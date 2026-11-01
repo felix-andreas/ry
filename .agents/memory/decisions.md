@@ -1057,25 +1057,28 @@ were not.
 
 The shape now lives in `crates/semantics/src/semantics.rs` and has three parts.
 
-- `interface_sccs(files)` builds the static interface-reference graph. It draws an edge from each
-  named package definition item to the winner of every global name its body reads, which is
-  `non_locals` plus validated `namespace_reads`. One iterative Tarjan pass condenses it in
-  canonical order, which is project file order and then item order within a file. Only a cyclic
-  group is recorded, meaning one with more than one member or with a self-edge.
-- `scc_schemes(files, group)` is the canonical fixpoint of one group. Every member starts at the
-  tolerant `Unknown` scheme. Each round re-checks every member against the previous round's table,
-  which is Jacobi iteration, so one propagation hop happens per round and within-round order cannot
-  matter either. Convergence is scheme-table equality. A group still changing at the round cap,
-  which is 16 and shared with the backstop, pins all members to `Unknown`. That is the only
-  entry-order-free pin. A member check runs `check_item_with_annotation` directly against an
-  overlay environment called `SccGlobals`, which reads the round table first and falls back to
-  ordinary global resolution, and which suppresses stub overloads for member names. It never runs
-  through `item_check`, so no cycle forms.
-- `item_check` adopts the canonical scheme as a member's exported scheme, which keeps a single
-  source of truth. Export, hover and every downstream reader see the fixpoint value rather than the
-  one-hop-ahead re-derivation the item's own check just computed. `global_scheme` reads `item_check`
-  only. The dynamic cycle recovery stays as a backstop for reference edges the static graph cannot
-  see.
+- `interface_sccs(files)` builds the static interface-reference graph over every item of every
+  file, statements included. Each read is resolved by `item_interface_reads` through the same binder
+  the check uses (the nearest earlier writer in the reading file, or a script's last writer, then the
+  test layer, the package-layer winner, and the conditional writers up to the join cap), so the
+  graph has exactly the edges a check follows. One iterative Tarjan pass condenses it in canonical
+  order (project file order, then item order). Only a cyclic group is recorded, meaning one with
+  more than one member or with a self-edge.
+- `scc_exports(files, group)` is the canonical fixpoint of one group. Every member starts at the
+  tolerant `Unknown` export (its scheme and the schemes of the top-level names it binds). Each round
+  re-checks every member against the previous round's table, which is Jacobi iteration, so one
+  propagation hop happens per round and within-round order cannot matter. Convergence is table
+  equality. A group still changing at the round cap, which is 16 and shared with the backstop, pins
+  all members to `Unknown`. A member check runs through `SalsaGlobals` with the group table, which
+  looks up by resolved item, so the fixpoint and the ordinary check share one code path and no
+  salsa cycle forms.
+- `item_check` adopts the canonical exports as a member's exported scheme, which keeps a single
+  source of truth. `global_scheme` reads `item_check` only. Salsa's cycle recovery stays as a
+  backstop for references the static graph cannot see, and such a reference is a bug: salsa never
+  backdates a cycle member, so an edit that breaks a recovered cycle and restores it panics in its
+  backdating check. That is how a winner-only graph that missed statement items, earlier writers,
+  script and test files and conditional writers surfaced (`test_incremental.rs`,
+  `removing_a_cross_file_cycle_and_restoring_it_revalidates` and its siblings).
 
 Correctness: forward, reverse and phase-pre-forced forcing now render identical diagnostics. The
 regression test is `cyclic_group_answers_are_forcing_order_independent` in
@@ -1903,12 +1906,15 @@ there was no evaluator, so there was no previous source of truth.
   the base primitive, falling back to the AST evaluator for the whole expression, so redefining
   `if` or `+` keeps GNU R's semantics instead of GNU R's compiler's assumption that base is not
   shadowed.
-- **Inline caches are validated by one heap counter, the binding epoch,** which moves when a
-  binding is created or removed outside a function frame, or an enclosure changes. Function frames
-  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a cached
-  lookup never resolves through one and the frame itself is probed directly. A function lookup that
-  skipped a non-function binding is not cached, because that binding could later hold a function
-  without moving the epoch.
+- **Inline caches are validated per symbol** (`Heap::lookup_stamp`): each symbol carries an epoch
+  that moves when a binding of that symbol is created or removed outside a function frame, and the
+  stamp adds a heap-wide enclosure epoch that moves when any enclosure changes. A single heap-wide
+  counter was invalidated by every test body evaluated in a fresh environment. Function frames
+  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a
+  cached lookup never resolves through one and the frame itself is probed directly. A function
+  lookup that skipped a non-function binding is not cached, because that binding could later hold
+  a function without moving the stamp. A lookup that reaches the global environment goes through
+  the symbol's cached search-path cell (`Heap::global_cell`), GNU R's global cache.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
@@ -3448,7 +3454,13 @@ explicit allocators".
   (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
   own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
   TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
-  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+  after the first one exits. v2 stays: under `ry run`, data.table's OpenMP workers and Polars'
+  thread pool run beside it without a crash (both keep their threads alive). The v3 crash needs
+  an allocating thread to exit before another starts allocating, which the libr test binaries do
+  and a package that starts its own short-lived threads could too, so v2 removes the risk. Move to v3 only once a `libmimalloc-sys` release passes the libr test binaries with it.
+  Cargo unifies features across the packages of one build, so `cargo build -p ry-lang -p libr`
+  gives the binary v2 as well; `mi_option_arena_eager_commit` is option 4 in both versions, so
+  `main.rs` is correct either way. Arenas sit on top of the global allocator, not in place of it.
 - **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
   by value, because salsa stores them across revisions and backdates by equality. So an arena
   never leaks into a memoized result: a query does its work in a scratch arena and copies the
@@ -3500,6 +3512,49 @@ explicit allocators".
   `ExpressionTypes` was already dense. IDE scans that need both kind and range go through
   `Module::expressions`, which zips the two arrays.
 
+# Decision record: the interpreter's call path, lookups and allocation
+
+- **Goal.** Per-test time on the three benchmark code bases, without the JIT, at or below GNU R's.
+  The cost was spread over the interpreter core (`step`, frame lookup, argument matching, an
+  allocation per binding and promise), so the fixes are many small cuts rather than one redesign.
+- **A closure call's heap objects are the environment, one cell per formal, and the argument
+  promises with their pairlist; the bookkeeping stays off the Rust heap.** Arguments and matched
+  formals live in inline `SmallVec`s (`eval::Args` holds 10, `eval::Matched` 8, so a call with
+  more spills to one Rust allocation), callers fill a vector they own (`promise_args_into`,
+  `evaluate_args_into`), and the frame lives inside the environment object. A formal whose default
+  is atomic or `NULL` binds that value directly with `BINDING_MISSING` set, because a promise of a
+  constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
+  binding's type. A typed closure turns such a binding back into a promise on entry, because an
+  inline annotation checks a default only when the body uses it.
+- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_fresh`
+  skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
+  cell, as GNU R's frame list does.
+- **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
+  `identical` has nine formals, and building a map per call cost more than scanning.
+- **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
+  compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
+  a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
+  it as a lazy-load promise, so the guard compares against the forced value); and a function
+  expression compiles its body once per site, shared by every closure the site creates.
+- **Scalar `x[i]` and `x[[i]]` on a plain vector skip general subscript resolution**, in the
+  subset builtins (`subset.rs`) rather than the compiler, so both evaluators take it.
+- **A compiled read of a promise-bound variable forces the promise it found** instead of
+  restarting the lookup through `eval_symbol`; only active, missing and unbound cells take the slow
+  path.
+- **A for loop reuses its scalar** when only the loop binding references it, as GNU R's `STEPFOR`
+  does, and the AST loop releases each iteration's handles instead of rooting them until the end.
+- **Minor collections mark only roots added since the last one** (new symbols, newly preserved
+  objects), because older ones are already marked old. The nursery stays at 8 MB: 32 MB was
+  measured slower, because first touches of fresh pages cost more than the collections saved.
+- **Compiled regular expressions are cached by pattern and flags**, and fixed argument names
+  (`PACKAGE`, `NAOK`, `.Environment` and friends) are interned once in `values::symbols()`.
+- **`inherits()` follows `class()`**: an object with no class attribute inherits from the implicit
+  class `class()` reports (`matrix`/`array`, else the basic class), not the dispatch chain, so
+  `inherits(1L, "numeric")` is `FALSE`, as in GNU R. It compares bytes and allocates nothing.
+- **Listing a hashed frame replays GNU R's table through flat head and next arrays**, and callers
+  that only need the set (`length(env)`, sorted `ls()`, `lockEnvironment`) use
+  `Heap::bound_symbols`, which skips the replay.
+
 ## `just ry` builds ry's runtime; ry-lang does not depend on libr
 
 - `ry run` loads ry's runtime (`libR.so`) beside the executable at run time, and libr is a separate
@@ -3509,6 +3564,50 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## In-place updates through nested targets
+
+- **Before.** Only `x <- f(x, ...)` with a builtin flagged `reusing_first_argument` updated in
+  place, so `state$seen <- Dict.insert(state$seen, k, v)` copied every step: the list element was
+  a second holder. Compiled code had a hole as well: registers hold values without counting as
+  references, so an update from outside the body (`eval.parent()`, a forced promise) could change
+  a value a register was about to use, and `r <- list(x, h())` with `h` running
+  `eval.parent(quote(x[[1]] <- 99))` gave `r[[1]][[1]] == 99`.
+- **Nested targets.** `rebind` accepts a target that is a chain of `$` or `[[` with a constant
+  name, string or number (`same_expression` compares both sides). `solely_held` walks the chain
+  requiring one reference at each plain list, and no other argument may be the value or a list
+  on the chain, because argument values are not counted (`holds_on_chain`).
+- **Bytecode.** `CallRebinding` carries the target so compiled code takes the same path. It is
+  appended last because `OPS` is indexed by discriminant. The JIT treats it as a generic call and
+  inlines it only when the target's slot type is plain.
+- **Register rule.** `gp::COMPILED_FRAME` marks an environment while a compiled body runs on it.
+  `reuse_permitted(env, value)` allows an update when the flag is clear, when the innermost frame
+  is that environment's own compiled closure (whose updates the compiler orders with
+  `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
+  copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
+- **Rejected: moving a value into a helper's parameter.** `d <- helper(d, k)` handing the caller's
+  sole reference to the callee was implemented and removed. After an in-place update the caller's
+  variable no longer holds the old value, yet a second argument naming it, a nested closure,
+  `get(..., parent.frame())`, and an error unwinding through the assignment all read it. Making
+  it sound needs escape analysis of the callee plus an undo path, so helpers copy as in GNU R.
+- **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
+  vector, a value vector and an open-addressing index in an integer vector, all in the collector's
+  heap, which a `SEXP`-holding value must be (`decisions.md`, "Data-oriented design and explicit
+  allocators"). Measured on a release build with 1,000,000 calls each: `Dict.len` (no hashing)
+  costs 0.62 us a call, `Dict.get` on a 1M-entry dictionary 0.67 us, and on a one-entry
+  dictionary 0.56 us. Hashing and probing are at most about 15% of a call; the rest is
+  interpreter dispatch, so a new layout cannot pay and the win is in call overhead.
+- **Impact.** Value semantics are unchanged (pinned in
+  `crates/interp/tests/test_standard_library.rs`, including the cases that broke the move), nested
+  accumulator loops become linear, and incremental analysis is unaffected.
+
+## A key of the wrong type is an error, not a missing key
+
+- A dictionary or set holds keys of one kind. A lookup with a key of another kind used to return
+  `:Err(:KeyNotFound)`, which hid a bug the checker reports statically. It now stops with "the
+  dict's keys are character, and this one is integer; a collection holds one type", through the
+  same `joined_key_kind` check that insertion uses. Integer and double keys still join as numbers,
+  and an empty collection has no kind yet, so any key misses.
 
 ## A function literal in a call argument is typed in context
 

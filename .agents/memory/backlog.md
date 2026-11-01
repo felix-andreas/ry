@@ -28,7 +28,7 @@ The quality bar is four things.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** At 300,000 lines the test blocks run 1.7x to 2.1x GNU R's time, while whole processes are close to parity because GNU R spends minutes in testthat's per-file `gc()`. The gap is spread across the interpreter core rather than one hot spot: bytecode `step`, environment-chain lookup (`Heap::frame_cell`), `match_args`, and an allocation per binding and promise on every closure call. Basic operations measured alone are 2x to 4x GNU R's (a closure call, `seq`, `tryCatch`, `format`, `rlang::enquo`). Call overhead and cached global lookup belong to the JIT tier's call work (`decisions.md`, "the JIT tier"); vector kernels such as arithmetic and `sum` are already at or ahead of GNU R.
+- **Per-test time.** At 300,000 lines, with the JIT off, the test blocks run 1.18x to 1.39x GNU R's time, while whole processes are already faster than GNU R. The rest is spread over the interpreter core: on the first 20 dsbench files, bytecode `step` is about 12% of the profile, first touches of fresh nursery pages (`clear_page_erms`) 6%, `Heap::frame_cell` 4%, `allocate_with` 4%, collection 3.5% (mostly R-level `gc()` calls), `mk_char` 3% and `match_args` 2%. Measured alone, a call to a closure with many formals still costs 3x to 5x GNU R's (`inherits` 598 ns against 152, `identical` 1215 against 265, `nchar` 754 against 157), because each formal gets its own binding cell; a bulk cell allocation per frame is the next lever. A plain closure call is already faster than GNU R's (147 ns against 207).
 
 ## Open: the package loader
 
@@ -292,6 +292,11 @@ type-level function the annotation language does not have.
   be `Unknown`.
 - The add-annotation code action writes a `#:` comment even in a project that uses inline
   annotations. It could offer the inline form where inline annotations are on.
+- Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
+  pins what works). `data.frame()` hovers `Unknown` and `df$` completes nothing, for the reason in
+  the `data.frame()` item above. `matrix()` hovers `Any` because ry has no array type. A local whose
+  type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
+  because a bare `T` without its binder would mislead.
 - `contributing/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
@@ -307,24 +312,15 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
-- A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
-  error; the checker rejects it statically, so only `Unknown` code reaches it.
-- A diagnostic for library calls in a project that targets GNU R, once a project can declare its
-  runtime (`decisions.md`, "The standard library runs only on ry's runtime").
-- Reuse misses two shapes: a nested update (`state$seen <- Dict.insert(state$seen, k, v)`, about
-  28 s for 20,000 inserts in a debug build, quadratic) and the first update of a parameter inside
-  a helper. Both need either a nested-replacement path in `eval::rebind` or last-use analysis.
-- **Bytecode registers are uncounted, so in-place updates can be observed.** In a compiled
-  closure, `r <- list(d, mod())` keeps `d` in a register without a reference; if `mod` runs
-  `d <- Dict.insert(d, ...)` in that frame through `eval.parent`, the count reads 1 and `r[[1]]`
-  sees the insert. `x[[1]] <- 99` through `eval.parent` misbehaves the same way, so the cause is
-  in `crates/interp/src/bytecode.rs` (`may_modify_in_place` is syntactic), not the library. Fix
-  by counting register references or refusing reuse while a compiled frame for the environment
-  is live.
+- A check-time diagnostic for library calls in a project that targets GNU R, once a project can
+  declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
+  time, `ry R` already stops with an error that names the cause.
+- A helper that updates a collection it receives copies on every call, so `d <- helper(d, k)` in a
+  loop is quadratic (`decisions.md`, "In-place updates through nested targets", the rejected
+  move). A sound version needs escape analysis showing nothing reads the caller's variable while
+  the callee runs, plus restoring the old value on error.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
-  signalling) for the reuse path, and `bytecode::reuses_first_argument` matches the callee's name
-  against `BUILTINS` as a string for every subexpression. Fold the first into `eval_call` and give
-  the second a name set.
+  signalling) for the reuse path. Fold it into `eval_call`.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.
@@ -448,16 +444,17 @@ change that does not pay.
    scans words without touching dead objects. The header layout is private (packages reach it only
    through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
    in large-heap sessions such as the data.table groupby workloads.
-4. **The allocation fast path.** `Heap::allocate` searches `SLOT_SIZES` linearly, pops a `Vec`
-   free list, zeroes the whole slot and pushes onto `young` (`crates/heap/src/heap.rs`). Target: a
-   size-to-class lookup table, bump allocation through free runs of a page, and zeroing only what
-   must be initialized (pointer-holding objects; R leaves atomic vector payloads uninitialized).
+4. **The allocation fast path.** The size-to-class table and partial zeroing are in
+   (`SIZE_CLASS_BY_WORDS`, `allocate_with`'s `zeroed`; a triple is not zeroed at all). Left:
+   bump allocation through free runs of a page instead of popping a `Vec` free list, and the
+   `young` list push (`crates/heap/src/heap.rs`). `allocate_with` is about 4% of a profile of
+   the benchmark tests.
    Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
    2.5 to 3 times slower than GNU R ("Open: the JIT").
-5. **Scratch storage for argument matching.** `match_args` returns a fresh `Vec<Sexp>` on every
-   closure call (`crates/interp/src/eval.rs`). Target: a reusable scratch stack beside the
-   bytecode register file, so a call allocates only what R's semantics require (the frame and its
-   promises). Expected win: call-heavy code such as fib, lapply and `micro/closures`.
+5. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
+   stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
+   so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
+   interpreter's call path, lookups and allocation").
 6. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
    through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
    re-check. Target: hash the index, and sort by spelling only where output order is visible.
@@ -579,21 +576,6 @@ no ordering requirement, and `BTreeMap::get` showed up under `infer_read`. Switc
 `item_naming` to `returns(ref)` removed the node-walk half of that cost, so what is left is lookup
 only. Measure before switching, and check iteration order wherever any of these is walked to build
 diagnostics.
-
-### Cycles through statement items re-iterate on every structural edit
-
-`interface_sccs` has nodes for named definitions only. A reference cycle that runs through a
-statement item, such as a conditional top-level write read back through `statement_binding_scheme`,
-is therefore resolved by salsa's cycle backstop rather than by `scc_schemes`. Salsa cannot verify a
-cycle's memos without re-running it, so every structural edit (a new or renamed definition anywhere)
-re-iterates each such cycle twice once something demands it.
-
-Measured on data.table, a new top-level binding re-runs 72 `item_check`s, 13 of them twice, for the
-edited file's diagnostics. That costs about 50 ms against 12 ms for a body edit. The members are
-ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycle by a statement in
-`utils.R`. The fix is to make conditional writers nodes of the static graph, with an edge from a
-reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
-any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
 
 ### Judged fast enough, so do not invent work here
 
@@ -2880,7 +2862,7 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-- Goto-definition, references and rename have a p99 of 15 to 25 ms (p50 about 1 ms) on all three benches, on main as before. The slow positions are calls to stub globals (`seq_len`, `factor`, `vapply`). `stub_declaration` is a map lookup, so the cost sits elsewhere on that path (the item check, `position_in_item`, or the server's `stub_location`); profile it before guessing.
+- A file opened at startup settles about 450 ms after the open (target 200 ms). On dsbench with 4 cores the time goes to the attach scan (about 110 ms, mostly parsing all 1,006 files), project naming (about 290 ms: `item_hir` lowering and `resolve_item`), then the file's own check (about 60 ms). The settled wave waits for all naming because `conditional_slot_items` (lints through `s3_generics`, and `package_name`) needs every item's top-level writes. In samples of the naming pass, about a fifth of helper time spins on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs` in `function/sync.rs`, taken twice per query execution) and another fifth is in mimalloc's page slow path. Levers: fewer tracked queries per item on the cold path, a cheaper source for the top-level writes than full naming, or a sharded claim table upstream.
 
 ## Open: false errors on real CRAN code
 

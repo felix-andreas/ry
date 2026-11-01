@@ -297,7 +297,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bitwiseShiftR", 2, |call| unsafe {
         bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32)
     }),
-    builtin("xtfrm", 1, |call| unsafe { Ok(call.arg(0)) }).generic(Generic::Internal),
+    builtin("xtfrm", 1, |call| Ok(call.arg(0))).generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
     builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
     builtin("Mod", 1, |call| unsafe { complex_part(call, 2) }).generic(Generic::Complex),
@@ -307,7 +307,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("polyroot", 1, do_polyroot),
     internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
     internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
-    internal("cumall", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("cumall", 1, |call| Ok(call.arg(0))),
     internal("tabulate", 2, do_tabulate),
     internal("which", 1, do_which),
     internal("which.max", 1, |call| unsafe { which_extreme(call, true) }),
@@ -682,14 +682,14 @@ unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
     match call.args {
         [single] => unary_arithmetic(call, op, single.value),
         [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
-        _ => Err(call.error(format!("operator needs one or two arguments"))),
+        _ => Err(call.error("operator needs one or two arguments".to_string())),
     }
 }
 
 unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     let operand = values::materialize(operand)?;
     if !matches!(op, Op::Add | Op::Subtract) {
-        return Err(call.error(format!("invalid unary operator")));
+        return Err(call.error("invalid unary operator".to_string()));
     }
     let result = match operand.kind() {
         SexpType::Logical => {
@@ -709,8 +709,7 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
             if op == Op::Add {
                 return Ok(operand);
             }
-            let result = values::shallow_duplicate(operand)?;
-            result
+            values::shallow_duplicate(operand)?
         }
         _ => return Err(call.error("invalid argument to unary operator")),
     };
@@ -843,7 +842,7 @@ unsafe fn recycled_length(call: Sexp, left: usize, right: usize) -> R<usize> {
         return Ok(0);
     }
     let longer = left.max(right);
-    if longer % left.min(right) != 0 {
+    if !longer.is_multiple_of(left.min(right)) {
         conditions::warning_call(
             call,
             "longer object length is not a multiple of shorter object length",
@@ -1634,9 +1633,9 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
             )
     };
     if !valid(left) || !valid(right) {
-        return Err(call.error(format!(
-            "operations are possible only for numeric, logical or complex types"
-        )));
+        return Err(call.error(
+            "operations are possible only for numeric, logical or complex types".to_string(),
+        ));
     }
     let left_length = length(left);
     let right_length = length(right);
@@ -3603,7 +3602,7 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
         _ => return Err(call.error("invalid 'type' argument")),
     };
     let count = length(bits);
-    if count % width != 0 {
+    if !count.is_multiple_of(width) {
         return Err(call.error(format!("argument 'x' must be a multiple of {width} long")));
     }
     let mut flags = Vec::with_capacity(count);

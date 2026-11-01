@@ -309,6 +309,9 @@ pub struct ItemCheck<'db> {
     /// the fields a literal still lacks. Nested literals record nothing: their expectation is
     /// the enclosing one's field or payload.
     pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
+    /// The element type each `for` loop binds its variable to, keyed by the loop. The
+    /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
+    pub loop_variables: FxHashMap<ExprId, Ty<'db>>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -554,6 +557,7 @@ pub fn check_item_with_annotation<'db>(
         recorded: RecordedTypes(vec![None; module.expression_count()]),
         recorded_patterns: FxHashMap::default(),
         recorded_expectations: FxHashMap::default(),
+        recorded_loop_variables: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
@@ -723,6 +727,11 @@ pub fn check_item_with_annotation<'db>(
         .iter()
         .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
         .collect();
+    let loop_variables = context
+        .recorded_loop_variables
+        .iter()
+        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+        .collect();
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -762,6 +771,7 @@ pub fn check_item_with_annotation<'db>(
         expression_types,
         pattern_types,
         literal_expectations,
+        loop_variables,
         errors,
         strict_origins: context.strict_origins,
         scheme,
@@ -975,6 +985,7 @@ struct Checker<'db, 'a> {
     recorded: RecordedTypes<'db>,
     recorded_patterns: FxHashMap<PatId, Ty<'db>>,
     recorded_expectations: FxHashMap<ExprId, Ty<'db>>,
+    recorded_loop_variables: FxHashMap<ExprId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
@@ -3866,6 +3877,10 @@ impl<'db> Checker<'db, '_> {
                 unknown(self.db)
             }
         };
+        if variable_range.is_some() {
+            self.recorded_loop_variables
+                .insert(loop_expression, element);
+        }
         let loop_slot = variable_range.and_then(|variable_range| {
             self.naming
                 .bindings

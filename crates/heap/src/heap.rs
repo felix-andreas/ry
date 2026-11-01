@@ -29,14 +29,14 @@ use {
     crate::{
         env::Frame,
         object::{
-            NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, VECTOR_DATA_OFFSET, flag_bits,
-            gc_bits, gp, object_size, slot_for,
+            NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
+            VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
         },
         records::Layouts,
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
-    std::{alloc::Layout, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
+    std::{alloc::Layout, cell::Cell, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
 };
 
 /// The longest vector R allows, `R_XLEN_T_MAX`.
@@ -57,6 +57,10 @@ pub struct Heap {
     mark_stack: Vec<Sexp>,
     strings: StringTable,
     symbols: FxHashMap<Sexp, Sexp>,
+    /// Symbols interned and objects preserved since the last collection. A minor collection marks
+    /// only these: every older entry of the symbol table and the precious set is already marked,
+    /// and walking those tables touched one cold header per entry on every minor collection.
+    new_roots: Vec<Sexp>,
     /// The tag and layout interners of ry's records, tuples and tags.
     pub layouts: Layouts,
     pub roots: Roots,
@@ -73,6 +77,9 @@ pub struct Heap {
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
     /// environments knows it is still valid when the epoch is unchanged.
     binding_epoch: u64,
+    /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
+    /// own epoch, so a cache keyed by symbol sees both kinds of change.
+    enclosure_epoch: u64,
 }
 
 /// The objects every R session has, created with the heap.
@@ -322,8 +329,10 @@ impl Heap {
             ready_to_finalize: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
+            enclosure_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
+            new_roots: Vec::new(),
             layouts: Layouts::default(),
             roots: Roots {
                 protect: ProtectStack {
@@ -557,13 +566,19 @@ impl Heap {
     ) -> HeapResult<Sexp> {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
         let keep = [first, second, third, extra.unwrap_or(first)];
-        let object = self.allocate(kind, size, &keep)?;
+        let object = self.allocate_with(kind, size, &keep, 0)?;
         object.set_car_unbarriered(first);
         object.set_cdr_unbarriered(second);
         object.set_tag_unbarriered(third);
         first.increment_refcount();
         second.increment_refcount();
         third.increment_refcount();
+        if kind == SexpType::Symbol {
+            let symbol = object.as_ptr().cast::<SymbolObject>();
+            std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
+            std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
+            std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
+        }
         Ok(object)
     }
 
@@ -758,6 +773,7 @@ impl Heap {
         let symbol = self.alloc_triple(SexpType::Symbol, name, nil, nil)?;
         symbol.mark_not_mutable();
         self.symbols.insert(name, symbol);
+        self.new_roots.push(symbol);
         Ok(symbol)
     }
 
@@ -833,6 +849,7 @@ impl Heap {
 
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
         self.binding_epoch += 1;
+        self.enclosure_epoch += 1;
         self.write_barrier(env, value);
         env.set_enclosure_unbarriered(value);
     }
@@ -911,6 +928,7 @@ impl Heap {
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
         if !env.has_gp(gp::FUNCTION_FRAME) || symbol.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
+            bump_symbol_epoch(symbol);
         }
         if self.is_symbol_frame(env) {
             self.store(symbol, symbol.cdr(), cell);
@@ -920,6 +938,24 @@ impl Heap {
             (*env.frame_ptr()).insert(cell);
         }
         Ok(())
+    }
+
+    /// Binds `symbol` in the frame of `env`, a new function frame, and returns the new cell. A
+    /// closure call binds each formal this way: the frame is new, so the lock checks of
+    /// [`Heap::define`] cannot matter, and its probe would only matter for duplicate formals,
+    /// where the frame keeps the first binding as GNU R does.
+    pub unsafe fn define_fresh(
+        &mut self,
+        env: Sexp,
+        symbol: Sexp,
+        value: Sexp,
+    ) -> HeapResult<Sexp> {
+        debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
+        let cell =
+            self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
+        self.write_barrier(env, cell);
+        (*env.frame_ptr()).insert(cell);
+        Ok(cell)
     }
 
     pub unsafe fn set_binding_value(&mut self, cell: Sexp, value: Sexp) -> HeapResult<()> {
@@ -942,6 +978,7 @@ impl Heap {
             return Err(HeapError::LockedEnvironmentRemove);
         }
         self.binding_epoch += 1;
+        bump_symbol_epoch(symbol);
         if self.is_symbol_frame(env) {
             let cell = symbol.cdr();
             if cell.kind() != SexpType::Binding {
@@ -957,10 +994,60 @@ impl Heap {
         Ok((*env.frame_ptr()).remove(symbol).is_some())
     }
 
+    /// A stamp for lookups of `symbol` through environments other than function frames: it
+    /// changes whenever a binding of `symbol` appears or disappears in such an environment, or
+    /// any enclosure is replaced, so a cell cached under an unchanged stamp is still the one a
+    /// fresh walk would find.
+    pub unsafe fn lookup_stamp(&self, symbol: Sexp) -> u64 {
+        symbol.symbol_payload().epoch.get() + self.enclosure_epoch
+    }
+
+    /// The first binding of `symbol` on the search path, from the global environment to the
+    /// base environment. GNU R keeps the same cache, because every free variable of top-level
+    /// code and of functions defined there resolves along the search path, which in a session
+    /// with many attached packages means many large frames to probe.
+    ///
+    /// The flag says whether the cell may be cached under the symbol's stamp: it may not when
+    /// the walk passed a function frame, whose bindings come and go without moving the stamp.
+    pub unsafe fn global_cell(&self, symbol: Sexp) -> Option<(Sexp, bool)> {
+        let payload = symbol.symbol_payload();
+        let stamp = self.lookup_stamp(symbol);
+        if payload.global_stamp.get() == stamp {
+            return payload.global_cell.get().map(|cell| (cell, true));
+        }
+        let mut env = self.known.global_env;
+        let mut cacheable = true;
+        while env != self.known.empty_env {
+            cacheable &= !env.has_gp(gp::FUNCTION_FRAME);
+            if let Some(cell) = self.frame_cell(env, symbol) {
+                if cacheable {
+                    payload.global_cell.set(Some(cell));
+                    payload.global_stamp.set(stamp);
+                }
+                return Some((cell, cacheable));
+            }
+            env = env.enclosure();
+        }
+        None
+    }
+
     /// See the field: an unchanged epoch means no binding outside a function frame appeared or
     /// disappeared, and no enclosure changed.
     pub fn binding_epoch(&self) -> u64 {
         self.binding_epoch
+    }
+
+    /// The symbols `env` binds, in no particular order: cheaper than [`Heap::frame_symbols`]
+    /// for a caller that sorts them or only needs the set.
+    pub unsafe fn bound_symbols(&self, env: Sexp) -> Vec<Sexp> {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return self.frame_symbols(env);
+        }
+        (*env.frame_ptr())
+            .cells()
+            .iter()
+            .map(|cell| cell.car())
+            .collect()
     }
 
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
@@ -1019,6 +1106,11 @@ impl Heap {
     /// `R_PreserveObject`. Preserving twice needs two releases.
     pub fn preserve(&mut self, object: Sexp) {
         *self.roots.precious.entry(object).or_insert(0) += 1;
+        // An old object keeps its mark, so a minor collection would skip it anyway. The caller
+        // is preserving the object, so it is live.
+        if !unsafe { object.is_marked() } {
+            self.new_roots.push(object);
+        }
     }
 
     /// `R_ReleaseObject`. Releasing an object that is not preserved does nothing, as in GNU R.
@@ -1197,7 +1289,7 @@ impl Heap {
         for &object in keep {
             self.mark(object);
         }
-        self.mark_roots();
+        self.mark_roots(kind);
         if kind == Collection::Minor {
             // Old objects are already marked, so their young children are pushed directly.
             for index in 0..self.remembered.len() {
@@ -1258,7 +1350,7 @@ impl Heap {
         }
     }
 
-    unsafe fn mark_roots(&mut self) {
+    unsafe fn mark_roots(&mut self, kind: Collection) {
         let known = self.known;
         for object in known.all() {
             self.mark(object);
@@ -1282,8 +1374,14 @@ impl Heap {
                 mark_stack.push(object);
             }
         };
-        self.roots.precious.keys().for_each(|&object| mark(object));
-        self.symbols.values().for_each(|&symbol| mark(symbol));
+        match kind {
+            Collection::Major => {
+                self.roots.precious.keys().for_each(|&object| mark(object));
+                self.symbols.values().for_each(|&symbol| mark(symbol));
+            }
+            Collection::Minor => self.new_roots.iter().for_each(|&object| mark(object)),
+        }
+        self.new_roots.clear();
         let sources: Vec<Rc<dyn RootSource>> = self
             .sources
             .iter()
@@ -1740,6 +1838,8 @@ impl WellKnown {
 impl Default for GcPolicy {
     fn default() -> Self {
         GcPolicy {
+            // A larger nursery collects less often but touches more fresh memory before its
+            // first collection, and first touches are what a short-lived process pays for most.
             young_limit: 8 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
@@ -1849,3 +1949,8 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
+
+unsafe fn bump_symbol_epoch(symbol: Sexp) {
+    let epoch = &symbol.symbol_payload().epoch;
+    epoch.set(epoch.get() + 1);
+}

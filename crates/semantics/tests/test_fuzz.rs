@@ -161,46 +161,60 @@ fn run_single_file(budget: usize, seed: u64, generate: fn(&mut SplitMix64) -> St
     }
 }
 
+/// Prints the failing inputs on panic, as [`run_single_file`] does.
 fn run_multi_file(budget: usize, seed: u64) {
     let mut rng = SplitMix64(seed);
     for _ in 0..budget {
         let first_source = generate_program(&mut rng);
         let second_source = generate_program(&mut rng);
-        let mut db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let first = SourceFile::new(&db, first_source.clone(), DocumentKind::Package);
-        let second = SourceFile::new(&db, second_source.clone(), DocumentKind::Package);
-        ProjectFiles::new(&db, vec![first, second]);
-        let before = (render(&db, first), render(&db, second));
-
         let edited_source = generate_program(&mut rng);
-        second.set_text(&mut db).to(edited_source.clone());
-        let after_first = render(&db, first);
-        let after_second = render(&db, second);
-
-        let fresh_db = RootDatabase::default();
-        install_shipped_stubs(&fresh_db);
-        let fresh_first = SourceFile::new(&fresh_db, first_source.clone(), DocumentKind::Package);
-        let fresh_second = SourceFile::new(&fresh_db, edited_source, DocumentKind::Package);
-        ProjectFiles::new(&fresh_db, vec![fresh_first, fresh_second]);
-        assert_eq!(
-            after_first,
-            render(&fresh_db, fresh_first),
-            "cross-file incremental output diverges (untouched file)"
-        );
-        assert_eq!(
-            after_second,
-            render(&fresh_db, fresh_second),
-            "cross-file incremental output diverges (edited file)"
-        );
-
-        second.set_text(&mut db).to(second_source);
-        assert_eq!(
-            (render(&db, first), render(&db, second)),
-            before,
-            "cross-file output not restored after editing back"
-        );
+        let result =
+            catch_unwind(|| check_multi_file_edit(&first_source, &second_source, &edited_source));
+        if let Err(payload) = result {
+            eprintln!(
+                "---- multi-file pipeline panicked ----\n{first_source}\n---- second file ----\n{second_source}\n---- second file edited to ----\n{edited_source}\n----"
+            );
+            resume_unwind(payload);
+        }
     }
+}
+
+/// Edits the second of two package files and back, checking each state against a fresh
+/// database.
+fn check_multi_file_edit(first_source: &str, second_source: &str, edited_source: &str) {
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let first = SourceFile::new(&db, first_source.to_owned(), DocumentKind::Package);
+    let second = SourceFile::new(&db, second_source.to_owned(), DocumentKind::Package);
+    ProjectFiles::new(&db, vec![first, second]);
+    let before = (render(&db, first), render(&db, second));
+
+    second.set_text(&mut db).to(edited_source.to_owned());
+    let after_first = render(&db, first);
+    let after_second = render(&db, second);
+
+    let fresh_db = RootDatabase::default();
+    install_shipped_stubs(&fresh_db);
+    let fresh_first = SourceFile::new(&fresh_db, first_source.to_owned(), DocumentKind::Package);
+    let fresh_second = SourceFile::new(&fresh_db, edited_source.to_owned(), DocumentKind::Package);
+    ProjectFiles::new(&fresh_db, vec![fresh_first, fresh_second]);
+    assert_eq!(
+        after_first,
+        render(&fresh_db, fresh_first),
+        "cross-file incremental output diverges (untouched file)"
+    );
+    assert_eq!(
+        after_second,
+        render(&fresh_db, fresh_second),
+        "cross-file incremental output diverges (edited file)"
+    );
+
+    second.set_text(&mut db).to(second_source.to_owned());
+    assert_eq!(
+        (render(&db, first), render(&db, second)),
+        before,
+        "cross-file output not restored after editing back"
+    );
 }
 
 /// Inputs that once broke an invariant, pinned without the gitignored fuzz corpus.
