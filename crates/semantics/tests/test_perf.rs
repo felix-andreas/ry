@@ -4,12 +4,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use salsa::Setter;
 use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
-use semantics::infer::RESOLVE_CALLS;
+use semantics::infer::resolve_calls;
 use semantics::stubs::install_shipped_stubs;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 
@@ -41,7 +40,7 @@ fn corpus_budgets() {
     let elapsed = start.elapsed();
     let per_line = |value: f64| value / lines.max(1) as f64;
     let microseconds = per_line(elapsed.as_secs_f64() * 1e6);
-    let steps = per_line(RESOLVE_CALLS.load(Ordering::Relaxed) as f64);
+    let steps = per_line(resolve_calls() as f64);
     let resident = proc_status_kb("VmRSS").map(|kb| per_line(kb as f64 * 1024.0));
     println!(
         "cold: {} packages, {lines} lines, {:.2}s ({microseconds:.1} µs/line), \

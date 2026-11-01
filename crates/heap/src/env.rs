@@ -24,10 +24,10 @@ const HASH_MINIMUM_SIZE: u32 = 29;
 
 #[derive(Default)]
 pub struct Frame {
-    /// Most closure frames bind a few arguments, which fit inline without a malloc.
-    cells: SmallVec<[Sexp; 3]>,
-    /// Boxed so the frame stays small enough to live inside its environment object.
-    index: Option<Box<FxHashMap<Sexp, u32>>>,
+    /// Inline up to the index threshold, because most frames are a call's few arguments and
+    /// locals, and a closure call should not pay for a second allocation beside the frame's own.
+    cells: SmallVec<[Sexp; INDEX_THRESHOLD]>,
+    index: Option<FxHashMap<Sexp, u32>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,
     /// How many leading cells are a closure's formals, which GNU R lists after the locals and

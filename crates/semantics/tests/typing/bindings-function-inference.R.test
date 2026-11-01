@@ -7,12 +7,12 @@ mirror: <T> fn(x: T) -> T
 #---- first_of_two
 first <- function(x, y) x
 #++++
-first: <T, U> fn(x: T, y: U) -> T
+first: <T, U> fn(x: T, [y]: U) -> T
 
 #---- second_of_two
 second <- function(x, y) y
 #++++
-second: <T, U> fn(x: T, y: U) -> U
+second: <T, U> fn([x]: T, y: U) -> U
 
 #---- nullary_constant
 make <- function() 1L
@@ -22,7 +22,7 @@ make: fn() -> integer
 #---- constant_ignores_param
 const <- function(x) "ok"
 #++++
-const: <T> fn(x: T) -> character
+const: <T> fn([x]: T) -> character
 
 #---- param_numeric_from_add_literal
 inc <- function(x) x + 1L
@@ -37,7 +37,7 @@ neg: <T: numeric> fn(x: T) -> T
 #---- param_numeric_from_compare
 is_pos <- function(x) x > 0L
 #++++
-is_pos: <T: numeric> fn(x: T) -> logical
+is_pos: <T> fn(x: T) -> logical
 
 #---- param_numeric_division_double
 halve <- function(x) x / 2
@@ -135,7 +135,7 @@ call_it: <T> fn(f: fn() -> T) -> T
 #---- empty_body_returns_null
 noop <- function(x) { }
 #++++
-noop: <T> fn(x: T) -> NULL
+noop: <T> fn([x]: T) -> NULL
 
 #---- param_passed_to_two_funcs_same_constraint
 twice <- function(x) x + x
@@ -186,7 +186,7 @@ applytwice: <T> fn(f: fn(T) -> T, x: T) -> T
 #---- param_or_default_logical
 flagfn <- function(flag = TRUE) if (flag) 1L else 2L
 #++++
-flagfn: fn([flag]: logical) -> integer
+flagfn: <T> fn([flag]: T) -> integer
 
 #---- if_with_param_value_nullable
 pick <- function(c, v) if (c) v

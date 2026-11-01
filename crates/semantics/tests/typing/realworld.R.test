@@ -36,7 +36,7 @@ broken <- function() {
 #++++
 ratio: fn(numerator: double, denominator: double) -> double
 broken: Unknown
-153..158 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
+153..158 error[type-mismatch] this call leaves out `denominator`, which the function requires
 
 #---- unguarded_nullable_use
 #: fn(x: integer | NULL) -> integer
@@ -70,7 +70,7 @@ broken <- function() {
 #++++
 join_fields: fn(...: Any, strict: logical) -> character
 broken: Unknown
-138..149 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 1
+138..149 error[type-mismatch] this call leaves out `strict`, which the function requires
 
 #---- typed_rest_parameter_rejects_a_wrong_element
 #: fn(...: double) -> double
@@ -171,7 +171,7 @@ use_all <- function() {
   paste(fill_default("a"), require_x(1L), pick(), sep = " ")
 }
 #++++
-fill_default: <T> fn(name: T, [punct]: character) -> character
+fill_default: <T, U> fn(name: T, [punct]: U) -> character
 require_x: <T: numeric> fn([x]: T) -> T
 pick: <T: numeric> fn([x]: T) -> T | integer
 use_all: fn() -> character
@@ -212,8 +212,8 @@ find_index <- function(xs, target) {
 
 run <- function() find_index(list(10L, 20L, 30L), 20L)
 #++++
-find_index: <T, U> fn(xs: T, target: U) -> integer | NULL
-run: fn() -> integer | NULL
+find_index: <T, U> fn(xs: T, target: U) -> integer
+run: fn() -> integer
 
 #---- switch_dispatch_is_clean
 apply_op <- function(op, a, b) {
@@ -1124,3 +1124,182 @@ report <- function() {
 #++++
 normalize_words: fn(words: Unknown) -> list{cleaned: Unknown, lengths: list[named: integer]}
 report: fn() -> integer
+
+#==== cran_idioms
+#---- return_exits_so_the_body_adds_no_null
+# `return()` leaves the function, so a body that always ends in one contributes
+# no trailing value.
+yes <- function() return(TRUE)
+all_false <- function(x) {
+  for (i in x) {
+    if (i) return(FALSE)
+  }
+  return(TRUE)
+}
+both <- function() yes() && all_false(c(FALSE, FALSE))
+#++++
+yes: fn() -> logical
+all_false: <T> fn(x: T) -> logical
+both: fn() -> logical
+
+#---- list_of_dots_is_open
+# The fields of `list(...)` are not known statically, so reading or writing any
+# field is fine.
+with_defaults <- function(...) {
+  dots <- list(...)
+  if (is.null(dots$environment)) dots$environment <- TRUE
+  dots
+}
+from_env <- function(x = 1) {
+  values <- as.list(environment())
+  values$x
+}
+#++++
+with_defaults: fn(...: Any) -> list[named: Unknown]
+from_env: <T> fn([x]: T) -> Any
+
+#---- comparisons_coerce_across_atomics
+is_rstudio <- function() Sys.getenv("RSTUDIO") == 1
+quarter <- function(type = "quarter") {
+  if (is.logical(type)) type <- if (type) "a" else "b"
+  type == "a"
+}
+flagged <- quarter(TRUE)
+#++++
+is_rstudio: fn() -> logical
+quarter: <T> fn([type]: T) -> logical
+flagged: logical
+
+#---- combining_optional_lists_drops_null
+pieces <- function(a) c(if (a) list(1), if (a) list(2))
+#++++
+pieces: fn(a: logical) -> list[double]
+
+#---- narrowing_composes_across_and
+first_of <- function(x) {
+  if (is.character(x)) x <- NULL
+  if (!is.null(x) && is.list(x)) x[[1]]
+}
+length_or_zero <- function(x = NULL) !is.null(x) && length(x) > 0L
+#++++
+first_of: <T> fn(x: T) -> Unknown
+length_or_zero: <T> fn([x]: T | NULL) -> logical
+
+#---- null_case_label_is_a_string
+kind_of <- function(x) switch(typeof(x), NULL = 1, 2)
+next_kind <- function() kind_of(1) + 1
+#++++
+kind_of: <T> fn(x: T) -> double
+next_kind: fn() -> double
+
+#---- defaulted_flag_accepts_a_number
+has_op <- function(x, which = FALSE) {
+  loc <- grep("Op", x)
+  if (!identical(loc, integer(0))) {
+    return(if (which) loc else TRUE)
+  }
+  FALSE
+}
+found <- has_op(c("Op", "Hi"), 1)
+#++++
+has_op: <T, U> fn(x: T, [which]: U) -> Unknown
+found: Unknown
+
+#---- reassigned_default_keeps_the_parameter_open
+tag <- function(name, class = NULL) {
+  if (!length(class)) class <- ""
+  paste(name, class)
+}
+span <- tag("span", class = NULL)
+#++++
+tag: <T, U> fn(name: T, [class]: U) -> character
+span: character
+
+#---- nested_replacement_updates_the_inner_field
+deep <- function() {
+  old <- list(list(private = NULL))
+  old[[1]]$private <- list(deep_clone = 1)
+  old[[1]]$private$deep_clone + 1
+}
+grown <- function() {
+  x <- NULL
+  x$a <- 1
+  x$a + 1
+}
+#++++
+deep: fn() -> double
+grown: fn() -> double
+
+#---- time_arithmetic_and_na_comparison
+later <- function() Sys.time() + as.difftime(5, units = "secs")
+expired <- function(flag) {
+  info <- list(expires = NA)
+  if (flag) info$expires <- Sys.time()
+  !is.na(info$expires) && info$expires >= Sys.time()
+}
+#++++
+later: fn() -> POSIXct
+expired: fn(flag: logical) -> logical
+
+#---- typeof_switch_arm_narrows_its_subject
+# Each arm runs only for its label's type, so `if (x)` in the `logical` arm does not
+# make every caller pass a logical.
+friendly <- function(x) {
+  switch(
+    typeof(x),
+    logical = if (x) "TRUE" else "FALSE",
+    character = if (nzchar(x)) "a string" else "empty",
+    "other"
+  )
+}
+described <- friendly("a")
+#++++
+friendly: <T> fn(x: T) -> character
+described: character
+
+#---- validator_that_allows_null_keeps_the_caller_value
+# A callee that tests `is.null(x)` takes `T | NULL`; passing a value there says
+# nothing about whether the caller's value is `NULL`.
+check_thing <- function(x, allow_null = FALSE) {
+  if (allow_null && is.null(x)) return(invisible(NULL))
+  if (!is.list(x)) stop("not a list")
+  invisible(NULL)
+}
+field_of <- function(thing) {
+  check_thing(thing)
+  thing$field
+}
+#++++
+check_thing: <T, U> fn(x: T | NULL, [allow_null]: U) -> NULL
+field_of: <T> fn(thing: T) -> Unknown
+
+#---- combining_a_maybe_null_parameter
+merge_vectors <- function(a, b) {
+  if (!is.null(a) && length(a) > 1 && is.null(names(a))) stop("unnamed")
+  x <- c(a, b)
+  x[!duplicated(names(x), fromLast = TRUE)]
+}
+items_of <- function(items = NULL) {
+  if (!is.null(items) && length(items) == 0L) stop("empty")
+  lapply(items, function(item) item)
+}
+#++++
+merge_vectors: <T, U> fn(a: T | NULL, b: U) -> Unknown
+items_of: <T> fn([items]: list[T] | T[] | NULL) -> list[T]
+
+#---- normalizing_a_parameter_keeps_it_open
+# A write under a test that reads the same formal normalizes the input: the body
+# sees the written type, and callers may still pass anything.
+quarter_of <- function(type = "quarter") {
+  if (is.logical(type)) type <- if (type) "q" else "m"
+  type == "q"
+}
+asked <- quarter_of(TRUE)
+fill <- function(object, coredata = NULL) {
+  if (is.null(coredata)) coredata <- inherits(object, "zoo")
+  if (coredata) object else NULL
+}
+#++++
+quarter_of: <T> fn([type]: T) -> logical
+asked: logical
+fill: <T, U> fn(object: T, [coredata]: U | NULL) -> T | NULL

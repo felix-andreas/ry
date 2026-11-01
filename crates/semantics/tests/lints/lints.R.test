@@ -36,11 +36,11 @@ f <- function(x) x
 clean
 
 #==== trailing-comma
-#---- call_trailing_comma_errors
+#---- call_trailing_comma_warns
 f <- function(a, b) a
 f(1, 2,)
 #++++
-28..29 error[trailing-comma] Unexpected comma after last argument
+28..29 warning[trailing-comma] Unexpected comma after last argument
 
 #---- subset_trailing_comma_allowed
 m <- matrix(1)
@@ -53,7 +53,7 @@ g <- function(x) x
 h <- function(x) x
 g(h(1,))
 #++++
-43..44 error[trailing-comma] Unexpected comma after last argument
+43..44 warning[trailing-comma] Unexpected comma after last argument
 
 #==== levels
 #---- naming_style_off_by_default

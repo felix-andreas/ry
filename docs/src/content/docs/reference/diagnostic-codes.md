@@ -84,8 +84,10 @@ line assigns rather than passes an argument.
 **`boolean-shorthand`** (warning): `T` or `F`, which are ordinary variables that any code can
 reassign, unlike `TRUE` and `FALSE`.
 
-**`trailing-comma`** (error): a comma after a call's last argument. R reads it as an empty argument,
-so `c(1, 2, )` fails when it runs.
+**`trailing-comma`** (warning): a comma after a call's last argument. R reads it as an empty
+argument, which fails only when the callee evaluates it: `c(1, 2, )` stops with "argument 3 is
+empty", while `ngettext(2, "a", "b", )` runs, because the empty argument leaves `domain` at its
+default.
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
 `setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still

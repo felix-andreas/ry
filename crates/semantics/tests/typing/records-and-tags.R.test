@@ -613,7 +613,7 @@ s <- sum((x = 1,))
 #++++
 keep: <T> fn(v: T) -> T
 k: record{x: double}
-sum: <T> fn(v: T) -> double
+sum: <T> fn([v]: T) -> double
 s: double
 
 #---- a_value_that_may_be_r_data_is_not_reported

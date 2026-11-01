@@ -2176,7 +2176,17 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                                 na = true;
                             }
                         }
-                        total.add(value);
+                        if is_na_real(value) {
+                            na = true;
+                        }
+                    }
+                    total.add(value);
+                };
+                for &item in &items {
+                    if item.kind() == SexpType::Real {
+                        values::reals(item).iter().for_each(|&value| add(value));
+                    } else {
+                        (0..length(item)).for_each(|index| add(real_at(item, index)));
                     }
                 }
                 let na = na
