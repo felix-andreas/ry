@@ -229,8 +229,6 @@ pub fn output_name(expr: &Expr) -> PlSmallStr {
     }
 }
 
-/// Whether `expr` gives one value for a whole group: every column it reads sits inside an
-/// aggregation. `GroupBy.agg` accepts only such expressions.
 /// Whether `expr` may be an item of `agg`: it gives one value per group, or it is
 /// `Expr.head(n)`, which gives up to `n` rows per group. ry has no list columns, so where Polars
 /// would give a list per group the rows are exploded, as data.table recycles them.

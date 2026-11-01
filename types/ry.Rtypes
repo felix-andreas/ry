@@ -210,7 +210,7 @@ DataFrame.sort : fn(df: DataFrame, ...: Expr | character, [descending]: logical)
 DataFrame.head : fn(df: DataFrame, [n]: integer | double) -> DataFrame
 DataFrame.tail : fn(df: DataFrame, [n]: integer | double) -> DataFrame
 DataFrame.join : fn(df: DataFrame, other: DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> DataFrame
-DataFrame.join_asof : fn(df: DataFrame, other: DataFrame, on: character, [by]: character, [strategy]: character, [suffix]: character) -> DataFrame
+DataFrame.join_asof : fn(df: DataFrame, other: DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> DataFrame
 DataFrame.lazy : fn(df: DataFrame) -> LazyFrame
 GroupBy.agg : fn(group: GroupBy, ...: Expr) -> DataFrame
 LazyFrame.scan_csv : fn(path: character) -> LazyFrame
@@ -223,7 +223,7 @@ LazyFrame.sort : fn(lf: LazyFrame, ...: Expr | character, [descending]: logical)
 LazyFrame.head : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
 LazyFrame.tail : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
 LazyFrame.join : fn(lf: LazyFrame, other: LazyFrame | DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> LazyFrame
-LazyFrame.join_asof : fn(lf: LazyFrame, other: LazyFrame | DataFrame, on: character, [by]: character, [strategy]: character, [suffix]: character) -> LazyFrame
+LazyFrame.join_asof : fn(lf: LazyFrame, other: LazyFrame | DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> LazyFrame
 LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
 LazyFrame.explain : fn(lf: LazyFrame) -> character
 LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame

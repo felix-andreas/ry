@@ -102,8 +102,23 @@ is short for `DataFrame.select(df, col("region"))`. Inside `GroupBy.agg`, each e
 give one value per group. `col("units")` alone gives one value per row, so the checker and the
 runtime both reject it until you aggregate it.
 
-The one exception is `Expr.head(n)`, which keeps up to `n` values per group. Polars would give a
-list per group here, but ry has no list columns, so the values become rows. After a descending
+```r
+sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3L)
+```
+
+```text
+   region  cost  units
+   <char> <num> <lgcl>
+1:     eu   1.8   TRUE
+2:     us   2.4   TRUE
+3:     eu   3.6  FALSE
+4:   asia   0.6   TRUE
+5:     us   4.8  FALSE
+```
+
+Inside `GroupBy.agg`, the one exception to one value per group is `Expr.head(n)`, which keeps up
+to `n` values per group. Polars would give a list per group here, but ry has no list columns, so
+the values become rows. After a descending
 sort, this gives each group's largest values:
 
 ```r
@@ -125,23 +140,9 @@ sales |>
 5:     eu         2
 ```
 
-The groups come in the order of their first row in the sorted data. Written lazily, the sort and
-the grouping run as one step that keeps only each group's best rows, instead of sorting the whole
-table first.
-
-```r
-sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3L)
-```
-
-```text
-   region  cost  units
-   <char> <num> <lgcl>
-1:     eu   1.8   TRUE
-2:     us   2.4   TRUE
-3:     eu   3.6  FALSE
-4:   asia   0.6   TRUE
-5:     us   4.8  FALSE
-```
+The groups come in the order of their first row in the sorted data. Written lazily, with one
+sort column and `Expr.head(n)` as the only item for an `n` of at most 8, the sort and the grouping
+run as one step that keeps only each group's best rows, instead of sorting the whole table first.
 
 ### Joins
 

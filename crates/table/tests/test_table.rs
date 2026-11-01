@@ -1975,7 +1975,9 @@ fn mult_keeps_the_first_or_last_match_as_data_table_does() {
 }
 
 /// The fuzz builds small tables, so this one is large enough for the grouped median, sd and `cor`
-/// kernels to split their rows across threads; the Polars plan is the reference.
+/// kernels to split their rows across threads; the Polars plan is the reference. `g` groups
+/// through dense states and `sparse`, the same groups spread over a wide code range, through
+/// hashed partitions.
 #[test]
 fn large_grouped_medians_and_moments_match_the_plan() {
     let mut rng = SplitMix64(7);
@@ -1995,8 +1997,10 @@ fn large_grouped_medians_and_moments_match_the_plan() {
         .iter()
         .map(|y| *y as i32 / 3 + rng.below(100) as i32)
         .collect();
+    let sparse: Vec<i32> = groups.iter().map(|group| group * 4_000_000).collect();
     let table = frame(vec![
         ("g", ints(&groups)),
+        ("sparse", ints(&sparse)),
         ("x", doubles(&x)),
         ("y", doubles(&y)),
         ("z", ints(&z)),
@@ -2006,47 +2010,49 @@ fn large_grouped_medians_and_moments_match_the_plan() {
         arg: Box::new(column("x")),
         na_rm: true,
     };
-    let query = || Query {
-        select: Select::Columns(vec![
-            named("md", removed(Aggregate::Median)),
-            named("md_na", aggregate(Aggregate::Median, column("x"))),
-            named("sd", removed(Aggregate::Sd)),
-            named("var", aggregate(Aggregate::Var, column("y"))),
-            named(
-                "cor",
-                Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
-            ),
-        ]),
-        by: vec![named("g", column("g"))],
-        ..Query::default()
-    };
-    let mut kernel = run_table(&mut table.fork(), query());
-    let mut planned =
-        match execute_with_plans_only(&mut table.fork(), query()).map(|executed| executed.output) {
-            Ok(Output::Table(result)) => result,
-            other => panic!("expected a table, got {other:?}"),
+    for key in ["g", "sparse"] {
+        let query = || Query {
+            select: Select::Columns(vec![
+                named("md", removed(Aggregate::Median)),
+                named("md_na", aggregate(Aggregate::Median, column("x"))),
+                named("sd", removed(Aggregate::Sd)),
+                named("var", aggregate(Aggregate::Var, column("y"))),
+                named(
+                    "cor",
+                    Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
+                ),
+            ]),
+            by: vec![named(key, column(key))],
+            ..Query::default()
         };
-    assert_eq!(read(&mut kernel, "g"), get(&mut planned, "g"));
-    for name in ["md", "md_na"] {
-        assert_eq!(read(&mut kernel, name), get(&mut planned, name), "{name}");
-    }
-    for name in ["sd", "var", "cor"] {
-        let (RVector::Double(left), RVector::Double(right)) =
-            (get(&mut kernel, name), get(&mut planned, name))
-        else {
-            panic!("{name} is not a double column");
-        };
-        assert_eq!(left.len(), right.len(), "{name}");
-        for (left, right) in left.iter().zip(&right) {
-            assert_eq!(
-                is_na_real(*left),
-                is_na_real(*right),
-                "{name}: {left} against {right}"
-            );
-            assert!(
-                is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
-                "{name}: {left} against {right}"
-            );
+        let mut kernel = run_table(&mut table.fork(), query());
+        let mut planned =
+            match execute_with_plans_only(&mut table.fork(), query()).map(|executed| executed.output) {
+                Ok(Output::Table(result)) => result,
+                other => panic!("expected a table, got {other:?}"),
+            };
+        assert_eq!(read(&mut kernel, key), get(&mut planned, key));
+        for name in ["md", "md_na"] {
+            assert_eq!(read(&mut kernel, name), get(&mut planned, name), "{key} {name}");
+        }
+        for name in ["sd", "var", "cor"] {
+            let (RVector::Double(left), RVector::Double(right)) =
+                (get(&mut kernel, name), get(&mut planned, name))
+            else {
+                panic!("{key} {name} is not a double column");
+            };
+            assert_eq!(left.len(), right.len(), "{key} {name}");
+            for (left, right) in left.iter().zip(&right) {
+                assert_eq!(
+                    is_na_real(*left),
+                    is_na_real(*right),
+                    "{key} {name}: {left} against {right}"
+                );
+                assert!(
+                    is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
+                    "{key} {name}: {left} against {right}"
+                );
+            }
         }
     }
 }

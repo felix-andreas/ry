@@ -1750,13 +1750,31 @@ fn sort_by_slot(runs: &[Vec<(u32, u32)>], slots: usize, values: &[f64]) -> (Vec<
     } else {
         usize::MAX
     };
-    let parts: Vec<&[(u32, u32)]> = runs.iter().flat_map(|run| run.chunks(piece)).collect();
+    // A part is `piece` consecutive entries, which may span several runs: a hashed grouping
+    // gives a run per partition, and a histogram per run would cost the slot count each time.
+    let mut parts: Vec<Vec<&[(u32, u32)]>> = vec![Vec::new()];
+    let mut filled = 0;
+    for run in runs {
+        let mut rest = run.as_slice();
+        while !rest.is_empty() {
+            let (taken, left) = rest.split_at((piece - filled).min(rest.len()));
+            if let Some(part) = parts.last_mut() {
+                part.push(taken);
+            }
+            filled += taken.len();
+            rest = left;
+            if filled == piece {
+                parts.push(Vec::new());
+                filled = 0;
+            }
+        }
+    }
     let mut next: Vec<Vec<usize>> = THREAD_POOL.install(|| {
         parts
             .par_iter()
             .map(|part| {
                 let mut counts = vec![0usize; slots];
-                for (_, slot) in *part {
+                for (_, slot) in part.iter().copied().flatten() {
                     counts[*slot as usize] += 1;
                 }
                 counts
@@ -1781,7 +1799,7 @@ fn sort_by_slot(runs: &[Vec<(u32, u32)>], slots: usize, values: &[f64]) -> (Vec<
             .par_iter()
             .zip(next.par_iter_mut())
             .for_each(|(part, next)| {
-                for (row, slot) in *part {
+                for (row, slot) in part.iter().copied().flatten() {
                     let position = &mut next[*slot as usize];
                     // SAFETY: the parts' offsets for a slot are disjoint runs inside that slot's
                     // run, and the runs cover `0..total` exactly once.

@@ -2458,6 +2458,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::NotAnAggregation { column } => format!(
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),
+        TypeErrorKind::HeadInsideExpression { column } => format!(
+            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
+        ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",
             if *columns == 1 { "column" } else { "columns" },

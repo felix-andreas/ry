@@ -147,6 +147,11 @@ pub enum TypeErrorKind<'db> {
     NotAnAggregation {
         column: String,
     },
+    /// `Expr.head(n)` inside a larger expression in `GroupBy.agg`, which accepts it only as a
+    /// whole item.
+    HeadInsideExpression {
+        column: String,
+    },
     /// `setnames(f, new)` with as many names as the frame has columns, which data.table
     /// requires.
     ColumnNameCount {
@@ -318,16 +323,18 @@ enum Shape {
     /// `Expr.head(n)`: up to `n` per group, which `agg` accepts only as a whole item, exploding
     /// them into rows.
     Head,
+    /// An expression that combines `Expr.head(n)` with something else, which `agg` rejects.
+    NestedHead,
 }
 
 impl Shape {
     /// The shape of an expression combining two others: one value per group only when both give
-    /// one.
+    /// one. A head inside wins, so that `agg` can say what is wrong.
     fn combine(self, other: Shape) -> Shape {
-        if self == Shape::PerGroup && other == Shape::PerGroup {
-            Shape::PerGroup
-        } else {
-            Shape::PerRow
+        match (self, other) {
+            (Shape::Head | Shape::NestedHead, _) | (_, Shape::Head | Shape::NestedHead) => Shape::NestedHead,
+            (Shape::PerGroup, Shape::PerGroup) => Shape::PerGroup,
+            _ => Shape::PerRow,
         }
     }
 }
@@ -6288,14 +6295,19 @@ impl<'db> Checker<'db, '_> {
                 };
                 let computed = expressions(self, &|_| true)?;
                 for (argument, column) in rest.iter().filter_map(|argument| argument.value).zip(&computed) {
-                    if column.shape == Shape::PerRow {
-                        self.errors.push(TypeError {
-                            range: self.blame_range(argument),
-                            kind: TypeErrorKind::NotAnAggregation {
-                                column: column.name.clone(),
-                            },
-                        });
-                    }
+                    let kind = match column.shape {
+                        Shape::PerRow => TypeErrorKind::NotAnAggregation {
+                            column: column.name.clone(),
+                        },
+                        Shape::NestedHead => TypeErrorKind::HeadInsideExpression {
+                            column: column.name.clone(),
+                        },
+                        Shape::PerGroup | Shape::Head => continue,
+                    };
+                    self.errors.push(TypeError {
+                        range: self.blame_range(argument),
+                        kind,
+                    });
                 }
                 let mut result = existing(columns.get(..usize::try_from(keys).ok()?)?);
                 result.extend(fields(computed));
@@ -6345,7 +6357,10 @@ impl<'db> Checker<'db, '_> {
         };
         let keys = |position: usize| matched[position].map(|value| literal_strings(module, value));
         let (how, suffix, left_keys, right_keys) = if asof {
-            let mut keys_of_both = keys(2).unwrap_or(Some(Vec::new()))?;
+            let by_null = matched[2].is_some_and(|value| {
+                matches!(module.expression(value).kind, ExpressionKind::Literal(LiteralKind::Null))
+            });
+            let mut keys_of_both = if by_null { Vec::new() } else { keys(2).unwrap_or(Some(Vec::new()))? };
             keys_of_both.extend(keys(1)??);
             let suffix = string(4)?.unwrap_or_else(|| "_right".to_owned());
             ("left".to_owned(), suffix, keys_of_both.clone(), keys_of_both)
