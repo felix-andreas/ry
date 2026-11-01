@@ -188,6 +188,20 @@ fn park(activation: &mut Activation, unwind: Unwind) {
     activation.pending = Some(unwind);
 }
 
+/// Like [`guarded`], but fails at once while an error is parked. A failed allocation in a box
+/// helper parks its error and hands compiled code `NULL`, which has no failure branch, so the
+/// next helper that would run interpreter code with that value fails instead and the error
+/// reaches tier 0. Write-back and deoptimization helpers use [`guarded`], because they must
+/// still run after an error to leave the frame as tier 0 expects it.
+unsafe fn checked<T>(activation: *mut Activation, fallback: T, body: impl FnOnce(&mut Activation) -> T) -> T {
+    unsafe {
+        if (*activation).pending.is_some() {
+            return fallback;
+        }
+        guarded(activation, fallback, body)
+    }
+}
+
 unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     unsafe { activation.registers.add(compiled(activation).registers + slot as usize) }
 }
@@ -195,7 +209,7 @@ unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
 pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate: i32) -> i32 {
     unsafe {
-        guarded(activation, outcome::FAILED, |activation| {
+        checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
             match scoped(|| bytecode::step_one(machine, pc as usize)) {
                 Err(unwind) => {
@@ -212,7 +226,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
 /// Loads the variable `GetVar` at `pc` reads into its slot. Returns the slot's status.
 pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
     unsafe {
-        guarded(activation, outcome::LOAD_FAILED, |activation| {
+        checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
             finish_load(activation, slot, loaded)
@@ -223,7 +237,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
 /// Loads a slot's variable for an element assignment, which has no inline cache.
 pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {
-        guarded(activation, outcome::LOAD_FAILED, |activation| {
+        checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let symbol = compiled(activation).slots[slot as usize];
             let loaded = scoped(|| {
@@ -322,7 +336,7 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
 /// `if (value)`: 1 or 0, or 2 after parking the error.
 pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut Header, call: *mut Header) -> i32 {
     unsafe {
-        guarded(activation, 2, |activation| {
+        checked(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
                 park(activation, error("compiled code passed a null condition"));
                 return 2;
@@ -341,7 +355,7 @@ pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut 
 /// An operand of `&&` or `||` as a logical scalar, or 2 after parking the error.
 pub unsafe extern "C" fn jit_logic(activation: *mut Activation, value: *mut Header, call: *mut Header, is_and: i32, right: i32) -> i32 {
     unsafe {
-        guarded(activation, 2, |activation| {
+        checked(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
                 park(activation, error("compiled code passed a null operand"));
                 return 2;

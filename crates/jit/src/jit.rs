@@ -232,6 +232,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             _ => {}
         }
         Some(TierExit::Finished(match Sexp::from_raw(result) {
+            // An error parked by a helper whose failure compiled code does not branch on.
+            Some(_) if activation.pending.is_some() => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
             Some(value) => Ok(value),
             None => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
         }))
