@@ -4,6 +4,7 @@ use crate::annotations::{
 };
 use crate::check::{
     ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
+    column_element,
 };
 use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
 use crate::hir::{ExprId, ExpressionKind, Symbol};
@@ -2226,6 +2227,56 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 ),
             };
             format!("{subject} has no column `{column}`{hint}")
+        }
+        TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
+            "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.",
+            renderer.render(db, *x),
+            renderer.render(db, *i)
+        ),
+        TypeErrorKind::OrderedJoinOnText {
+            condition,
+            column,
+            found,
+        } => format!(
+            "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings.",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::InSubsetColumn { column, inner } => {
+            let inner = TypeError {
+                range: error.range,
+                kind: (**inner).clone(),
+            };
+            let message = render_type_error_message(db, &inner);
+            format!(
+                "{}, for the column `{column}` of `.SD`",
+                message.trim_end_matches('.')
+            )
+        }
+        TypeErrorKind::RollingNonEquiJoin => {
+            "a rolling join needs every join condition to be `==`".to_owned()
+        }
+        TypeErrorKind::LossyColumnWrite {
+            column,
+            column_ty,
+            found,
+        } => {
+            let effect = match (
+                column_element(db, *column_ty).kind(db),
+                column_element(db, *found).kind(db),
+            ) {
+                (TyKind::Scalar(Atomic::Logical), TyKind::Scalar(Atomic::Character)) => {
+                    "is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`"
+                }
+                (_, TyKind::Scalar(Atomic::Character)) => {
+                    "is parsed as a number, and a string that is not one becomes `NA`"
+                }
+                _ => "is truncated to an integer",
+            };
+            format!(
+                "column `{column}` holds `{}`, so this `{}` value {effect}",
+                renderer.render(db, *column_ty),
+                renderer.render(db, *found)
+            )
         }
         TypeErrorKind::BadRowIndex { found } => {
             let hint = if matches!(found.kind(db), TyKind::Frame(_)) {

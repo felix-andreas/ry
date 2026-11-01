@@ -1823,13 +1823,20 @@ The end-to-end guard rests on the corpus suites.
 
 - **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
   `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
-- **Query gaps.** `j` cannot read `x.`-prefixed columns in a join. Under `.EACHI`, a column of `i`
-  inside an aggregate is the matched rows' values, where data.table gives the row's one value.
-  A non-equi join's extra condition columns are named `t.1` where data.table repeats `t`.
-- **Warnings:** a `:=` that coerces a string into a number column does not warn, where data.table
-  does; only number narrowing does.
-- **Checker:** a non-equi `on =` and `by = .EACHI` give `Unknown`; the engine's `result_type`
-  already knows both results.
+- **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
+  variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
+- **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
+  name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
+  instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
+- **Engine:** under `.EACHI`, `sum(.N)` reads the raw group row count rather than the matched
+  count (`single_value` does not rewrite the argument), and `parse_strings` uses Polars' string
+  cast, which is unverified against R for padded (`" 3"`) and hex (`"0x1A"`) strings.
+- **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
+  so `lapply(.SD, sum)` over a character column is silent.
+- **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
+  checked. The engine refuses a factor joined to a number and a number written into a factor.
+- **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
+  type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
 - **Naming:** the interpreter must bind `frame` as the delegating closure `decisions.md` describes
