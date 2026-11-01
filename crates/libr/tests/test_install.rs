@@ -327,6 +327,34 @@ fn the_front_ends_run_r_code_on_ry() {
     assert!(output.contains("Says hello."), "{output}");
 }
 
+/// `callr::r_session` drives `R --slave` over a stdin pipe and attaches its
+/// helpers from the user profile, so both have to behave as in GNU R.
+#[test]
+fn the_console_reads_stdin_after_the_user_profile() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let profile = directory.join("console-profile.R");
+    std::fs::write(&profile, "greeting <- 'hi'\n").expect("a profile");
+    let mut child = Command::new(home().join("bin").join("R"))
+        .args(["--no-readline", "--slave", "--no-save", "--no-restore"])
+        .env("R_PROFILE_USER", &profile)
+        .current_dir(directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run bin/R");
+    let mut stdin = child.stdin.take().expect("a stdin pipe");
+    stdin.write_all(b"cat(greeting, '\\n')\nstop('boom')\ncat('unreached')\n").expect("write stdin");
+    std::mem::drop(stdin);
+    let output = child.wait_with_output().expect("bin/R exits");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi \n");
+    assert!(stderr.contains("boom") && stderr.contains("Execution halted"), "{stderr}");
+}
+
 /// Builds every source tarball in `RY_SOURCE_PACKAGES` against ry's headers into
 /// `target/tmp/source-library`, dependencies of `LinkingTo` resolving from `R_LIBS`.
 #[test]

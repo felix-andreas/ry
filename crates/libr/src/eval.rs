@@ -1086,7 +1086,8 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     }
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
-        vanilla: true,
+        site_profile: false,
+        user_profile: false,
         interactive: false,
     };
     match interp::session::start(options) {
@@ -1100,7 +1101,8 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
 
 /// Runs R on ry's runtime the way `Rscript` does: starts the session (base R and the default
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
-/// `input` and then the file at `path` (either may be null), and returns the exit status: 0 on
+/// `input` and then the file at `path` (either may be null, and with both null it reads R code
+/// from stdin, running each expression once it is complete), and returns the exit status: 0 on
 /// success, 1 after an error, 2 when the session could not start. `arguments` are what
 /// `commandArgs(trailingOnly = TRUE)` returns, and `flags` are the [`RUN_FLAGS`] bits. This is
 /// the entry point of `ry run --runtime ry` and `ry load`.
@@ -1129,7 +1131,8 @@ pub unsafe extern "C" fn ry_run(
     runtime();
     let options = interp::session::StartOptions {
         command_args,
-        vanilla: true,
+        site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
+        user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: false,
     };
     if let Err(unwind) = interp::session::start(options) {
@@ -1145,6 +1148,30 @@ pub unsafe extern "C" fn ry_run(
     let mut outcome = interp::session::Outcome::Completed;
     if let Some(input) = &input {
         outcome = interp::session::run_text(input, "<input>");
+    } else if path.is_none() {
+        // Each expression runs as soon as it is complete, not once stdin ends: callr drives `R`
+        // this way, writing a command and waiting for its result before it writes the next.
+        let mut stdin = std::io::stdin().lock();
+        outcome = interp::session::run_console(
+            |_prompt| {
+                use std::io::{BufRead, Write};
+                if let Err(error) = std::io::stdout().flush() {
+                    let message = format!("ry: cannot write output: {error}\n");
+                    crate::boundary::write_console(message.as_bytes(), true);
+                }
+                let mut line = Vec::new();
+                match stdin.read_until(b'\n', &mut line) {
+                    Ok(0) => None,
+                    Ok(_) => Some(String::from_utf8_lossy(&line).into_owned()),
+                    Err(error) => {
+                        let message = format!("ry: cannot read R input from stdin: {error}\n");
+                        crate::boundary::write_console(message.as_bytes(), true);
+                        None
+                    }
+                }
+            },
+            true,
+        );
     }
     if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
         outcome = match std::fs::read_to_string(path) {
@@ -1174,8 +1201,17 @@ pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
 /// Set when S4, R6 and Reference Class definitions in user code are allowed.
 pub const RUN_FLAG_OBJECT_SYSTEMS: c_int = 1 << 1;
 
+/// `ry_run` flag: source the site profile, as GNU R does without `--vanilla` or
+/// `--no-site-file`. `ry run` leaves it off; ry's R home's `bin/R` and `bin/Rscript` set it.
+pub const RUN_FLAG_SITE_PROFILE: c_int = 1 << 2;
+
+/// `ry_run` flag: source the user profile, as GNU R does without `--vanilla` or
+/// `--no-init-file`.
+pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 3;
+
 /// Every flag `ry_run` and `ry_repl` understand.
-pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS;
+pub const RUN_FLAGS: c_int =
+    RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS | RUN_FLAG_SITE_PROFILE | RUN_FLAG_USER_PROFILE;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
@@ -1196,7 +1232,8 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
     apply_flags(flags);
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
-        vanilla: false,
+        site_profile: true,
+        user_profile: true,
         interactive: true,
     };
     if let Err(unwind) = interp::session::start(options) {
@@ -1235,7 +1272,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
             }
             prompt = std::ffi::CString::default();
         }
-    });
+    }, false);
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0

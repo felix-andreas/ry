@@ -291,7 +291,33 @@ pub enum Session {
         arguments: Vec<String>,
         /// `Rscript --default-packages=`, which becomes `R_DEFAULT_PACKAGES`.
         default_packages: Option<String>,
+        /// Off with `--vanilla` or `--no-site-file`.
+        site_profile: bool,
+        /// Off with `--vanilla` or `--no-init-file`.
+        user_profile: bool,
     },
+}
+
+/// Which startup profiles a command line turns off, from GNU R's options for them.
+struct Profiles {
+    site: bool,
+    user: bool,
+}
+
+impl Profiles {
+    /// Reads one option, returning whether it was a profile option.
+    fn read(&mut self, option: &str) -> bool {
+        match option {
+            "--vanilla" => {
+                self.site = false;
+                self.user = false;
+            }
+            "--no-site-file" => self.site = false,
+            "--no-init-file" => self.user = false,
+            _ => return false,
+        }
+        true
+    }
 }
 
 fn version_text() -> String {
@@ -301,15 +327,20 @@ fn version_text() -> String {
     )
 }
 
-/// Reads GNU R's `R [options] [< infile]` command line. Session options that change nothing in
-/// a non-interactive run on ry (`--vanilla`, `--no-save`, `--no-echo`, memory sizes) are
-/// accepted and ignored.
+/// Reads GNU R's `R [options] [< infile]` command line. `--vanilla`, `--no-site-file` and
+/// `--no-init-file` turn the startup profiles off; other session options that change nothing in
+/// a non-interactive run on ry (`--no-save`, `--no-echo`, memory sizes) are accepted and
+/// ignored.
 pub fn r_command_line(arguments: &[String]) -> Result<Session> {
     let mut file = None;
     let mut expressions: Vec<String> = Vec::new();
     let mut rest = arguments.iter();
     let mut trailing = Vec::new();
+    let mut profiles = Profiles { site: true, user: true };
     while let Some(argument) = rest.next() {
+        if profiles.read(argument) {
+            continue;
+        }
         match argument.as_str() {
             "--args" => {
                 trailing.extend(rest.by_ref().cloned());
@@ -346,6 +377,8 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
         arguments: trailing,
         default_packages: None,
+        site_profile: profiles.site,
+        user_profile: profiles.user,
     })
 }
 
@@ -354,9 +387,12 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
 pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
     let mut expressions: Vec<String> = Vec::new();
     let mut default_packages = None;
+    let mut profiles = Profiles { site: true, user: true };
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
-        if argument == "-e" {
+        if profiles.read(argument) {
+            index += 1;
+        } else if argument == "-e" {
             let expression = arguments
                 .get(index + 1)
                 .ok_or_else(|| Error::Usage("-e not followed by an expression".into()))?;
@@ -386,6 +422,8 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
         arguments: rest.to_vec(),
         default_packages,
+        site_profile: profiles.site,
+        user_profile: profiles.user,
     })
 }
 
