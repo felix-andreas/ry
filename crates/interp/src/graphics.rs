@@ -15,7 +15,7 @@ use {
         graphics_engine::{
             self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
         },
-        graphics_render::{self, Format, Rect, Shape, Stroke},
+        graphics_render::{self, Format, Paper, Rect, Shape, Stroke},
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -870,17 +870,19 @@ unsafe fn snapshot_saved(snapshot: Sexp) -> R<Option<Saved>> {
 // grDevices: opening devices.
 
 /// The paper sizes `postscript`, `xfig` and `pdf` know, in inches.
-fn paper_size(paper: &str) -> Option<[f64; 2]> {
+fn paper_size(paper: &str) -> Option<Paper> {
     let a4 = [21.0 / 2.54, 29.7 / 2.54];
-    match paper.to_ascii_lowercase().as_str() {
-        "a4" => Some(a4),
-        "a4r" => Some([a4[1], a4[0]]),
-        "letter" | "us" => Some([8.5, 11.0]),
-        "usr" => Some([11.0, 8.5]),
-        "legal" => Some([8.5, 14.0]),
-        "executive" => Some([7.25, 10.5]),
-        _ => None,
-    }
+    let (name, size) = match paper.to_ascii_lowercase().as_str() {
+        "a4" => ("a4", a4),
+        "a4r" => ("a4r", [a4[1], a4[0]]),
+        "letter" => ("letter", [8.5, 11.0]),
+        "us" => ("us", [8.5, 11.0]),
+        "usr" => ("usr", [11.0, 8.5]),
+        "legal" => ("legal", [8.5, 14.0]),
+        "executive" => ("executive", [7.25, 10.5]),
+        _ => return None,
+    };
+    Some(Paper { name, size })
 }
 
 /// The size of a paper device: the given width and height, or the paper less a quarter-inch
@@ -893,15 +895,22 @@ unsafe fn paper_device_size(paper: Sexp, width: Sexp, height: Sexp, horizontal: 
     if given.iter().all(|size| size.is_finite() && *size > 0.0) {
         return given;
     }
+    let [paper_width, paper_height] =
+        named_paper(paper).map_or([21.0 / 2.54, 29.7 / 2.54], |paper| paper.size);
+    let size = [paper_width - 0.5, paper_height - 0.5];
+    if horizontal { [size[1], size[0]] } else { size }
+}
+
+/// The size of the paper a `paper` argument names, with `"default"` taken from
+/// `getOption("papersize")`, or `None` for `"special"`.
+unsafe fn named_paper(paper: Sexp) -> Option<Paper> {
     let mut paper =
         values::first_string(paper).map_or_else(String::new, |paper| paper.into_owned());
     if paper == "default" {
         paper = values::first_string(crate::envir::get_option("papersize"))
             .map_or_else(|| "a4".to_owned(), |paper| paper.into_owned());
     }
-    let [paper_width, paper_height] = paper_size(&paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
-    let size = [paper_width - 0.5, paper_height - 0.5];
-    if horizontal { [size[1], size[0]] } else { size }
+    paper_size(&paper)
 }
 
 unsafe fn colour_arg(value: Sexp, default: Colour) -> R<Colour> {
@@ -943,17 +952,28 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
 /// ...)`.
 unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
+    let size = paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal);
+    // A special paper is the page itself, turned with it.
+    let paper = named_paper(call.arg(1)).unwrap_or(Paper {
+        name: "special",
+        size: if horizontal { [size[1], size[0]] } else { size },
+    });
     let spec = graphics_render::DeviceSpec {
         name: "postscript",
         file: device_file(call.arg(0)),
-        format: Some(Format::Postscript),
-        size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
+        format: Some(Format::Postscript {
+            onefile: values::as_logical_scalar(call.arg(10)) != 0,
+            paper: Some(paper),
+            landscape: horizontal,
+        }),
+        size,
         unit_inches: 1.0 / 72.0,
         y_down: false,
         pointsize: values::as_real_scalar(call.arg(9)),
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
-        title: String::new(),
+        title: values::first_string(call.arg(14))
+            .map_or_else(String::new, |title| title.into_owned()),
         quality: 75,
     };
     graphics_render::open_device(spec)?;
@@ -1010,7 +1030,15 @@ unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
         3 => ("jpeg", true, Some(Format::Jpeg)),
         4 => ("svg", false, Some(Format::Svg)),
         6 => ("cairo_pdf", false, Some(Format::Pdf)),
-        7 => ("cairo_ps", false, Some(Format::Postscript)),
+        7 => (
+            "cairo_ps",
+            false,
+            Some(Format::Postscript {
+                onefile: true,
+                paper: None,
+                landscape: false,
+            }),
+        ),
         8 => ("tiff", true, Some(Format::Tiff)),
         9 => ("bmp", true, Some(Format::Bmp)),
         _ => return Err(error("invalid type for cairo device")),
@@ -1471,7 +1499,13 @@ unsafe fn do_par(call: &NativeCall<'_>) -> R<Sexp> {
                             }
                             entries.push((name, found.unwrap_or(ParValue::Null)));
                         }
-                        None => entries.push((String::new(), ParValue::Null)),
+                        None => {
+                            warnings.push(format!(
+                                "argument {} does not name a graphical parameter",
+                                index + 1
+                            ));
+                            entries.push((String::new(), ParValue::Null));
+                        }
                     }
                 }
             }
@@ -2186,8 +2220,8 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
             _ => return Err(error(format!("invalid \"log={log}\" specification"))),
         }
     }
-    if (xlog && xlim.iter().any(|limit| *limit <= 0.0))
-        || (ylog && ylim.iter().any(|limit| *limit <= 0.0))
+    if (xlog && xlim.iter().any(|limit| *limit < 0.0))
+        || (ylog && ylim.iter().any(|limit| *limit < 0.0))
     {
         return Err(error("Logarithmic axis must have positive limits"));
     }
@@ -2212,12 +2246,27 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
     } else {
         yaxs
     };
+    let mut warnings = Vec::new();
     with_device(|device| {
         let lab = lab.unwrap_or([device.pars.lab[0], device.pars.lab[1]]);
-        let logged =
-            |limits: [f64; 2], log: bool| if log { limits.map(f64::log10) } else { limits };
-        let mut x = logged(xlim, xlog);
-        let mut y = logged(ylim, ylog);
+        // A zero limit on a log axis is -Inf in decades, which GNU R corrects to 1e-320 with
+        // a warning.
+        let mut logged = |limits: [f64; 2], log: bool, axis: i32| {
+            if !log {
+                return limits;
+            }
+            let decades = limits.map(f64::log10);
+            if decades.iter().any(|end| !end.is_finite()) {
+                warnings.push(format!(
+                    "nonfinite axis={axis} limits [GScale({},{},..); log=TRUE] -- corrected now",
+                    crate::linalg::format_g(decades[0]),
+                    crate::linalg::format_g(decades[1]),
+                ));
+            }
+            decades.map(|end| if end.is_finite() { end } else { -320.0 })
+        };
+        let mut x = logged(xlim, xlog, 1);
+        let mut y = logged(ylim, ylog, 2);
         if asp.is_finite() && asp > 0.0 {
             let pin = device.plot_size();
             let (x_range, y_range) = ((x[1] - x[0]).abs(), (y[1] - y[0]).abs());
@@ -2240,6 +2289,9 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
         pars.yaxp = yaxp;
         Ok(())
     })?;
+    for warning in warnings {
+        call.warning(warning)?;
+    }
     Ok(nil())
 }
 
@@ -2269,9 +2321,19 @@ fn scale_axis(limits: [f64; 2], style: char, log: bool, intervals: i32) -> ([f64
         }
     }
     if style == 'r' || style == 'e' || style == 's' {
-        let extension = (high - low) * 0.04;
-        low -= extension;
-        high += extension;
+        // The range may overflow, so extend by each end's share; an end pushed past the
+        // largest double stays at it.
+        let extension = high * 0.04 - low * 0.04;
+        low = (low - extension).max(-f64::MAX);
+        high = (high + extension).min(f64::MAX);
+    }
+    // A log axis keeps its upper end 1% below the largest double, and a lower end that
+    // underflows to zero is pulled up to 1% above the smallest normal double, as in GNU R.
+    if log {
+        high = high.min((0.99 * f64::MAX).log10());
+        if 10f64.powf(low) == 0.0 {
+            low = (1.01 * f64::MIN_POSITIVE).log10();
+        }
     }
     let data = if log {
         [10f64.powf(low), 10f64.powf(high)]
@@ -5311,6 +5373,21 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
     if x.len() < 2 || y.len() < 2 || z.len() != x.len() * y.len() {
         return Err(error("invalid x / y values or limits"));
     }
+    if let Some(index) = levels.iter().position(|level| !level.is_finite()) {
+        // GNU R formats the level with C's `%g`, which spells it `-inf`, `inf` or `nan`.
+        let level = levels[index];
+        let text = if level.is_nan() {
+            "nan"
+        } else if level > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        };
+        return Err(error(format!(
+            "non-finite level values: levels[{}] = {text}",
+            index + 1
+        )));
+    }
     with_inline_pars(call, 12, |device| {
         let pars = device.pars.clone();
         let clip = clip_rect(device);
@@ -6282,7 +6359,7 @@ unsafe fn do_axis_pars(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// The ticks of a linear axis: the pretty values inside `[low, high]`.
 pub fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
-    let pretty = crate::arith::pretty(low, high, intervals, 1, 0.25, [0.8, 1.7], 2, false);
+    let pretty = crate::arith::pretty(low, high, intervals, 1, 0.25, [0.8, 1.7, 20.0], 2, false);
     let unit = pretty.unit;
     let mut first = pretty.low;
     let mut last = pretty.high;
@@ -6303,6 +6380,21 @@ pub fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
 /// The ticks of a log axis spanning `[low, high]` (not logged): decades with a tick code, or a
 /// linear axis with a negative count when the range is too short for decades.
 pub fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
+    // A range past the largest double has no decades to tick, and an end that overflows
+    // or underflows is pulled back to the last decade that still is a normal double.
+    if low.is_infinite() {
+        return (f64::INFINITY, f64::INFINITY, 1);
+    }
+    let high = if high > 1e308 && low < 1e308 {
+        1e308
+    } else {
+        high
+    };
+    let low = if low < 1e-307 && high >= 1e-307 {
+        1e-307
+    } else {
+        low
+    };
     let (log_low, log_high) = (low.log10(), high.log10());
     let mut first = log_low.ceil();
     let mut last = log_high.floor();
@@ -6354,10 +6446,17 @@ pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec
     let count = code.round() as i32;
     if !log || count < 0 {
         let count = count.unsigned_abs().max(1) as usize;
-        let step = (last - first) / count as f64;
+        // Each end is divided first, since the span of an axis across the whole double range
+        // overflows.
+        let step = last / count as f64 - first / count as f64;
         return (0..=count)
             .map(|index| {
-                let tick = first + index as f64 * step;
+                let mut tick = first + index as f64 * step;
+                if !tick.is_finite() {
+                    // Halving is exact, so the halved sum is the same tick without the
+                    // intermediate overflow.
+                    tick = (first / 2.0 + index as f64 * (step / 2.0)) * 2.0;
+                }
                 // A tick that should be zero but is off by rounding is shown as zero.
                 if tick.abs() < 1e-10 * step.abs() {
                     0.0
@@ -6379,8 +6478,9 @@ pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec
     };
     let mut ticks = Vec::new();
     if count == 1 {
-        // Doubles span fewer than 700 decades, so the clamp only guards against an infinite ratio.
-        let decades = (last / first).log10().round().clamp(0.0, 700.0) as i32;
+        // The ratio of the ends can overflow, so decades are counted on the log scale.
+        let first_decade = first.log10();
+        let decades = (last.log10() - first_decade).round().clamp(0.0, 700.0) as i32;
         let intervals = intervals.max(1);
         // Too many decades for the wanted number of intervals: every few decades only. GNU R
         // also skips the first decades when the count is well past a multiple of the
@@ -6393,7 +6493,7 @@ pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec
             0
         };
         while exponent <= decades {
-            let tick = first * 10f64.powi(exponent);
+            let tick = 10f64.powf(first_decade + f64::from(exponent));
             if inside(tick) {
                 ticks.push(tick);
             }

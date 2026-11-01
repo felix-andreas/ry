@@ -16,6 +16,7 @@ use {
         },
     },
     heap::object::{Sexp, SexpType, gp},
+    smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -65,20 +66,41 @@ pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
         }
         return Ok(class);
     }
-    let mut classes: Vec<&str> = Vec::new();
     let dim = get_attr(object, symbols().dim);
-    if dim != nil() {
-        if length(dim) == 2 {
-            classes.push("matrix");
-        }
+    let shape = match dim {
+        dim if dim == nil() => 0,
+        dim if length(dim) == 2 => 2,
+        _ => 1,
+    };
+    let kind = object.kind();
+    // A call's class depends on its head (`if`, `for`, `=`, ...) and a record's on its kind,
+    // so only their type does not determine it.
+    let cacheable = !matches!(kind, SexpType::Language | SexpType::Record);
+    if cacheable && let Some(&classes) = interp().globals.implicit_classes.get(&(shape, kind)) {
+        return Ok(classes);
+    }
+    let mut classes: Vec<&str> = Vec::new();
+    if shape == 2 {
+        classes.push("matrix");
+    }
+    if shape > 0 {
         classes.push("array");
     }
-    match object.kind() {
+    match kind {
         SexpType::Integer => classes.extend(["integer", "numeric"]),
         SexpType::Real => classes.extend(["double", "numeric"]),
         _ => classes.push(basic_class(object, true)),
     }
-    string_vector(&classes)
+    let classes = string_vector(&classes)?;
+    if cacheable {
+        // Shared by every dispatch from now on, so a caller that modifies it must copy it.
+        classes.mark_not_mutable();
+        interp()
+            .globals
+            .implicit_classes
+            .insert((shape, kind), classes);
+    }
+    Ok(classes)
 }
 
 /// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class
@@ -219,7 +241,10 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
         }
         env = env.enclosure();
     }
-    Ok(None)
+    match crate::standard_library::builtins_env() {
+        Some(env) => function_in_frame(name, env),
+        None => Ok(None),
+    }
 }
 
 unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {
@@ -232,7 +257,13 @@ unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {
 }
 
 unsafe fn method_symbol(generic: &str, class: &str) -> R<Sexp> {
-    values::install(&format!("{generic}.{class}"))
+    // Dispatch builds two or three of these names per call, and formatting them was most of the
+    // cost of `UseMethod`.
+    let mut name: SmallVec<[u8; 64]> = SmallVec::new();
+    name.extend_from_slice(generic.as_bytes());
+    name.push(b'.');
+    name.extend_from_slice(class.as_bytes());
+    values::install_bytes(&name)
 }
 
 /// The dispatch variables a method frame gets.
@@ -295,9 +326,15 @@ unsafe fn find_s3_method(
             method_name = method_symbol(group, &class)?;
             found = lookup_method(method_name, call_env, def_env)?;
         }
-        if let Some(method) = found {
+        // base's `sort.list` is a function, not the `sort` method for class "list", and
+        // GNU R's dispatch passes over it.
+        if let Some(method) = found
+            && !(symbol_name(method_name) == "sort.list"
+                && method.kind() == SexpType::Closure
+                && method.tag() == values::base_namespace())
+        {
             let suffix = class_suffix(classes, index)?;
-            let method_string = scalar_string(&symbol_name(method_name))?;
+            let method_string = values::scalar_string_charsxp(method_name.car())?;
             let vars = dispatch_vars(generic, suffix, method_string, call_env, def_env, group)?;
             return Ok(Some(Found {
                 method,
@@ -308,7 +345,7 @@ unsafe fn find_s3_method(
     }
     let default = method_symbol(generic, "default")?;
     if let Some(method) = lookup_method(default, call_env, def_env)? {
-        let method_string = scalar_string(&symbol_name(default))?;
+        let method_string = values::scalar_string_charsxp(default.car())?;
         let empty = values::alloc(SexpType::String, 0)?;
         let vars = dispatch_vars(generic, empty, method_string, call_env, def_env, group)?;
         return Ok(Some(Found {
@@ -445,10 +482,8 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         return Ok(nil());
     }
     let value = eval::find_var_in_frame(first, env)?;
-    if value == missing_arg() {
-        return Ok(nil());
-    }
-    if value == unbound() {
+    // A generic called without its first argument dispatches as on NULL.
+    if value == unbound() || value == missing_arg() {
         return Ok(nil());
     }
     value_of(value)
@@ -703,7 +738,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             .collect();
         string_vector(&entries)?
     } else {
-        scalar_string(&symbol_name(method_name))?
+        values::scalar_string_charsxp(method_name.car())?
     };
     let vars = dispatch_vars(
         &generic_name,
@@ -791,6 +826,16 @@ pub unsafe fn try_builtin_dispatch(
             } else {
                 definition.name
             };
+            if generic == "c" {
+                // A `c` method never sees the `NULL` arguments after the first, as in GNU R.
+                let kept: Vec<Arg> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, arg)| *position == 0 || arg.value != nil())
+                    .map(|(_, arg)| *arg)
+                    .collect();
+                return internal_dispatch(generic, call, &kept, env);
+            }
             internal_dispatch(generic, call, args, env)
         }
         Generic::Ops | Generic::MatrixOps => {
@@ -1224,7 +1269,7 @@ unsafe fn find_group_method(
             let name = method_symbol(prefix, &class)?;
             if let Some(method) = lookup_method(name, env, def_env)? {
                 let suffix = class_suffix(classes, index)?;
-                let method_string = scalar_string(&symbol_name(name))?;
+                let method_string = values::scalar_string_charsxp(name.car())?;
                 let vars =
                     dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
                 return Ok(Some(Found {
@@ -1487,6 +1532,15 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     if value.kind() != SexpType::String {
         return Err(call.error("attempt to set invalid 'class' attribute"));
     }
+    // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
+    if length(value) == 2
+        && values::dims(object).is_some_and(|dims| dims.len() == 2)
+        && char_str(value.element(0)) == "matrix"
+        && char_str(value.element(1)) == "array"
+    {
+        set_class_attribute(object, nil())?;
+        return Ok(object);
+    }
     if length(value) == 1 {
         let class = char_str(value.element(0));
         // Setting an implicit class removes the attribute, or coerces.
@@ -1514,10 +1568,6 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                         "cannot set class to \"array\" unless the dimension attribute has length > 0",
                     ));
                 }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
-            }
-            "function" if values::is_function(object) => {
                 set_class_attribute(object, nil())?;
                 return Ok(object);
             }

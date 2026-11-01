@@ -812,32 +812,36 @@ in-place update and so keep data.table's syntax. Run-to-run times vary by up to 
 allocation-heavy questions, because the allocator returns large blocks to the OS between queries
 (`.agents/memory/backlog.md`, "Large allocations page-fault on every query").
 
-`tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers on
-the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums. The
-numbers are measured from Rust, in seconds, as the faster of two runs. Calls from R do not reach
-these kernels yet.
+`tools/bench/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
+rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the
+same operations from Rust. All three columns give the same checksums. R calls to these names run
+data.table's own C under ry's runtime, which is the middle column; calls from R do not reach the
+engine's kernels.
 
-| Operation | data.table | ry |
-|---|---|---|
-| `fread` | 2.92 | 1.39 |
-| `fwrite` | 0.87 | 0.70 |
-| `setkey` | 0.42 | 0.46 |
-| `setorder` | 0.97 | 0.69 |
-| `unique` | 0.10 | 0.09 |
-| `uniqueN` | 0.13 | 0.10 |
-| `rbindlist` | 0.88 | 0.29 |
-| `melt` | 1.20 | 0.39 |
-| `dcast` | 0.26 | 0.26 |
-| `shift` | 0.024 | 0.004 |
-| `fifelse` | 0.084 | 0.050 |
-| `fcoalesce` | 0.059 | 0.047 |
-| `nafill` | 0.081 | 0.042 |
-| `rleid` | 0.026 | 0.011 |
-| `between` | 0.018 | 0.013 |
-| `%chin%` | 0.049 | 0.036 |
-| `tstrsplit` | 5.17 | 1.86 |
+| Operation | data.table on GNU R | data.table on ry's runtime | ry engine, from Rust |
+|---|---|---|---|
+| `fread` | 3.16 | 2.36 | 1.39 |
+| `fwrite` | 0.84 | 0.60 | 0.70 |
+| `setkey` | 0.43 | 0.42 | 0.46 |
+| `setorder` | 0.90 | 0.83 | 0.69 |
+| `unique` | 0.083 | 0.085 | 0.09 |
+| `uniqueN` | 0.12 | 0.12 | 0.10 |
+| `rbindlist` | 0.90 | 0.71 | 0.29 |
+| `melt` | 1.21 | 0.94 | 0.39 |
+| `dcast` | 0.21 | 0.14 | 0.26 |
+| `shift` | 0.024 | 0.006 | 0.004 |
+| `fifelse` | 0.092 | 0.044 | 0.050 |
+| `fcoalesce` | 0.063 | 0.028 | 0.047 |
+| `nafill` | 0.085 | 0.051 | 0.042 |
+| `rleid` | 0.026 | 0.011 | 0.011 |
+| `between` | 0.022 | 0.013 | 0.013 |
+| `%chin%` | 0.078 | 0.067 | 0.036 |
+| `tstrsplit` | 5.73 | 3.71 | 1.86 |
 
-Each cell is the faster of two runs.
+Each cell is the faster of two runs. Under ry's runtime `unique` is at parity (its median over the
+two runs is 0.086 s against 0.10 s) and every other helper is faster than on GNU R. The 5 GB size
+(1e8 rows) needs more than the 15 GB of memory the measuring machine has, because `rbindlist(list(x,
+x))` alone holds 15 GB of columns.
 
 
 ## 8. Typing integration
@@ -958,10 +962,10 @@ Each step ends with something real running, and each one is a large, whole chang
 
    The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
    other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 47 of 66 end with GNU R's
-   exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
-   URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
-   `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
+   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
+   exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
+   (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
+   `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
    implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime

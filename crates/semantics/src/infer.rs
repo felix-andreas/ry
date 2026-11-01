@@ -10,8 +10,8 @@ use {
         stubs::stubs,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
-            array_element, for_each_child_type, is_ry_value_type, map_child_types, scalar,
-            substitute_rigid, union_of, unknown,
+            array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
+            map_child_types, scalar, substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -213,6 +213,9 @@ impl<'db> InferenceTable<'db> {
             return resolved;
         }
 
+        if !ty.may_resolve() {
+            return (ty, true);
+        }
         if let Some(&hit) = self.resolve_cache.borrow().1.get(&ty) {
             return (hit, true);
         }
@@ -310,6 +313,9 @@ impl<'db> InferenceTable<'db> {
     /// Lowering levels keeps a generalization at an outer level from quantifying
     /// a variable still reachable from an inner one.
     pub(crate) fn adjust_levels(&mut self, db: &'db dyn Db, level: u32, ty: Ty<'db>) {
+        if !contains_inference_var(db, ty) {
+            return;
+        }
         let shallow = self.shallow_resolve(db, ty);
         if let TyKind::Var(var) = shallow.kind(db) {
             let representative = self.find(*var);
@@ -1259,6 +1265,9 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
         visit: &mut impl FnMut(InferenceVar) -> bool,
     ) -> bool {
+        if !contains_inference_var(db, ty) {
+            return true;
+        }
         let shallow = self.shallow_resolve(db, ty);
         if let TyKind::Var(var) = shallow.kind(db) {
             return visit(*var);

@@ -15,6 +15,7 @@ use {
         values,
     },
     heap::object::{NA_REAL, Sexp, SexpType},
+    std::collections::HashMap,
 };
 
 /// Calls the stats function `name` (as the calling R code sees it) on numeric arguments and
@@ -675,6 +676,214 @@ pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
     }
     random::put_rng_state()?;
     values::real_vector(&statistics)
+}
+
+/// `Fexact(x, pars, workspace, mult)`: the p-value of Fisher's exact test for an r x c table,
+/// the total probability of the tables with the observed margins that are at most
+/// `1 + 1e-7` times as likely as the observed one. The p-value is always exact: the hybrid
+/// approximation `pars` can ask for, and the workspace limits, do not apply.
+///
+/// A table's probability is a constant times the product of `1 / x!` over its cells, so the
+/// search works with `-sum(log(x!))`, the table's value. Tables are built column by column, as
+/// paths through a network whose nodes are the remaining row sums after each column, sorted,
+/// because the completions of a node depend only on that multiset. Paths that reach a node with
+/// the same value merge. At each node, bounds on the values its completions can add (each
+/// remaining column maximized or minimized on its own) settle most paths at once: a path whose
+/// every completion is below the threshold counts the closed-form total of its completions, and
+/// one whose every completion is above it is dropped.
+pub unsafe fn fexact(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = call.arg(0);
+    let Some([rows, columns]) = values::dims(x).and_then(|dims| <[usize; 2]>::try_from(dims).ok())
+    else {
+        return Err(call.error("'x' must be a matrix"));
+    };
+    let counts = integer_values(x)?;
+    if counts.len() != rows * columns || counts.iter().any(|&count| count < 0) {
+        return Err(call.error("all entries of 'x' must be nonnegative and finite"));
+    }
+    let cell = |row: usize, column: usize| counts[row + column * rows] as usize;
+    let mut row_sums: Vec<usize> = (0..rows)
+        .map(|row| (0..columns).map(|column| cell(row, column)).sum())
+        .collect();
+    let mut column_sums: Vec<usize> = (0..columns)
+        .map(|column| (0..rows).map(|row| cell(row, column)).sum())
+        .collect();
+    let total: usize = row_sums.iter().sum();
+    let factorial = log_factorials(total);
+    let observed: f64 = -counts
+        .iter()
+        .map(|&count| factorial[count as usize])
+        .sum::<f64>();
+    row_sums.retain(|&sum| sum > 0);
+    column_sums.retain(|&sum| sum > 0);
+    if row_sums.len() < 2 || column_sums.len() < 2 {
+        return values::real_vector(&[1.0]);
+    }
+    row_sums.sort_unstable();
+    // Wide columns early make the bounds bite sooner.
+    column_sums.sort_unstable_by(|left, right| right.cmp(left));
+    let constant = row_sums.iter().map(|&sum| factorial[sum]).sum::<f64>()
+        + column_sums.iter().map(|&sum| factorial[sum]).sum::<f64>()
+        - factorial[total];
+    let threshold = observed + 1e-7f64.ln_1p();
+    let mut p_value = Neumaier::default();
+    let mut stage: HashMap<Vec<usize>, PastPaths> = HashMap::new();
+    stage.insert(row_sums, PastPaths::start());
+    for (index, &column_sum) in column_sums.iter().enumerate() {
+        let remaining = &column_sums[index..];
+        let mut next: HashMap<Vec<usize>, PastPaths> = HashMap::new();
+        for (node, paths) in stage {
+            if index + 1 == column_sums.len() {
+                let last = -node.iter().map(|&sum| factorial[sum]).sum::<f64>();
+                for &(value, multiplicity) in paths.values.values() {
+                    if value + last <= threshold {
+                        p_value.add(multiplicity * (constant + value + last).exp());
+                    }
+                }
+                continue;
+            }
+            let (mut upper, mut lower) = (0.0, 0.0);
+            for &sum in remaining {
+                upper += most_even_column(sum, &node, &factorial);
+                lower += most_concentrated_column(sum, &node, &factorial);
+            }
+            let left: usize = node.iter().sum();
+            let completions = factorial[left]
+                - node.iter().map(|&sum| factorial[sum]).sum::<f64>()
+                - remaining.iter().map(|&sum| factorial[sum]).sum::<f64>();
+            let mut open = Vec::new();
+            for &(value, multiplicity) in paths.values.values() {
+                if value + upper <= threshold {
+                    p_value.add(multiplicity * (constant + value + completions).exp());
+                } else if value + lower <= threshold {
+                    open.push((value, multiplicity));
+                }
+            }
+            if open.is_empty() {
+                continue;
+            }
+            let mut cells = vec![0; node.len()];
+            column_choices(&node, column_sum, 0, &mut cells, &mut |cells| {
+                let mut child: Vec<usize> = node
+                    .iter()
+                    .zip(cells)
+                    .map(|(&sum, &count)| sum - count)
+                    .collect();
+                child.sort_unstable();
+                let step = -cells.iter().map(|&count| factorial[count]).sum::<f64>();
+                let entry = next.entry(child).or_insert_with(PastPaths::default);
+                for &(value, multiplicity) in &open {
+                    entry.add(value + step, multiplicity);
+                }
+            });
+        }
+        stage = next;
+    }
+    values::real_vector(&[p_value.total()])
+}
+
+/// The paths that reach one node, by value: equal values, up to rounding, merge into one
+/// entry with the number of paths behind it.
+#[derive(Default)]
+struct PastPaths {
+    values: HashMap<i64, (f64, f64)>,
+}
+
+impl PastPaths {
+    fn start() -> PastPaths {
+        let mut paths = PastPaths::default();
+        paths.add(0.0, 1.0);
+        paths
+    }
+
+    fn add(&mut self, value: f64, multiplicity: f64) {
+        // Values that agree to 1e-9 are the same table value computed in a different order.
+        let key = (value * 1e9).round() as i64;
+        self.values.entry(key).or_insert((value, 0.0)).1 += multiplicity;
+    }
+}
+
+/// Calls `visit` with every column of cells summing to `left` from row `row` on, each cell
+/// capped by its remaining row sum in `node`.
+fn column_choices(
+    node: &[usize],
+    left: usize,
+    row: usize,
+    cells: &mut [usize],
+    visit: &mut impl FnMut(&[usize]),
+) {
+    if row + 1 == node.len() {
+        if left <= node[row] {
+            cells[row] = left;
+            visit(cells);
+        }
+        return;
+    }
+    let capacity_after: usize = node[row + 1..].iter().sum();
+    for count in left.saturating_sub(capacity_after)..=left.min(node[row]) {
+        cells[row] = count;
+        column_choices(node, left - count, row + 1, cells, visit);
+    }
+}
+
+/// Compensated summation, so thousands of small probabilities add up without drift.
+#[derive(Default)]
+struct Neumaier {
+    sum: f64,
+    compensation: f64,
+}
+
+impl Neumaier {
+    fn add(&mut self, value: f64) {
+        let sum = self.sum + value;
+        self.compensation += if self.sum.abs() >= value.abs() {
+            (self.sum - sum) + value
+        } else {
+            (value - sum) + self.sum
+        };
+        self.sum = sum;
+    }
+
+    fn total(&self) -> f64 {
+        self.sum + self.compensation
+    }
+}
+
+/// The largest `-sum(log(x!))` of a column with sum `sum` and cells capped by `rows`: the
+/// cells spread as evenly as the caps allow.
+fn most_even_column(sum: usize, rows: &[usize], log_factorials: &[f64]) -> f64 {
+    let mut order: Vec<usize> = rows.to_vec();
+    order.sort_unstable();
+    let mut left = sum;
+    let mut value = 0.0;
+    for (position, &cap) in order.iter().enumerate() {
+        // With caps ascending, a row below its share saturates and the rows after it, whose
+        // caps are at least as large, share the rest.
+        let rows_left = order.len() - position;
+        let count = if cap < left.div_ceil(rows_left) {
+            cap
+        } else {
+            left / rows_left
+        };
+        value -= log_factorials[count];
+        left -= count;
+    }
+    value
+}
+
+/// The smallest `-sum(log(x!))` of a column with sum `sum` and cells capped by `rows`: the
+/// largest caps fill first.
+fn most_concentrated_column(sum: usize, rows: &[usize], log_factorials: &[f64]) -> f64 {
+    let mut order: Vec<usize> = rows.to_vec();
+    order.sort_unstable_by(|left, right| right.cmp(left));
+    let mut left = sum;
+    let mut value = 0.0;
+    for &cap in &order {
+        let count = cap.min(left);
+        value -= log_factorials[count];
+        left -= count;
+    }
+    value
 }
 
 /// `chisq_sim(sr, sc, B, E)`: for `B` random tables with row sums `sr` and column sums `sc`,
