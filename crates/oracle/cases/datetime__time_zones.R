@@ -41,3 +41,10 @@ format(as.POSIXct(c(0, NA), origin = "1970-01-01", tz = "UTC"), usetz = TRUE)
 d <- as.Date(c("2010-01-01", "2012-12-31", "2016-01-03", "2021-01-01"))
 format(d, "%G-%V %g %U %W %u %C %s")
 format(as.POSIXct("1999-03-04 00:30:00", tz = "UTC"), "%k|%l|%P|%r|%c|%Ey|%Od|%x|%X")
+
+# A month without a day cannot be completed from today's date, and date-time arithmetic
+# takes precedence over Ops.difftime.
+strptime(c("2020-10", "Oct-2020"), c("%Y-%m", "%b-%Y"), tz = "UTC")
+start <- as.POSIXct("2008-08-03", tz = "UTC")
+start + 2 * difftime(start + 86400, start)
+as.Date("2020-01-01") - as.difftime(3, units = "days")

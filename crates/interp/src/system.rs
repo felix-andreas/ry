@@ -1182,18 +1182,30 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
 
 /// Parses `text` with a `strptime` format into wall seconds, with the UTC offset a `%z` gave.
 fn parse_time(text: &str, format: &str) -> Option<(f64, Option<i64>)> {
-    let mut fields = Parsed { year: 1970, month: 1, day: 1, ..Parsed::default() };
+    let mut fields = Parsed::default();
     let mut input = text;
     parse_with(&mut fields, &mut input, format)?;
-    let mut year = fields.year;
+    // GNU R fills an unspecified year, month or day from today's date, except that a month
+    // without a day is invalid, since today's day need not exist in that month.
+    if fields.month.is_some() && fields.day.is_none() && fields.yearday.is_none() {
+        return None;
+    }
+    let (this_year, this_month, this_day) = if fields.year.is_some() && fields.month.is_some() && fields.day.is_some() {
+        (0, 0, 0)
+    } else {
+        let now = now_seconds().floor() as i64;
+        let state = zone_state(&resolve_zone(""), now);
+        civil_from_days((now + state.offset).div_euclid(86400))
+    };
+    let mut year = fields.year.unwrap_or(this_year);
     if let Some(century) = fields.century {
-        year = century * 100 + fields.year.rem_euclid(100);
+        year = century * 100 + year.rem_euclid(100);
     }
     let mut hour = fields.hour;
     if let Some(afternoon) = fields.afternoon {
         hour = hour % 12 + if afternoon { 12 } else { 0 };
     }
-    let (mut month, mut day) = (fields.month, fields.day);
+    let (mut month, mut day) = (fields.month.unwrap_or(this_month), fields.day.unwrap_or(this_day));
     if let Some(yearday) = fields.yearday {
         if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
             return None;
@@ -1219,10 +1231,10 @@ fn parse_time(text: &str, format: &str) -> Option<(f64, Option<i64>)> {
 
 #[derive(Default)]
 struct Parsed {
-    year: i64,
+    year: Option<i64>,
     century: Option<i64>,
-    month: i64,
-    day: i64,
+    month: Option<i64>,
+    day: Option<i64>,
     hour: i64,
     minute: i64,
     second: f64,
@@ -1270,16 +1282,16 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
         }
         match spec {
             'Y' => {
-                fields.year = signed_number(input, 4)?;
+                fields.year = Some(signed_number(input, 4)?);
                 fields.century = None;
             }
             'y' => {
                 let value = number(input, 2)?;
-                fields.year = if value < 69 { 2000 + value } else { 1900 + value };
+                fields.year = Some(if value < 69 { 2000 + value } else { 1900 + value });
             }
             'C' => fields.century = Some(number(input, 2)?),
-            'm' => fields.month = number(input, 2)?,
-            'd' | 'e' => fields.day = number(input, 2)?,
+            'm' => fields.month = Some(number(input, 2)?),
+            'd' | 'e' => fields.day = Some(number(input, 2)?),
             'H' | 'k' => fields.hour = number(input, 2)?,
             'I' | 'l' => {
                 fields.hour = number(input, 2)?;
@@ -1301,7 +1313,7 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             }
             'B' | 'b' | 'h' => {
                 let found = match_name(input, &MONTHS)?;
-                fields.month = found as i64 + 1;
+                fields.month = Some(found as i64 + 1);
             }
             'A' | 'a' => {
                 match_name(input, &WEEKDAYS)?;
@@ -1366,34 +1378,21 @@ fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
 }
 
 /// A `%z` offset in seconds: `Z`, or a sign and `hh`, `hhmm` or `hh:mm`.
+// GNU R accepts only the `+hhmm` form here: no `Z`, no colon, and nothing beyond +/-1400.
 fn parse_offset(input: &mut &str) -> Option<i64> {
     let trimmed = input.trim_start();
-    if let Some(rest) = trimmed.strip_prefix('Z') {
-        *input = rest;
-        return Some(0);
-    }
     let sign = match trimmed.chars().next()? {
         '+' => 1,
         '-' => -1,
         _ => return None,
     };
-    let mut rest = &trimmed[1..];
-    let hours = rest.get(..2).filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))?.parse::<i64>().ok()?;
-    rest = &rest[2..];
-    if let Some(after) = rest.strip_prefix(':') {
-        rest = after;
-    }
-    let minutes = match rest.get(..2).filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit())) {
-        Some(digits) => {
-            rest = &rest[2..];
-            digits.parse::<i64>().ok()?
-        }
-        None => 0,
-    };
-    if hours > 14 || minutes > 59 {
+    let digits = trimmed.get(1..5).filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))?;
+    let value = digits.parse::<i64>().ok()?;
+    let (hours, minutes) = (value / 100, value % 100);
+    if value > 1400 || minutes > 59 {
         return None;
     }
-    *input = rest;
+    *input = &trimmed[5..];
     Some(sign * (hours * 3600 + minutes * 60))
 }
 
