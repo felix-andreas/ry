@@ -38,7 +38,7 @@ use {
         unwind::{R, Unwind, error},
         values::{self, install, is_nil, length, nil, symbols},
     },
-    heap::object::{NA_INTEGER, Sexp, SexpType},
+    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
     rustc_hash::FxHashSet,
     std::{cell::Cell, collections::HashSet},
     table::{
@@ -228,18 +228,17 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         keyed: parts.keyed,
     };
     let referenced = query::referenced_columns(&query);
+    // `by = cols` with `cols` empty groups the whole table as one group, which data.table answers
+    // as a grouped query and the engine as an ungrouped one.
+    if parts.by.is_some() && query.by.is_empty() {
+        return Ok(None);
+    }
     if grouped
-        && !assigning
         && parts
             .j
             .as_ref()
             .and_then(Piece::expression)
-            .and_then(|j| gforce_terms(j, &schema))
-            .is_some_and(|terms| {
-                terms
-                    .iter()
-                    .any(|term| matches!(term, Term::Reduce { function, .. } if function == "sum"))
-            })
+            .is_some_and(|j| mentions_sum(j))
         && !running_sums_fit(&columns, referenced.as_ref())
     {
         return Ok(None);
@@ -341,10 +340,28 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
     !reduces(j, schema)
 }
 
+/// Whether `expression` mentions `sum`, as a call or as a function passed on, as in
+/// `lapply(.SD, sum)`.
+unsafe fn mentions_sum(expression: Sexp) -> bool {
+    match expression.kind() {
+        SexpType::Symbol => values::symbol_name(expression) == "sum",
+        SexpType::Builtin | SexpType::Special => values::primitive_name(expression) == "sum",
+        SexpType::Language => {
+            mentions_sum(expression.car())
+                || values::pairlist_items(expression.cdr())
+                    .into_iter()
+                    .any(|(_, item)| mentions_sum(item))
+        }
+        _ => false,
+    }
+}
+
 /// Whether no running total of an integer column the query reads can leave the integer range,
-/// because its absolute values add up to at most `INT_MAX`. data.table's GForce `sum` widens a
-/// group's integer sum to a double, with a warning, as soon as its running total in row order
-/// leaves the range, even when the final total fits, while the engine widens on the final total.
+/// because its absolute values add up to at most `INT_MAX`. Grouped integer sums are where the
+/// engine and data.table part on overflow: GForce's `sum` widens a group's sum to a double, with
+/// a warning, as soon as its running total in row order leaves the range, even when the final
+/// total fits; outside GForce, base `sum` widens one group's total while the others stay
+/// integers, which data.table rejects; the engine widens every group on the final totals.
 /// `referenced` is `None` when the query reads every column.
 unsafe fn running_sums_fit(
     columns: &[SubjectColumn],
@@ -775,6 +792,7 @@ unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCod
             let mut codes = Vec::with_capacity(rows);
             let mut first_rows = Vec::new();
             let mut saved: Vec<(Sexp, i32)> = Vec::new();
+            let mut stale = false;
             for index in 0..rows {
                 let charsxp = vector.element(index);
                 if charsxp == na {
@@ -783,7 +801,18 @@ unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCod
                 }
                 let mark = charsxp.char_truelength();
                 if mark < 0 {
-                    codes.push(mark.unsigned_abs());
+                    // A mark this loop did not set (one left behind by C code that stopped
+                    // midway) would alias two strings, so it is checked against its owner.
+                    let code = mark.unsigned_abs();
+                    let ours = (code as usize)
+                        .checked_sub(1)
+                        .and_then(|slot| saved.get(slot))
+                        .is_some_and(|(owner, _)| *owner == charsxp);
+                    if !ours {
+                        stale = true;
+                        break;
+                    }
+                    codes.push(code);
                     continue;
                 }
                 saved.push((charsxp, mark));
@@ -795,6 +824,19 @@ unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCod
             for (charsxp, mark) in &saved {
                 charsxp.set_char_truelength(*mark);
             }
+            if stale {
+                return Err(error("a string carries a truelength mark from elsewhere"));
+            }
+            // Strings intern by encoding, so the same text marked UTF-8, latin1 or native is
+            // several CHARSXPs that data.table groups as one. Codes would split them, so such a
+            // column groups by its text instead.
+            let mut encodings = saved
+                .iter()
+                .filter(|(charsxp, _)| !charsxp.has_gp(gp::ASCII))
+                .map(|(charsxp, _)| charsxp.gp() & gp::ENCODING);
+            let mixed = encodings
+                .next()
+                .is_some_and(|first| encodings.any(|other| other != first));
             let distinct: Vec<_> = saved
                 .iter()
                 .map(|(charsxp, _)| values::char_str(*charsxp))
@@ -802,7 +844,8 @@ unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCod
             let series =
                 convert::strings_from_codes(name, distinct.iter().map(AsRef::as_ref), &codes)
                     .map_err(|failure| error(failure.to_string()))?;
-            (series, Some(ImportedCodes { codes, first_rows }))
+            let codes = (!mixed).then_some(ImportedCodes { codes, first_rows });
+            (series, codes)
         }
         ColumnType::Factor => {
             let levels = values::get_attr(vector, symbols().levels);

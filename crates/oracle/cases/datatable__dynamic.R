@@ -42,4 +42,27 @@ withCallingHandlers(
   sapply(running[, lapply(.SD, sum), by = g], class),
   warning = function(w) cat("warning:", conditionMessage(w), "\n")
 )
+# Outside GForce, base `sum` widens one group's total and data.table rejects the mixed types.
+wide <- data.table(g = c("a", "a", "b"), x = c(m, 1L, 5L))
+tryCatch(wide[, .(s = sum(x) + 0L), by = g], error = function(e) conditionMessage(e))
+# `eval(e)` whose variables name a column means that column.
+named <- data.table(e = 1:3, g = c(1L, 1L, 2L), b = 7:9)
+e <- quote(sum(b))
+named[, eval(e), by = g]
+# data.table reads `with = FALSE` from `j` before it expands `eval()`.
+positions <- quote(1:2)
+dt[2:3, eval(positions)]
+# An empty evaluated `by` is one group.
+none <- character()
+dt[, max(y), by = none]
+rollup(dt, j = sum(x), by = c("g", "k"))
+# The same text in different encodings is one group.
+utf8 <- "\u00e9"
+native <- utf8
+Encoding(native) <- "unknown"
+latin1 <- iconv(utf8, "UTF-8", "latin1")
+mixed <- data.table(s = c(utf8, native, latin1, "b"), v = 1:4)
+mixed[, .(n = sum(v)), by = s]$n
+# An unnamed key expression is named after its first variable.
+dt[, .(n = .N), keyby = .(g, x > 2L)]
 invisible(NULL)

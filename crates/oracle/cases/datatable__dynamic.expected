@@ -71,6 +71,31 @@
 | warning: The sum of an integer column for a group was more than type 'integer' can hold so the result has been coerced to 'numeric' automatically for convenience. 
 |         g         v 
 | "integer" "numeric" 
+| [1] "Column 1 of result for group 2 is type 'integer' but expecting type 'double'. Column types must be consistent for each group."
+|    g V1
+| 1: 1  1
+| 2: 1  2
+| 3: 2  3
+| [1] 1 2
+|     V1
+| 1: 0.6
+|       g  k V1
+| 1:    b  2  7
+| 2:    a  1  1
+| 3:    c  1 NA
+| 4:    a  2  5
+| 5:    b  1  2
+| 6:    b NA  9
+| 7:    a NA  6
+| 8:    c NA NA
+| 9: <NA> NA NA
+| [1] 6 4
+|    g     x n
+| 1: a FALSE 1
+| 2: a  TRUE 1
+| 3: b FALSE 1
+| 4: b  TRUE 2
+| 5: c    NA 1
 [messages]
 [warnings]
 - The sum of an integer column for a group was more than type 'integer' can hold so the result has been coerced to 'numeric' automatically for convenience. (in gsum(v))
