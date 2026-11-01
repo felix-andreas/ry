@@ -2852,18 +2852,35 @@ first lines R had already read, leaving R mid-command.
   `NA`-free and reports failure as a tag was taken; the full list and the renames are in
   `contributing/design/standard-library.md`.
 - **Skipped, with the reason:**
-  - `Bool`, `Box`, `Encode`, `Decode`, `Hash`, `Inspect`: R covers booleans; the rest serve Roc's
-    memory layout or abilities, which ry does not have.
-  - Bitwise operations, shifts, `add_wrap`, `pow_int`: R's 32-bit integer reserves its minimum for
-    `NA`, so wrapping has no total definition and integer `pow` overflows almost at once.
-  - Unchecked `sqrt` and `log`, `asin`, `acos`, `is_nan`: they produce `NaN`, which the library
-    never returns.
-  - `pi`, `tau`, `e`: constants are not functions and R already has `pi`.
+  - `Box`, `Encode`, `Decode`, `Hash`, `Inspect`, and the `Eq` implementations (`Dict.is_eq`):
+    they serve Roc's memory layout or abilities, which ry does not have; `Bool.is_eq` compares any
+    two values by `identical()`.
+  - Wrapping arithmetic (`add_wrap` and the rest): R's 32-bit integer reserves its minimum for
+    `NA`, so wrapping would have to stop at that one value, and the code that wants wrapping
+    (hashing) wants it total.
+  - Per-width conversions and limits (`to_i8`, `min_i32`, `int_cast`, `f64_to_parts`, `Dec`):
+    R has one integer and one double type.
+  - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
   - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
     and strings are immutable.
   - `List.range`: `seq_len` and `seq` cover it.
   - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
     first key fixes the key type.
+- **Unchecked operations error where Roc crashes or returns `NaN`.** `Num.add`, `div`, `sqrt`,
+  `log`, `asin`, `acos`, `pow_int` and the rest were first skipped because they produce `NaN` or
+  overflow for part of their domain. They are taken with an R error there that names the
+  `_checked` variant, so a step can be passed by name (`List.walk(xs, 0L, Num.add)`) and a domain
+  failure is still never a silent `NaN`. `Num.is_nan` is the one function that accepts `NaN`.
+- **Bit operations** (`bitwise_*`, shifts, bit counts) work on the 32-bit two's complement and
+  error only on the pattern `-2147483648`, which is `NA`. Shifts wrap as Roc's do.
+- **`Bool` and constants.** `Bool` was first skipped as redundant with `TRUE`, `!` and `&&`; it is
+  taken so boolean steps can be passed by name and Roc code reads the same. `Bool.true`,
+  `Bool.false`, `Num.pi`, `Num.tau` and `Num.e` are values in `standard_library::CONSTANTS`,
+  bound in `package:ry` by `standard_library::attach` and declared in the stub as plain types.
+  Under GNU R, `crates/ry/src/load.rs` reads which `ry.Rtypes` declarations are not function types
+  and binds each as an active binding that stops with the "only ry's runtime" error.
+- **UTF-16 and UTF-32** (`Str.to_utf16`, `from_utf16`, `to_utf32`, ...) follow Roc's newer `Str`
+  builtins, with `:BadUtf16` and `:BadUtf32`; NUL is bad because an R string cannot hold it.
 - **Changed:** `Num.ceiling`, `floor` and `round` keep the number type (R integers are 32-bit, so a
   rounded large double cannot become an integer); `Num.to_integer_checked` converts with
   `:Err(:OutOfBounds)`. Saturating integer arithmetic clamps to plus or minus 2147483647.

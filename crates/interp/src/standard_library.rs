@@ -1,5 +1,5 @@
-//! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, modeled
-//! on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
+//! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules,
+//! modeled on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
 //! live in the docs (`contributing/design/standard-library.md`, `reference/standard-library.mdx`).
 //!
 //! The functions are bound in a `package:ry` environment just above `package:base`, so any
@@ -2679,7 +2679,7 @@ unsafe fn unchecked(
     }
 }
 
-/// A double result, which the library never lets be `NaN`: `Inf - Inf` is an error.
+/// An unchecked operation's double result, where `NaN` (as from `Inf - Inf`) is an error.
 unsafe fn defined(call: &Call<'_>, value: f64) -> R<Sexp> {
     if value.is_nan() {
         return Err(call.error("the result is undefined (`NaN`)"));

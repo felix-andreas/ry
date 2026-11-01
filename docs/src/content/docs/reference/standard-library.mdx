@@ -1,12 +1,12 @@
 ---
 title: Standard library
-description: Result, List, Str, Num, Dict and Set, the typed functions ry's runtime ships
+description: Result, List, Str, Num, Bool, Dict and Set, the typed functions ry's runtime ships
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-ry ships a small standard library modeled on Roc's builtins: `Result`, `List`, `Str`, `Num`, `Dict`
-and `Set`. Every function is fully typed, never meets `NA`, and reports failure as a tag instead of
+ry ships a small standard library modeled on Roc's builtins: `Result`, `List`, `Str`, `Num`,
+`Bool`, `Dict` and `Set`. Every function is fully typed, never meets `NA`, and reports failure as a tag instead of
 an error or a warning, so the pieces compose with [`match`](/type-checking/records-and-tags/) and
 the checker follows every step:
 
@@ -81,12 +81,15 @@ These rules hold in every module:
 - **Positions are 1-based** `integer`s, as in `xs[[1L]]`. A whole double such as `2` is accepted
   too.
 - **A string is a length-one `character`, and a number a length-one `integer` or `double`.** `NA`
-  and `NaN` are refused with an error, because no function has an `NA` case to fall into.
+  and `NaN` are refused with an error, because no function has an `NA` case to fall into. The one
+  exception is `Num.is_nan`, which accepts `NaN` because telling it apart is its job.
 - **Misuse is an error, not a tag.** An argument of the wrong type, an `NA`, or an `integer`
-  `List.sum` or `List.product` that overflows stops with an R error that names the problem.
+  `List.sum` or `List.product` that overflows stops with an R error that names the problem. So
+  does an unchecked `Num` operation whose result does not exist, such as `Num.div(1, 0)`, where
+  Roc would crash; its `_checked` variant returns the failure as a tag instead.
 - **Failure is a tag.** A function that can fail returns `:Ok(value)` or `:Err(tag)`, typed
   `Result<T, E>`, and the tag names the reason: `:OutOfBounds`, `:NotFound`, `:ListWasEmpty`,
-  `:KeyNotFound`, `:InvalidNumStr`, `:BadUtf8`, `:Overflow`, `:DivByZero`, `:SqrtOfNegative` or
+  `:KeyNotFound`, `:InvalidNumStr`, `:BadUtf8`, `:BadUtf16`, `:BadUtf32`, `:Overflow`, `:DivByZero`, `:SqrtOfNegative` or
   `:LogNeedsPositive`.
 - **Equality is `identical()`**, wherever a function compares values (`List.contains`,
   `Dict.keep_shared`).
@@ -1736,9 +1739,87 @@ Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen,
 #> list(97L, 196L)
 ```
 
+#### `Str.to_utf16`
+
+```
+fn(string: character) -> list[integer]
+```
+
+The string's UTF-16 code units, each an integer from 0 to 65535. A character outside the Basic Multilingual Plane takes two units, a surrogate pair.
+
+```r ry run runtime=ry dput
+Str.to_utf16("h\U0001F600")
+#> list(104L, 55357L, 56832L)
+```
+
+#### `Str.from_utf16`
+
+```
+fn(units: list[integer]) -> Result<character, :BadUtf16>
+```
+
+Decodes UTF-16 code units, or `:Err(:BadUtf16)` for an unpaired surrogate or a zero unit, which an R string cannot hold. A number outside 0 to 65535 is an error.
+
+```r ry run runtime=ry dput
+Str.from_utf16(list(104L, 55357L))
+#> :Err(:BadUtf16)
+```
+
+#### `Str.from_utf16_lossy`
+
+```
+fn(units: list[integer]) -> character
+```
+
+Decodes UTF-16 code units, replacing each unpaired surrogate and each zero unit with U+FFFD.
+
+```r ry run runtime=ry dput
+Str.from_utf16_lossy(list(104L, 105L))
+#> "hi"
+```
+
+#### `Str.to_utf32`
+
+```
+fn(string: character) -> list[integer]
+```
+
+The string's Unicode code points, one per character.
+
+```r ry run runtime=ry dput
+Str.to_utf32("h\u00e9")
+#> list(104L, 233L)
+```
+
+#### `Str.from_utf32`
+
+```
+fn(code_points: list[integer]) -> Result<character, :BadUtf32>
+```
+
+Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that is not one (a surrogate, a negative number, or one above 1114111) and for zero.
+
+```r ry run runtime=ry dput
+Str.from_utf32(list(55296L))
+#> :Err(:BadUtf32)
+```
+
+#### `Str.from_utf32_lossy`
+
+```
+fn(code_points: list[integer]) -> character
+```
+
+Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
+
+```r ry run runtime=ry dput
+Str.from_utf32_lossy(list(82L, 121L))
+#> "Ry"
+```
+
 ### Num
 
-Functions over single numbers, `integer` or `double`. A checked operation returns the failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning.
+Functions over single numbers, `integer` or `double`, and three constants. A checked operation returns the failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning; its unchecked twin (`Num.add` beside `Num.add_checked`) stops with an error in that case, and so does it for a `NaN` result such as `Num.sub(Inf, Inf)`. The bit operations take integers as 32-bit two's complement.
 
 #### `Num.to_str`
 
@@ -2284,6 +2365,439 @@ The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it 
 ```r
 Num.to_integer_checked(-3.7)
 #> :Ok(-3L)
+```
+
+#### `Num.add`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> T
+```
+
+The sum. An `integer` sum that overflows stops with an error, so use `Num.add_checked` when overflow is possible. Unlike `+`, it can be passed by name.
+
+```r ry run runtime=ry dput
+List.walk(list(1L, 2L, 3L), 0L, Num.add)
+#> 6L
+```
+
+#### `Num.sub`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> T
+```
+
+`second` subtracted from `first`. An `integer` result that overflows is an error, and so is a `NaN` result such as `Inf - Inf`.
+
+```r ry run runtime=ry dput
+Num.sub(10L, 4L)
+#> 6L
+```
+
+#### `Num.mul`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> T
+```
+
+The product. An `integer` product that overflows is an error.
+
+```r ry run runtime=ry dput
+Num.mul(6L, 7L)
+#> 42L
+```
+
+#### `Num.div`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> double
+```
+
+The quotient as a double. A zero divisor is an error; `Num.div_checked` returns `:Err(:DivByZero)` instead.
+
+```r ry run runtime=ry dput
+Num.div(7L, 2L)
+#> 3.5
+```
+
+#### `Num.div_trunc`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> T
+```
+
+The quotient rounded toward zero. A zero divisor is an error.
+
+```r ry run runtime=ry dput
+Num.div_trunc(-7L, 2L)
+#> -3L
+```
+
+#### `Num.div_ceil`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> T
+```
+
+The quotient rounded up. A zero divisor is an error.
+
+```r ry run runtime=ry dput
+Num.div_ceil(7L, 2L)
+#> 4L
+```
+
+#### `Num.rem`
+
+```
+<T: scalar numeric> fn(first: T, second: T) -> T
+```
+
+The remainder of the truncated division, with the sign of `first`. A zero divisor is an error.
+
+```r ry run runtime=ry dput
+Num.rem(-7L, 2L)
+#> -1L
+```
+
+#### `Num.pow_int`
+
+```
+fn(base: integer, exponent: integer) -> integer
+```
+
+`base` raised to a non-negative `exponent`, as an integer. A result that overflows is an error; `Num.pow` returns a double instead.
+
+```r ry run runtime=ry dput
+Num.pow_int(3L, 4L)
+#> 81L
+```
+
+#### `Num.sqrt`
+
+```
+<T: scalar numeric> fn(number: T) -> double
+```
+
+The square root. A negative number is an error; `Num.sqrt_checked` returns `:Err(:SqrtOfNegative)` instead.
+
+```r ry run runtime=ry dput
+Num.sqrt(16L)
+#> 4
+```
+
+#### `Num.log`
+
+```
+<T: scalar numeric> fn(number: T) -> double
+```
+
+The natural logarithm. A number that is not positive is an error; `Num.log_checked` returns `:Err(:LogNeedsPositive)` instead.
+
+```r ry run runtime=ry dput
+Num.log(Num.e)
+#> 1
+```
+
+#### `Num.asin`
+
+```
+<T: scalar numeric> fn(number: T) -> double
+```
+
+The arcsine in radians. A number outside -1 to 1 is an error.
+
+```r ry run runtime=ry dput
+Num.asin(1)
+#> 1.5707963267949
+```
+
+#### `Num.acos`
+
+```
+<T: scalar numeric> fn(number: T) -> double
+```
+
+The arccosine in radians. A number outside -1 to 1 is an error.
+
+```r ry run runtime=ry dput
+Num.acos(1)
+#> 0
+```
+
+#### `Num.is_nan`
+
+```
+<T: scalar numeric> fn(number: T) -> logical
+```
+
+Whether the number is `NaN`. It is the one library function that accepts `NaN`; `NA` is still an error.
+
+```r ry run runtime=ry dput
+Num.is_nan(0 / 0)
+#> TRUE
+```
+
+#### `Num.bitwise_and`
+
+```
+fn(first: integer, second: integer) -> integer
+```
+
+The bits set in both integers, in 32-bit two's complement.
+
+```r ry run runtime=ry dput
+Num.bitwise_and(12L, 10L)
+#> 8L
+```
+
+#### `Num.bitwise_or`
+
+```
+fn(first: integer, second: integer) -> integer
+```
+
+The bits set in either integer.
+
+```r ry run runtime=ry dput
+Num.bitwise_or(12L, 10L)
+#> 14L
+```
+
+#### `Num.bitwise_xor`
+
+```
+fn(first: integer, second: integer) -> integer
+```
+
+The bits set in exactly one of the integers. A result whose bit pattern is -2147483648 is an error, because R uses that value for `NA`; the same holds for every bit operation.
+
+```r ry run runtime=ry dput
+Num.bitwise_xor(12L, 10L)
+#> 6L
+```
+
+#### `Num.bitwise_not`
+
+```
+fn(number: integer) -> integer
+```
+
+The integer with every bit flipped, which is `-number - 1`.
+
+```r ry run runtime=ry dput
+Num.bitwise_not(5L)
+#> -6L
+```
+
+#### `Num.shift_left_by`
+
+```
+fn(number: integer, bits: integer) -> integer
+```
+
+Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
+
+```r ry run runtime=ry dput
+Num.shift_left_by(1L, 4L)
+#> 16L
+```
+
+#### `Num.shift_right_by`
+
+```
+fn(number: integer, bits: integer) -> integer
+```
+
+Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative.
+
+```r ry run runtime=ry dput
+Num.shift_right_by(-16L, 2L)
+#> -4L
+```
+
+#### `Num.shift_right_zf_by`
+
+```
+fn(number: integer, bits: integer) -> integer
+```
+
+Shifts the bits right by `bits`, filling with zeros.
+
+```r ry run runtime=ry dput
+Num.shift_right_zf_by(-16L, 28L)
+#> 15L
+```
+
+#### `Num.count_one_bits`
+
+```
+fn(number: integer) -> integer
+```
+
+The number of set bits.
+
+```r ry run runtime=ry dput
+Num.count_one_bits(255L)
+#> 8L
+```
+
+#### `Num.count_leading_zero_bits`
+
+```
+fn(number: integer) -> integer
+```
+
+The number of zero bits above the highest set bit, 32 for zero.
+
+```r ry run runtime=ry dput
+Num.count_leading_zero_bits(1L)
+#> 31L
+```
+
+#### `Num.count_trailing_zero_bits`
+
+```
+fn(number: integer) -> integer
+```
+
+The number of zero bits below the lowest set bit, 32 for zero.
+
+```r ry run runtime=ry dput
+Num.count_trailing_zero_bits(8L)
+#> 3L
+```
+
+#### `Num.pi`
+
+```
+double
+```
+
+The ratio of a circle's circumference to its diameter. It is a value, not a function.
+
+```r ry run runtime=ry dput
+Num.pi
+#> 3.14159265358979
+```
+
+#### `Num.tau`
+
+```
+double
+```
+
+The ratio of a circle's circumference to its radius, `2 * Num.pi`.
+
+```r ry run runtime=ry dput
+Num.tau
+#> 6.28318530717959
+```
+
+#### `Num.e`
+
+```
+double
+```
+
+Euler's number, the base of the natural logarithm.
+
+```r ry run runtime=ry dput
+Num.e
+#> 2.71828182845905
+```
+
+### Bool
+
+Booleans are R's `TRUE` and `FALSE`, never `NA`. R's operators already cover most of this module; its functions exist so that a boolean step can be passed by name, as in `List.walk(flags, Bool.true, Bool.and)`, and so that code written against Roc's names reads the same.
+
+#### `Bool.true`
+
+```
+logical
+```
+
+`TRUE`, as Roc spells it. It is a value, not a function.
+
+```r ry run runtime=ry dput
+Bool.true
+#> TRUE
+```
+
+#### `Bool.false`
+
+```
+logical
+```
+
+`FALSE`.
+
+```r ry run runtime=ry dput
+Bool.false
+#> FALSE
+```
+
+#### `Bool.and`
+
+```
+fn(first: logical, second: logical) -> logical
+```
+
+Whether both are `TRUE`. Both arguments are evaluated, unlike with `&&`.
+
+```r ry run runtime=ry dput
+Bool.and(TRUE, FALSE)
+#> FALSE
+```
+
+#### `Bool.or`
+
+```
+fn(first: logical, second: logical) -> logical
+```
+
+Whether either is `TRUE`. Both arguments are evaluated, unlike with `||`.
+
+```r ry run runtime=ry dput
+Bool.or(TRUE, FALSE)
+#> TRUE
+```
+
+#### `Bool.not`
+
+```
+fn(value: logical) -> logical
+```
+
+The opposite value.
+
+```r ry run runtime=ry dput
+List.keep_if(list(1L, 2L, 3L), function(x) Bool.not(Num.is_even(x)))
+#> list(1L, 3L)
+```
+
+#### `Bool.is_eq`
+
+```
+<T> fn(first: T, second: T) -> logical
+```
+
+Whether two values are equal by `identical()`, the library's equality. An integer and a double are never identical, so `Bool.is_eq(1L, 1)` is `FALSE`, and a dictionary or set compares without regard to order.
+
+```r ry run runtime=ry dput
+Bool.is_eq(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 1L)))
+#> TRUE
+```
+
+#### `Bool.is_not_eq`
+
+```
+<T> fn(first: T, second: T) -> logical
+```
+
+Whether two values differ by `identical()`.
+
+```r ry run runtime=ry dput
+Bool.is_not_eq(list(1L), list(2L))
+#> TRUE
 ```
 
 ### Dict
