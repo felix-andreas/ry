@@ -2238,16 +2238,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
   layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
   case, and contour label placement, which picks slightly different positions than GNU R.
-- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
-  GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
-  (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
-  `initialize` error (reg-S4-examples), `news()` timing out (reg-examples1), "Error: block"
-  (reg-examples2), Kendall `cor` on empty columns (reg-tests-1b), `kmeans` (reg-tests-1c),
-  `assertCondition` (reg-tests-1d), `env.profile` (reg-tests-1e), the rank in `summary.manova`
-  (reg-tests-2), `nchar` on invalid multibyte strings (reg-tests-3), the DESCRIPTION column
-  layout (reg-packages), URL connections (libcurl), utf8-regex, and a timeout in utf8.
-  reg-large writes temporary files of several gigabytes under ry, so run it with a file size
-  limit (`ulimit -f`).
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
+  build: 63 of 66 end with GNU R's exit status, 26 print exactly its output). Two divergences are
+  accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`
+  bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
+  out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
+  with a release build. `.Internal(curlVersion)` and `.Internal(serverSocket)` are still missing.
 - **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
