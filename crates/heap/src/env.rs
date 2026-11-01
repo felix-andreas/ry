@@ -95,8 +95,12 @@ impl Frame {
         // bucket and counts one, and once the count passes 85% of the size the table grows to
         // `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry
         // prepended, after which the count restarts at the number of occupied buckets.
+        // Each bucket is a chain threaded through `next`, so an insert and a rehash allocate
+        // nothing per entry.
+        const EMPTY: usize = usize::MAX;
         let mut size = self.hash_size as usize;
-        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
+        let mut heads = vec![EMPTY; size];
+        let mut next = vec![EMPTY; self.cells.len()];
         let mut count = 0;
         let hashes: Vec<usize> = self
             .cells
@@ -104,23 +108,36 @@ impl Frame {
             .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
             .collect();
         for (position, hash) in hashes.iter().enumerate() {
-            buckets[hash % size].insert(0, position);
+            let bucket = hash % size;
+            next[position] = heads[bucket];
+            heads[bucket] = position;
             count += 1;
             if count as f64 > size as f64 * 0.85 {
                 size = (size as f64 * 1.2) as usize + 1;
-                let mut grown: Vec<Vec<usize>> = vec![Vec::new(); size];
-                for &moved in buckets.iter().flatten() {
-                    grown[hashes[moved] % size].insert(0, moved);
+                let mut grown = vec![EMPTY; size];
+                for &head in &heads {
+                    let mut moved = head;
+                    while moved != EMPTY {
+                        let following = next[moved];
+                        let bucket = hashes[moved] % size;
+                        next[moved] = grown[bucket];
+                        grown[bucket] = moved;
+                        moved = following;
+                    }
                 }
-                count = grown.iter().filter(|bucket| !bucket.is_empty()).count();
-                buckets = grown;
+                count = grown.iter().filter(|head| **head != EMPTY).count();
+                heads = grown;
             }
         }
-        buckets
-            .iter()
-            .flatten()
-            .map(|&position| self.cells[position])
-            .collect()
+        let mut listed = Vec::with_capacity(self.cells.len());
+        for &head in &heads {
+            let mut position = head;
+            while position != EMPTY {
+                listed.push(self.cells[position]);
+                position = next[position];
+            }
+        }
+        listed
     }
 
     /// Adds a cell whose symbol the frame does not bind yet.

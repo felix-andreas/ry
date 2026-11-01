@@ -530,7 +530,7 @@ pub unsafe fn pairlist_length(mut list: Sexp) -> usize {
 }
 
 pub unsafe fn env_length(env: Sexp) -> usize {
-    crate::heap().frame_symbols(env).len()
+    crate::heap().bound_symbols(env).len()
 }
 
 unsafe fn altrep_length(object: Sexp) -> usize {

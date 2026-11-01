@@ -697,7 +697,12 @@ unsafe fn do_remove(call: &Call<'_>) -> R<Sexp> {
 
 /// The symbols bound in `env`, in the order `ls()` lists their names.
 pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
-    let mut symbols = crate::heap().frame_symbols(env);
+    let heap = crate::heap();
+    let mut symbols = if sorted {
+        heap.bound_symbols(env)
+    } else {
+        heap.frame_symbols(env)
+    };
     if !all {
         symbols.retain(|symbol| symbol.car().bytes().first() != Some(&b'.'));
     }
@@ -790,7 +795,7 @@ unsafe fn do_lock_environment(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "env")?;
     let bindings = values::as_logical_scalar(call.arg(1)) == 1;
     if bindings {
-        for symbol in crate::heap().frame_symbols(env) {
+        for symbol in crate::heap().bound_symbols(env) {
             if let Some(cell) = crate::heap().frame_cell(env, symbol) {
                 cell.set_gp_bits(gp::BINDING_LOCKED, true);
             }

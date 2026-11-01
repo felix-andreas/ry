@@ -924,6 +924,19 @@ impl Heap {
         self.binding_epoch
     }
 
+    /// The symbols `env` binds, in no particular order: cheaper than [`Heap::frame_symbols`]
+    /// for a caller that sorts them or only needs the set.
+    pub unsafe fn bound_symbols(&self, env: Sexp) -> Vec<Sexp> {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return self.frame_symbols(env);
+        }
+        (*env.frame_ptr())
+            .cells()
+            .iter()
+            .map(|cell| cell.car())
+            .collect()
+    }
+
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
     pub unsafe fn frame_symbols(&self, env: Sexp) -> Vec<Sexp> {
         if self.is_symbol_frame(env) {
