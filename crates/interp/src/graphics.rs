@@ -132,7 +132,7 @@ pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
 /// does at startup, for a session whose only device is the null device.
 pub unsafe fn define_device_variables() -> R<()> {
     if BASE_SYSTEM.get() == 0 {
-        BASE_SYSTEM.set(graphics_engine::register_system(base_callback)?);
+        graphics_engine::register_system(base_callback, |index| BASE_SYSTEM.set(index))?;
     }
     graphics_engine::publish_devices()
 }

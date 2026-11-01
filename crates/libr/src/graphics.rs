@@ -709,11 +709,11 @@ const COLOR_NAMES: &[(&str, u32)] = &[
 pub unsafe extern "C" fn GEregisterSystem(callback: Option<SystemCallback>, index: *mut c_int) {
     enter(|| {
         let callback = callback.ok_or_else(|| error("invalid graphics system callback"))?;
-        let claimed = graphics_engine::register_system(callback)?;
-        if !index.is_null() {
-            *index = claimed as c_int;
-        }
-        Ok(())
+        graphics_engine::register_system(callback, |claimed| {
+            if !index.is_null() {
+                *index = claimed as c_int;
+            }
+        })
     })
 }
 
@@ -1547,13 +1547,15 @@ pub extern "C" fn R_GE_getVersion() -> c_int {
     GE_VERSION
 }
 
-/// `R_GE_checkVersionOrDie(version)`: a device built for another engine version cannot run.
+/// `R_GE_checkVersionOrDie(version)`: GNU R accepts only its own version, but ry's engine reads
+/// every device description from version 14 on, so packages built against R 4.1 to 4.6 run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GE_checkVersionOrDie(version: c_int) {
-    if version != GE_VERSION {
+    if !(graphics_engine::OLDEST_ENGINE_VERSION..=GE_VERSION).contains(&version) {
         raise(error(format!(
             "Graphics API version mismatch: the device expects version {version}, ry provides \
-             {GE_VERSION}"
+             versions {} to {GE_VERSION}",
+            graphics_engine::OLDEST_ENGINE_VERSION
         )));
     }
 }

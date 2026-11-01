@@ -82,7 +82,7 @@ pub struct GEContext {
     pub lineheight: f64,
     pub fontface: c_int,
     pub fontfamily: [c_char; 201],
-    pub pattern_fill: Option<Sexp>,
+    pub pattern_fill: Sexp,
 }
 
 impl GEContext {
@@ -102,7 +102,7 @@ impl GEContext {
             lineheight: 1.0,
             fontface: 1,
             fontfamily: [0; 201],
-            pattern_fill: None,
+            pattern_fill: nil(),
         }
     }
 
@@ -824,16 +824,18 @@ fn open_devices() -> Vec<*mut GEDevDesc> {
 }
 
 /// `GEregisterSystem`: registers `callback` with every open device and with each device opened
-/// later, and returns its index.
-pub unsafe fn register_system(callback: SystemCallback) -> R<usize> {
+/// later. `claim` receives the system's index first, because a system's state callback looks
+/// its own state up by that index while the open devices are notified.
+pub unsafe fn register_system(callback: SystemCallback, claim: impl FnOnce(usize)) -> R<()> {
     let index =
         with_engine(|engine| system_indices().find(|index| engine.systems[*index].is_none()))
             .ok_or_else(|| error("too many graphics systems registered"))?;
+    claim(index);
     for dd in open_devices() {
         register_one(dd, index, callback)?;
     }
     with_engine(|engine| engine.systems[index] = Some(callback));
-    Ok(index)
+    Ok(())
 }
 
 /// `GEunregisterSystem`.
@@ -1540,8 +1542,7 @@ unsafe fn clip_polygon(
     let mut closed_x: Vec<f64> = x.iter().copied().chain(x.first().copied()).collect();
     let mut closed_y: Vec<f64> = y.iter().copied().chain(y.first().copied()).collect();
     let n = x.len();
-    let transparent_fill =
-        (gc.fill as u32) >> 24 == 0 && gc.pattern_fill.is_none_or(|fill| fill == nil());
+    let transparent_fill = (gc.fill as u32) >> 24 == 0 && gc.pattern_fill == nil();
     if transparent_fill && !to_device {
         // Without a fill, an outline clipped as a polygon would run along the clip border,
         // so it is drawn as a closed polyline instead.
