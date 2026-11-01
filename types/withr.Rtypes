@@ -1,0 +1,3 @@
+# withr: run `code` with temporary state and return its value.
+with_tempdir : <T> fn(code: T, [clean]: logical, [pattern]: character, [tmpdir]: character, [fileext]: character) -> T
+with_dir : <T> fn(new: character, code: T) -> T

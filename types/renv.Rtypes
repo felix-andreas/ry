@@ -1,0 +1,4 @@
+# renv: project-local libraries. `paths` is a list of path builders.
+@type renv_lockfile
+paths : list{root: fn(...: character) -> character, library: fn(...: character, [project]: character | NULL) -> character, lockfile: fn([project]: character | NULL) -> character, settings: fn([project]: character | NULL) -> character, cache: fn(...: character, [version]: character | NULL) -> character, sandbox: fn([project]: character | NULL) -> character}
+snapshot : fn([project]: character | NULL, ...: Any, [library]: character[] | NULL, [lockfile]: character | NULL, [type]: character, [dev]: logical, [repos]: character[named] | NULL, [packages]: character[] | NULL, [exclude]: character[] | NULL, [prompt]: logical, [update]: logical, [force]: logical, [reprex]: logical) -> renv_lockfile

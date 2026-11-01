@@ -43,13 +43,7 @@ fn unhex(text: &str) -> Vec<u8> {
 /// The writer version a stream's header records, as `R_Version` encodes it: the version of the
 /// base R the session runs, as in GNU R.
 fn session_writer_version() -> i32 {
-    let version = interp::system::r_version();
-    let mut minor = version
-        .minor
-        .split('.')
-        .map(|part| part.parse::<i32>().unwrap_or(0));
-    let major: i32 = version.major.parse().unwrap_or(0);
-    major * 65536 + minor.next().unwrap_or(0) * 256 + minor.next().unwrap_or(0)
+    interp::system::r_version().code()
 }
 
 /// `stream` with the writer version in its header replaced by the session's, so a stream

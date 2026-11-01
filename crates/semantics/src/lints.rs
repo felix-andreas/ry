@@ -1,13 +1,13 @@
 use {
     crate::{
         Db, SourceFile,
-        diagnostics::{Diagnostic, Severity},
+        diagnostics::{Applicability, Diagnostic, Severity},
         is_s3_method_name, item_naming, item_spans,
         naming::BindingKind,
         parse, s3_generics,
         stubs::{declaring_namespace, stubs},
     },
-    rowan::NodeOrToken,
+    rowan::{Direction, NodeOrToken},
     syntax::{
         GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
         ast::BinaryExpr,
@@ -71,7 +71,12 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             .filter_map(|span| item_naming(db, span.item).as_ref())
             .flat_map(|naming| naming.bindings.values())
             .map(|binding| binding.name.as_str())
-            .filter(|name| object_system_function(name).is_some())
+            .filter(|name| {
+                syntax
+                    .unless_redefined
+                    .iter()
+                    .any(|(function, _)| function == name)
+            })
             .collect();
         diagnostics.extend(
             syntax
@@ -110,9 +115,8 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
     diagnostics
 }
 
-/// Memoized so that revalidating an untouched file never needs its tree, which may have
-/// been evicted. It reads only syntax, so a cold check can compute it while the tree is
-/// still in memory, before naming has run.
+/// Memoized so that relinting after an edit elsewhere never walks this file's tree again. It
+/// reads only syntax, so a cold check computes it in its first pass, before naming has run.
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_lints(db: &dyn Db, file: SourceFile, config: LintConfig) -> SyntaxLints {
     let mut lints = SyntaxLints::default();
@@ -123,9 +127,10 @@ pub fn file_syntax_lints(db: &dyn Db, file: SourceFile, config: LintConfig) -> S
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct SyntaxLints {
     always: Vec<Diagnostic>,
-    /// Findings on a bare call to a class-defining function, keyed by its name. A file that
-    /// binds `setClass` itself calls its own function, not the methods one, so these hold
-    /// only when the file does not redefine the name.
+    /// Findings that hold only while the file does not bind the name they are keyed by: a bare
+    /// call to a class-defining function (a file that binds `setClass` calls its own function),
+    /// and `T` or `F` (a file that binds `T`, even as a parameter, may mean that binding, and
+    /// the fix to `TRUE` would change what the code does).
     unless_redefined: Vec<(String, Diagnostic)>,
 }
 
@@ -214,6 +219,9 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 SyntaxKind::BINARY_EXPR => binary_lints(&red, config, diagnostics),
                 SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),
                 SyntaxKind::PARAMETER => parameter_name_lint(&red, config, diagnostics),
+                SyntaxKind::NAME if annotation_depth == 0 => {
+                    boolean_shorthand_lint(&red, config, &mut lints.unless_redefined);
+                }
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
                 }
@@ -225,25 +233,78 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Token { kind, text, range }
-            if kind == SyntaxKind::IDENT && annotation_depth == 0 =>
-        {
-            let message = match text {
-                "T" => "Use TRUE, not T, for Boolean values",
-                "F" => "Use FALSE, not F, for Boolean values",
-                _ => return,
-            };
-            push_lint(
-                diagnostics,
-                config.boolean_shorthand,
-                Severity::Warning,
-                "boolean-shorthand",
-                range,
-                message,
-            );
-        }
         GreenEvent::Token { .. } => {}
     });
+}
+
+/// `T` and `F` are flagged only where they are read as values: an argument name, an assignment
+/// target, or a `$` or `@` field is a different name that happens to be spelled `T`, and
+/// rewriting it to `TRUE` would not parse.
+fn boolean_shorthand_lint(
+    name: &SyntaxNode,
+    config: &LintConfig,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
+) {
+    let Some(token) = name.first_token() else {
+        return;
+    };
+    if let Some(parent) = name.parent() {
+        let is_first = parent.first_child().as_ref() == Some(name);
+        let next_kind = name
+            .siblings_with_tokens(Direction::Next)
+            .skip(1)
+            .find(|element| !element.kind().is_trivia())
+            .map(|element| element.kind());
+        let is_target = match parent.kind() {
+            SyntaxKind::ARGUMENT => next_kind == Some(SyntaxKind::EQ),
+            SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR => !is_first,
+            SyntaxKind::BINARY_EXPR => match BinaryExpr::cast(parent.clone())
+                .and_then(|binary| binary.operator())
+                .map(|operator| operator.kind())
+            {
+                Some(
+                    SyntaxKind::LESS_MINUS
+                    | SyntaxKind::LESS2_MINUS
+                    | SyntaxKind::EQ
+                    | SyntaxKind::COLON_EQ,
+                ) => is_first,
+                Some(SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2) => !is_first,
+                _ => false,
+            },
+            _ => false,
+        };
+        if is_target {
+            return;
+        }
+    }
+    let (message, title, replacement) = match token.text() {
+        "T" => (
+            "Use TRUE, not T, for Boolean values",
+            "Change to `TRUE`",
+            "TRUE",
+        ),
+        "F" => (
+            "Use FALSE, not F, for Boolean values",
+            "Change to `FALSE`",
+            "FALSE",
+        ),
+        _ => return,
+    };
+    let mut diagnostics = Vec::new();
+    push_lint(
+        &mut diagnostics,
+        config.boolean_shorthand,
+        Severity::Warning,
+        "boolean-shorthand",
+        token.text_range(),
+        message,
+        Some((title, replacement)),
+    );
+    unless_redefined.extend(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| (token.text().to_owned(), diagnostic)),
+    );
 }
 
 /// A conservative green-tree test for whether the red lint for `node` can report anything:
@@ -265,6 +326,7 @@ fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfi
                     })
         }
         SyntaxKind::PARAMETER => config.naming_style.is_some(),
+        SyntaxKind::NAME => matches!(node.single_token_text(), Some("T" | "F")),
         SyntaxKind::CALL_EXPR => match node.child_nodes().next() {
             Some(callee) if callee.kind() == SyntaxKind::NAME => callee
                 .single_token_text()
@@ -293,6 +355,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             "assignment-operator",
             operator.text_range(),
             "Use <-, not =, for assignment",
+            Some(("Change to `<-`", "<-")),
         );
     }
     if let Some(style) = config.naming_style
@@ -373,6 +436,7 @@ fn object_system_lint(
             format!(
                 "`{function}` defines {defines}. ry recommends a record or a tagged union instead"
             ),
+            None,
         );
     }
     match package {
@@ -390,11 +454,18 @@ fn trailing_comma_lint(
     config: &LintConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut last_comma = None;
+    // The comma, and the removal that also takes the blanks after it, so `g(1, )` becomes
+    // `g(1)` rather than `g(1 )`.
+    let mut last_comma: Option<(TextRange, TextRange)> = None;
     for element in argument_list.children_with_tokens() {
         match element {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => {
-                last_comma = Some(token.text_range());
+                last_comma = Some((token.text_range(), token.text_range()));
+            }
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::WHITESPACE => {
+                if let Some((_, removal)) = &mut last_comma {
+                    *removal = removal.cover(token.text_range());
+                }
             }
             NodeOrToken::Node(node) if node.kind() == SyntaxKind::ARGUMENT => {
                 last_comma = None;
@@ -402,17 +473,26 @@ fn trailing_comma_lint(
             _ => {}
         }
     }
-    if let Some(range) = last_comma {
-        push_lint(
-            diagnostics,
-            config.trailing_comma,
-            // R reads the comma as an empty argument, which only fails when the callee
-            // evaluates it (`c(1, )`); a closure that leaves it unforced runs fine, so the
-            // comma is a style finding, not a certain run-time error.
-            Severity::Warning,
-            "trailing-comma",
-            range,
-            "Unexpected comma after last argument",
+    let Some((comma, removal)) = last_comma else {
+        return;
+    };
+    // R reads the comma as an empty argument, which only fails when the callee evaluates it
+    // (`c(1, )`); a closure that leaves it unforced runs fine, so the comma is a style finding,
+    // not a certain run-time error.
+    if let Some(severity) = lint_severity(config.trailing_comma, Some(Severity::Warning)) {
+        diagnostics.push(
+            Diagnostic::new(
+                comma,
+                severity,
+                "trailing-comma",
+                "Unexpected comma after last argument".to_owned(),
+            )
+            .with_fix(
+                Applicability::Safe,
+                "Remove the trailing comma".to_owned(),
+                removal,
+                String::new(),
+            ),
         );
     }
 }
@@ -468,6 +548,7 @@ fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option
     ))
 }
 
+/// `fix` is a title and the text that replaces the whole reported range.
 fn push_lint(
     diagnostics: &mut Vec<Diagnostic>,
     level: LintLevel,
@@ -475,9 +556,19 @@ fn push_lint(
     code: &'static str,
     range: TextRange,
     message: impl Into<String>,
+    fix: Option<(&str, &str)>,
 ) {
     if let Some(severity) = lint_severity(level, Some(default_severity)) {
-        diagnostics.push(Diagnostic::new(range, severity, code, message.into()));
+        let diagnostic = Diagnostic::new(range, severity, code, message.into());
+        diagnostics.push(match fix {
+            Some((title, replacement)) => diagnostic.with_fix(
+                Applicability::Safe,
+                title.to_owned(),
+                range,
+                replacement.to_owned(),
+            ),
+            None => diagnostic,
+        });
     }
 }
 

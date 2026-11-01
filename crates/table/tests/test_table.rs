@@ -6,7 +6,9 @@ use {
     syntax::testing::{SplitMix64, fuzz_iterations},
     table::{
         ColumnType, Schema, Table,
-        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        convert::{
+            self, NA_INTEGER, NA_REAL, RVector, is_na_real, string_to_factor, to_r, to_series,
+        },
         ffi, io, ops,
         polars::prelude::{IntoColumn, PlSmallStr},
         query::{
@@ -1540,6 +1542,56 @@ fn random_table(rng: &mut SplitMix64, rows: usize) -> Table {
     ])
 }
 
+/// `table` with a character column `g4` whose rows are numbered by distinct string, as the R
+/// bridge numbers them, so grouping by it takes the kernels' string digit.
+fn with_string_key(rng: &mut SplitMix64, mut table: Table) -> Table {
+    let rows = table.height();
+    let distinct = if rng.chance(1, 4) {
+        5_000
+    } else {
+        1 + rng.below(6)
+    };
+    let values: Vec<Option<String>> = (0..rows)
+        .map(|_| {
+            // Reversed digits make the strings' order differ from their order of appearance.
+            (!rng.chance(1, 10)).then(|| {
+                let number = rng.below(distinct);
+                format!("k{}", number.to_string().chars().rev().collect::<String>())
+            })
+        })
+        .collect();
+    let mut numbers = std::collections::HashMap::new();
+    let mut first_rows = Vec::new();
+    let mut distinct: Vec<&str> = Vec::new();
+    let codes: Vec<u32> = values
+        .iter()
+        .enumerate()
+        .map(|(row, value)| match value {
+            None => 0,
+            Some(value) => *numbers.entry(value.as_str()).or_insert_with(|| {
+                first_rows.push(row as u32);
+                distinct.push(value);
+                first_rows.len() as u32
+            }),
+        })
+        .collect();
+    let column =
+        convert::strings_from_codes(PlSmallStr::from("g4"), distinct.iter().copied(), &codes)
+            .expect("the codes index the distinct strings");
+    assert_eq!(
+        to_r(&column).expect("a string column converts"),
+        RVector::Character(values.clone()),
+        "strings_from_codes",
+    );
+    table
+        .set_column(column.into_column())
+        .expect("the column has the table's height");
+    table
+        .set_string_codes("g4", codes, first_rows)
+        .expect("the codes fit the column");
+    table
+}
+
 /// A table to join [`random_table`] to: its keys overlap that table's, and its factor has the
 /// levels in another order plus one that table lacks.
 fn random_lookup(rng: &mut SplitMix64, rows: usize) -> Table {
@@ -1774,7 +1826,8 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             1 + rng.below(400)
         };
         let table = random_table(&mut rng, rows);
-        let keys = ["g1", "g2", "g3"];
+        let table = with_string_key(&mut rng, table);
+        let keys = ["g1", "g2", "g3", "g4"];
         let mut by = Vec::new();
         for key in keys {
             if rng.chance(1, 2) {
@@ -3229,6 +3282,34 @@ fn files_read_and_write_through_the_file_system() {
     assert_eq!(
         back.schema().to_string(),
         "DataFrame{k: factor, v: integer[]}"
+    );
+}
+
+#[test]
+fn a_string_column_becomes_a_factor_with_sorted_levels() {
+    let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![3, 2, NA_INTEGER, 3, 1],
+            levels: vec!["asia".to_string(), "eu".to_string(), "us".to_string()],
+        }
+    );
+}
+
+#[test]
+fn an_all_missing_string_column_becomes_a_factor_without_levels() {
+    let column = column_of("k", strings(&["NA", "NA"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![NA_INTEGER, NA_INTEGER],
+            levels: vec![],
+        }
     );
 }
 

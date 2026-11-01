@@ -4,8 +4,11 @@
 //! of first appearance, which is what made multi-key and high-cardinality groupings slower than
 //! data.table. These kernels code the grouping columns into one integer per row instead: each
 //! column is a digit of a mixed-radix number, with `NA` as digit zero, a factor's level `l` as
-//! `l + 1` and an integer `v` as `v - min + 1`. Comparing codes compares the keys in `keyby`
-//! order (`NA` first), so a sorted result only sorts the groups.
+//! `l + 1` and an integer `v` as `v - min + 1`. A character column is a digit only when the table
+//! carries its [`StringCodes`](crate::StringCodes), which the R bridge takes from R's interned
+//! strings: the digit is the string's code, or for `keyby` its rank among the distinct strings.
+//! Comparing codes compares the keys in `keyby` order (`NA` first), so a sorted result only sorts
+//! the groups.
 //!
 //! When the codes span at most [`DENSE_CODES`] values, they index the group states directly, and
 //! each thread accumulates a contiguous run of rows that is merged in row order afterwards. Wider
@@ -21,7 +24,7 @@
 
 use {
     crate::{
-        ColumnType, Result, Schema, Table,
+        ColumnType, Result, Schema, StringCodes, Table,
         kernel::{
             CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, and, fill,
             gather_column,
@@ -33,6 +36,7 @@ use {
     polars_buffer::Buffer,
     polars_core::runtime::THREAD_POOL,
     rayon::prelude::*,
+    std::sync::Arc,
 };
 
 /// The widest code range whose group states are indexed by code directly. Each thread holds one
@@ -80,7 +84,7 @@ pub(crate) fn aggregate(
         },
         Rows::Filter(_) | Rows::Positions(_) | Rows::Join(_) => return Ok(None),
     };
-    let Some(keys) = group_keys(frame, schema, &query.by)? else {
+    let Some(keys) = group_keys(table, schema, &query.by, query.keyed)? else {
         return Ok(None);
     };
     let evaluator = Evaluator {
@@ -178,15 +182,23 @@ enum DigitSource {
         values: Bitmap,
         validity: Option<Bitmap>,
     },
+    /// A character column's [`StringCodes`], with `ranks[code]` the digit of each code when the
+    /// digits must follow the strings' order, as `keyby`'s do.
+    Strings {
+        codes: Arc<StringCodes>,
+        ranks: Option<Vec<u32>>,
+    },
 }
 
-/// The grouping columns as digits, or `None` when a group is computed, is a double or a string,
-/// or the codes would not fit in 64 bits.
+/// The grouping columns as digits, or `None` when a group is computed, is a double or a string
+/// without [`StringCodes`], or the codes would not fit in 64 bits.
 fn group_keys(
-    frame: &DataFrame,
+    table: &Table,
     schema: &Schema,
     by: &[(PlSmallStr, Expr)],
+    keyed: bool,
 ) -> Result<Option<Keys>> {
+    let frame = table.frame();
     let mut digits = Vec::with_capacity(by.len());
     let mut radix: u64 = 1;
     for (_, expr) in by {
@@ -237,6 +249,34 @@ fn group_keys(
                 Digit {
                     source: DigitSource::Logical { values, validity },
                     radix: 3,
+                }
+            }
+            Some(ColumnType::Character) => {
+                let Some(codes) = table.string_codes(name) else {
+                    return Ok(None);
+                };
+                // Only the distinct strings are sorted, which is what keeps this cheaper than
+                // hashing every row's string.
+                let ranks = if keyed {
+                    let strings = column.as_materialized_series().str()?;
+                    let mut order: Vec<u32> = (1..=codes.first_rows.len() as u32).collect();
+                    order.sort_unstable_by_key(|code| {
+                        strings.get(codes.first_rows[*code as usize - 1] as usize)
+                    });
+                    let mut ranks = vec![0; codes.first_rows.len() + 1];
+                    for (rank, code) in order.into_iter().enumerate() {
+                        ranks[code as usize] = rank as u32 + 1;
+                    }
+                    Some(ranks)
+                } else {
+                    None
+                };
+                Digit {
+                    radix: codes.first_rows.len() as u64 + 1,
+                    source: DigitSource::Strings {
+                        codes: Arc::clone(codes),
+                        ranks,
+                    },
                 }
             }
             _ => return Ok(None),
@@ -296,6 +336,17 @@ fn row_codes(keys: &Keys, height: usize) -> Vec<u64> {
                     append_digits(out, start, radix, validity, |row| {
                         u64::from(values.get_bit(row)) + 1
                     });
+                }
+                DigitSource::Strings { codes, ranks } => {
+                    let codes = &codes.codes;
+                    match ranks {
+                        Some(ranks) => append_digits(out, start, radix, &None, |row| {
+                            u64::from(ranks[codes[row] as usize])
+                        }),
+                        None => {
+                            append_digits(out, start, radix, &None, |row| u64::from(codes[row]))
+                        }
+                    }
                 }
             }
         }
@@ -898,28 +949,28 @@ fn doubles(evaluator: &Evaluator, arg: &Expr, height: usize) -> Option<Vector> {
 enum State {
     IntegerSum {
         sums: Vec<i64>,
-        missing: Vec<bool>,
+        missing: Flags,
     },
     DoubleSum {
         sums: Vec<f64>,
-        missing: Vec<bool>,
+        missing: Flags,
     },
     Mean {
         sums: Vec<f64>,
         counts: Vec<u32>,
-        missing: Vec<bool>,
+        missing: Flags,
     },
     IntegerExtreme {
         max: bool,
         values: Vec<i32>,
-        seen: Vec<bool>,
-        missing: Vec<bool>,
+        seen: Flags,
+        missing: Flags,
     },
     DoubleExtreme {
         max: bool,
         values: Vec<f64>,
-        seen: Vec<bool>,
-        missing: Vec<bool>,
+        seen: Flags,
+        missing: Flags,
     },
     /// The first or last row of each group.
     Row {
@@ -930,7 +981,7 @@ enum State {
     /// Running moments for `var`, `sd` and `cor`.
     Moments {
         moments: Vec<Moments>,
-        missing: Vec<bool>,
+        missing: Flags,
     },
     /// Every counted row with its slot, for `median`, as one list per run of rows in row order. A
     /// flat list appends far faster than a list per group, and keeping each run's list instead of
@@ -940,7 +991,7 @@ enum State {
     Values {
         slots: usize,
         runs: Vec<Vec<(u32, u32)>>,
-        missing: Vec<bool>,
+        missing: Flags,
     },
     /// Each group's best rows under the ranking, best first, [`NO_ROW`]-padded to `k` per group.
     Top {
@@ -955,28 +1006,28 @@ impl State {
         match aggregation.function {
             Function::Sum if floats => State::DoubleSum {
                 sums: vec![0.0; slots],
-                missing: vec![false; slots],
+                missing: Flags::new(slots),
             },
             Function::Sum => State::IntegerSum {
                 sums: vec![0; slots],
-                missing: vec![false; slots],
+                missing: Flags::new(slots),
             },
             Function::Mean => State::Mean {
                 sums: vec![0.0; slots],
                 counts: vec![0; slots],
-                missing: vec![false; slots],
+                missing: Flags::new(slots),
             },
             Function::Min | Function::Max if floats => State::DoubleExtreme {
                 max: aggregation.function == Function::Max,
                 values: vec![0.0; slots],
-                seen: vec![false; slots],
-                missing: vec![false; slots],
+                seen: Flags::new(slots),
+                missing: Flags::new(slots),
             },
             Function::Min | Function::Max => State::IntegerExtreme {
                 max: aggregation.function == Function::Max,
                 values: vec![0; slots],
-                seen: vec![false; slots],
-                missing: vec![false; slots],
+                seen: Flags::new(slots),
+                missing: Flags::new(slots),
             },
             Function::First | Function::Last => State::Row {
                 last: aggregation.function == Function::Last,
@@ -985,12 +1036,12 @@ impl State {
             Function::Count => State::Count(vec![0; slots]),
             Function::Var | Function::Sd | Function::Correlation => State::Moments {
                 moments: vec![Moments::default(); slots],
-                missing: vec![false; slots],
+                missing: Flags::new(slots),
             },
             Function::Median => State::Values {
                 slots,
                 runs: Vec::new(),
-                missing: vec![false; slots],
+                missing: Flags::new(slots),
             },
             Function::Top => {
                 let k = top.map_or(1, |ranking| ranking.k);
@@ -1015,7 +1066,7 @@ impl State {
                 for (sum, later) in sums.iter_mut().zip(later_sums) {
                     *sum += later;
                 }
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::DoubleSum { sums, missing },
@@ -1027,7 +1078,7 @@ impl State {
                 for (sum, later) in sums.iter_mut().zip(later_sums) {
                     *sum += later;
                 }
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::Mean {
@@ -1047,7 +1098,7 @@ impl State {
                 for (count, later) in counts.iter_mut().zip(later_counts) {
                     *count += later;
                 }
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::IntegerExtreme {
@@ -1064,10 +1115,10 @@ impl State {
                 },
             ) => {
                 let max = *max;
-                merge_extreme(values, seen, later_values, later_seen, |a, b| {
+                merge_extreme(values, seen, later_values, &later_seen, |a, b| {
                     if max { a.max(b) } else { a.min(b) }
                 });
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::DoubleExtreme {
@@ -1084,10 +1135,10 @@ impl State {
                 },
             ) => {
                 let max = *max;
-                merge_extreme(values, seen, later_values, later_seen, |a, b| {
+                merge_extreme(values, seen, later_values, &later_seen, |a, b| {
                     extreme(max, a, b)
                 });
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::Row { last, rows },
@@ -1117,7 +1168,7 @@ impl State {
                 for (moment, later) in moments.iter_mut().zip(later_moments) {
                     moment.merge(&later);
                 }
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::Values { runs, missing, .. },
@@ -1128,7 +1179,7 @@ impl State {
                 },
             ) => {
                 runs.extend(later_runs);
-                or_into(missing, later_missing);
+                missing.or_assign(&later_missing);
             }
             (
                 State::Top { k, rows },
@@ -1170,7 +1221,7 @@ impl State {
                 },
             ) => {
                 sums.extend(other_sums);
-                missing.extend(other_missing);
+                missing.append(&other_missing);
             }
             (
                 State::DoubleSum { sums, missing },
@@ -1180,7 +1231,7 @@ impl State {
                 },
             ) => {
                 sums.extend(other_sums);
-                missing.extend(other_missing);
+                missing.append(&other_missing);
             }
             (
                 State::Mean {
@@ -1196,7 +1247,7 @@ impl State {
             ) => {
                 sums.extend(other_sums);
                 counts.extend(other_counts);
-                missing.extend(other_missing);
+                missing.append(&other_missing);
             }
             (
                 State::IntegerExtreme {
@@ -1213,8 +1264,8 @@ impl State {
                 },
             ) => {
                 values.extend(other_values);
-                seen.extend(other_seen);
-                missing.extend(other_missing);
+                seen.append(&other_seen);
+                missing.append(&other_missing);
             }
             (
                 State::DoubleExtreme {
@@ -1231,8 +1282,8 @@ impl State {
                 },
             ) => {
                 values.extend(other_values);
-                seen.extend(other_seen);
-                missing.extend(other_missing);
+                seen.append(&other_seen);
+                missing.append(&other_missing);
             }
             (
                 State::Row { rows, .. },
@@ -1251,7 +1302,7 @@ impl State {
                 },
             ) => {
                 moments.extend(other_moments);
-                missing.extend(other_missing);
+                missing.append(&other_missing);
             }
             (
                 State::Values {
@@ -1273,7 +1324,7 @@ impl State {
                     runs.push(run);
                 }
                 *slots += other_slots;
-                missing.extend(other_missing);
+                missing.append(&other_missing);
             }
             (
                 State::Top { rows, .. },
@@ -1288,29 +1339,70 @@ impl State {
     }
 }
 
-fn or_into(missing: &mut [bool], later: Vec<bool>) {
-    for (missing, later) in missing.iter_mut().zip(later) {
-        *missing |= later;
+fn merge_extreme<T: Copy>(
+    values: &mut [T],
+    seen: &mut Flags,
+    later_values: Vec<T>,
+    later_seen: &Flags,
+    better: impl Fn(T, T) -> T,
+) {
+    for (slot, (value, later)) in values.iter_mut().zip(later_values).enumerate() {
+        if later_seen.get(slot) {
+            *value = if seen.get(slot) {
+                better(*value, later)
+            } else {
+                later
+            };
+            seen.set(slot);
+        }
     }
 }
 
-fn merge_extreme<T: Copy>(
-    values: &mut [T],
-    seen: &mut [bool],
-    later_values: Vec<T>,
-    later_seen: Vec<bool>,
-    better: impl Fn(T, T) -> T,
-) {
-    for (((value, seen), later), later_seen) in values
-        .iter_mut()
-        .zip(seen.iter_mut())
-        .zip(later_values)
-        .zip(later_seen)
-    {
-        if later_seen {
-            *value = if *seen { better(*value, later) } else { later };
-            *seen = true;
+/// One flag per slot, packed 64 to a word, for the accumulators' `missing` and `seen`. Bits past
+/// `len` stay zero, which [`Flags::append`] relies on.
+struct Flags {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl Flags {
+    fn new(len: usize) -> Flags {
+        Flags {
+            words: vec![0; len.div_ceil(64)],
+            len,
         }
+    }
+
+    fn get(&self, index: usize) -> bool {
+        (self.words[index / 64] >> (index % 64)) & 1 == 1
+    }
+
+    fn set(&mut self, index: usize) {
+        self.words[index / 64] |= 1 << (index % 64);
+    }
+
+    /// Sets every flag the same slot has in `later`, a state over the same slots.
+    fn or_assign(&mut self, later: &Flags) {
+        for (word, later) in self.words.iter_mut().zip(&later.words) {
+            *word |= later;
+        }
+    }
+
+    /// Appends the flags of another partition's slots after these.
+    fn append(&mut self, other: &Flags) {
+        let shift = self.len % 64;
+        if shift == 0 {
+            self.words.extend_from_slice(&other.words);
+        } else {
+            for &word in &other.words {
+                if let Some(last) = self.words.last_mut() {
+                    *last |= word << shift;
+                }
+                self.words.push(word >> (64 - shift));
+            }
+        }
+        self.len += other.len;
+        self.words.truncate(self.len.div_ceil(64));
     }
 }
 
@@ -1350,7 +1442,7 @@ fn update(
                         if validity.get_bit(row) {
                             sums[slot] += i64::from(values[row]);
                         } else if !na_rm {
-                            missing[slot] = true;
+                            missing.set(slot);
                         }
                     }
                 }
@@ -1370,7 +1462,7 @@ fn update(
                     let value = values[row];
                     if !valid {
                         if !na_rm {
-                            missing[slot] = true;
+                            missing.set(slot);
                         }
                     } else if !(na_rm && value.is_nan()) {
                         sums[slot] += value;
@@ -1405,7 +1497,7 @@ fn update(
                         counts[slot] += 1;
                     }
                     Some(_) => {}
-                    None if !na_rm => missing[slot] = true,
+                    None if !na_rm => missing.set(slot),
                     None => {}
                 }
             }
@@ -1427,16 +1519,16 @@ fn update(
                     .is_none_or(|validity| validity.get_bit(row))
                 {
                     let value = values[row];
-                    kept[slot] = if !seen[slot] {
+                    kept[slot] = if !seen.get(slot) {
                         value
                     } else if max {
                         kept[slot].max(value)
                     } else {
                         kept[slot].min(value)
                     };
-                    seen[slot] = true;
+                    seen.set(slot);
                 } else if !na_rm {
-                    missing[slot] = true;
+                    missing.set(slot);
                 }
             }
         }
@@ -1460,14 +1552,14 @@ fn update(
                     if na_rm && value.is_nan() {
                         continue;
                     }
-                    kept[slot] = if seen[slot] {
+                    kept[slot] = if seen.get(slot) {
                         extreme(max, kept[slot], value)
                     } else {
                         value
                     };
-                    seen[slot] = true;
+                    seen.set(slot);
                 } else if !na_rm {
-                    missing[slot] = true;
+                    missing.set(slot);
                 }
             }
         }
@@ -1480,7 +1572,7 @@ fn update(
                     .is_some_and(|validity| !validity.get_bit(row))
                 {
                     if !na_rm {
-                        missing[slot] = true;
+                        missing.set(slot);
                     }
                 } else if !(na_rm && value.is_nan()) {
                     moments[slot].add(value, 0.0);
@@ -1494,7 +1586,7 @@ fn update(
                     .as_ref()
                     .is_some_and(|validity| !validity.get_bit(row))
                 {
-                    missing[slot] = true;
+                    missing.set(slot);
                 } else {
                     moments[slot].add(x[row], y[row]);
                 }
@@ -1510,7 +1602,7 @@ fn update(
                     .is_some_and(|validity| !validity.get_bit(row))
                 {
                     if !na_rm {
-                        missing[slot] = true;
+                        missing.set(slot);
                     }
                 } else if !(na_rm && value.is_nan()) {
                     entries.push((row as u32, slot as u32));
@@ -1576,11 +1668,11 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
     };
     match state {
         State::IntegerSum { sums, missing } => {
-            let validity = validity(&|slot| missing[slot]);
+            let validity = validity(&|slot| missing.get(slot));
             // R's integer sum is an integer when every total fits and a double otherwise. An `NA`
             // total stops R's sum before it can overflow, so it fits whatever was added.
             let fits = order.iter().all(|slot| {
-                let (sum, missing) = (sums[*slot as usize], missing[*slot as usize]);
+                let (sum, missing) = (sums[*slot as usize], missing.get(*slot as usize));
                 missing || (sum > i64::from(i32::MIN) && sum <= i64::from(i32::MAX))
             });
             if fits {
@@ -1597,7 +1689,7 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
         }
         State::DoubleSum { sums, missing } => Vector::Double {
             values: Buffer::from(gather_slots(order, |slot| sums[slot])),
-            validity: validity(&|slot| missing[slot]),
+            validity: validity(&|slot| missing.get(slot)),
         },
         State::Mean {
             sums,
@@ -1607,7 +1699,7 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
             values: Buffer::from(gather_slots(order, |slot| {
                 sums[slot] / f64::from(counts[slot])
             })),
-            validity: validity(&|slot| missing[slot]),
+            validity: validity(&|slot| missing.get(slot)),
         },
         State::IntegerExtreme {
             values,
@@ -1616,7 +1708,7 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
             ..
         } => Vector::Integer {
             values: Buffer::from(gather_slots(order, |slot| values[slot])),
-            validity: validity(&|slot| missing[slot] || !seen[slot]),
+            validity: validity(&|slot| missing.get(slot) || !seen.get(slot)),
         },
         State::DoubleExtreme {
             values,
@@ -1625,7 +1717,7 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
             ..
         } => Vector::Double {
             values: Buffer::from(gather_slots(order, |slot| values[slot])),
-            validity: validity(&|slot| missing[slot] || !seen[slot]),
+            validity: validity(&|slot| missing.get(slot) || !seen.get(slot)),
         },
         State::Row { rows, .. } => {
             let rows = gather_slots(order, |slot| rows[slot]);
@@ -1657,7 +1749,7 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
                 // `NA` where R's `var` and `cor` are: fewer than two values, and for `cor` a
                 // zero spread or a `NaN`.
                 match function {
-                    _ if missing[slot] || moment.count < 2.0 => None,
+                    _ if missing.get(slot) || moment.count < 2.0 => None,
                     Function::Correlation => {
                         let correlation = moment.co / (moment.m2_x * moment.m2_y).sqrt();
                         (!correlation.is_nan()).then_some(correlation)
@@ -1703,7 +1795,7 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
                     .into_par_iter()
                     .enumerate()
                     .map(|(slot, group)| {
-                        if missing[slot] || group.is_empty() {
+                        if missing.get(slot) || group.is_empty() {
                             return None;
                         }
                         let (middle, even) = (group.len() / 2, group.len() % 2 == 0);
@@ -2046,5 +2138,42 @@ impl Moments {
         self.m2_y += later.m2_y + delta_y * delta_y * weight;
         self.co += later.co + delta_x * delta_y * weight;
         self.count = count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Flags;
+
+    #[test]
+    fn appended_flags_keep_every_slot_at_any_offset() {
+        for first_len in [0, 1, 63, 64, 65, 130] {
+            for second_len in [0, 1, 63, 64, 65, 130] {
+                let pattern = |index: usize| index % 3 == 0 || index % 7 == 1;
+                let mut first = Flags::new(first_len);
+                (0..first_len)
+                    .filter(|index| pattern(*index))
+                    .for_each(|index| first.set(index));
+                let mut second = Flags::new(second_len);
+                (0..second_len)
+                    .filter(|index| !pattern(*index))
+                    .for_each(|index| second.set(index));
+                first.append(&second);
+                assert_eq!(first.len, first_len + second_len);
+                assert_eq!(first.words.len(), first.len.div_ceil(64));
+                for index in 0..first.len {
+                    let expected = if index < first_len {
+                        pattern(index)
+                    } else {
+                        !pattern(index - first_len)
+                    };
+                    assert_eq!(
+                        first.get(index),
+                        expected,
+                        "{first_len} + {second_len} at {index}"
+                    );
+                }
+            }
+        }
     }
 }

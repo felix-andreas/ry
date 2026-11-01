@@ -327,9 +327,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rowMeans", 4, |call| unsafe {
         margin_sums(call, true, true)
     }),
-    internal("findInterval", 5, do_find_interval),
+    internal("findInterval", -1, do_find_interval),
     internal("pretty", 8, do_pretty),
-    internal("sequence", 3, do_sequence),
+    internal("sequence", -1, do_sequence),
     internal("bincode", 4, do_bincode),
 ];
 
@@ -400,6 +400,8 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
 }
 
 /// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`.
+/// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`, plus `checkNA` from R 4.4 on,
+/// which only lets GNU R skip its NA scan, so the answer does not depend on it.
 unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
     let breaks = values::reals(call.arg(0)).to_vec();
     let points = call.arg(1);
@@ -588,16 +590,76 @@ pub fn pretty(
 }
 
 /// `sequence(nvec, from, by)`.
+/// `sequence(nvec, from, by)`, plus R 4.4's `recycle`: `TRUE` recycles all three to the longest,
+/// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
+/// to `nvec`, with a warning when that drops elements.
 unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
     let lengths = coerce_vector(call.arg(0), SexpType::Integer)?;
     let from = coerce_vector(call.arg(1), SexpType::Integer)?;
     let by = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let recycle_argument = call.arg(3);
+    // R 4.6 and later pass `recycle`, as an integer when the caller left it missing.
+    let maybe_warn = call.len() > 3 && recycle_argument.kind() != SexpType::Logical;
+    let recycle = call.len() > 3
+        && recycle_argument.kind() == SexpType::Logical
+        && values::as_logical_scalar(recycle_argument) == 1;
+    let (lengths, from, by) = (values::ints(lengths), values::ints(from), values::ints(by));
+    if lengths.is_empty() {
+        return values::integer_vector(&[]);
+    }
+    for (values, name) in [(from, "from"), (by, "by")] {
+        if values.is_empty() {
+            if recycle {
+                return values::integer_vector(&[]);
+            }
+            let message = if crate::system::r_at_least(4, 6) {
+                format!(
+                    "'{name}' has length 0, but not 'nvec'; 'recycle = TRUE' returns empty here"
+                )
+            } else {
+                format!("'{name}' has length 0, but not 'lengths'")
+            };
+            return Err(crate::unwind::error(message));
+        }
+    }
+    let mut total = lengths.len().max(from.len()).max(by.len());
+    if !recycle && lengths.len() < total {
+        // GNU R warns about the coming default at most once per session.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if maybe_warn && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::conditions::warning(format!(
+                "length(nvec) {} < {total} = max(length(from), length(by)) -- future R`s \
+                 default 'recycle = TRUE' will recycle 'nvec'",
+                lengths.len()
+            ))?;
+        }
+        total = lengths.len();
+    }
+    if lengths
+        .iter()
+        .any(|&count| count == NA_INTEGER || count < 0)
+    {
+        let name = if crate::system::r_at_least(4, 6) {
+            "nvec"
+        } else {
+            "lengths"
+        };
+        return Err(crate::unwind::error(format!(
+            "'{name}' must be a vector of non-negative integers"
+        )));
+    }
     let mut output = Vec::new();
-    for index in 0..length(lengths) {
-        let count = values::ints(lengths)[index];
-        let start = values::ints(from)[index % length(from).max(1)];
-        let step = values::ints(by)[index % length(by).max(1)];
-        for position in 0..count.max(0) {
+    for index in 0..total {
+        let count = lengths[index % lengths.len()];
+        let start = from[index % from.len()];
+        let step = by[index % by.len()];
+        if count != 0 && start == NA_INTEGER {
+            return Err(crate::unwind::error("'from' contains NAs"));
+        }
+        if count >= 2 && step == NA_INTEGER {
+            return Err(crate::unwind::error("'by' contains NAs"));
+        }
+        for position in 0..count {
             output.push(start + position * step);
         }
     }
@@ -1942,13 +2004,14 @@ fn times_minus_i(z: Rcomplex) -> Rcomplex {
     Rcomplex { r: z.i, i: -z.r }
 }
 
-/// Far from the real axis the tangent is `±i`, which some C libraries return as NaN.
+/// Far from the real axis the imaginary part of the tangent is `±1`, which some C libraries
+/// return as NaN. The tiny real part stays as the library computed it.
 unsafe fn complex_tan(z: Rcomplex) -> Rcomplex {
     let result = ctan(z);
     if z.i.is_finite() && z.i.abs() > 25.0 {
         return Rcomplex {
-            r: 0.0,
-            i: if z.i > 0.0 { 1.0 } else { -1.0 },
+            r: result.r,
+            i: if z.i < 0.0 { -1.0 } else { 1.0 },
         };
     }
     result

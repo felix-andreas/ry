@@ -78,6 +78,14 @@ pub enum RequestKind {
     InlayHint,
     CodeAction,
     Diagnostic,
+    SelectionRange,
+    /// Takes its query from the name a rename would.
+    WorkspaceSymbol,
+    SemanticTokensRange,
+    CallHierarchy,
+    /// Asks for callers of an item placed at the position, as a client replays one it kept.
+    IncomingCalls,
+    OutgoingCalls,
 }
 
 pub const REQUEST_KINDS: &[RequestKind] = &[
@@ -94,6 +102,12 @@ pub const REQUEST_KINDS: &[RequestKind] = &[
     RequestKind::InlayHint,
     RequestKind::CodeAction,
     RequestKind::Diagnostic,
+    RequestKind::SelectionRange,
+    RequestKind::WorkspaceSymbol,
+    RequestKind::SemanticTokensRange,
+    RequestKind::CallHierarchy,
+    RequestKind::IncomingCalls,
+    RequestKind::OutgoingCalls,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -179,17 +193,14 @@ impl Simulation {
         self.request_with_name(kind, uri, position, "renamed")
     }
 
-    /// Sends a rename to `new_name`; every other request kind ignores the name.
-    pub fn request_rename(&mut self, uri: &Url, position: Position, new_name: &str) -> RequestId {
-        self.request_with_name(RequestKind::Rename, uri, position, new_name)
-    }
-
-    fn request_with_name(
+    /// A rename renames to `name`, a workspace symbol search takes it as the query, and every
+    /// other request kind ignores it.
+    pub fn request_with_name(
         &mut self,
         kind: RequestKind,
         uri: &Url,
         position: Position,
-        new_name: &str,
+        name: &str,
     ) -> RequestId {
         let document = lsp_types::TextDocumentIdentifier::new(uri.clone());
         let at = lsp_types::TextDocumentPositionParams::new(document.clone(), position);
@@ -218,7 +229,7 @@ impl Simulation {
             })),
             RequestKind::Rename => json(self.state.rename(lsp_types::RenameParams {
                 text_document_position: at,
-                new_name: new_name.to_owned(),
+                new_name: name.to_owned(),
                 work_done_progress_params: work,
             })),
             RequestKind::Completion => json(self.state.completion(lsp_types::CompletionParams {
@@ -278,6 +289,49 @@ impl Simulation {
                 work_done_progress_params: work,
                 partial_result_params: partial,
             })),
+            RequestKind::SelectionRange => {
+                json(self.state.selection_range(lsp_types::SelectionRangeParams {
+                    text_document: document,
+                    positions: vec![position],
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
+                }))
+            }
+            RequestKind::WorkspaceSymbol => {
+                json(self.state.symbol(lsp_types::WorkspaceSymbolParams {
+                    query: name.to_owned(),
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
+                }))
+            }
+            RequestKind::SemanticTokensRange => json(self.state.semantic_tokens_range(
+                lsp_types::SemanticTokensRangeParams {
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
+                    text_document: document,
+                    range: lsp_types::Range::new(Position::new(position.line, 0), whole.end),
+                },
+            )),
+            RequestKind::CallHierarchy => json(self.state.prepare_call_hierarchy(
+                lsp_types::CallHierarchyPrepareParams {
+                    text_document_position_params: at,
+                    work_done_progress_params: work,
+                },
+            )),
+            RequestKind::IncomingCalls => json(self.state.incoming_calls(
+                lsp_types::CallHierarchyIncomingCallsParams {
+                    item: hierarchy_item(document.uri, position),
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
+                },
+            )),
+            RequestKind::OutgoingCalls => json(self.state.outgoing_calls(
+                lsp_types::CallHierarchyOutgoingCallsParams {
+                    item: hierarchy_item(document.uri, position),
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
+                },
+            )),
             RequestKind::Diagnostic => json(self.state.document_diagnostic(
                 lsp_types::DocumentDiagnosticParams {
                     text_document: document,
@@ -485,6 +539,22 @@ fn json<T: serde::Serialize + 'static>(
 
 fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).expect("protocol types serialize")
+}
+
+/// A call hierarchy item only the server reads back: it re-resolves the item from its uri and
+/// the start of its selection, so the other fields can stay empty.
+fn hierarchy_item(uri: lsp_types::Url, position: Position) -> lsp_types::CallHierarchyItem {
+    let range = lsp_types::Range::new(position, position);
+    lsp_types::CallHierarchyItem {
+        name: String::new(),
+        kind: lsp_types::SymbolKind::FUNCTION,
+        tags: None,
+        detail: None,
+        uri,
+        range,
+        selection_range: range,
+        data: None,
+    }
 }
 
 fn initialize_params(root: &Path, options: ClientOptions) -> lsp_types::InitializeParams {

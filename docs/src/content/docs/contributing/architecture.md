@@ -120,30 +120,29 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees are evicted
+### Syntax trees stay resident
 
-Rowan trees are the largest thing the analysis holds, and nothing past lowering needs them, so a
-cold pass does not retain them. `limit_resident_trees` gives `parse` and the per-item `item_syntax`
-and `item_annotation_syntax` salsa LRU capacities, and every query that reads a tree is a memoized
-query whose result is small: the
-item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references
-and agreement candidates in `diagnostics.rs`, `item_name_range`, and `lints::file_syntax_lints`. An evicted memo keeps
-its dependency edges, so revalidating an untouched file after an edit elsewhere never re-parses it;
-only a file whose text changed is parsed again. A finding that also needs naming or the project's
-declarations is split in two: the syntax-only half is memoized, and a cheap step joins it with the
-rest (a bare `setClass` call is reported only when the file does not bind `setClass` itself, and
-two annotations disagree only when their types differ once aliases expand).
+Every host keeps every rowan tree. Salsa's LRU would bound memory, but each read of an LRU query
+records its use under one mutex per query, and the cold check reads `item_syntax` often enough
+on all cores that the lock cost about a sixth of its wall time, for about 80 MB saved on a
+300,000-line package. Every query that reads a tree is still a memoized query whose result is
+small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
+annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
+`lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
+the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
+joins it with the rest (a bare `setClass` call is reported only when the file does not bind
+`setClass` itself, and two annotations disagree only when their types differ once aliases
+expand).
 
-The CLI's cold check leans on this to cap its peak. It runs three passes over the files, largest
-first, spread over the cores. The first pass works in batches and calls `trigger_lru_eviction`
-between them: `diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is
-resident. The second pass names every item and derives its interface and top-level read sets, and
-the third assembles the diagnostics. Neither later pass reads a tree. Naming runs as one batch
-with no barriers, and the diagnostics pass evicts between larger batches, which bounds the peak on
-a project with many findings. Each file is therefore parsed exactly once, and at most a few batches of trees
-are alive at a time. `RootDatabase::one_shot` also turns
-off the splice cache, which would otherwise keep the previous tree of every file. A
-`test_incremental.rs` case pins the one-parse property.
+The CLI's cold check runs three passes over the files, largest first, spread over the cores.
+The first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each
+file's share of the project-wide maps (`warm_project_folds`), so that no later check derives
+another file's facts on its own thread. The second names every item, so that two threads
+checking files that reach the same item do not block on one claim, and the third assembles the
+diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
+previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
+once.
 
 Most tree readers look for a handful of node kinds in a large file, and a red-tree walk pays for a
 red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
@@ -163,7 +162,9 @@ wall time. Several of them are worth knowing:
   `test_name` take only the name and read `ProjectFiles` themselves.
 - `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
   64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
-  compare and reading the kind is a field load. The entry stores the type's size, which the
+  compare and reading the kind is a field load. A direct-mapped per-thread cache sits in front of
+  the shards, because checkers intern the same few types over and over and those land on the same
+  shard mutexes. The entry stores the type's size, which the
   inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
@@ -174,13 +175,9 @@ wall time. Several of them are worth knowing:
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
-  huge pages that a short-lived process never touched.
-
-The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
-bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
-tree must be rebuilt whenever a memo's value is needed. The memory it saves matters less in a
-long-lived process, so the server never calls `limit_resident_trees`, and the tree queries' `lru = 0`
-default leaves them unbounded with no per-fetch bookkeeping.
+  huge pages that a short-lived process never touched. What allocation still costs is mostly
+  setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
+  and huge-page options measured no difference.
 
 ### From item to scheme
 
@@ -195,7 +192,10 @@ spelling it passed through; it lives in the module's own text buffer, addressed 
 struct-of-arrays: an `ExprId` indexes separate kind and range arrays, and every list (arguments,
 parameters, statements, record fields, match arms, pattern lists) lives in one side array per
 element type that the expression addresses with a `Span`, so every HIR kind is `Copy` and a scan
-over kinds never touches ranges. Lowering reads the green tree through `syntax::GreenNodeAt` and
+over kinds never touches ranges. A name written at a site with its own range (an argument name, a
+field after `$` or `@`, a loop variable, a tag) is a `NameId` into a `NameSite` side array that
+holds the symbol and its range together, and every id is a `NonZeroU32`, so an optional child costs
+no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the green tree through `syntax::GreenNodeAt` and
 builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
 items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
 capacity and lowering allocates a handful of arrays per item. Naming
@@ -221,11 +221,13 @@ When definitions refer to each other in a cycle, the package interface resolves 
 through one canonical fixpoint, so the result never depends on which member happened to be queried
 first:
 
-1. `interface_sccs` condenses the static graph of references from every item, definitions and
-   top-level statements alike, to each item its reads resolve to, using an iterative Tarjan walk
-   in canonical project order. The edges follow exactly the resolution a check performs: the
-   frame binder in the item's own file, then the test and package layers, and every conditional
-   writer of a name that has no unconditional winner.
+1. `interface_group` finds the cyclic group an item belongs to. `item_interface_edges` gives each
+   item, definition or top-level statement alike, the items its reads resolve to, following
+   exactly the resolution a check performs: the frame binder in the item's own file, then the
+   test and package layers, and every conditional writer of a name that has no unconditional
+   winner. An iterative Tarjan walk from the item visits only what it reaches, which is enough,
+   because a cycle through the item lies inside that reachable set. Members come back in
+   canonical project order, and the first one keys the group.
 2. `scc_exports` starts every member at `Unknown` and runs Jacobi rounds until the table of
    exports (each member's scheme and the schemes of the top-level names it binds) stops changing.
    If the round cap is reached, every member is pinned.
@@ -249,15 +251,21 @@ the obvious one.
 
 ### Keeping project-wide work cheap
 
-A walk over the whole project reads small per-item projections instead of full naming results.
-`item_interface_reads` is the set of items and names an item's reads resolve to, which feeds
-`interface_sccs`, and `item_top_level_names` is the set of names it binds, which feeds the
-resolution of conditional slots. Both are tiny tracked queries whose values survive an edit that only shifts ranges. The
-typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
-instead of running again.
+A check never names the whole project. The interface graph is walked per item, from the items a
+check reaches, and `item_interface_reads`, the set of items and names an item's reads resolve to, is
+a tiny tracked query whose value survives an edit that only shifts ranges.
 
-The walks reach those projections through one tracked memo per file (`file_definitions`,
-`file_interface_reads`, `file_conditional_writers`), never directly. After a keystroke salsa must
+The one map that does cover every package item is the set of conditional writers, the items that
+write a top-level name other than their own, which a read with no unconditional winner joins.
+`file_conditional_writers` builds a file's share by screening each item's syntax first: only an
+assignment operator, `for`, a destructuring `%<-%`, or a by-reference `setnames` outside a nested
+function can write a top-level name, so an item with no such token besides its own binding needs
+no naming pass. Only the rest go through `item_top_level_names`. The screen may pass too many items
+but never too few, and the fuzz battery checks it against naming on every generated program.
+
+The project-wide maps reach per-file data through one tracked memo per file (`file_definitions`,
+`file_conditional_writers`, `file_type_definitions` and the others `warm_project_folds` lists),
+never through per-item queries. After a keystroke salsa must
 confirm that a project-wide map is still valid, and it does so by checking the map's dependencies.
 Read per file, that is about 500 memos on a 300,000-line project, and every one outside the edited
 file passes on durability alone (see "The language server"). Read per item, it was about 56,000
@@ -266,9 +274,17 @@ memos, which cost every editor request about 35 ms right after a keystroke.
 A check never reads a project-wide map either. Each lookup it makes across items goes through a
 firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
 writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
-binder that an immediate or script read sees. A structural edit re-runs each firewall that a check
-read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
-its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+binder that an immediate or script read sees. The interface edges an item contributes to the group
+walk (`item_interface_edges`) go through `package_name` too. A structural edit re-runs each firewall
+that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
+items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+
+A name being typed is a new top-level definition on every keystroke, so the folds that a new name
+changes are kept to one pass: `package_definition_index` folds each package file's definitions
+into the winners and, in the same loop, the names defined more than once. The duplicate check reads
+those through `duplicate_binding_map`, a copy that is empty in a healthy project and so backdates.
+Names in these maps are interned `Symbol`s whose hash was computed once at interning, so a fold
+hashes four bytes per name and never rereads the spelling.
 
 Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
@@ -331,9 +347,11 @@ and all the documents, and the database handle deliberately never leaves it.
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
   scans every file's `library()` and `require()` calls and applies the attached set once, then
-  derives every item's naming and the per-file folds behind the project-wide maps. Every semantic
-  wave reads those maps, and one thread would take seconds to derive them, so settled publishes
-  wait for it. After the warm-up the worker rescans the `library()` calls of any file whose scan a
+  derives the per-file folds behind the project-wide maps (`warm_project_folds`). Every semantic
+  wave reads those maps, and one thread would parse the whole project to derive them, so settled
+  publishes wait for it. The warm-up names no item: a file's check names only the items its
+  interface reaches, so a file opened at startup settles in about 200 ms on a 300,000-line
+  package. After the warm-up the worker rescans the `library()` calls of any file whose scan a
   cancellation interrupted, because the edit that cancelled it may belong to another file and
   nothing else would rescan this one. Then it serves any settled publish it owes, most recently
   edited file first. Then it re-derives `project_global_names`, the set goto-definition and

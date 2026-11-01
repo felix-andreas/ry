@@ -1,0 +1,16 @@
+[stdout]
+| [1] "2020-01-02 UTC"
+| [1] "2020-01-02 03:00:00 UTC"
+| [1] 15
+| [1] "2020-01-02 UTC"
+| [1] NA
+| [1] NA
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(sec = NA_real_, min = NA_integer_, hour = NA_integer_, 
+|     mday = NA_integer_, mon = NA_integer_, year = NA_integer_, 
+|     wday = NA_integer_, yday = NA_integer_, isdst = -1L, zone = "UTC", 
+|     gmtoff = 0L), class = c("POSIXlt", "POSIXt"), tzone = "UTC", balanced = TRUE)

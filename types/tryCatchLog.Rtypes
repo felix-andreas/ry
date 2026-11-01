@@ -1,0 +1,7 @@
+# tryCatchLog: `tryCatch` that logs every condition with its call stack.
+#
+# The result is the value of `expr` or of whichever handler in `...` caught a
+# condition, so it is `Any` like `tryCatch` itself.
+tryCatchLog : fn(expr: Any, ...: Any, [execution.context.msg]: character, [finally]: Any, [write.error.dump.file]: logical, [write.error.dump.folder]: character, [silent.warnings]: logical, [silent.messages]: logical, [include.full.call.stack]: logical, [include.compact.call.stack]: logical, [logged.conditions]: Any) -> Any
+tryLog : fn(expr: Any, [write.error.dump.file]: logical, [write.error.dump.folder]: character, [silent.warnings]: logical, [silent.messages]: logical, [include.full.call.stack]: logical, [include.compact.call.stack]: logical, [logged.conditions]: Any, [execution.context.msg]: character) -> Any
+last.tryCatchLog.result : fn() -> data.frame

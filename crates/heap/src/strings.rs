@@ -6,7 +6,10 @@
 //! otherwise use, and keeps its `TRUELENGTH` in the low half ([`Sexp::char_truelength`]).
 
 use {
-    crate::object::{Sexp, gp},
+    crate::{
+        object::{Sexp, gp},
+        space::Space,
+    },
     hashbrown::HashTable,
     std::hash::Hasher,
 };
@@ -101,10 +104,15 @@ impl StringTable {
         self.young.push(string);
     }
 
+    /// The strings interned since the last collection.
+    pub fn young(&self) -> &[Sexp] {
+        &self.young
+    }
+
     /// Drops the entries for young strings the current minor collection did not mark.
-    pub unsafe fn remove_dead_young(&mut self) {
+    pub unsafe fn remove_dead_young(&mut self, space: &Space) {
         for string in std::mem::take(&mut self.young) {
-            if unsafe { string.is_marked() } {
+            if unsafe { space.is_marked(string) } {
                 continue;
             }
             let hash = spread(unsafe { string.char_hash() });
@@ -117,8 +125,9 @@ impl StringTable {
         }
     }
 
-    pub unsafe fn remove_dead(&mut self) {
-        self.table.retain(|string| unsafe { string.is_marked() });
+    pub unsafe fn remove_dead(&mut self, space: &Space) {
+        self.table
+            .retain(|&mut string| unsafe { space.is_marked(string) });
         self.young.clear();
     }
 }

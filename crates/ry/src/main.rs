@@ -90,7 +90,16 @@ fn main() -> ExitCode {
             files,
             output,
             min_severity,
-        } => exit_code(cli::check(files.as_deref(), output, min_severity)),
+            fix,
+            unsafe_fixes,
+        } => {
+            let fix = match (fix, unsafe_fixes) {
+                (false, _) => cli::FixMode::Off,
+                (true, false) => cli::FixMode::Safe,
+                (true, true) => cli::FixMode::All,
+            };
+            exit_code(cli::check(files.as_deref(), output, min_severity, fix))
+        }
         Command::Fmt {
             files,
             check,

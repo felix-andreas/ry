@@ -1,0 +1,9 @@
+# jsonlite: JSON encoding and decoding.
+#
+# `toJSON()` returns a character string of class "json". `fromJSON()` returns whatever the document
+# holds, and its `txt` may also be a file path or a URL it reads.
+
+@type json
+
+toJSON : @pure fn(x: Any, [dataframe]: character, [matrix]: character, [Date]: character, [POSIXt]: character, [factor]: character, [complex]: character, [raw]: character, [null]: character, [na]: character, [auto_unbox]: logical, [digits]: double | logical, [pretty]: logical | double, [force]: logical, ...: Any) -> json
+fromJSON : fn(txt: Any, [simplifyVector]: logical, [simplifyDataFrame]: logical, [simplifyMatrix]: logical, [flatten]: logical, ...: Any) -> Any

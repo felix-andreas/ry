@@ -363,7 +363,10 @@ definition 51..56
 references: 51..56*
 rename: 1 edit(s)
 signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
 completion (48): maybe, makePrototypeFromClassDef, mapply, mauchly.test, .mapply, simplify2array, Summary, summary
+hint @5: data.frame
 
 #---- trust_annotation
 #: @trust integer
@@ -596,6 +599,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*, 24..30
 rename: 2 edit(s)
+calls mirror: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
@@ -611,6 +615,7 @@ hover-definition: global 0..4
 definition 0..4
 references: 0..4*, 25..29
 rename: 2 edit(s)
+calls pair: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(x: T, [y]: U) -> T\n"
@@ -626,6 +631,7 @@ hover-definition: global 0..7
 definition 0..7
 references: 0..7*, 30..37
 rename: 2 edit(s)
+calls add_one: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
@@ -641,6 +647,7 @@ hover-definition: global 0..4
 definition 0..4
 references: 0..4*, 32..36
 rename: 2 edit(s)
+calls make: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> list{T, integer}\n"
@@ -691,8 +698,8 @@ completion (21): undebug, undebugcall, packageNotFoundError, unique.data.frame, 
 total <- s$0um(1L, 2L)
 #++++
 hover 9..12: sum: fn(...: integer[] | logical[], [na.rm]: logical) -> integer
-hover-definition: package base (5 declaration(s), declared in stub source 0 at `sum`)
-definition: stub source 0 at `sum`
+hover-definition: package base (5 declaration(s), declared in stub source base at `sum`)
+definition: stub source base at `sum`
 references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)

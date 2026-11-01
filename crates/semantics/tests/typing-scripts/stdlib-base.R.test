@@ -217,7 +217,7 @@ sum(c("a", "b"))
 integer
 double
 complex
-Unknown
+double
 difftime
 Unknown
 100..116 error[type-mismatch] no overload of `sum` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `integer[] | logical[]`, found `character[]`
@@ -347,6 +347,18 @@ f <- function(x) sum(x)
 f(c("a", "b"))
 #++++
 f: fn(x: Unknown) -> Unknown
+Unknown
+
+#---- an_unchecked_argument_takes_the_fit_more_specific_than_the_catch_all
+n <- nrow(matrix(0, 2L, 2L))
+rep(0, n)
+#++++
+n: Any
+double[]
+
+#---- unchecked_arguments_the_specific_fits_disagree_on_stay_unknown
+seq(nrow(matrix(0, 2L, 2L)))
+#++++
 Unknown
 
 #==== precise_strings
@@ -509,7 +521,7 @@ NULL
 #---- tryCatch_resolves_with_handler
 tryCatch(1L, error = function(e) NULL)
 #++++
-Unknown
+integer | NULL
 
 #---- try_returns_any
 try(log(-1), silent = TRUE)
@@ -591,11 +603,11 @@ integer[]
 character[]
 logical[]
 
-#---- matrix_and_factor_degrade_to_any_with_checked_formals
+#---- matrix_and_factor_type_with_checked_formals
 matrix(c(1L, 2L), nrow = 1L)
 factor(c("a"), levels = c("a", "b"))
 #++++
-Any
+matrix
 factor
 
 #---- rowSums_is_double_vector
@@ -727,11 +739,11 @@ cbind(a = 1L, b = 2L)
 Sys.setenv(MY_VAR = "v")
 table(group = c("a", "a"))
 #++++
-Unknown
+data.frame
 integer
+Any
 Unknown
-Unknown
-Unknown
+integer[]
 
 #==== still_any
 #---- reflection_resolves

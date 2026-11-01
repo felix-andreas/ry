@@ -3,7 +3,9 @@ use {
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
-        global_scheme, interface_sccs, item_naming, item_tree, limit_resident_trees,
+        global_scheme,
+        hir::Symbol,
+        interface_group, item_naming, item_tree,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
@@ -24,7 +26,7 @@ fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
 fn definition<'db>(db: &'db ProbeDatabase, name: &str) -> Item<'db> {
     let files = ProjectFiles::get(db);
     *package_definitions(db, files)
-        .get(name)
+        .get(&Symbol::new(name))
         .unwrap_or_else(|| panic!("`{name}` is defined"))
 }
 
@@ -137,6 +139,34 @@ fn a_new_definition_rechecks_nothing_that_does_not_read_it() {
     db.edit(files[0], "x <- function() 1L\nfresh <- 2L\n".to_owned());
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["fresh"]);
+}
+
+/// A name being typed is a new top-level definition on every keystroke. The project-wide
+/// definition map changes each time, so whatever reads it directly re-runs for every item
+/// checked afterwards; the interface edges and the duplicate check read per-name projections
+/// instead, and the edited file is the only one whose edges re-run.
+#[test]
+fn a_new_definition_rebuilds_no_other_files_interface_edges() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "x <- function() 1L\n",
+        "use_x <- function() x()\nalso <- function() use_x()\n",
+        "other <- function() also()\n",
+    ]);
+    settle(&db, &files);
+    db.executions_since(&[]);
+
+    db.edit(files[0], "x <- function() 1L\nfresh <- 2L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&[
+            "item_interface_edges",
+            "duplicate_binding_map",
+            "package_definition_index",
+        ]),
+        [1, 1, 1],
+        "only the new item's edges are derived; the fold runs once and its duplicates backdate"
+    );
 }
 
 #[test]
@@ -377,24 +407,25 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
 
     db.edit(files[0], "x <- function() 3L\n".to_owned());
     settle(&db, &files);
+    // Each checked item's interface group verifies the edges it reaches, so validations of
+    // `item_interface_reads` follow the items a check demands. What must not happen is any
+    // untouched item recomputing its reads.
     assert_eq!(
-        db.validations_since(&["item_interface_reads", "item_top_level_names"]),
-        [1, 0],
-        "the project-wide name maps fold per-file memos, so an edit verifies only the edited \
-         file's one item and none of the five in the untouched files, and a function item \
-         writes only its own name, so the conditional writers never name it"
+        db.executions_since(&["item_interface_reads", "item_top_level_names"]),
+        [0, 1],
+        "only the edited item re-derives its top-level names, for its own file's frame binders; \
+         its naming backdates, so nothing recomputes interface reads, and none of the five items \
+         in the untouched files reruns either"
     );
 }
 
-/// More files than the tree caches hold, so a cold pass really evicts trees. Each file has
-/// every kind of syntax a later pass reads: a lint, a `#:` comment, and a statement
-/// annotated both ways.
-/// Two files far apart both bind `shared`, so reporting the duplicate reads the other file's
-/// facts after its tree is evicted, and the trailing script reports an unused binding.
-fn evicting_project(db: &ProbeDatabase) -> Vec<SourceFile> {
+/// Each file has every kind of syntax a later pass reads: a lint, a `#:` comment, and a
+/// statement annotated both ways. Two files far apart both bind `shared`, so reporting the
+/// duplicate reads the other file's facts, and the trailing script reports an unused binding.
+fn wide_project(db: &ProbeDatabase) -> Vec<SourceFile> {
     let mut files: Vec<SourceFile> = (0..200)
         .map(|index| {
-            let mut source = evicting_project_source(index);
+            let mut source = wide_project_source(index);
             if index == 0 || index == 199 {
                 source.push_str("shared <- 1L\n");
             }
@@ -410,15 +441,13 @@ fn evicting_project(db: &ProbeDatabase) -> Vec<SourceFile> {
     files
 }
 
-/// The order `ry check` runs in: derive from each tree and evict, name every item, then
-/// report.
+/// The order `ry check` runs in: derive from each tree, name every item, then report.
 fn cold_check(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     for &file in files {
         derive_from_syntax(db, file, lints);
-        db.trigger_lru_eviction();
     }
-    // `ry check` writes the attached namespaces here, so later passes verify memos over
-    // evicted trees instead of reusing them within one revision.
+    // `ry check` writes the attached namespaces here, so later passes verify memos instead of
+    // reusing them within one revision.
     db.synthetic_write(Durability::LOW);
     for &file in files {
         for &item in item_tree(db, file) {
@@ -432,15 +461,13 @@ fn report(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     for &file in files {
         file_diagnostics(db, file);
         lint_file(db, file, lints);
-        db.trigger_lru_eviction();
     }
 }
 
 #[test]
-fn a_cold_check_that_evicts_trees_parses_each_file_once() {
+fn a_cold_check_parses_each_file_once() {
     let mut db = ProbeDatabase::default();
-    limit_resident_trees(&mut db);
-    let files = evicting_project(&db);
+    let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
     assert_eq!(db.executions_since(&["parse"]), [files.len()]);
@@ -469,15 +496,14 @@ fn a_cold_check_that_evicts_trees_parses_each_file_once() {
 }
 
 #[test]
-fn an_edit_after_eviction_reparses_and_relints_only_the_edited_file() {
+fn an_edit_after_a_cold_check_reparses_and_relints_only_the_edited_file() {
     let mut db = ProbeDatabase::default();
-    limit_resident_trees(&mut db);
-    let files = evicting_project(&db);
+    let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
     db.checked_since();
 
-    let edited = evicting_project_source(0).replace("x + 0L", "x + 9L");
+    let edited = wide_project_source(0).replace("x + 0L", "x + 9L");
     db.edit(files[0], edited);
     report(&mut db, &files, &lints);
     assert_eq!(
@@ -486,7 +512,7 @@ fn an_edit_after_eviction_reparses_and_relints_only_the_edited_file() {
     );
 }
 
-fn evicting_project_source(index: usize) -> String {
+fn wide_project_source(index: usize) -> String {
     format!(
         "f{index} <- function(x) x + {index}L\n#: integer\nn{index} <- T\n#: integer\nm{index}: integer <- 1L\nsetClass(\"A{index}\")\n"
     )
@@ -733,12 +759,12 @@ fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
     let db = ProbeDatabase::default();
     let files = db.project(&["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"]);
     let items = item_tree(&db, files[0]);
-    let sccs = interface_sccs(&db, ProjectFiles::get(&db));
+    let project = ProjectFiles::get(&db);
     assert!(
-        sccs.membership.contains_key(&items[1]),
+        interface_group(&db, project, items[1]).is_some(),
         "the loop reads the slot it writes, so the group fixpoint resolves it, not salsa"
     );
-    assert!(!sccs.membership.contains_key(&items[0]));
+    assert!(interface_group(&db, project, items[0]).is_none());
     round_trip_edit(
         DocumentKind::Package,
         &["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"],

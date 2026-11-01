@@ -711,8 +711,8 @@ run <- function() guarded(1 + 1)
 #++++
 reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
 total: <T, U> fn(values: list[T] | T[]) -> U
-guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> Unknown
-run: fn() -> Unknown
+guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> T
+run: fn() -> double
 
 #---- a_formal_captured_by_a_defuser_is_optional
 enquo <- function(arg) substitute(arg)
@@ -884,7 +884,7 @@ lookup <- function(in_memory, dir, id) {
   entry$hashes
 }
 #++++
-cache: Unknown
+cache: environment
 lookup: <T, U> fn(in_memory: logical, [dir]: T, id: U) -> Unknown
 
 #---- a_branch_join_of_typed_values_still_checks_the_union
