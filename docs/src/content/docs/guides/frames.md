@@ -122,22 +122,22 @@ checksums. Times are in seconds.
 
 | Operation | GNU R | ry |
 |---|---|---|
-| `fread` | 3.09 | 2.32 |
-| `fwrite` | 0.76 | 1.27 |
-| `setkey` | 0.43 | 0.45 |
-| `setorder` | 0.88 | 0.95 |
-| `unique` | 0.073 | 0.121 |
-| `uniqueN` | 0.11 | 0.15 |
-| `rbindlist` | 0.85 | 1.22 |
-| `melt` | 1.21 | 1.56 |
-| `dcast` | 0.20 | 0.21 |
+| `fread` | 3.09 | 2.03 |
+| `fwrite` | 0.76 | 1.21 |
+| `setkey` | 0.43 | 0.40 |
+| `setorder` | 0.88 | 0.92 |
+| `unique` | 0.073 | 0.070 |
+| `uniqueN` | 0.11 | 0.12 |
+| `rbindlist` | 0.85 | 1.26 |
+| `melt` | 1.21 | 1.38 |
+| `dcast` | 0.20 | 0.19 |
 | `shift` | 0.024 | 0.024 |
-| `fifelse` | 0.086 | 0.081 |
-| `fcoalesce` | 0.062 | 0.065 |
-| `nafill` | 0.082 | 0.083 |
-| `rleid` | 0.025 | 0.025 |
-| `between` | 0.016 | 0.021 |
-| `%chin%` | 0.077 | 0.092 |
-| `tstrsplit` | 5.79 | 6.59 |
+| `fifelse` | 0.086 | 0.088 |
+| `fcoalesce` | 0.062 | 0.061 |
+| `nafill` | 0.082 | 0.085 |
+| `rleid` | 0.025 | 0.026 |
+| `between` | 0.016 | 0.016 |
+| `%chin%` | 0.077 | 0.081 |
+| `tstrsplit` | 5.79 | 4.16 |
 
-Each cell is the faster of two runs.
+Each cell is the fastest of at least four runs.
