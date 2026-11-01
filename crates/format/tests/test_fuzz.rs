@@ -46,6 +46,7 @@ const SEEDS: &[&str] = &[
     "repeat {\n  next\n}\n",
     "{\n  1; 2\n  3\n}\n",
     "p <- (x = 1, y = 2); t <- (1L, \"a\"); e <- (); one <- (x = 1,)\n",
+    "a <- [1, 2, 3]; e <- []; n <- [[1L], [2L, 3L]]\nxs <- [\n  1,\n  2,\n]\nx\n[1]\n",
     "s <- :Rect(width = 2, height = 3); n <- :None\n",
     "match (s) { # c\n  :Circle(radius = r) => r, :Rect(width = w, ..) if (w > 0) => w\n\n  (a, 'x') | (_, a) => a; -1L => 0\n  _ => NULL\n}\n",
     "x: :Some(integer) | :None | .. <- :None\n",

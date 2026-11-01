@@ -31,7 +31,7 @@ use {
         path::{Path, PathBuf},
         sync::Arc,
         thread,
-        time::SystemTime,
+        time::{SystemTime, UNIX_EPOCH},
     },
     syntax::Parse,
 };
@@ -78,6 +78,10 @@ struct LoadedPackage {
     committed: Option<LoadState>,
     /// The state a plan was made for, until the backend confirms it applied.
     pending: Option<LoadState>,
+    /// [`source_fingerprint`] of what is loaded.
+    committed_fingerprint: Option<u64>,
+    /// [`source_fingerprint`] of what the pending plan read.
+    pending_fingerprint: Option<u64>,
 }
 
 /// What is loaded for one package: the load index plus the inputs the analysis does not read.
@@ -241,8 +245,18 @@ impl Loader {
     /// one. The plan stays pending until [`Loader::commit`].
     pub fn plan(&mut self, path: &Path, full: bool) -> Result<Plan, LoadError> {
         let root = find_package_root(path)?;
+        // Taken before reading, so an edit made while the plan is read shows as a change later.
+        let fingerprint = source_fingerprint(&root);
         let inputs = self.read(&root)?;
-        self.plan_inputs(&root, inputs, full)
+        let plan = self.plan_inputs(&root, inputs, full)?;
+        if let Some(package) = self
+            .packages
+            .iter_mut()
+            .find(|package| package.root == root)
+        {
+            package.pending_fingerprint = fingerprint;
+        }
+        Ok(plan)
     }
 
     /// Plans a load of the package at `root` from sources the caller read.
@@ -307,7 +321,10 @@ impl Loader {
                 .get(path)
                 .map_or("", |&file| file_load_index(db, file).text.as_str())
         });
-        self.packages[position].pending = Some(next);
+        let package = &mut self.packages[position];
+        package.pending = Some(next);
+        // Only `plan` knows what the caller's sources were read from, and it sets this after.
+        package.pending_fingerprint = None;
         Ok(plan)
     }
 
@@ -323,10 +340,29 @@ impl Loader {
         match package.pending.take() {
             Some(state) => {
                 package.committed = Some(state);
+                package.committed_fingerprint = package.pending_fingerprint.take();
                 true
             }
             None => false,
         }
+    }
+
+    /// The roots of the loaded packages whose sources changed on disk since they were loaded,
+    /// judged from file names, sizes and modification times without reading a file. A root is
+    /// reported once per change: a reload that fails is not retried until the next change.
+    pub fn changed_roots(&mut self) -> Vec<PathBuf> {
+        let mut changed = Vec::new();
+        for package in &mut self.packages {
+            if package.committed.is_none() {
+                continue;
+            }
+            let current = source_fingerprint(&package.root);
+            if current != package.committed_fingerprint {
+                package.committed_fingerprint = current;
+                changed.push(package.root.clone());
+            }
+        }
+        changed
     }
 
     /// The pending state for `root`, which a backend that persists state saves.
@@ -498,6 +534,8 @@ impl Loader {
                     sources,
                     files: FxHashMap::default(),
                     committed: None,
+                    committed_fingerprint: None,
+                    pending_fingerprint: None,
                     pending: None,
                 });
                 self.packages.len() - 1
@@ -573,11 +611,7 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
     for entry in entries {
         let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let is_code = Path::new(&name)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"));
-        if is_code && entry.path().is_file() {
+        if is_r_code(&name) && entry.path().is_file() {
             names.push(name);
         }
     }
@@ -597,6 +631,14 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
         .into_iter()
         .map(|name| format!("R/{name}"))
         .collect())
+}
+
+/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides.
+fn is_r_code(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
 }
 
 /// The plan that turns `previous` (nothing, for a full load) into `next`. It looks inside only
@@ -1266,6 +1308,40 @@ impl Plan {
             && self.dynamic_libraries.is_none()
             && !self.exports_changed
     }
+}
+
+/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE` and the code
+/// files in `R/`, so a change is noticed without reading a file. `src/` is left out: hashing it
+/// would cost a walk of the compiled sources before every command, and a rebuild is slow enough
+/// that it is asked for with `load_all()`.
+fn source_fingerprint(root: &Path) -> Option<u64> {
+    let mut records = Vec::new();
+    let mut record = |path: &Path| {
+        if let Ok(metadata) = fs::metadata(path) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            records.push(format!(
+                "{}\0{}\0{modified}",
+                path.display(),
+                metadata.len()
+            ));
+        }
+    };
+    record(&root.join("DESCRIPTION"));
+    record(&root.join("NAMESPACE"));
+    let entries = fs::read_dir(root.join("R")).ok()?;
+    // An editor's swap and backup files (`.a.R.swp`, `a.R~`) are not code, so saving one
+    // reloads nothing.
+    for entry in entries.flatten() {
+        if is_r_code(&entry.file_name().to_string_lossy()) {
+            record(&entry.path());
+        }
+    }
+    records.sort();
+    Some(fnv1a(records.join("\n").as_bytes()))
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {

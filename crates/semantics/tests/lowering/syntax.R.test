@@ -110,13 +110,14 @@ for (item in ) 1L
 [
 #++++
 # <statement>
-  Missing
+  Array
 
 #---- bare_open_double_bracket
 [[
 #++++
 # <statement>
-  Missing
+  Array
+    Array
 
 #---- bare_close_paren
 )

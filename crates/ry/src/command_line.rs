@@ -69,8 +69,8 @@ pub enum Command {
         /// Kept for scripts written before `ry R` existed: `gnu-r` runs on GNU R
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
-        /// With `--runtime gnu-r`, do not load the package the working directory belongs to
-        #[arg(long, hide = true, conflicts_with = "script")]
+        /// Do not load the package the working directory belongs to into the console
+        #[arg(long, conflicts_with = "script")]
         no_load: bool,
     },
     /// Run an R script on GNU R, or open a GNU R console without one

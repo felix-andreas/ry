@@ -1626,6 +1626,11 @@ impl Parser<'_, '_> {
                 self.new_expr()
             }
             L_PAREN if self.literal_ahead() => self.collection_literal(),
+            L_BRACKET => self.array_literal(),
+            L_BRACKET2 => {
+                self.split_double_bracket();
+                self.array_literal();
+            }
             ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
                 self.wrap(ERROR);
@@ -2039,7 +2044,7 @@ impl Parser<'_, '_> {
         let dots = self.at(DOTS)
             && self
                 .peek_significant(self.pos + 1, true)
-                .is_none_or(|(kind, _)| matches!(kind, COMMA | R_PAREN));
+                .is_none_or(|(kind, _)| kind == COMMA || kind == closer);
         self.argument(closer);
         let kind = if named {
             ItemKind::Named(unquoted(self.token_str(start)).to_owned())
@@ -2220,6 +2225,48 @@ impl Parser<'_, '_> {
         let named = self.validate_items(&items, "literal");
         self.start_at(checkpoint, if named { RECORD_EXPR } else { TUPLE_EXPR });
         self.finish();
+    }
+
+    /// `[a, b]`: R reads `[` only after an operand, so in operand position it is free for ry's
+    /// Array literal, and every R indexing expression keeps its meaning.
+    fn array_literal(&mut self) {
+        self.start(ARRAY_EXPR);
+        let mut items = Vec::new();
+        self.argument_list_items(L_BRACKET, Some(&mut items));
+        for item in &items {
+            match &item.kind {
+                ItemKind::Empty => self.error_at(item.range, "expected an item in this Array"),
+                ItemKind::Dots => {
+                    self.error_at(item.range, "`...` cannot be spliced into an Array")
+                }
+                ItemKind::Named(_) => self.error_at(
+                    item.range,
+                    "an Array item has no name; use a record such as `(x = 1, y = 2)` for named fields",
+                ),
+                ItemKind::Positional => {}
+            }
+        }
+        self.finish();
+    }
+
+    /// R's lexer reads `[[` as one token, but in operand position it opens two nested Array
+    /// literals, so the token is split in place.
+    fn split_double_bracket(&mut self) {
+        debug_assert!(self.at(L_BRACKET2));
+        let single = TextSize::from(1);
+        self.tokens[self.pos] = Token {
+            kind: L_BRACKET,
+            len: single,
+        };
+        self.tokens.insert(
+            self.pos + 1,
+            Token {
+                kind: L_BRACKET,
+                len: single,
+            },
+        );
+        self.offsets
+            .insert(self.pos + 1, self.offsets[self.pos] + 1);
     }
 
     /// `@Name(value)`: prefix `@` is a syntax error in R, so the form is free. The
@@ -2721,6 +2768,8 @@ fn starts_expression(kind: SyntaxKind) -> bool {
                 | TILDE
                 | QUESTION
                 | L_PAREN
+                | L_BRACKET
+                | L_BRACKET2
                 | L_BRACE
                 | BACKSLASH
         )

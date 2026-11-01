@@ -230,11 +230,16 @@ fn run_console(
     let filter: Box<dyn repl::InputFilter> =
         Box::new(ConsoleFilter::new(preflight, runtime == Runtime::GnuR));
     let completer = Some(Box::new(AnalysisCompleter::new()) as Box<dyn repl::SessionCompleter>);
+    let load = load_package
+        .then(load::current_package)
+        .flatten()
+        .map(|root| load::load_statement(&root, true));
     match runtime {
-        // ry's runtime has no package loader in its console yet, so the console starts bare.
+        // ry's runtime carries its own loader, so it needs only the load statement.
         Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
             repl::RunOptions {
                 keybindings,
+                startup: load.into_iter().collect(),
                 input,
                 filter: Some(filter),
                 completer,
@@ -244,9 +249,7 @@ fn run_console(
         )),
         Runtime::GnuR => {
             let mut startup = vec![load::embedded_runtime()];
-            if let Some(root) = load_package.then(load::current_package).flatten() {
-                startup.push(load::load_statement(&root, true));
-            }
+            startup.extend(load);
             gnu_r_exit(repl::run(repl::RunOptions {
                 keybindings,
                 routines: load::call_routines(),

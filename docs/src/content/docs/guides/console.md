@@ -3,12 +3,13 @@ title: Console
 description: An R console that reloads your package as you edit it, with completion from the type checker
 ---
 
-`ry R` is the R console for working on a package. Start it anywhere inside the package, and each
+`ry run` is the R console for working on a package. Start it anywhere inside the package, and each
 time you edit a file, the next command sees the change without a `load_all()` or a restart:
 
 ```text
-$ ry R
-Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 6 ms.
+$ ry run
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 5 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 > count_words("the  quick fox")     # after editing R/count.R
@@ -17,7 +18,7 @@ Reloaded tally: 1 definition rebound, in 3 ms.
 ```
 
 [Loading packages](/guides/loading-packages) covers this loop in full, including how to get the same
-`load_all()` in RStudio. Outside a package, `ry R` is a plain R console with the extras below.
+`load_all()` in RStudio. Outside a package, `ry run` is a plain R console with the extras below.
 
 ## Completion that knows your values
 
@@ -33,12 +34,12 @@ owner    character
 
 ## Two runtimes
 
-`ry R` runs the GNU R installed on your machine, which ry finds on its own. `ry run` opens the same
-console on ry's own runtime, which runs [records, tags](/type-checking/records-and-tags) and
+`ry run` runs on ry's own runtime, which runs [records, tags](/type-checking/records-and-tags) and
 [`DataFrame`](/guides/dataframes) and turns inline annotations into
 [checks](/type-checking/inline-annotations#running-annotated-code). That runtime is still
-incomplete, so code that needs something it lacks stops with an error that names it, and its
-console does not load your package yet.
+incomplete, so code that needs something it lacks stops with an error that names it. `ry R` opens
+the same console, with the same package loading, on the GNU R installed on your machine, which ry
+finds on its own.
 
 Both run a script when you give them one, and the arguments after the script name reach it through
 `commandArgs(trailingOnly = TRUE)`:

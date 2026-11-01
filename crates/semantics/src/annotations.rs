@@ -1454,6 +1454,24 @@ impl<'db> Lowering<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
+                // An Array is one-dimensional and NA-free, so a vector, list, `NULL` or function
+                // item would make it ragged or missing.
+                if text == "Array"
+                    && let [item] = arguments.as_slice()
+                    && !array_item_annotation(self.db, *item)
+                    && let Some(argument) = node
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::TYPE_ARG_LIST)
+                        .and_then(|list| list.children().find(|c| is_type_kind(c.kind())))
+                {
+                    self.errors.push((
+                        format!(
+                            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+                            argument.text().to_string().trim()
+                        ),
+                        argument.text_range(),
+                    ));
+                }
                 if let Some(range) = reference {
                     self.applied_references.push((text, arguments.len(), range));
                 }
@@ -1618,5 +1636,26 @@ impl<'db> Lowering<'db> {
                 ret,
             }),
         )
+    }
+}
+
+/// Whether an annotation may name `item` as an Array's item type. A type name, a type parameter or
+/// a union of tags may; an R vector, list, `NULL`, function, `complex` or `raw` may not.
+fn array_item_annotation(db: &dyn Db, item: Ty<'_>) -> bool {
+    match item.kind(db) {
+        TyKind::Scalar(atomic) => !matches!(atomic, Atomic::Complex | Atomic::Raw),
+        TyKind::Union(members) => members.iter().all(|&member| {
+            !matches!(member.kind(db), TyKind::Null) && array_item_annotation(db, member)
+        }),
+        TyKind::Vector(_)
+        | TyKind::NamedVector(_)
+        | TyKind::List(_)
+        | TyKind::NamedList(_)
+        | TyKind::Tuple(_)
+        | TyKind::Record(_)
+        | TyKind::Frame(..)
+        | TyKind::Function(_)
+        | TyKind::Null => false,
+        _ => true,
     }
 }

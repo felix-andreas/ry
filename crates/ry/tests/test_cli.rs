@@ -1495,7 +1495,7 @@ fn run_and_r_help_hide_the_runtime_flag() {
         run.stdout
     );
     assert!(run.stdout.contains("--interactive"), "{}", run.stdout);
-    assert!(!run.stdout.contains("--no-load"), "{}", run.stdout);
+    assert!(run.stdout.contains("--no-load"), "{}", run.stdout);
     let r = ry(directory.path(), &["R", "--help"]);
     assert!(
         r.stdout.contains("Usage: ry R [OPTIONS] [FILE] [ARGS]..."),

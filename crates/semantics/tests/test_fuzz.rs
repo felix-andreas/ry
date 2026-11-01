@@ -83,6 +83,18 @@ const TEMPLATES: &[&str] = &[
     "{n} <- memoise::memoise({m})",
     "if ({m}) {n} <- @pure function() 1L",
     "{n} <- local({\n  for (i in 1:2) {m} <- i\n  {m}\n})",
+    "{n} <- [{m}, 1, 2]",
+    "{n} <- []",
+    "#: Array<integer>\n{n} <- [1L, {m}]",
+    "{n} <- [{m}] + [1] * {m}",
+    "{n} <- !([{m}] > 1) & [TRUE]",
+    "{n} <- {m}[[1]] + {m}[[{m}]]",
+    "{n} <- {m}[{m} > 0]",
+    "for (i in [{m}, 2L]) {n} <- i",
+    "{n} <- List.map([{m}], \\(v) v * 2)",
+    "{n} <- as.Array({m})",
+    "{n} <- [({m}, 1L), (2L, {m})]",
+    "#: Array<double[]>\n{n} <- [{m}]",
 ];
 
 const DIRECTIVES: &[&str] = &[
@@ -96,6 +108,7 @@ const SOUP: &[&str] = &[
     "x", "f", "(", ")", "{", "}", "[", "[[", "]", ",", "\n", " ", "<-", "+", "if", "else",
     "function", "1L", "\"s\"", "%in%", "|>", "~", "$", "::", "#:", "@type", "fn", "list{", "NULL",
     "...", ":=", "<<-", "\\", "@new", "match", "=>", ":Some", ":None", "_", "..", "|", "@pure",
+    "Array<", ">", "as.Array", "[1, 2]",
 ];
 
 fn iterations() -> usize {

@@ -115,6 +115,8 @@ pub enum SyntaxKind {
     TUPLE_EXPR,
     /// `(x = 1, y = 2)`, a ry record literal.
     RECORD_EXPR,
+    /// `[a, b]`, a ry Array literal.
+    ARRAY_EXPR,
     /// `:Name` or `:Name(payload)`, a ry tag constructor.
     TAG_EXPR,
     /// `match (value) { arms }`.
@@ -320,6 +322,7 @@ impl SyntaxKind {
             NEXT_EXPR => "`next`",
             TUPLE_EXPR => "tuple",
             RECORD_EXPR => "record",
+            ARRAY_EXPR => "Array",
             TAG_EXPR => "tag",
             MATCH_EXPR => "`match` expression",
             NEW_EXPR => "nominal constructor",

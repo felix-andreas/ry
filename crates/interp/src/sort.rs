@@ -1499,6 +1499,7 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
     let kind = x.kind();
     if kind != y.kind()
         || x.is_object() != y.is_object()
+        || x.is_array() != y.is_array()
         || x.has_gp(gp::S4_OBJECT) != y.has_gp(gp::S4_OBJECT)
     {
         return false;
