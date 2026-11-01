@@ -537,7 +537,9 @@ Any other constraint name is an annotation error, and the error lists the ones t
 argument whose type violates a constraint is a type error at the call. A union satisfies a
 constraint when every member does, so `double | integer` satisfies `numeric`. A vector `U[]`
 satisfies `numeric` when its element is a number, and an undetermined element becomes a
-`scalar numeric` one. A value that must be a number and meets a union takes the member it fits, so
+`scalar numeric` one. A constrained value that meets a union takes the union whole when the
+constraint admits every member, so a number meeting `integer | double` stays `integer | double`.
+Otherwise it takes the first member it fits, so
 `function(n) if (length(n) == 1L) half(n) else lapply(n, half)`, where `half` needs a number, gives
 `n` the type `T[]` from `lapply`'s `list[T] | T[] | NULL`, with `T: scalar numeric`.
 
@@ -1567,7 +1569,8 @@ scalar condition admits:
 - A `character` condition of `if` or `while` is accepted unless it is a string literal. R reads it
   with `as.logical`, which accepts the spellings of `TRUE` and `FALSE` (such as `"T"` or `"true"`),
   and the value of `Sys.getenv("FLAG", unset = "TRUE")` presumably is one. Only a literal shows its
-  text, so `if ("yes")` is reported and `if ("TRUE")` is not.
+  text, so `if ("yes")` is reported and `if ("TRUE")` is not. An operand of `&&` or `||` that is
+  `character` is a type error, because R rejects any string there.
 - A vector is accepted, because a vector type carries no length, and the vector a test produces,
   such as `x >= 1` on a `double[]`, has length one at run time far more often than not. Only a
   `c()` call with two or more arguments is known to be longer than one, so `if (c(TRUE, FALSE))` is
@@ -2551,8 +2554,9 @@ upper_names <- function(x) {
   `function(x, callback) callback(x)` and `function(format) format(1L)` infer the parameter as a
   function, even though base has a `format`. A call declares no parameter names, so a later call
   may name an argument the first call passed by position: after `f(pars, arglist)`, the call
-  `f(pars = pars + 1, arglist)` fills the first free slot without checking it, while an argument
-  beyond the slots the first call used is still an error. When the first call forwarded `...`, as
+  `f(pars = pars + 1, arglist)` takes a slot without checking it, while an argument beyond the
+  slots the first call used is still an error. Which slot the name took is unknown, so the call's
+  positional arguments are not checked either. When the first call forwarded `...`, as
   `f(x, ...)` does, a later name may also go to `...`, so it takes only a slot that the call's
   positional arguments leave free. When the body also reads it as a value and an outer
   binding of the same name is a function, the call could reach either one, so it types as `Unknown`
@@ -2822,7 +2826,8 @@ called as a method. At the top level they are unresolved names.
 
 Inside a function body, `assign("name", value)` and `delayedAssign("name", value)` with a string
 literal name and no other argument bind `name` in the function's frame, as R does. A later read of
-`name` sees that local binding, typed `Unknown`, rather than an outer one, so after
+`name` sees that local binding, typed `Unknown` even when `name` was a parameter or an earlier
+local, rather than an outer one, so after
 `delayedAssign("length", parse_int(read_bytes(2)))` the call `read_bytes(length)` does not read
 base's `length`. A call that names an environment, as in `assign("x", 1, envir = globalenv())`,
 binds nothing locally.

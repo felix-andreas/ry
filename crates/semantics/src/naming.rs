@@ -77,6 +77,9 @@ pub struct ItemNaming {
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
     /// a new write of that slot, so later reads see the added or removed column.
     pub column_updates: SortedMap<ExprId, BindingId>,
+    /// `assign("name", v)` and `delayedAssign("name", v)` calls and the local slot each binds
+    /// to a value ry does not track.
+    pub run_time_writes: SortedMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
     /// Names R creates in the global environment as a side effect: `<<-` targets with no
@@ -121,6 +124,7 @@ struct NamingDraft {
     captured_slots: BTreeSet<BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
+    run_time_writes: BTreeMap<ExprId, BindingId>,
     namespace_reads: BTreeMap<ExprId, NamespaceRead>,
     super_globals: BTreeSet<Symbol>,
     invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
@@ -146,6 +150,7 @@ impl NamingDraft {
             captured_slots: self.captured_slots.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
+            run_time_writes: self.run_time_writes.into(),
             namespace_reads: self.namespace_reads.into(),
             super_globals: self.super_globals.into(),
             invalid_assignment_targets: self.invalid_assignment_targets.into_boxed_slice(),
@@ -488,6 +493,7 @@ impl Context<'_> {
                             BindingKind::Local,
                         );
                         self.record_write(slot, Reach::Implicit);
+                        self.naming.run_time_writes.insert(id, slot);
                         return;
                     }
                     // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last

@@ -1650,7 +1650,27 @@ pub fn argument_targets(
             }
         });
     }
+    // Which slot such a name took is unknown, so the slot each positional argument fills is
+    // unknown too: `f(b = "x", 1)` after `f(1, "x")` puts the `1` first, not second.
+    if function.inferred
+        && function.variadic.is_none()
+        && targets.contains(&Some(ArgumentTarget::UndeclaredName))
+    {
+        for target in &mut targets {
+            if let Some(ArgumentTarget::Positional(_)) = target {
+                *target = Some(ArgumentTarget::UndeclaredName);
+            }
+        }
+    }
     targets
+}
+
+/// Where a value is read as a condition: `if` and `while` read a string through `as.logical`,
+/// while `&&`, `||` and a match guard reject one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionSite {
+    IfOrWhile,
+    Operand,
 }
 
 fn argument_shapes<'a>(arguments: &'a [CallArgument<'_>]) -> Vec<ArgumentShape<'a>> {
@@ -2209,6 +2229,11 @@ impl<'db> Checker<'db, '_> {
                 let first_call_error = self.errors.len();
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 self.check_native_arguments(range, callee, &module[arguments], first_call_error);
+                if let Some(&slot) = self.naming.run_time_writes.get(&id) {
+                    let written = unknown(self.db);
+                    self.environment.set(slot, EnvEntry::Mono(written));
+                    self.note_captured_write(slot, written);
+                }
                 ty
             }
             ExpressionKind::Index {
@@ -3555,7 +3580,7 @@ impl<'db> Checker<'db, '_> {
         else_branch: Option<ExprId>,
         discarded: bool,
     ) -> Ty<'db> {
-        self.expect_scalar_logical(condition);
+        self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
         let guard = self.recognize_guard(condition);
 
         let mark = self.environment.mark();
@@ -3691,7 +3716,7 @@ impl<'db> Checker<'db, '_> {
                 self.note_captured_write(slot, ty);
             }
             if let Some(guard) = arm.guard {
-                self.expect_scalar_logical(guard);
+                self.expect_scalar_logical(guard, ConditionSite::Operand);
             }
             let value = self.infer(arm.body);
             all_values.push(value);
@@ -4320,7 +4345,7 @@ impl<'db> Checker<'db, '_> {
                 self.environment.set(slot, EnvEntry::Mono(element));
             }
             if let Some(condition) = condition {
-                self.expect_scalar_logical(condition);
+                self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
             }
             self.infer(body);
             let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
@@ -5536,7 +5561,7 @@ impl<'db> Checker<'db, '_> {
             // The right operand runs only on the left's true edge for `&&` (false for `||`), so
             // `is.numeric(x) && x > 0` narrows like the `if` it abbreviates.
             And2 | Or2 => {
-                self.expect_scalar_logical(lhs);
+                self.expect_scalar_logical(lhs, ConditionSite::Operand);
                 // `!is.null(x) && length(x)`: the right operand runs only on the left's true
                 // edge (`&&`) or false edge (`||`).
                 let guard = self.recognize_guard(lhs).unwrap_or_default();
@@ -5547,7 +5572,7 @@ impl<'db> Checker<'db, '_> {
                 };
                 let mark = self.environment.mark();
                 self.apply_refinements(&edge);
-                self.expect_scalar_logical(rhs);
+                self.expect_scalar_logical(rhs, ConditionSite::Operand);
                 // The right operand may not run, so its own assignments join with the state
                 // before it; the refinement itself ends with the operator.
                 let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
@@ -5959,7 +5984,7 @@ impl<'db> Checker<'db, '_> {
         self.module.range(id)
     }
 
-    fn expect_scalar_logical(&mut self, condition: ExprId) {
+    fn expect_scalar_logical(&mut self, condition: ExprId, site: ConditionSite) {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
         let resolved = self.structural(inferred);
@@ -5970,7 +5995,10 @@ impl<'db> Checker<'db, '_> {
         }
         // `if` reads a string through `as.logical`, so `if (Sys.getenv("FLAG", unset = "TRUE"))`
         // is ordinary R. Only a literal shows its text, and then only R's logical spellings pass.
-        if matches!(resolved.kind(self.db), TyKind::Scalar(Atomic::Character)) {
+        // `&&`, `||` and a match guard reject any string, so they skip this.
+        if site == ConditionSite::IfOrWhile
+            && matches!(resolved.kind(self.db), TyKind::Scalar(Atomic::Character))
+        {
             let mut operand = condition;
             while let ExpressionKind::Paren(inner) = self.module.kind(operand) {
                 operand = *inner;
@@ -10223,6 +10251,13 @@ impl<'db> Checker<'db, '_> {
                 )
             })
             .count();
+        let filled_by_name = targets
+            .iter()
+            .zip(arguments)
+            .filter(|(target, argument)| {
+                argument.name.is_some() && *target == &Some(ArgumentTarget::UndeclaredName)
+            })
+            .count();
         if forwards_dots || unknown_name {
             return findings;
         }
@@ -10232,8 +10267,8 @@ impl<'db> Checker<'db, '_> {
             return vec![TypeError {
                 range: callee_range,
                 kind: TypeErrorKind::ArityMismatch {
-                    expected: function.positional.len(),
-                    found: positional_filled,
+                    expected: function.positional.len() - filled_by_name,
+                    found: positional_filled - filled_by_name,
                 },
             }];
         }

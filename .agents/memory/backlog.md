@@ -149,8 +149,16 @@ Smaller gaps:
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
-reference. A random sample of the rest is still almost entirely false reports on correct R. The
+reference, then rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
+lifecycle. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
+
+- **Not yet sorted: reports the larger stub set exposed.** They are unanalyzed, so each needs a
+  repro before a fix. The biggest groups: kernlab calls a `character` or `double` local as a
+  function (21); Matrix, devtools and pkgdown calls leave out a required `x` or `object` (26);
+  rmgarch passes `list[Any]` where `list[named: Any]` is expected; usethis names arguments on a
+  callback with no named parameters and tests `character | logical | T | NULL` as `logical`;
+  lifecycle passes `NULL` to `character[]`; pkgdown passes `xml_node | xml_missing` to xml2.
 
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a

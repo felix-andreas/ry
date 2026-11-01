@@ -719,6 +719,8 @@ impl<'db> InferenceTable<'db> {
         }
         // A constrained variable cannot bind to a union that has a member outside its
         // constraint, so `lapply(n, f)` after `f(n)` made `n` numeric fits `X`'s `T[]` member.
+        // A union the constraint admits whole (`integer | double` for a number) binds whole,
+        // because picking a member would reject the others at every later call.
         if let (TyKind::Var(var), TyKind::Union(members)) = (actual.kind(db), expected.kind(db))
             && !matches!(
                 self.entry(self.find(*var)),
@@ -729,6 +731,11 @@ impl<'db> InferenceTable<'db> {
             )
         {
             let members = members.clone();
+            let snapshot = self.snapshot();
+            if self.unify(db, actual, expected).is_ok() {
+                return true;
+            }
+            self.rollback(snapshot);
             return members
                 .into_iter()
                 .any(|member| self.compatible_probe(db, actual, member, depth + 1));

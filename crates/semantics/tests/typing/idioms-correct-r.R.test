@@ -1207,3 +1207,54 @@ fit <- function(f, arglist) {
 hessian: <T, U> fn(f: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
 fit: Unknown
 110..113 error[type-mismatch] expected `double`, found `character`
+
+#---- a_number_meeting_a_union_of_numbers_keeps_the_whole_union
+#: fn(x: integer | double) -> double
+h <- function(x) 1
+g <- function(n) {
+  stopifnot(n + 1 > 0)
+  h(n)
+}
+r <- g(0.5)
+#++++
+h: fn(x: integer | double) -> double
+g: fn(n: integer | double) -> double
+r: double
+
+#---- a_name_on_an_inferred_callback_leaves_the_positional_slots_unchecked
+# R matches `b = "x"` first, so the `1` fills `a`, the first slot, not the second.
+g <- function(f) {
+  f(1, "x")
+  f(b = "x", 1)
+}
+#++++
+g: <T> fn(f: fn(double, character) -> T) -> T
+
+#---- a_string_operand_of_and_is_still_rejected
+f <- function() {
+  s <- paste0("a", "b")
+  if (s && TRUE) 1 else 2
+}
+#++++
+f: Unknown
+48..49 error[type-mismatch] expected `logical`, found `character`
+
+#---- assign_over_a_parameter_makes_it_untyped
+f <- function(value) {
+  assign("value", 1)
+  value + 1
+}
+r <- f("a")
+#++++
+f: <T> fn(value: T) -> Unknown
+r: Unknown
+
+#---- assign_over_a_local_makes_it_untyped
+f <- function() {
+  x <- "a"
+  assign("x", 1)
+  x + 1
+}
+#++++
+f: fn() -> Unknown
+20..21 warning[unused] `x` is assigned but never used.
