@@ -282,16 +282,51 @@ fn expectations_match_a_fresh_gnu_r_run() {
     assert!(status.success());
     let fresh = std::fs::read_to_string(&output).expect("the fresh recording");
     let recorded = std::fs::read_to_string(expected_path()).expect("the recorded expectations");
-    let first_difference = fresh
-        .lines()
-        .zip(recorded.lines())
-        .position(|(fresh, recorded)| fresh != recorded);
+    // GNU R's routines call the system BLAS, whose summation order varies between builds and
+    // even between runs, so a fresh run can differ from the recording in the last digits. The
+    // recording counts as current when it agrees with the fresh run under each case's
+    // tolerance, and ry must agree with the fresh run under the same tolerances.
+    let (fresh_cases, fresh_pretty) = parse_expectations(&fresh);
+    let (recorded_cases, recorded_pretty) = parse_expectations(&recorded);
+    let mut stale = Vec::new();
+    if fresh_cases.len() != recorded_cases.len() || fresh_pretty.len() != recorded_pretty.len() {
+        stale.push(format!(
+            "{} fresh cases and {} pretty calls, {} and {} recorded",
+            fresh_cases.len(),
+            fresh_pretty.len(),
+            recorded_cases.len(),
+            recorded_pretty.len()
+        ));
+    }
+    for (fresh, recorded) in fresh_cases.iter().zip(&recorded_cases) {
+        let tolerance = tolerance(&fresh.name);
+        let values_agree = fresh.values.len() == recorded.values.len()
+            && fresh
+                .values
+                .iter()
+                .zip(&recorded.values)
+                .all(|(fresh, recorded)| tokens_agree(fresh, recorded, tolerance));
+        if fresh.name != recorded.name || !values_agree || fresh.printed != recorded.printed {
+            stale.push(format!("case {:?} (recorded as {:?})", fresh.name, recorded.name));
+        }
+    }
+    for (fresh, recorded) in fresh_pretty.iter().zip(&recorded_pretty) {
+        if fresh.input != recorded.input || fresh.output != recorded.output {
+            stale.push(format!("R_pretty{:?}", fresh.input));
+        }
+    }
     assert!(
-        fresh == recorded,
-        "tests/data/numerics.expected is stale (first difference at line {first_difference:?}, \
-         {} fresh lines, {} recorded); regenerate it with tests/data/numerics.R",
-        fresh.lines().count(),
-        recorded.lines().count()
+        stale.is_empty(),
+        "tests/data/numerics.expected is stale; regenerate it with tests/data/numerics.R:\n{}",
+        stale.join("\n")
+    );
+    let r = r();
+    numerics(&r);
+    let problems = compare_cases(&r, &fresh_cases);
+    assert!(
+        problems.is_empty(),
+        "ry disagrees with a fresh GNU R run:\n{}",
+        problems.join("\n")
     );
 }
 
