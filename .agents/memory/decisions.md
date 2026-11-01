@@ -2788,7 +2788,23 @@ first lines R had already read, leaving R mid-command.
   value, another type or a position out of range goes to tier 0, which applies the Array rules
   (a double position past the last item is an error, not truncated into range). `[` and
   arithmetic on Arrays stay generic, because their results must be Arrays checked for missing
-  values. A copy for a shared Array keeps the bit (`jit_duplicate`).
+  values. A copy for a shared Array keeps the bit (`jit_duplicate`). `List.len` is the `length`
+  intrinsic on an Array or list.
+- **A forgotten variable keeps its type as a guess.** An opaque call forgets every slot, since
+  it may rebind anything, but the slot keeps the type it had. A later load where tier 0 has
+  never read the variable (a branch not taken yet) speculates on that type behind a guard,
+  instead of loading it boxed and leaving its arithmetic to tier 0 for good.
+- **A failed guard after a load resumes after the load.** The load may have forced a promise,
+  and only that forcing set the visibility `withVisible(x)` reads, so tier 0 continues at the
+  next instruction with the boxed value instead of loading again.
+- **A closure's type names its source body.** A `function` site replaces its body constant with
+  the shared compiled code once it has run, so the analysis maps that code back to its source
+  before building `Ty::Closure`. Otherwise the closure guard never matches and the body
+  recompiles until it gives up, with every call left to tier 0.
+- **A backward jump compiles impatiently.** The cold refusal (wait for code that has never run to
+  record its types) applies only to compiles at entry. At a loop's back edge the loop is the hot
+  code, and waiting for the code after it ran three more rounds of back-edge thresholds in
+  tier 0.
 
 # Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
 

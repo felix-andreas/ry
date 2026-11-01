@@ -1657,7 +1657,15 @@ impl<'a> Builder<'a> {
             },
             Op::Closure => {
                 state.visible = Some(true);
-                let ty = Ty::Closure(self.constant(operand(1)), self.constant(operand(2)));
+                // The site's body constant becomes the shared compiled code once the site has run,
+                // while a closure's type names its source body, which is what inlining reads and
+                // what the runtime check compares.
+                let body = self.constant(operand(2));
+                let body = match body.kind() {
+                    SexpType::Bytecode => body.cdr().element(bytecode::SOURCE),
+                    _ => body,
+                };
+                let ty = Ty::Closure(self.constant(operand(1)), body);
                 state.registers[operand(0)] = ty;
                 Action::Step {
                     effect: Effect::Pure,

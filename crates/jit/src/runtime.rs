@@ -485,6 +485,9 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
+            if std::env::var_os("RY_JIT_LOG").is_some() {
+                eprintln!("jit: deopt at pc {pc} (reason {why})");
+            }
             if why == reason::SPECULATION && activation.pending.is_none() {
                 invalidate(machine.code);
             }

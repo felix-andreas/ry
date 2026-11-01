@@ -99,14 +99,14 @@ pub fn install_mode(mode: Mode) {
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
         let entries = values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES];
-        let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get))?;
+        let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get), false)?;
         run(machine, compiled, 0)
     }
 }
 
 unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit> {
     unsafe {
-        let compiled = compiled_for(machine, true)?;
+        let compiled = compiled_for(machine, true, true)?;
         if !compiled.osr.contains(&target) {
             return None;
         }
@@ -115,7 +115,13 @@ unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit
 }
 
 /// The compiled code for the activation, compiling it now when `hot` and it has none.
-unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compiled> {
+/// `in_loop` says a backward jump asked: the loop is running in tier 0 right now, so waiting for
+/// the code after it to record its types would only keep the loop slow.
+unsafe fn compiled_for<'a>(
+    machine: &Machine<'_>,
+    hot: bool,
+    in_loop: bool,
+) -> Option<&'a Compiled> {
     unsafe {
         let constants = machine.code.cdr();
         let tier1 = constants.element(TIER1);
@@ -134,7 +140,7 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
             counters[profile::TIER_STATE] = -1;
             return None;
         }
-        let patient = runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
+        let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
         let result = compile(machine, patient);
         // Compiling reads the profile too, so the counters are borrowed again afterwards.
         let counters = values::ints_mut(constants.element(PROFILE));
