@@ -10170,23 +10170,20 @@ impl<'db> Checker<'db, '_> {
         self.join_types(left, right)
     }
 
-    /// A path that rebinds an untyped value (`if (is.null(repo)) repo <- getwd()`) must not
+    /// A path that rebinds an open value (`if (is.null(repo)) repo <- getwd()`) must not
     /// pin the value the other path still holds, which is usually a parameter. Neither may
     /// a union keep that variable, since a later use of the rebound value (`repo + 1`)
     /// would then constrain the parameter, so the joined value is unchecked.
     fn join_written_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
-        // An unconstrained rigid is the same open parameter written back as an annotation,
-        // so it joins the same way.
+        // A rigid is the same open parameter written back as an annotation, so it joins the
+        // same way. A bound such as `numeric` (from `omega + x` before the rebinding) does not
+        // make the other path's value the parameter's type: `omega <- omega + m %*% m` on one
+        // path must leave a caller free to pass a plain vector.
         let open_parameter = |ty: Ty<'db>| match ty.kind(self.db) {
-            TyKind::Var(_) => {
-                self.table.open_constraint(self.db, ty) == Some(Constraint::Unconstrained)
-            }
-            TyKind::Rigid(name) => matches!(
-                self.table.rigid_constraints.get(name),
-                None | Some(Constraint::Unconstrained)
-            ),
+            TyKind::Var(_) => self.table.open_constraint(self.db, ty).is_some(),
+            TyKind::Rigid(_) => true,
             _ => false,
         };
         let (open, other) = match (
@@ -10195,6 +10192,8 @@ impl<'db> Checker<'db, '_> {
         ) {
             (true, false) => (left_resolved, right_resolved),
             (false, true) => (right_resolved, left_resolved),
+            // Two different parameters (`x <- n` in a loop) stay independent.
+            (true, true) if left_resolved != right_resolved => return unknown(self.db),
             _ => return self.join_types(left, right),
         };
         // A guard's own narrowing (`T` against `T | NULL`) and a `NULL` path keep the

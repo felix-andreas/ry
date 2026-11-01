@@ -466,3 +466,24 @@ run <- function(paths) vapply(paths, with_progress(cache_path), "")
 with_progress: <T> fn(callback: fn(...: Any) -> T) -> fn(...: Any) -> T
 cache_path: <T> fn(path: T) -> character
 run: <T> fn(paths: list[T] | T[]) -> character[]
+
+#---- a_rebinding_on_one_path_leaves_a_numeric_parameter_open
+forecast <- function(omega, regressors, flag) {
+  if (flag) {
+    omega <- omega + regressors %*% regressors
+  }
+  omega
+}
+run <- function(m) forecast(c(1, 2), m, TRUE)
+#++++
+forecast: <T: numeric, U> fn(omega: T, [regressors]: U, flag: logical) -> Unknown
+run: <T> fn(m: T) -> Unknown
+
+#---- a_matrix_scales_by_a_vector
+scale_rows <- function(m, weights) {
+  s <- m %*% m
+  w <- c(0.5, 2)
+  w * s
+}
+#++++
+scale_rows: <T, U> fn(m: T, [weights]: U) -> matrix

@@ -2437,7 +2437,10 @@ when one path rebinds it. A union would let a later use of the rebound value con
 parameter that the other path still holds, so the joined variable is `Unknown` instead, and the
 parameter stays open: `function(x, flag) { if (flag) x <- 1L; x + 1L }` is
 `<T> fn(x: T, flag: logical) -> Unknown`. The default idiom `if (is.null(x)) x <- 0L` joins the
-same way, so `x` reads as `Unknown` after the `if`.
+same way, so `x` reads as `Unknown` after the `if`. A parameter that only carries a bound such as
+`numeric` still counts as untyped, so `if (flag) omega <- omega + m %*% m` leaves `omega` a
+`T: numeric` that a caller may fill with a plain vector, and a loop's `x <- n` does not make two
+parameters one type.
 
 A variable with exactly one reaching write keeps that write's generalized type, so
 `f <- function(x) x` inside a body stays `<T> fn(x: T) -> T`, and so does an alias of it: after
