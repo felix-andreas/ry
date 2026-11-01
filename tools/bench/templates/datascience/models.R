@@ -13,7 +13,6 @@ simulate_regression_@ID@ <- function(rows = @ROWS@L, noise = @NOISE@, seed = 4L)
 
 #: fn(data: data.frame) -> Any
 fit_model_@ID@ <- function(data) {
-  #: formula
   model <- y ~ x1 + x2
   stats::lm(model, data = data)
 }
@@ -37,7 +36,6 @@ fit_logistic_@ID@ <- function(data) {
   #: double[]
   response <- data$y
   data$label <- as.integer(response > stats::median(response))
-  #: formula
   model <- label ~ x1 + x2
   stats::glm(model, data = data, family = stats::binomial())
 }

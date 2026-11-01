@@ -47,7 +47,7 @@ residuals : Any
 fitted : fn(object: Any, ...: Any) -> Any
 coef : fn(object: Any, ...: Any) -> Any
 confint : Any
-formula : @pure Any
+formula : @pure fn(x: Any, ...: Any) -> formula
 as.formula : @pure Any
 aggregate : Any
 optim : Any

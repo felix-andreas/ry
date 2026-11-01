@@ -19,11 +19,10 @@ special <- function(a, b) a %undeclared% b
 formula_model <- function() y ~ x
 #++++
 special: <T, U> fn(a: T, b: U) -> Unknown
-formula_model: fn() -> Unknown
+formula_model: fn() -> formula
 20..21 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
 23..24 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 26..42 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
-71..76 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- a_corpus_declared_operator_is_typed_and_no_origin
 member <- function(a, b) a %in% b
@@ -214,13 +213,13 @@ first: fn(...: Any) -> Any
 #: fn(callback: Any) -> Any
 run <- function(callback) callback(1 + "a")
 #: fn(m: matrix) -> Any
-flip <- function(m) t(m)
+joined <- function(m) merge(m, m)
 #++++
 == R/main.R
 run: fn(callback: Any) -> Any
-flip: fn(m: matrix) -> Any
+joined: fn(m: matrix) -> Any
 67..70 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
-116..120 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+118..129 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- stop_is_strict_clean_in_either_position
 #~~~~ R/main.R

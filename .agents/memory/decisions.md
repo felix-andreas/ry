@@ -3930,7 +3930,17 @@ explicit allocators".
   reports only `Unknown`, so `#: fn(x: Any) -> double` over `sum(x)`, and `utils::head(...)`, are
   clean, while an `Unknown` argument still makes the call a strict finding. A stub's `Any` result
   (`nrow`) was already silent when the stub has one signature, so this makes overloaded and plain
-  calls agree.
+  calls agree. An unannotated parameter is a type parameter, not an inferred `Unknown`, so
+  `t(m)` on an untyped `m` is `Any` too; strict mode already reports the parameter itself.
+
+## A formula is the nominal `formula`, and its operands are not judged
+
+- `~` (unary and binary) types as `formula` (`infer_formula` in `check.rs`). Its operands are
+  inferred for hover and goto-definition, but their errors and strict origins are dropped, because
+  they name model variables (data-frame columns, `.`, `I(x^2)`) that are not bindings in scope.
+  Previously `~` was `Unknown`, so every model call and every `dcast(dt, id ~ n)` was a strict
+  finding that could not even be annotated inline. Rejected: typing operands as ordinary
+  expressions, which would report every column name as unresolved.
 
 ## `$`, `[` and `[[` dispatch to a class's subset method
 

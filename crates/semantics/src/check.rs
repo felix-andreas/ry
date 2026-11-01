@@ -4939,12 +4939,29 @@ impl<'db> Checker<'db, '_> {
                 }
             }
             UnaryOperator::Not => self.infer_unary_not(operand),
-            UnaryOperator::Plus | UnaryOperator::Tilde | UnaryOperator::Help => {
+            UnaryOperator::Tilde => self.infer_formula(&[operand]),
+            UnaryOperator::Plus | UnaryOperator::Help => {
                 self.infer(operand);
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
             }
         }
+    }
+
+    /// A formula quotes its operands, which name model variables rather than bindings in scope,
+    /// so they infer for the IDE but nothing inside is judged.
+    fn infer_formula(&mut self, operands: &[ExprId]) -> Ty<'db> {
+        let errors_mark = self.errors.len();
+        let origins_mark = self.strict_origins.len();
+        for &operand in operands {
+            self.infer(operand);
+        }
+        self.errors.truncate(errors_mark);
+        self.strict_origins.truncate(origins_mark);
+        Ty::new(
+            self.db,
+            TyKind::Named(Name::new(self.db, "formula"), Vec::new()),
+        )
     }
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
@@ -5256,7 +5273,8 @@ impl<'db> Checker<'db, '_> {
             // discarded because nothing inside the construct is judged. Elementwise `&` and `|`
             // over logical or numeric operands are typed; any other operand (raw, a classed
             // object with its own method) leaves them opaque.
-            And | Or | Special | Pipe | Tilde | Help => {
+            Tilde => self.infer_formula(&[lhs, rhs]),
+            And | Or | Special | Pipe | Help => {
                 let errors_mark = self.errors.len();
                 let origins_mark = self.strict_origins.len();
                 let left = self.infer(lhs);

@@ -38,7 +38,6 @@ join_labels_@ID@ <- function(events, labels) {
 
 #: fn(events: FeaturedEvents@ID@) -> data.table
 reshape_wide_@ID@ <- function(events) {
-  #: formula
   shape <- group ~ size_class
   data.table::dcast(events, shape, value.var = "amount", fun.aggregate = sum)
 }

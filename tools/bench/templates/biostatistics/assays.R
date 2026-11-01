@@ -35,7 +35,6 @@ normalise_plate_@ID@ <- function(layout) {
 
 #: fn(layout: data.frame) -> Any
 fit_dose_response_@ID@ <- function(layout) {
-  #: @if-unknown formula
   model <- signal ~ top / (1 + (ec50 / dose)^hill)
   stats::nls(model, data = layout, start = list(top = 100, ec50 = 1, hill = 1))
 }

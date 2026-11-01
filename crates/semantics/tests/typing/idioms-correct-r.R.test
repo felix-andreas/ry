@@ -386,7 +386,7 @@ flip <- function(phi, flag, m) {
   t(m)
 }
 #++++
-flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
+flip: <T, U> fn(phi: T, flag: logical, m: U) -> Any
 
 #---- a_condition_accepts_an_optional_logical
 pluck <- function(config, key) {

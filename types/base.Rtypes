@@ -505,7 +505,9 @@ data.frame : @pure fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.
 table : @pure fn(...: Any, [exclude]: Any, [useNA]: character, [dnn]: Any, [deparse.level]: integer) -> integer[]
 cbind : @pure fn(...: Any, [deparse.level]: double) -> Any
 rbind : @pure fn(...: Any, [deparse.level]: double, [make.row.names]: logical, [stringsAsFactors]: logical, [factor.exclude]: Any) -> Any
-t : @pure Any
+# `t` transposes a matrix, and a data frame or a plain vector becomes a matrix first.
+t : @pure fn(x: matrix | data.frame | double[] | integer[] | character[] | logical[]) -> matrix
+t : @pure fn(x: Any) -> Any
 diag : @pure fn([x]: Any, [nrow]: Any, [ncol]: Any, [names]: logical) -> Any
 crossprod : @pure fn(x: Any, [y]: Any, ...: Any) -> matrix
 tcrossprod : @pure fn(x: Any, [y]: Any, ...: Any) -> matrix
@@ -574,6 +576,9 @@ sapply : Any
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical, FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer | logical, FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
+# A vector-valued `FUN` gives a matrix when `FUN.VALUE` has several elements and a vector when it has
+# one, which the types cannot tell apart, and R coerces an integer or logical result to double.
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any

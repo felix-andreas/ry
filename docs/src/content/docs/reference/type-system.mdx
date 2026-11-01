@@ -1942,6 +1942,13 @@ one whose type is `Unknown` makes it `Unknown`, which strict mode reports where 
 was lost. An operand with no type yet, such as an unannotated parameter, could be a scalar or a
 vector, so the operator gives `Unknown` and strict mode reports it; annotate the parameter.
 
+### Formula operator `~`
+
+A formula, one-sided (`~ x`) or two-sided (`y ~ x + z`), is the nominal type `formula`. Its operands
+name model variables, which are usually columns of a data frame rather than bindings in scope, so
+they are not checked: `y ~ undefined_name + "text"` reports nothing. Annotate a formula variable or
+parameter as `formula`.
+
 ## Calls
 
 ### Function calls

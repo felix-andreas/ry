@@ -120,10 +120,10 @@ double[]
 matrix
 
 #==== unsupported_operators
-#---- tilde_formula_is_unsupported
+#---- tilde_is_a_formula
 1L ~ 2L
 #++++
-Unknown
+formula
 
 #---- s4_slot_read_is_unknown_but_visits_the_subject
 value <- 1L

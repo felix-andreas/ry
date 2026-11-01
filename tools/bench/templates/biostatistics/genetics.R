@@ -33,7 +33,6 @@ stack_cohorts_@ID@ <- function(...) abind::abind(..., along = 1)
 
 #: fn(genotype: integer[], phenotype: double[]) -> double[]
 association_@ID@ <- function(genotype, phenotype) {
-  #: @if-unknown formula
   model <- phenotype ~ genotype
   fit <- stats::lm(model)
   stats::coef(summary(fit))["genotype", c("Estimate", "Pr(>|t|)")]
