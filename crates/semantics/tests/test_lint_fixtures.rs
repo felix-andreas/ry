@@ -3,7 +3,7 @@
 use {
     semantics::{
         DocumentKind,
-        diagnostics::Severity,
+        diagnostics::{Applicability, Severity},
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
         testing::with_fixture_project,
     },
@@ -31,6 +31,18 @@ fn render_with(source: &str, config: &LintConfig) -> String {
                     diagnostic.code,
                     diagnostic.message
                 ));
+                if let Some(fix) = &diagnostic.fix {
+                    let applicability = match fix.applicability {
+                        Applicability::Safe => "safe",
+                        Applicability::Unsafe => "unsafe",
+                    };
+                    output.push_str(&format!(
+                        "  {applicability} fix {}..{} {:?}\n",
+                        u32::from(fix.range.start()),
+                        u32::from(fix.range.end()),
+                        fix.replacement
+                    ));
+                }
             }
             if output.is_empty() {
                 output.push_str("clean\n");
@@ -55,6 +67,8 @@ fn lint_style_fixtures() {
         unused_parameter: LintLevel::Warn,
         shadows_builtin: LintLevel::Warn,
         shadows_namespace: LintLevel::Warn,
+        commented_code: LintLevel::Warn,
+        redundant_return: LintLevel::Warn,
         ..LintConfig::default()
     };
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints-style");

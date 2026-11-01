@@ -134,3 +134,64 @@ myCount: integer <- 1L
 f <- function(myValue: integer) myValue
 #++++
 14..21 warning[naming-style] Parameter `myValue` should have snake_case name, e.g. my_value
+
+#==== commented-code
+#---- commented_out_code_warns
+# x <- compute(y)
+# print(result)
+#if (a) b
+f <- function(x) x
+#++++
+0..17 warning[commented-code] This comment is code. Delete it, since version control keeps the history
+18..33 warning[commented-code] This comment is code. Delete it, since version control keeps the history
+34..43 warning[commented-code] This comment is code. Delete it, since version control keeps the history
+
+#---- prose_and_documentation_are_clean
+# Compute the total from the inputs.
+# TODO: handle NA
+#' @param x a number
+#: fn(x: num) -> num
+#> [1] 1
+# x
+# see section 3
+f <- function(x) x
+#++++
+clean
+
+#==== redundant-return
+#---- tail_return_warns
+f <- function(x) {
+  y <- x + 1
+  return(y)
+}
+g <- function(x) {
+  if (x) return(1) else return(2)
+}
+h <- function(x) return(y <- x)
+#++++
+34..43 warning[redundant-return] This return() is redundant: a function returns the value of its last expression
+  safe fix 34..43 "y"
+74..83 warning[redundant-return] This return() is redundant: a function returns the value of its last expression
+  safe fix 74..83 "1"
+89..98 warning[redundant-return] This return() is redundant: a function returns the value of its last expression
+  safe fix 89..98 "2"
+118..132 warning[redundant-return] This return() is redundant: a function returns the value of its last expression
+  unsafe fix 118..132 "y <- x"
+
+#---- early_return_and_bound_return_are_clean
+f <- function(x) {
+  if (x) return(1)
+  2
+}
+g <- function() return
+h <- function(x) invisible(x)
+#++++
+clean
+
+#---- return_redefined_in_the_file_is_clean
+return <- function(x) x
+f <- function(x) {
+  return(x)
+}
+#++++
+0..6 warning[shadows-builtin] Top-level binding `return` shadows a builtin.

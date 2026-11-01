@@ -16,11 +16,13 @@ clean
 snake_name <- T
 #++++
 14..15 warning[boolean-shorthand] Use TRUE, not T, for Boolean values
+  safe fix 14..15 "TRUE"
 
 #---- assignment_equals
 snake_name = 1L
 #++++
 11..12 warning[assignment-operator] Use <-, not =, for assignment
+  safe fix 11..12 "<-"
 
 #---- trailing_comma
 snake_name(
@@ -28,6 +30,7 @@ snake_name(
 )
 #++++
 24..25 warning[trailing-comma] Unexpected comma after last argument
+  safe fix 24..25 ""
 
 #==== naming_style
 #---- snake_case_required_in_function

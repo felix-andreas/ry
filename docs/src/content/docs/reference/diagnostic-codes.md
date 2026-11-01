@@ -58,6 +58,11 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `assignment-operator` | `=` to `<-` | safe |
 | `boolean-shorthand` | `T` to `TRUE`, `F` to `FALSE` | safe |
 | `trailing-comma` | remove the comma | safe |
+| `redundant-return` | `return(x)` to `x` (unsafe when `x` is an assignment, which `return()` prints and a last expression does not) | safe |
+| `equals-na` | `x == NA` to `is.na(x)`, `x != NA` to `!is.na(x)` | unsafe |
+| `vector-logic` | `&` to `&&`, `|` to `||` | unsafe |
+| `length-sequence` | `1:length(x)` to `seq_along(x)`, `1:nrow(x)` to `seq_len(nrow(x))` | unsafe |
+| `class-equals` | `class(x) == "a"` to `inherits(x, "a")` | unsafe |
 | `annotation-mismatch` | change the `#:` comment to the inline type, when ry uses the inline one and it names no type parameter | safe |
 | `unreachable-pattern` | remove the arm, when it has its lines to itself | safe |
 | `unresolved`, `type-mismatch`, `annotation` | change a misspelled name, argument, field, column or type to the suggestion | unsafe |
@@ -106,6 +111,25 @@ no finding for that name, because there it may mean the binding.
 argument, which fails only when the callee evaluates it: `c(1, 2, )` stops with "argument 3 is
 empty", while `ngettext(2, "a", "b", )` runs, because the empty argument leaves `domain` at its
 default.
+
+**`equals-na`** (warning): a comparison with `NA`, such as `x == NA`, which gives `NA` whatever `x`
+holds, so it never tests whether a value is missing. The fix to `is.na(x)` is unsafe because the
+result changes from `NA` to `TRUE` or `FALSE`, which is the point but changes what the code does.
+
+**`vector-logic`** (warning): `&` or `|` in an `if` or `while` condition, where `&&` and `||` skip the right-hand side once the left decides the answer, and (since R 4.3)
+stop with an error on a vector longer than one instead of looking at its first element. The fix
+is unsafe because the right-hand side may no longer run. Inside a call such as `any(x & y)` the
+operator is left alone, because there it works on vectors on purpose.
+
+**`length-sequence`** (warning): `1:length(x)`, `1:nrow(x)`, `1:ncol(x)`, `1:NROW(x)` or
+`1:NCOL(x)`. When the length is zero, `1:0` is `c(1, 0)`, so a loop over it runs twice instead of
+not at all. The fix to `seq_along(x)` or `seq_len(nrow(x))` is unsafe because it changes what an
+empty input does.
+
+**`class-equals`** (warning): `class(x) == "name"` or `!=`, which misses an object whose class
+vector has several entries: a tibble's class is `c("tbl_df", "tbl", "data.frame")`, so the
+comparison gives three values, and since R 4.2 an `if` on it stops with an error. The fix to `inherits(x, "name")` is unsafe because it changes the result for such
+objects.
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
 `setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
@@ -194,5 +218,14 @@ mentions. Only `ry check` reports it.
 function from `base`, or from another package, such as defining your own `filter` while
 `stats::filter` exists.
 
-These four take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
+**`redundant-return`** (off by default): `return(x)` as a function's last expression, including
+both branches of a trailing `if`, where `x` alone returns the same value. A file that defines its
+own `return` gets no finding.
+
+**`commented-code`** (off by default): a comment that parses as R and calls, assigns, defines,
+branches, loops or indexes, such as `# x <- compute(y)`. Prose rarely parses that way, and roxygen
+(`#'`), plumber (`#*`), Quarto (`#|`), `#!` and `#>` output comments are skipped. Delete the code
+instead: version control keeps it.
+
+These six take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
 still accepted and does nothing, because `f(1 2)` is now a syntax error, as it is in R.

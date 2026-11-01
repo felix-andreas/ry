@@ -55,6 +55,18 @@ pub struct LintConfig {
     /// Warns by default: S4, R6 and Reference Classes still run, but ry recommends
     /// records and tagged unions, which it checks statically.
     pub object_system: LintLevel,
+    /// `x == NA`, which is always `NA`.
+    pub equals_na: LintLevel,
+    /// `&` or `|` in an `if` or `while` condition.
+    pub vector_logic: LintLevel,
+    /// `1:length(x)` and its kin, which count down to 0 for an empty input.
+    pub length_sequence: LintLevel,
+    /// `class(x) == "a"`, which misses objects with several classes.
+    pub class_equals: LintLevel,
+    /// Off by default: dead code kept in comments is a style choice, not a bug.
+    pub commented_code: LintLevel,
+    /// Off by default: an explicit final `return()` is a style choice.
+    pub redundant_return: LintLevel,
     /// Copied from `[check] object-systems = false` when the config loads, which turns
     /// every definition into an error whatever `object_system` says.
     #[serde(skip)]
@@ -225,6 +237,12 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
                 }
+                SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
+                    vector_logic_lint(&red, config, diagnostics);
+                }
+                SyntaxKind::FUNCTION_DEF => {
+                    redundant_return_lint(&red, config, &mut lints.unless_redefined);
+                }
                 _ => {}
             }
         }
@@ -233,7 +251,11 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Token { .. } => {}
+        GreenEvent::Token { kind, text, range } => {
+            if kind == SyntaxKind::COMMENT && annotation_depth == 0 {
+                commented_code_lint(text, range, config, diagnostics);
+            }
+        }
     });
 }
 
@@ -290,6 +312,7 @@ fn boolean_shorthand_lint(
         ),
         _ => return,
     };
+    let replacement = replacement.to_owned();
     let mut diagnostics = Vec::new();
     push_lint(
         &mut diagnostics,
@@ -298,7 +321,7 @@ fn boolean_shorthand_lint(
         "boolean-shorthand",
         token.text_range(),
         message,
-        Some((title, replacement)),
+        Some((Applicability::Safe, title, replacement)),
     );
     unless_redefined.extend(
         diagnostics
@@ -312,9 +335,21 @@ fn boolean_shorthand_lint(
 fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfig) -> bool {
     match node.kind() {
         SyntaxKind::BINARY_EXPR => node.child_kinds().any(|kind| {
-            kind == SyntaxKind::EQ
-                || (config.naming_style.is_some() && kind == SyntaxKind::LESS_MINUS)
+            matches!(
+                kind,
+                SyntaxKind::EQ | SyntaxKind::EQ2 | SyntaxKind::BANG_EQ | SyntaxKind::COLON
+            ) || (config.naming_style.is_some() && kind == SyntaxKind::LESS_MINUS)
         }),
+        SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
+            is_enabled(config.vector_logic, Some(Severity::Warning))
+                && node.child_kinds().any(|kind| {
+                    matches!(
+                        kind,
+                        SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR | SyntaxKind::PAREN_EXPR
+                    )
+                })
+        }
+        SyntaxKind::FUNCTION_DEF => is_enabled(config.redundant_return, None),
         SyntaxKind::ARGUMENT_LIST => {
             parent.is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
                 && node
@@ -355,8 +390,18 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             "assignment-operator",
             operator.text_range(),
             "Use <-, not =, for assignment",
-            Some(("Change to `<-`", "<-")),
+            Some((Applicability::Safe, "Change to `<-`", "<-".to_owned())),
         );
+    }
+    if matches!(operator.kind(), SyntaxKind::EQ2 | SyntaxKind::BANG_EQ)
+        && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
+    {
+        comparison_lints(node, operator.kind(), &lhs, &rhs, config, diagnostics);
+    }
+    if operator.kind() == SyntaxKind::COLON
+        && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
+    {
+        length_sequence_lint(node, &lhs, &rhs, config, diagnostics);
     }
     if let Some(style) = config.naming_style
         && matches!(operator.kind(), SyntaxKind::LESS_MINUS | SyntaxKind::EQ)
@@ -366,18 +411,8 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
     {
         let name = target.text().to_string();
         if let Some(message) = naming_style_message(&name, style, "Variable") {
-            // Excludes the trailing trivia (a comment or newline) some expression nodes swallow.
-            let start = target.text_range().start();
-            let mut end = target.text_range().end();
-            let mut token = target.last_token();
-            while let Some(trivia) = token.filter(|token| token.kind().is_trivia()) {
-                end = trivia.text_range().start();
-                token = trivia
-                    .prev_token()
-                    .filter(|previous| previous.text_range().start() >= start);
-            }
             diagnostics.push(Diagnostic::new(
-                TextRange::new(start, end),
+                significant_range(&target),
                 Severity::Warning,
                 "naming-style",
                 message,
@@ -522,6 +557,390 @@ fn parameter_name_lint(
     }
 }
 
+/// `x == NA` and `class(x) == "a"`, with `!=` alike. Each fix swaps the comparison for the test
+/// it was meant to be, so it changes what the code computes and is unsafe.
+fn comparison_lints(
+    comparison: &SyntaxNode,
+    operator: SyntaxKind,
+    lhs: &SyntaxNode,
+    rhs: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let negation = if operator == SyntaxKind::BANG_EQ {
+        "!"
+    } else {
+        ""
+    };
+    let range = significant_range(comparison);
+    let other = if is_na_literal(rhs) {
+        Some(lhs)
+    } else if is_na_literal(lhs) {
+        Some(rhs)
+    } else {
+        None
+    };
+    if let Some(other) = other {
+        push_lint(
+            diagnostics,
+            config.equals_na,
+            Severity::Warning,
+            "equals-na",
+            range,
+            "Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values",
+            Some((
+                Applicability::Unsafe,
+                "Change to `is.na()`",
+                format!("{negation}is.na({})", significant_text(other)),
+            )),
+        );
+        return;
+    }
+    let class_call = |node: &SyntaxNode, other: &SyntaxNode| {
+        is_string_literal(other)
+            .then(|| single_argument_of(node, &["class"]))
+            .flatten()
+            .map(|(_, argument)| (argument, significant_text(other)))
+    };
+    if let Some((argument, class)) = class_call(lhs, rhs).or_else(|| class_call(rhs, lhs)) {
+        push_lint(
+            diagnostics,
+            config.class_equals,
+            Severity::Warning,
+            "class-equals",
+            range,
+            "Comparing class() with a string misses objects that have several classes. Use inherits()",
+            Some((
+                Applicability::Unsafe,
+                "Change to `inherits()`",
+                format!(
+                    "{negation}inherits({}, {class})",
+                    significant_text(&argument)
+                ),
+            )),
+        );
+    }
+}
+
+/// `1:length(x)` is `c(1, 0)` for an empty `x`, so a loop over it runs twice instead of never.
+/// The fix makes the empty case run zero times, which is what the loop meant but not what it
+/// did, so it is unsafe.
+fn length_sequence_lint(
+    sequence: &SyntaxNode,
+    lhs: &SyntaxNode,
+    rhs: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let starts_at_one = lhs.kind() == SyntaxKind::LITERAL
+        && lhs
+            .first_token()
+            .is_some_and(|token| matches!(token.text(), "1" | "1L"));
+    if !starts_at_one {
+        return;
+    }
+    let Some((function, argument)) =
+        single_argument_of(rhs, &["length", "nrow", "ncol", "NROW", "NCOL"])
+    else {
+        return;
+    };
+    let argument = significant_text(&argument);
+    let (message, title, replacement) = if function == "length" {
+        (
+            "`1:length(...)` is `c(1, 0)` when the vector is empty. Use seq_along()".to_owned(),
+            "Change to `seq_along()`",
+            format!("seq_along({argument})"),
+        )
+    } else {
+        (
+            format!("`1:{function}(...)` is `c(1, 0)` when the count is zero. Use seq_len()"),
+            "Change to `seq_len()`",
+            format!("seq_len({function}({argument}))"),
+        )
+    };
+    push_lint(
+        diagnostics,
+        config.length_sequence,
+        Severity::Warning,
+        "length-sequence",
+        significant_range(sequence),
+        message,
+        Some((Applicability::Unsafe, title, replacement)),
+    );
+}
+
+/// `&` and `|` work element by element and always evaluate both sides; a condition wants one
+/// value, which `&&` and `||` insist on. Only operators that decide the condition itself count,
+/// so `if (any(x & y))` is fine. The fix is unsafe because `&&` skips evaluating its right side.
+fn vector_logic_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
+    let Some(condition) = node.first_child() else {
+        return;
+    };
+    let mut pending = vec![condition];
+    while let Some(expression) = pending.pop() {
+        match expression.kind() {
+            SyntaxKind::PAREN_EXPR | SyntaxKind::UNARY_EXPR => {
+                pending.extend(expression.children());
+            }
+            SyntaxKind::BINARY_EXPR => {
+                let Some(binary) = BinaryExpr::cast(expression.clone()) else {
+                    continue;
+                };
+                let Some(operator) = binary.operator() else {
+                    continue;
+                };
+                let scalar = match operator.kind() {
+                    SyntaxKind::AMP => "&&",
+                    SyntaxKind::PIPE => "||",
+                    SyntaxKind::AMP2 | SyntaxKind::PIPE2 => "",
+                    _ => continue,
+                };
+                pending.extend(binary.lhs());
+                pending.extend(binary.rhs());
+                if scalar.is_empty() {
+                    continue;
+                }
+                let keyword = if node.kind() == SyntaxKind::IF_EXPR {
+                    "an `if`"
+                } else {
+                    "a `while`"
+                };
+                push_lint(
+                    diagnostics,
+                    config.vector_logic,
+                    Severity::Warning,
+                    "vector-logic",
+                    operator.text_range(),
+                    format!(
+                        "Use {scalar}, not {}, in {keyword} condition: {} works element by element and always evaluates both sides",
+                        operator.text(),
+                        operator.text()
+                    ),
+                    Some((
+                        Applicability::Unsafe,
+                        &format!("Change to `{scalar}`"),
+                        scalar.to_owned(),
+                    )),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A `return(x)` whose value the function would return anyway: the last expression of the body,
+/// or of a branch of an `if` in that place. Keyed on `return` because a file that binds its own
+/// `return` may mean that function.
+fn redundant_return_lint(
+    function: &SyntaxNode,
+    config: &LintConfig,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
+) {
+    let Some(body) = function
+        .children()
+        .filter(|child| {
+            !matches!(
+                child.kind(),
+                SyntaxKind::PARAMETER_LIST | SyntaxKind::RETURN_TYPE | SyntaxKind::PURE_MARKER
+            )
+        })
+        .last()
+    else {
+        return;
+    };
+    let mut diagnostics = Vec::new();
+    let mut pending = vec![body];
+    while let Some(tail) = pending.pop() {
+        match tail.kind() {
+            SyntaxKind::BRACE_EXPR => pending.extend(tail.children().last()),
+            SyntaxKind::IF_EXPR => pending.extend(tail.children().skip(1)),
+            SyntaxKind::CALL_EXPR => {
+                if let Some(("return", value)) = single_argument_of(&tail, &["return"]) {
+                    // `return(x <- 1)` returns visibly but a trailing `x <- 1` is invisible, so
+                    // unwrapping an assignment changes what the console prints.
+                    let assigns = BinaryExpr::cast(value.clone())
+                        .and_then(|binary| binary.operator())
+                        .is_some_and(|operator| {
+                            matches!(
+                                operator.kind(),
+                                SyntaxKind::LESS_MINUS
+                                    | SyntaxKind::LESS2_MINUS
+                                    | SyntaxKind::MINUS_GREATER
+                                    | SyntaxKind::MINUS_GREATER2
+                                    | SyntaxKind::EQ
+                                    | SyntaxKind::COLON_EQ
+                            )
+                        });
+                    let applicability = if assigns {
+                        Applicability::Unsafe
+                    } else {
+                        Applicability::Safe
+                    };
+                    push_lint(
+                        &mut diagnostics,
+                        config.redundant_return,
+                        Severity::Warning,
+                        "redundant-return",
+                        significant_range(&tail),
+                        "This return() is redundant: a function returns the value of its last expression",
+                        Some((applicability, "Remove `return()`", significant_text(&value))),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    unless_redefined.extend(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| ("return".to_owned(), diagnostic)),
+    );
+}
+
+/// A comment whose text parses as R and does something (calls, assigns, defines, branches,
+/// loops or indexes), which prose almost never does. Roxygen (`#'`), plumber (`#*`), Quarto
+/// (`#|`), shebang (`#!`) and printed output (`#>`) comments are other tools' syntax.
+fn commented_code_lint(
+    text: &str,
+    range: TextRange,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !is_enabled(config.commented_code, None) {
+        return;
+    }
+    let after_hashes = text.trim_start_matches('#');
+    if after_hashes.starts_with(['\'', '*', '|', '!', '>']) {
+        return;
+    }
+    let code = after_hashes.trim();
+    if code.is_empty() {
+        return;
+    }
+    let parsed = syntax::parse(code);
+    if !parsed.errors().is_empty() {
+        return;
+    }
+    let does_something = parsed
+        .syntax_node()
+        .descendants()
+        .any(|node| match node.kind() {
+            SyntaxKind::CALL_EXPR
+            | SyntaxKind::FUNCTION_DEF
+            | SyntaxKind::IF_EXPR
+            | SyntaxKind::FOR_EXPR
+            | SyntaxKind::WHILE_EXPR
+            | SyntaxKind::SUBSET_EXPR
+            | SyntaxKind::SUBSET2_EXPR
+            | SyntaxKind::DOLLAR_EXPR => true,
+            SyntaxKind::BINARY_EXPR => BinaryExpr::cast(node)
+                .and_then(|binary| binary.operator())
+                .is_some_and(|operator| {
+                    matches!(
+                        operator.kind(),
+                        SyntaxKind::LESS_MINUS
+                            | SyntaxKind::LESS2_MINUS
+                            | SyntaxKind::MINUS_GREATER
+                            | SyntaxKind::MINUS_GREATER2
+                    )
+                }),
+            _ => false,
+        });
+    if does_something {
+        push_lint(
+            diagnostics,
+            config.commented_code,
+            Severity::Warning,
+            "commented-code",
+            range,
+            "This comment is code. Delete it, since version control keeps the history",
+            None,
+        );
+    }
+}
+
+fn is_na_literal(node: &SyntaxNode) -> bool {
+    node.kind() == SyntaxKind::LITERAL
+        && node.first_token().is_some_and(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::NA_KW
+                    | SyntaxKind::NA_INTEGER_KW
+                    | SyntaxKind::NA_REAL_KW
+                    | SyntaxKind::NA_COMPLEX_KW
+                    | SyntaxKind::NA_CHARACTER_KW
+            )
+        })
+}
+
+fn is_string_literal(node: &SyntaxNode) -> bool {
+    node.kind() == SyntaxKind::LITERAL
+        && node.first_token().is_some_and(|token| {
+            matches!(token.kind(), SyntaxKind::STRING | SyntaxKind::RAW_STRING)
+        })
+}
+
+/// The callee (one of `names`, called bare) and the value of a call with exactly one argument,
+/// passed by position: `length(x)` but not `length(x = x)` or `base::length(x)`.
+fn single_argument_of(
+    call: &SyntaxNode,
+    names: &[&'static str],
+) -> Option<(&'static str, SyntaxNode)> {
+    if call.kind() != SyntaxKind::CALL_EXPR {
+        return None;
+    }
+    let mut children = call.children();
+    let callee = children
+        .next()
+        .filter(|callee| callee.kind() == SyntaxKind::NAME)?;
+    let callee_text = callee.text();
+    let name = names.iter().copied().find(|name| callee_text == *name)?;
+    let arguments = children.find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
+    let mut argument_nodes = arguments
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT);
+    let argument = argument_nodes.next()?;
+    if argument_nodes.next().is_some()
+        || arguments
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::COMMA)
+        || argument
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::EQ)
+    {
+        return None;
+    }
+    let value = argument.first_child()?;
+    Some((name, value))
+}
+
+/// The node's range without the leading or trailing trivia (a comment or newline) some
+/// expression nodes swallow.
+fn significant_range(node: &SyntaxNode) -> TextRange {
+    let significant = |token: &syntax::SyntaxToken| !token.kind().is_trivia();
+    let mut tokens = node
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token());
+    let start = tokens
+        .find(significant)
+        .map_or(node.text_range().start(), |token| {
+            token.text_range().start()
+        });
+    let end = std::iter::successors(node.last_token(), |token| {
+        token
+            .prev_token()
+            .filter(|previous| previous.text_range().start() >= node.text_range().start())
+    })
+    .find(significant)
+    .map_or(node.text_range().end(), |token| token.text_range().end());
+    TextRange::new(start, end.max(start))
+}
+
+fn significant_text(node: &SyntaxNode) -> String {
+    let range = significant_range(node) - node.text_range().start();
+    node.text().to_string()[range].to_owned()
+}
+
 fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option<String> {
     // SCREAMING_SNAKE_CASE is R's conventional constant spelling, so it conforms under every style.
     if actual.chars().all(|character| {
@@ -548,7 +967,8 @@ fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option
     ))
 }
 
-/// `fix` is a title and the text that replaces the whole reported range.
+/// `fix` is the fix's applicability, its title, and the text that replaces the whole reported
+/// range.
 fn push_lint(
     diagnostics: &mut Vec<Diagnostic>,
     level: LintLevel,
@@ -556,20 +976,21 @@ fn push_lint(
     code: &'static str,
     range: TextRange,
     message: impl Into<String>,
-    fix: Option<(&str, &str)>,
+    fix: Option<(Applicability, &str, String)>,
 ) {
     if let Some(severity) = lint_severity(level, Some(default_severity)) {
         let diagnostic = Diagnostic::new(range, severity, code, message.into());
         diagnostics.push(match fix {
-            Some((title, replacement)) => diagnostic.with_fix(
-                Applicability::Safe,
-                title.to_owned(),
-                range,
-                replacement.to_owned(),
-            ),
+            Some((applicability, title, replacement)) => {
+                diagnostic.with_fix(applicability, title.to_owned(), range, replacement)
+            }
             None => diagnostic,
         });
     }
+}
+
+fn is_enabled(level: LintLevel, default: Option<Severity>) -> bool {
+    lint_severity(level, default).is_some()
 }
 
 /// An opt-in lint has no default severity, so `Default` leaves it off.
