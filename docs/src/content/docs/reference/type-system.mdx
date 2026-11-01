@@ -454,6 +454,11 @@ compatible with `list[T]` and `list[named: T]` alike, which makes `function(opti
 usable default for a `list[named: T]` parameter. A record type with required fields still rejects
 it, because those fields really are missing.
 
+Code starts from `list()` and fills it later far more often than it reads from a list it knows is
+empty, so any element read from `list{}` is `Unknown`: `out <- list(); out[[1]]` and
+`opts <- list(); opts$force` are not reported. Inside a union, an empty-list member contributes
+`NULL` to a field read instead, as [`$` on a union](#indexing) describes.
+
 ### `NULL`
 
 The literal `NULL` has the type `NULL`, which is the unit type of this type system and is
@@ -1183,7 +1188,9 @@ call is an error.
 Inside a wrapper, a call that forwards its own `...` to a function parameter, as in
 `function(func, x, ...) func(unique(x), ...)`, demands only the parameters its other arguments fill,
 because the forwarded `...` may be empty. So `dedup(basename, paths)` is accepted even though
-`basename` takes a single argument.
+`basename` takes a single argument. A call that passes nothing but the forwarded `...`, as in
+`function(callback) function(...) callback(...)`, gives the parameter the type `fn(...: Any) -> T`,
+which any function satisfies.
 
 ### Higher-order function types
 
@@ -1348,7 +1355,7 @@ members.
 - `(integer | character) + 1L` is a type error, because the `character` member is not numeric.
 - `(integer | NULL) + 1L` is a type error, because the `NULL` member is not numeric.
 - `rec$a` on `list{a: integer} | list{a: character}` is `integer | character`. A member that lacks
-  the field contributes `NULL` instead, as [indexing](#indexing) describes.
+  the field changes the result, as [indexing](#indexing) describes.
 - A `for` loop over `integer[] | character[]` binds its variable as `integer | character`.
 
 #### Conditions
@@ -1380,9 +1387,9 @@ name follows the same rule. `$` does not work on atomic vectors, because R rejec
 vector, named ones included: `c(foo = 1L)$foo` is a type error, while `c(foo = 1L)[["foo"]]` is
 `integer | NULL`.
 
-On a union, a field may be missing from some of the members. R answers `NULL` for a name a list does
-not have, so a field present in only some of the subject's shapes reads as that field's type unioned
-with `NULL`. Code that builds a list field by field therefore checks:
+On a union, a field may be missing from some of the members. When the members that lack it are
+empty lists, the read is that field's type unioned with `NULL`, which is what R answers for the
+empty list. Code that builds a list field by field therefore checks:
 
 ```r
 args <- list()
@@ -1390,8 +1397,10 @@ if (escape) args$escape <- TRUE
 args$escape        # logical | NULL
 ```
 
-A field that *no* member has is still an error, because that is a typo rather than an absence the
-program is prepared for. The "did you mean" suggestion draws on every field that any member has.
+When a non-empty member lacks the field, the read is `Unknown`, for the reason a single record-like
+list reads a missing name as `Unknown`. A field that *no* member has is still an error when it is a
+near miss of a field some member has, and the "did you mean" suggestion draws on every member's
+fields.
 
 #### `[[` on vectors
 
@@ -1406,9 +1415,14 @@ program is prepared for. The "did you mean" suggestion draws on every field that
   computed one.
 - A tuple-like list returns the element at a literal position. A position that does not exist is an
   error, and a computed position returns the union of the item types.
-- A record-like list returns the field at a literal name or literal position. A name or position that
-  does not exist is an error, and a computed index returns the union of the field types, which is how
-  a call to a function looked up in a list gets its type.
+- A record-like list returns the field at a literal name or literal position, and a computed index
+  returns the union of the field types, which is how a call to a function looked up in a list gets
+  its type. A position that does not exist is an error.
+- A literal name a record-like list lacks reads as `Unknown`, because R lists are open: a list
+  literal is often only the start of a value other code adds fields to. A name that is a near miss
+  of a field, such as `opts$verbsoe` for `verbose`, is still an error with a "did you mean"
+  suggestion. `$` also matches a unique prefix of a field name, as R does, so `opts$verb` reads
+  `verbose`.
 
 #### `[` on vectors
 
@@ -1491,12 +1505,17 @@ arithmetic operator method.
 - `function(x) x / 2` is `<T: numeric> fn(x: T) -> double`.
 - `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
 
-When the other operand is a vector or a union, an unannotated operand is pinned to a scalar `double`,
-which matches how R treats bare numbers: `f <- function(x) x + c(1L, 2L)` is
-`fn(x: double) -> double[]`. An operand whose shape is still unknown counts as scalar-like here and in
-comparisons, by the same claim that [`[` on vectors](#-on-vectors-1) makes. The cost is a false
-error when the caller passes a vector: for this `f`, `f(c(1, 2))` is reported. A generic vector
-written `T[]` is the exception, and its operator results really are vectors.
+When the other operand is a vector, the unannotated operand stays open and the result is a `double`
+vector, so `f <- function(x) x + c(1L, 2L)` is `<T: numeric> fn(x: T) -> double[]` and accepts
+`f(TRUE)` and `f(c(1, 2))` alike. When the other operand is a union, the unannotated operand is pinned
+to a scalar `double`, which matches how R treats bare numbers. An operand whose shape is still unknown
+counts as scalar-like here and in comparisons, by the same claim that
+[`[` on vectors](#-on-vectors-1) makes. A generic vector written `T[]` is the exception, and its
+operator results really are vectors.
+
+A `logical` argument satisfies the numeric requirement, because R promotes it, so
+`cost <- function(price, rate) price * rate` accepts `cost(TRUE, 0.5)` and `cost(1L, 0.5)`. Mixed
+arguments widen in R's order, `logical` to `integer` to `double`, so both calls are `double`.
 
 ### Operator methods on a class
 
@@ -1923,12 +1942,21 @@ The details:
 #### Lazy arguments and required formals
 
 R evaluates an argument only when the body forces it, and omitting an argument is an error only at
-that moment. A formal without a default is therefore required at call sites only when the body may
-force it, so `function(x, unused) x` may be called as `f(1)`. This relaxes only an inferred
+that moment. A formal without a default is therefore required at call sites only when every path
+through the body forces it, so `function(x, unused) x` may be called as `f(1)`, and
+`function(x, y) if (is.null(x)) y else x` may be called as `f(1)`, because the branch that reads `y`
+is not taken. This relaxes only an inferred
 signature. An annotation is honored as written, so under `#: fn(a: integer, b: character) -> integer`,
 `function(a, b) a` still requires `b`, and to let callers omit it the annotation says `[b]`. A read forces the formal, with these
 exceptions and additions:
 
+- A read on only some paths does not force the formal. The branches of `if`, `switch()`, and `match`
+  force only what all of them force, and an `if` without `else` or a `switch()` without an unnamed
+  default forces nothing. The right operand of `&&` or `||` and the body of a loop may not run, so
+  they force nothing either.
+- Passing the formal on under its own name to a project function, as in `inner(x, finally = finally)`,
+  does not force it, because the callee decides whether it is needed. A call to a library function
+  still forces it.
 - A read guarded by `missing(name)` does not make the formal required; see below.
 - An argument of `substitute()` or `quote()` is not evaluated, so a formal named only there is not
   forced.
@@ -2166,9 +2194,12 @@ scoping.
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
   [declared universe](#package-imports-namespace-and-description).
 - A [conditional namespace](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat), and
-  any shipped export manifest outside R's own packages, is unknown until the project uses the
-  package, and a `pkg::name` read does not count as use. So `dplyr::mutate()` in a script with no
-  `library(dplyr)` and no `DESCRIPTION` reports `dplyr` as unknown. This is a known gap.
+  any shipped export manifest outside R's own packages, stays inactive until the project uses the
+  package, and a `pkg::name` read does not count as use. The read is still accepted, because
+  `pkg::name` loads a package without attaching it, so a script may use a package that way alone.
+  Until the package is used, the name is not validated and types as `Unknown`, so in a script with
+  no `library(dplyr)` and no `DESCRIPTION`, both `dplyr::mutate` and a misspelled `dplyr::mutat`
+  pass.
 - A project stub that overrides a shipped name's type does not remove the name from its shipped
   namespace, so `stats::sd` stays valid under an `sd` override.
 - A qualified read that could not be validated types as `Unknown`, and is a strict-mode origin.

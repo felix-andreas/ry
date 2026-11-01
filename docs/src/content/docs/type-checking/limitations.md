@@ -41,26 +41,13 @@ not analyze them and `ry fmt` skips them.
 
 These are known bugs, not design decisions:
 
-- **A logical into an unannotated numeric function.** An unannotated parameter used in arithmetic
-  rejects a `logical`, so `g <- function(x) x * 2; g(TRUE)` is reported. Mixed `integer` and
-  `double` arguments are fine: `f <- function(price, rate) price * rate; f(1L, 0.5)` widens to
-  `double`. Annotating the parameter as `double` accepts the logical too.
-- **A vector meeting an unannotated parameter.** In `g <- function(x) x + c(1L, 2L)`, `x` is assumed
-  to have length one, so `g(c(1, 2))` is reported. Annotate `x` as `double[]`.
-- **A list filled by position.** `res <- list(); res[[i]] <- x` in a loop infers a dict-like list,
-  and a later `res[[1]]` is reported. Annotate the empty list with its element type, such as `#: list[integer]`.
-- **The loop variable after a loop.** At the top level of a file, reading `i` after
-  `for (i in xs) {}` is reported as unresolved, although R keeps its last value.
-- **A variable named like a function.** After `mean <- 3`, the call `mean(x)` is reported as calling
-  a number, although R skips non-function bindings when it looks up a function.
 - **Column names in packages without typed declarations.** After `library(tidyr)`,
   `pivot_longer(d, cols = c(a, b))` reports `a` and `b`. A top-level
   `utils::globalVariables(c("a", "b"))` silences them, as it does for `R CMD check`.
 - **A trailing comma for rlang's dynamic dots.** dplyr's verbs accept `mutate(d, y = 1, )`, but ry
   reports the trailing comma as it would for `c(1, 2, )`.
-- **Package-qualified calls outside a package.** `pkg::fun()` reports an unknown namespace unless
-  some file in the project calls `library(pkg)`, and for a package ry has no stub or export list for,
-  even then.
+- **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
+  namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
 - **A `stop()` guard in strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an
   undetermined type.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
