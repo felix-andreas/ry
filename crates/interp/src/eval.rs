@@ -1069,8 +1069,22 @@ unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     let mut value = nil();
     interp().visible = true;
+    // Only the last value stays rooted, so an object a statement drops can be collected (and
+    // finalized) by a `gc()` later in the same block.
+    let mark = crate::heap().handle_mark();
     for arg in call.args {
-        value = eval(arg.value, call.env)?;
+        let result = eval(arg.value, call.env);
+        crate::heap().release_handles(mark);
+        match result {
+            Ok(next) => {
+                crate::heap().root(next);
+                value = next;
+            }
+            Err(unwind) => {
+                unwind.root();
+                return Err(unwind);
+            }
+        }
     }
     Ok(value)
 }

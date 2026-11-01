@@ -10,7 +10,7 @@ use crate::{
         string_vector, symbols,
     },
 };
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
+use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType};
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -138,7 +138,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Cstack_info", 0, |_| unsafe { values::integer_vector(&[7969177, 0, 1, NA_INTEGER]) }),
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("reg.finalizer", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("reg.finalizer", 3, do_reg_finalizer),
     internal("traceback", 1, |_| unsafe { Ok(nil()) }),
     internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
@@ -1195,6 +1195,23 @@ unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
         0.0,
     ])?;
     Ok(result)
+}
+
+unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
+    let key = call.arg(0);
+    let finalizer = call.arg(1);
+    if !matches!(key.kind(), SexpType::Environment | SexpType::ExternalPtr) {
+        return Err(call.error("first argument must be environment or external pointer"));
+    }
+    if !matches!(finalizer.kind(), SexpType::Closure | SexpType::Builtin | SexpType::Special) {
+        return Err(call.error("second argument must be a function"));
+    }
+    let on_exit = values::as_logical_scalar(call.arg(2));
+    if on_exit == NA_LOGICAL {
+        return Err(call.error("third argument must be 'TRUE' or 'FALSE'"));
+    }
+    crate::heap().alloc_weak_ref(key, nil(), finalizer, 0, on_exit != 0)?;
+    Ok(nil())
 }
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
