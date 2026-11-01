@@ -1,0 +1,15 @@
+# Element loops over a million doubles: a dot product of `x[[i]] * y[[i]]`.
+# The typed program stores the same values in Arrays, which hold no NA and no attributes.
+array_dot <- function(x: Array<double>, y: Array<double>, times: integer) -> double {
+  total <- 0
+  n <- List.len(x)
+  for (k in seq_len(times)) {
+    for (i in seq_len(n)) total <- total + x[[i]] * y[[i]]
+  }
+  total
+}
+values: double[] <- seq(0, 1, length.out = 1000000L)
+reversed: double[] <- rev(values)
+x <- as.Array(values)
+y <- as.Array(reversed)
+measure("array_dot", function() array_dot(x, y, 5L))

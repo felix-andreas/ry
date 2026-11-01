@@ -31,7 +31,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
     }),
-    internal("icuSetCollate", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("icuSetCollate", -1, |_| Ok(nil())).invisible(),
     internal("icuGetCollate", 1, |_| unsafe {
         scalar_string("ICU not in use")
     }),
@@ -42,19 +42,19 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
     }),
     internal("readRenviron", 1, do_read_renviron).invisible(),
-    internal("debug", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("undebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("debug", 3, |_| Ok(nil())).invisible(),
+    internal("undebug", 1, |_| Ok(nil())).invisible(),
+    internal("debugonce", 3, |_| Ok(nil())).invisible(),
     internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("browserText", 1, |call| unsafe {
+    internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
-    internal("browserCondition", 1, |call| unsafe {
+    internal("browserCondition", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
-    internal("browserSetDebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("browserSetDebug", 1, |_| Ok(nil())).invisible(),
     internal("memory.profile", 0, |_| unsafe {
         values::integer_vector(&[])
     }),
@@ -79,14 +79,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(nil())
     })
     .invisible(),
-    internal("file.choose", 1, |call| unsafe {
+    internal("file.choose", 1, |call| {
         Err(call.error("file.choose() needs an interactive session"))
     }),
     internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
-    internal("curlGetHeaders", 5, |call| unsafe {
+    internal("curlGetHeaders", 5, |call| {
         Err(call.error("libcurl is not available in this session"))
     }),
-    internal("curlDownload", 6, |call| unsafe {
+    internal("curlDownload", 6, |call| {
         Err(call.error("libcurl is not available in this session"))
     }),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
@@ -207,18 +207,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Cstack_info", 0, |_| unsafe {
         values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
     }),
-    internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
+    internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
     internal("traceback", 1, |call| unsafe {
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
     }),
-    internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
+    internal(".traceback", 1, |_| Ok(nil())),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
-    builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
+    builtin("enc2native", 1, |call| Ok(call.arg(0))),
+    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -251,24 +251,24 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     // ry has no interactive debugger, so `browser()` continues as it does in a
     // non-interactive GNU R session.
-    special("browser", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    special("browser", -1, |_| Ok(nil())).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
-    builtin("untracemem", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    builtin("retracemem", -1, |_| unsafe { Ok(nil()) }).invisible(),
-    builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    internal("format.Date", 2, |call| unsafe {
+    builtin("untracemem", 1, |_| Ok(nil())).invisible(),
+    builtin("retracemem", -1, |_| Ok(nil())).invisible(),
+    builtin(".primTrace", 1, |call| Ok(call.arg(0))).invisible(),
+    builtin(".primUntrace", 1, |call| Ok(call.arg(0))).invisible(),
+    internal("format.Date", 2, |call| {
         Err(call.error("format.Date is not supported"))
     }),
     internal("tzone_name", 0, |_| unsafe {
         scalar_string(&session_zone_name())
     }),
-    internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
-    internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
+    internal("bindtextdomain", 2, |_| Ok(nil())),
+    internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("enc2native", 1, |call| Ok(call.arg(0))),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -277,7 +277,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         ))
     }),
     internal("mkjunction", 2, |_| unsafe { scalar_bool(false) }),
-    internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
+    internal("pkgload", -1, |_| Ok(nil())),
 ];
 
 /// GNU R's identifier for its internals interface, which `loadNamespace` compares against the one a
@@ -285,38 +285,73 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// GNU R 4.3 load unchanged.
 const INTERNALS_ID: &str = "2fdf6c18-697a-4ba7-b8ef-11c0d92f1327";
 
-/// The R installation whose base and recommended packages the session loads.
+/// The R installation whose base and recommended packages the session loads. When none was
+/// found this is GNU R's usual home, so `R.home()` still answers; [`missing_r_home`] says why.
 pub fn r_home() -> String {
-    static mut HOME: Option<String> = None;
-    // SAFETY: single-threaded access, as for the rest of the interpreter.
-    #[allow(static_mut_refs)]
-    unsafe {
-        HOME.get_or_insert_with(find_r_home).clone()
-    }
+    located_r_home()
+        .clone()
+        .unwrap_or_else(|_| FALLBACK_R_HOME.to_owned())
 }
 
-fn find_r_home() -> String {
-    if let Ok(home) = std::env::var("R_HOME")
-        && Path::new(&home).join("library/base").exists()
-    {
-        return home;
-    }
-    for candidate in [
-        "/usr/lib/R",
-        "/usr/local/lib/R",
-        "/opt/R/lib/R",
-        "/usr/lib64/R",
-    ] {
-        if Path::new(candidate).join("library/base").exists() {
-            return candidate.to_owned();
+/// The message a host prints, before starting a session, when no GNU R installation was found:
+/// what ry looked for, where, and how to fix it.
+pub fn missing_r_home() -> Option<String> {
+    located_r_home().as_ref().err().cloned()
+}
+
+const FALLBACK_R_HOME: &str = "/usr/lib/R";
+
+const CANDIDATE_R_HOMES: &[&str] = &[
+    "/usr/lib/R",
+    "/usr/local/lib/R",
+    "/opt/R/lib/R",
+    "/usr/lib64/R",
+];
+
+fn located_r_home() -> &'static Result<String, String> {
+    static HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(find_r_home)
+}
+
+/// An R home is usable when it holds base R's R code, which the session sources first. A set
+/// `R_HOME` is authoritative, as it is for GNU R, so an unusable one is not searched past.
+fn find_r_home() -> Result<String, String> {
+    let usable = |home: &str| Path::new(home).join("library/base/R/base").exists();
+    let fix = "install GNU R, or set R_HOME to the directory `R RHOME` prints; \
+               see https://ry-lang.org/installation/";
+    // An exported but empty R_HOME, as some env files leave it, names no directory.
+    if let Some(home) = std::env::var("R_HOME").ok().filter(|home| !home.is_empty()) {
+        if usable(&home) {
+            return Ok(home);
         }
+        return Err(format!(
+            "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {home}, \
+             which holds none (no library/base/R/base)\n  fix: {fix}\n"
+        ));
     }
-    if let Ok(output) = std::process::Command::new("R").arg("RHOME").output()
-        && output.status.success()
-    {
-        return String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let mut searched = vec!["R_HOME (not set)".to_owned()];
+    for candidate in CANDIDATE_R_HOMES {
+        if usable(candidate) {
+            return Ok((*candidate).to_owned());
+        }
+        searched.push((*candidate).to_owned());
     }
-    "/usr/lib/R".to_owned()
+    match std::process::Command::new("R").arg("RHOME").output() {
+        Ok(output) if output.status.success() => {
+            let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if usable(&home) {
+                return Ok(home);
+            }
+            searched.push(format!("`R RHOME` ({home}, which holds no base R)"));
+        }
+        Ok(_) => searched.push("`R RHOME` (it failed)".to_owned()),
+        Err(_) => searched.push("`R RHOME` (no `R` on PATH)".to_owned()),
+    }
+    Err(format!(
+        "ry: ry's runtime loads base R from a GNU R installation, and none was found\n  \
+         searched: {}\n  fix: {fix}\n",
+        searched.join(", ")
+    ))
 }
 
 fn temp_dir() -> String {
@@ -1343,7 +1378,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         // reads them. One without stays without them: GNU R normalizes its wall clock as plain
         // calendar arithmetic and keeps its `isdst` and `tzone`.
         let tz = posixlt_zone(list)?;
-        let result = if length(list) >= 11 {
+        if length(list) >= 11 {
             let seconds = posixlt_instants(list, &tz)?;
             posixlt_from_seconds(&seconds, &tz)?
         } else {
@@ -1383,8 +1418,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
             }
             values::set_attr(result, balanced_symbol, scalar_bool(true)?)?;
             result
-        };
-        result
+        }
     };
     if !already && length(list) > 5 && length(result) > 5 {
         // The year's names recycle with the fields, as GNU R balances them.
@@ -2471,7 +2505,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
             values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
             crate::conditions::warning_call(
                 call.call,
-                &format!("running command '{command}' had status {status}"),
+                format!("running command '{command}' had status {status}"),
             )?;
         }
         return Ok(result);
@@ -2876,7 +2910,7 @@ unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         crate::conditions::warning_call(
             call.call,
-            &format!("file '{path}' cannot be opened for reading"),
+            format!("file '{path}' cannot be opened for reading"),
         )?;
         return scalar_bool(false);
     };

@@ -224,13 +224,10 @@ pub unsafe fn coerce_vector_quiet(
             )));
         }
     };
-    if source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression) {
-        if kind.is_vector() {
-            values::copy_attributes(object, result)?;
-            if kind.is_atomic() && source == SexpType::List {
-                // Classes of a list do not carry over to an atomic vector.
-            }
-        }
+    if (source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression))
+        && kind.is_vector()
+    {
+        values::copy_attributes(object, result)?;
     }
     Ok(result)
 }
@@ -661,6 +658,7 @@ pub fn mode_type(mode: &str) -> Option<SexpType> {
 
 /// `as.vector(x, mode)`: converts and drops attributes, except a list's names.
 pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
+    let object = values::plain(object)?;
     if mode == "any" {
         if object.kind().is_atomic() && values::has_attributes(object) {
             let copy = values::shallow_duplicate(object)?;
@@ -860,7 +858,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             ))
         }
     }),
-    builtin("is.single", 1, |call| unsafe {
+    builtin("is.single", 1, |call| {
         Err(call.error("type \"single\" unimplemented in R"))
     }),
     internal("is.builtin.internal", 1, |call| unsafe {
@@ -876,7 +874,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 ];
 
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
-    let object = call.arg(0);
+    let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
         return Ok(object);
     }
@@ -887,9 +885,9 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         )));
     }
     if values::inherits(object, "factor") && kind == SexpType::String {
-        return factor_as_character(object).and_then(|result| {
+        return factor_as_character(object).map(|result| {
             values::clear_attributes(result);
-            Ok(result)
+            result
         });
     }
     let result = match object.kind() {

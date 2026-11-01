@@ -836,7 +836,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (46): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -849,7 +849,7 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (46): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_frame_update_types_later_reads
 sales <- DataFrame(a = 1)

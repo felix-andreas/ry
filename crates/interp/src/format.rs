@@ -17,7 +17,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("format", 9, do_format),
     internal("formatC", 7, do_format_c),
     internal("encodeString", 5, do_encode_string),
-    internal("prettyNum", -1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("prettyNum", -1, |call| Ok(call.arg(0))),
     internal("format.info", 3, do_format_info),
 ];
 
@@ -702,7 +702,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     let exponent: i32 = text
         .split_once('e')
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
-    let text = if exponent < -4 || exponent >= significant as i32 {
+    if exponent < -4 || exponent >= significant as i32 {
         let text = scientific_text(value, significant.saturating_sub(1));
         if keep_zeros {
             text
@@ -719,8 +719,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         } else {
             trim_zeros(&text).to_owned()
         }
-    };
-    text
+    }
 }
 
 fn trim_zeros(text: &str) -> &str {

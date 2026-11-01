@@ -271,7 +271,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         );
     }
 
-    print_memo_census(&db);
+    print_memo_census(&mut db);
 
     println!();
     println!("slowest files (typecheck):");
@@ -472,7 +472,7 @@ fn identifier_offsets(source: &str) -> Vec<TextSize> {
 /// Salsa's own census: how many memos each query holds and their inline size plus
 /// bookkeeping (dependency edges are the bulk of the metadata). Heap behind a value is
 /// not counted, so read it beside the phase growth above.
-fn print_memo_census(db: &RootDatabase) {
+fn print_memo_census(db: &mut RootDatabase) {
     let info = <dyn salsa::Database>::memory_usage(db);
     let mut queries: Vec<_> = info.queries.iter().collect();
     queries.sort_by_key(|(_, query)| Reverse(query.size_of_metadata() + query.size_of_fields()));

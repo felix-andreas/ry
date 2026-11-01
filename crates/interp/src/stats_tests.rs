@@ -127,9 +127,8 @@ pub unsafe fn swilk(call: &NativeCall<'_>) -> R<Sexp> {
     let w1 = (root - sax) * (root + sax) / (ssa * ssx);
     let w = 1.0 - w1;
     let p = if n == 3 {
-        let six_over_pi = 1.909_859_317_102_74;
-        let third_pi = 1.047_197_551_196_6;
-        (six_over_pi * (w.sqrt().asin() - third_pi)).max(0.0)
+        let six_over_pi = 6.0 / std::f64::consts::PI;
+        (six_over_pi * (w.sqrt().asin() - std::f64::consts::FRAC_PI_3)).max(0.0)
     } else {
         let mut y = w1.ln();
         let log_n = size.ln();
@@ -358,7 +357,7 @@ impl Ansari {
         } else if n == 0 {
             (k == low) as i32 as f64
         } else {
-            self.count(k, m, n - 1) + self.count(k - ((m + n + 1) / 2) as i64, m - 1, n)
+            self.count(k, m, n - 1) + self.count(k - (m + n).div_ceil(2) as i64, m - 1, n)
         };
         if let Some(table) = self.counts[m][n].as_mut() {
             table[k as usize] = value;

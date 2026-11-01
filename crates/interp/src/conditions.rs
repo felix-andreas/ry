@@ -187,10 +187,10 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         // GNU R prints no traceback for an error without a call, such as a variable missing in
         // top-level code that a callee forced.
         let traceback_wanted = values::as_logical_scalar(calls_option) == 1 && call != nil();
-        if traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some() {
-            if let Some(traceback) = concise_traceback(call) {
-                write_console(format!("Calls: {traceback}\n").as_bytes(), true);
-            }
+        if (traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some())
+            && let Some(traceback) = concise_traceback(call)
+        {
+            write_console(format!("Calls: {traceback}\n").as_bytes(), true);
         }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
@@ -445,9 +445,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".addRestart", 1, do_add_restart).invisible(),
     internal(".getRestart", 1, do_get_restart),
     internal(".invokeRestart", 2, do_invoke_restart),
-    internal(".addTryHandlers", 0, |_| unsafe { Ok(nil()) }).invisible(),
+    internal(".addTryHandlers", 0, |_| Ok(nil())).invisible(),
     internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
-    internal("warnings", 0, |_| unsafe { Ok(nil()) }),
+    internal("warnings", 0, |_| Ok(nil())),
     internal("interruptsSuspended", -1, |_| unsafe {
         values::scalar_bool(false)
     }),

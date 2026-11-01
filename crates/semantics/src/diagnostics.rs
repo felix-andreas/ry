@@ -23,10 +23,11 @@ use {
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, project_type_definitions, statement_annotations,
         stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
+        top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            QueryName, RecordField, Ty, TyKind, TypeScheme, map_child_types, substitute_rigid,
-            union_of,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
+            substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -176,6 +177,7 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let (what, range) = match node.kind() {
                 SyntaxKind::RECORD_EXPR => ("record", node.text_range()),
                 SyntaxKind::TUPLE_EXPR => ("tuple", node.text_range()),
+                SyntaxKind::ARRAY_EXPR => ("Array", node.text_range()),
                 SyntaxKind::TAG_EXPR => ("tag", node.text_range()),
                 // The arms can be long, so the head `match (x)` stands for the expression.
                 _ => {
@@ -203,7 +205,9 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// under R and the author should know the annotation is not checked.
 fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let recorded = file_syntax_sites(db, file);
-    if !recorded.any(SiteRole::InlineSite) {
+    // A `@pure` marker is an inline annotation on a function that is not otherwise an
+    // inline site, so it alone can make a file need the turned-off warning.
+    if !recorded.any(SiteRole::InlineSite) && !recorded.any(SiteRole::InlineAnnotation) {
         return Vec::new();
     }
     let root = parse(db, file).syntax_node();
@@ -2197,8 +2201,94 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ));
         }
     }
+    diagnostics.extend(top_level_diagnostics(db, file));
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     diagnostics
+}
+
+/// A package file runs its top level at every load; scripts, tests and the console are where
+/// code runs on purpose, so only `R/` files are judged. An item a syntax error touches is
+/// skipped, because its statement boundaries are a guess.
+pub fn top_level_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    if *file.kind(db) != DocumentKind::Package {
+        return Vec::new();
+    }
+    let broken_ranges = file_error_ranges(db, file);
+    let mut diagnostics = Vec::new();
+    for span in item_spans(db, file) {
+        if broken_ranges
+            .iter()
+            .any(|error| error.start() <= span.range.end() && span.range.start() <= error.end())
+        {
+            continue;
+        }
+        if let TopLevel::Effect { range, effect } = item_top_level(db, span.item) {
+            diagnostics.push(Diagnostic::new(
+                *range + span.range.start(),
+                Severity::Error,
+                "strict",
+                top_level_effect_message(effect),
+            ));
+        }
+    }
+    diagnostics
+}
+
+const TOP_LEVEL_RULE: &str = "A file in `R/` may only define things at its top level";
+const TOP_LEVEL_HOMES: &str = "a function, `.onLoad`, or the script `ry run` starts";
+
+fn top_level_effect_message(effect: &Effect) -> String {
+    match effect {
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Project,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}, or mark `{callee}` `@pure` if calling it has no effect"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Conditional,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is defined inside a condition, so ry cannot tell which definition runs when the package loads. {TOP_LEVEL_RULE}: give `{callee}` one unconditional definition, or move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Local,
+        } => format!(
+            "strict mode: this calls `{callee}`, a function defined inside `local()`, so it may run code every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Other,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::DynamicCall => format!(
+            "strict mode: this calls a computed function, so ry cannot tell whether loading the package runs code. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Loop => format!(
+            "strict mode: this loop runs every time the package loads. {TOP_LEVEL_RULE}: move it into {TOP_LEVEL_HOMES}, or compute the value inside `local()`"
+        ),
+        Effect::SuperAssignment => format!(
+            "strict mode: `<<-` here assigns outside the package every time it loads. {TOP_LEVEL_RULE}: bind the name with `<-`, or move the assignment into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Replacement { target } => {
+            let target = target
+                .as_deref()
+                .map_or_else(|| "a value".to_owned(), |name| format!("`{name}`"));
+            format!(
+                "strict mode: this changes {target} after its definition, every time the package loads. {TOP_LEVEL_RULE}: build the whole value where it is defined (`local()` can hold the steps), or move the change into {TOP_LEVEL_HOMES}"
+            )
+        }
+        Effect::NestedAssignment { target } => {
+            let target = target
+                .as_deref()
+                .map_or_else(|| "a name".to_owned(), |name| format!("`{name}`"));
+            format!(
+                "strict mode: this assignment binds {target} in the middle of an expression. {TOP_LEVEL_RULE}: give {target} its own top-level definition, or build the value inside `local()`"
+            )
+        }
+    }
 }
 
 fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
@@ -2208,11 +2298,24 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     let mut renderer = TypeRenderer::default();
     match &error.kind {
-        TypeErrorKind::Mismatch { expected, found } => format!(
-            "expected `{}`, found `{}`",
-            renderer.render(db, *expected),
-            renderer.render(db, *found)
-        ),
+        TypeErrorKind::Mismatch { expected, found } => {
+            let mut message = format!(
+                "expected `{}`, found `{}`",
+                renderer.render(db, *expected),
+                renderer.render(db, *found)
+            );
+            // An R vector never becomes an Array implicitly, because the conversion checks
+            // every item; say which call does it.
+            if array_element(db, *expected).is_some()
+                && matches!(
+                    found.kind(db),
+                    TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            {
+                message.push_str(". Convert an R vector with `as.Array()`");
+            }
+            message
+        }
         TypeErrorKind::AssignmentForRecord { field, expected } => format!(
             "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
             renderer.render(db, *expected)
@@ -2320,6 +2423,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint_description(*constraint),
             renderer.render(db, *found)
         ),
+        TypeErrorKind::ContextualParameter {
+            name,
+            expected,
+            passed,
+        } => format!(
+            "`{name}` is used as {} here, but the call passes this function `{}` for it",
+            operand_description(*expected),
+            renderer.render(db, *passed)
+        ),
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {
             RecordMismatch::Field {
                 path,
@@ -2379,14 +2491,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 required,
                 returns,
                 constraint,
+                required_constraint,
             } => {
                 let required = renderer.render(db, *required);
-                match constraint {
-                    Some(constraint) => format!(
+                match (constraint, required_constraint) {
+                    (Some(constraint), _) => format!(
                         "this function must return `{required}`, but its body produces {}",
                         constraint_description(*constraint)
                     ),
-                    None => format!(
+                    (None, Some(required_constraint)) => format!(
+                        "this function must return {}, but it returns `{}`",
+                        constraint_description(*required_constraint),
+                        renderer.render(db, *returns)
+                    ),
+                    (None, None) => format!(
                         "this function must return `{required}`, but it returns `{}`",
                         renderer.render(db, *returns)
                     ),
@@ -2466,6 +2584,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::NotAnAggregation { column } => format!(
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),
+        TypeErrorKind::HeadInsideExpression { column } => format!(
+            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
+        ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",
             if *columns == 1 { "column" } else { "columns" },
@@ -2539,22 +2660,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
         ),
-        TypeErrorKind::InvalidOperand { expected, found } => {
-            let expected_description = match expected {
-                OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
-                OperandExpectation::ScalarNumeric => {
-                    "a scalar numeric value (`integer` or `double`)"
-                }
-                OperandExpectation::Logical => "a `logical` value",
-                OperandExpectation::Comparable => {
-                    "a comparable value (numeric, `character`, or `logical`)"
-                }
-            };
-            format!(
-                "expected {expected_description}, found `{}`",
-                renderer.render(db, *found)
-            )
-        }
+        TypeErrorKind::InvalidOperand { expected, found } => format!(
+            "expected {}, found `{}`",
+            operand_description(*expected),
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::UnsupportedOperandPair {
             operator,
             left,
@@ -2614,6 +2724,61 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
+            "this item is `{}`, but the Array's first item is `{}`. An Array's items share one type and are never converted into each other",
+            renderer.render(db, *found),
+            renderer.render(db, *first)
+        ),
+        TypeErrorKind::ArrayItemType { found } => format!(
+            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ArrayOperands {
+            operator,
+            left,
+            right,
+        } => {
+            let head = format!(
+                "`{operator}` is not defined between `{}` and `{}`",
+                renderer.render(db, *left),
+                renderer.render(db, *right)
+            );
+            let is_r_vector = |ty: Ty<'_>| {
+                matches!(
+                    ty.kind(db),
+                    TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            };
+            let reason = if is_r_vector(*left) || is_r_vector(*right) {
+                "Convert the R vector with `as.Array()` first"
+            } else if left == right
+                || array_element(db, *left) == Some(*right)
+                || array_element(db, *right) == Some(*left)
+            {
+                match *operator {
+                    "&" | "|" => "On Arrays it takes `logical` items",
+                    _ => "On Arrays it takes `integer` or `double` items",
+                }
+            } else {
+                "Both sides must have one item type, and `integer` and `double` are never converted into each other"
+            };
+            format!("{head}. {reason}")
+        }
+        TypeErrorKind::ArrayIndex { double, found } => {
+            let rule = if *double {
+                "`x[[i]]` on an Array takes one position, an `integer` or `double`"
+            } else {
+                "`x[i]` on an Array takes one index: positions, or a `logical` mask"
+            };
+            match found {
+                Some(found) => format!(
+                    "{rule}, but this index is `{}`. An Array has one dimension and no names",
+                    renderer.render(db, *found)
+                ),
+                None => format!("{rule}. An Array has one dimension and no names"),
+            }
+        }
+        TypeErrorKind::ArrayMissingValue => "an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),
         TypeErrorKind::ConflictingTags { first, second } => format!(
             "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
             renderer.render(db, *first),
@@ -2855,6 +3020,15 @@ impl<'db> TypeRenderer<'db> {
     }
 }
 
+fn operand_description(expected: OperandExpectation) -> &'static str {
+    match expected {
+        OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
+        OperandExpectation::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        OperandExpectation::Logical => "a `logical` value",
+        OperandExpectation::Comparable => "a comparable value (numeric, `character`, or `logical`)",
+    }
+}
+
 fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
@@ -2864,6 +3038,9 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         }
         Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        Constraint::ArrayItem => {
+            "an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag)"
+        }
     }
 }
 

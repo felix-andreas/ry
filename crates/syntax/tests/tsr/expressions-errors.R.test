@@ -72,22 +72,30 @@ SOURCE_FILE@0..27
   NAME@7..10
     IDENT@7..10 "foo"
   NEWLINE@10..11 "\n"
-  ERROR@11..16
-    L_BRACKET@11..12 "["
-    IDENT@12..15 "bar"
-    R_BRACKET@15..16 "]"
+  ARRAY_EXPR@11..16
+    ARGUMENT_LIST@11..16
+      L_BRACKET@11..12 "["
+      ARGUMENT@12..15
+        NAME@12..15
+          IDENT@12..15 "bar"
+      R_BRACKET@15..16 "]"
   NEWLINE@16..17 "\n"
   NEWLINE@17..18 "\n"
   NAME@18..21
     IDENT@18..21 "foo"
   NEWLINE@21..22 "\n"
-  ERROR@22..27
-    L_BRACKET2@22..24 "[["
-    IDENT@24..25 "x"
-    R_BRACKET@25..26 "]"
-    R_BRACKET@26..27 "]"
-err: 11..12: expected a statement, found `[`
-err: 22..24: expected a statement, found `[[`
+  ARRAY_EXPR@22..27
+    ARGUMENT_LIST@22..27
+      L_BRACKET@22..23 "["
+      ARGUMENT@23..26
+        ARRAY_EXPR@23..26
+          ARGUMENT_LIST@23..26
+            L_BRACKET@23..24 "["
+            ARGUMENT@24..25
+              NAME@24..25
+                IDENT@24..25 "x"
+            R_BRACKET@25..26 "]"
+      R_BRACKET@26..27 "]"
 
 #---- not_a_call_subset_or_subset2_due_to_sequential_arguments_ts_error
 f(x y)

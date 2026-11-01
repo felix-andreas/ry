@@ -11,6 +11,7 @@ pub mod naming;
 pub mod sorted;
 pub mod stubs;
 pub mod testing;
+pub mod top_level;
 pub mod types;
 
 use {
@@ -405,6 +406,7 @@ fn is_ry_syntax(kind: SyntaxKind) -> bool {
         kind,
         SyntaxKind::RECORD_EXPR
             | SyntaxKind::TUPLE_EXPR
+            | SyntaxKind::ARRAY_EXPR
             | SyntaxKind::TAG_EXPR
             | SyntaxKind::MATCH_EXPR
     )
@@ -915,6 +917,15 @@ pub fn file_conditional_writers<'db>(
 ) -> Vec<(Symbol, Item<'db>)> {
     let mut writers = Vec::new();
     for &item in item_tree(db, file) {
+        // `name <- function(...)` binds only its own name at top level, since the body is a
+        // scope of its own, so it needs no naming pass. Most items are functions, and skipping
+        // them keeps the loader's strict-mode classification from naming the whole project.
+        if *item.kind(db) == ItemKind::Function
+            && item_syntax(db, item)
+                .is_some_and(|syntax| syntax.syntax_node().kind() == SyntaxKind::BINARY_EXPR)
+        {
+            continue;
+        }
         let own_name = item.name(db).clone();
         for &name in item_top_level_names(db, item) {
             if own_name.as_deref() != Some(name.as_str()) {

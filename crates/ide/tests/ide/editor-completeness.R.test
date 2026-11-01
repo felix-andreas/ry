@@ -57,7 +57,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
-completion (17): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.lazy, DataFrame.read_csv
+completion (18): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
 hint @5: DataFrame{region: character[], units: integer[]}
 
 #---- df_column_hover_after_dollar

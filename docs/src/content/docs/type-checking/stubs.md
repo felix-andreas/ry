@@ -54,4 +54,5 @@ what to add next. Even an empty stub file turns the unresolved-name check back o
 A declaration under `stubs/` replaces a shipped one with the same name, so you can fix a wrong
 return type, or add a function your version of the package has, without waiting for a release.
 `ry check` reports every line it could not load. [Authoring stubs](/contributing/authoring-stubs) has
-the full format, including overloads and data-masking functions.
+the full format, including overloads, data-masking functions, and `@pure` for functions that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) lets a package constant call.
