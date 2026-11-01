@@ -80,6 +80,7 @@ fn read_renviron() {
     let home = crate::system::r_home();
     // SAFETY: the session starts before any other thread exists.
     unsafe { std::env::set_var("R_HOME", &home) };
+    export_wrapper_directories(&home);
     for path in [format!("{home}/etc/Renviron"), "/etc/R/Renviron".to_owned()] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -101,6 +102,33 @@ fn read_renviron() {
             unsafe { std::env::set_var(name, value) };
         }
         break;
+    }
+}
+
+/// GNU R's `bin/R` shell wrapper exports `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR`
+/// before R starts, and `R.home("share")` and `R.home("doc")` read them. Distributions that
+/// keep those directories outside `R_HOME` (Debian puts them under `/usr/share/R`) need them
+/// recovered from the wrapper's plain `NAME=value` lines; a value that is still a shell
+/// expression is left alone.
+fn export_wrapper_directories(home: &str) {
+    let Ok(wrapper) = std::fs::read_to_string(format!("{home}/bin/R")) else {
+        return;
+    };
+    for name in ["R_SHARE_DIR", "R_INCLUDE_DIR", "R_DOC_DIR"] {
+        if std::env::var_os(name).is_some() {
+            continue;
+        }
+        let value = wrapper.lines().find_map(|line| {
+            let (key, value) = line.trim().split_once('=')?;
+            (key == name).then(|| value.trim_matches(|c| c == '\'' || c == '"'))
+        });
+        if let Some(value) = value
+            && !value.is_empty()
+            && !value.contains('$')
+        {
+            // SAFETY: the session starts before any other thread exists.
+            unsafe { std::env::set_var(name, value) };
+        }
     }
 }
 
