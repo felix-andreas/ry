@@ -1842,7 +1842,7 @@ signature in two languages for no safety gain.
 there was no previous source of truth; the choices that settle architecture are these.
 
 - **One installed package directory serves GNU R 4.6 and ry's runtime,** because ry's `libR` is
-  ABI-compatible and presents as R 4.6. ry treats the `Built:` field as GNU R does (refusing only
+  ABI-compatible with R 4.6's headers and reports the version of the GNU R it loads base R from. ry treats the `Built:` field as GNU R does (refusing only
   pre-3.0.0 builds), so existing libraries load unchanged. A package built under ry carries an extra
   `RyBuilt:` field until the oracle shows ry-built binaries load under GNU R, and the corpus is built
   only by GNU R.
@@ -3488,3 +3488,28 @@ explicit allocators".
   the formal and says the call supplied its type, and is reported on the use rather than the whole
   literal.
 - The spec is "Function literals in call arguments" in `reference/type-system.mdx`.
+
+## The runtime emulates the GNU R version it loads base R from
+
+- **Before.** ry's runtime always presented as R 4.6 at the R level, while its internals followed
+  R 4.3's behavior, so base R 4.6's own R code failed its `Built:` check or called internals that
+  had changed or did not exist yet.
+- **Now.** The version comes from `R_HOME` (`interp::system::r_version`, read once from
+  `R_HOME/include/Rversion.h` or `VERSION`), and `R.version`, `getRversion()` and the `Built:` check
+  all report it. Behavior that GNU R changed between versions is gated with
+  `interp::system::r_at_least(major, minor)` at the one place it differs (strptime in a DST gap,
+  `psignrank` rounding, `%*%` argument counts, `rbind`/`cbind` passing `deparse.level` to S3
+  methods, `is.atomic(NULL)`, complex formatting, short hex colours, the graphics engine version).
+  Additions such as `Tailcall`, `Exec`, `declare` and zstd compression exist under every version,
+  because no older base R calls them.
+- **Range.** GNU R 4.3 and later; an older `R_HOME` stops `ry run` with an error naming the version.
+  The oracle and the interp and ry test suites are run under 4.3.3 and 4.6.1 (`ORACLE_R` and
+  `R_HOME` select the installation). Gates for 4.4 and 4.5 were placed from GNU R's sources and
+  NEWS, not from running those versions.
+- **The default packages' routine table is the union over versions** (`builtin_libraries.rs`), so
+  a routine GNU R removed (`C_pKS2` in 4.6) still resolves. Base R's own code never calls a removed
+  routine, so the extra entries are harmless; a script calling one directly differs from GNU R.
+- **The C API stays at R 4.6's headers** (`libr`, `rcmd`), whatever the R-level version, because
+  compiled packages are built once against ry's headers and the newer API is a superset.
+- **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
+  right result but not constant stack depth; true tail calls are in `backlog.md`.
