@@ -1058,7 +1058,7 @@ impl Compiler {
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
-        self.emit(Op::GetFun, &[function, symbol, cache]);
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
         let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
         let base = self.next_register;
         for _ in args {
