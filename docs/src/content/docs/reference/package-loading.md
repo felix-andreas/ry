@@ -12,6 +12,11 @@ This page is the exact behavior.
   evaluates only that definition the first time anything uses `name`. When another top-level
   statement writes the same name, as `f <- memoise(f)` does, every writer of it runs in order
   instead.
+- **A constant of a strict file**, `name <- value` in a file under [strict mode](/type-checking/strict-mode)
+  whose value calls only pure functions, becomes a promise the same way, unless another statement
+  writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
+  gives what a load would have computed
+  ([lazy constants](/reference/type-system#lazy-constants)).
 - **Every other top-level statement** runs at load time, in `Collate` order, with the files that
   `Collate` leaves out following in C-locale order.
 - **`NAMESPACE`** works as in an installed package: imports, `S3method()` registrations, and exports.
@@ -41,6 +46,8 @@ A reload works out which top-level items changed and touches only those:
   it ran, including anything the functions it called use. `cached <- helper()` reruns after you edit
   `helper`, or a function `helper` calls, while a function that calls `helper()` does not need to,
   because it looks `helper` up when it runs.
+- A lazy constant is bound again when you changed it, or when anything its value reaches changed,
+  such as the body of a pure function it calls, so its next use computes the new value.
 - When two statements write the same name, the last one in collation order wins again, and a
   statement like `f <- memoise(f)` sees `f` as it was at load time rather than wrapping it twice.
 - A `NAMESPACE` change rebuilds the imports or resyncs the exports, `.onLoad` runs again when you

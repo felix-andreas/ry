@@ -61,7 +61,9 @@ person <- readRDS("person.rds")
 </Tabs>
 
 Inline annotations and `#:` comments share one type language and mean the same thing. Deleting each
-inline annotation turns a file into the plain R program it means.
+inline annotation turns a file into the plain R program it means. That includes `@pure` in front of
+`function`, the inline spelling of the `#: @pure` comment that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) reads.
 
 ## Type definitions
 

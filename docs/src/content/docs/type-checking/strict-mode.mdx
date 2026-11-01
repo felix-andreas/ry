@@ -71,6 +71,83 @@ ry reports it on `df$amount`, and again on the `sum()` call that receives it.
 
 An unresolved name, normally a warning, becomes an error.
 
+## Package files only define things
+
+In strict mode, the top level of a file in `R/` may only define things: functions, types, imports,
+classes, and constants. Loading the package then binds names and registers classes and has no other
+effect, so `ry load` can bind constants lazily too. Any other statement is an error that says where
+the code belongs:
+
+```r
+#: fn(x: double[]) -> double[]
+scale <- function(x) x * 100
+
+rates <- c(0.01, 0.05)
+scaled <- scale(rates)
+cat("tally loaded\n")
+```
+
+```text
+strict
+
+  x strict mode: this calls `scale`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function,
+  | `.onLoad`, or the script `ry run` starts, or mark `scale` `@pure` if calling it has no effect
+
+strict
+
+  x strict mode: this calls `cat`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function,
+  | `.onLoad`, or the script `ry run` starts
+```
+
+`rates` is fine, because `c()` is pure: calling it has no effect beyond returning a value. A constant
+may call only pure functions. ry never guesses that a function is pure, so you declare it with
+`@pure`, and move the rest into `.onLoad`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+scale <- @pure function(x: double[]) -> double[] x * 100
+
+rates <- c(0.01, 0.05)
+scaled <- scale(rates)
+
+.onLoad <- function(libname: character, pkgname: character) -> NULL {
+  cat("tally loaded\n")
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @pure
+#: fn(x: double[]) -> double[]
+scale <- function(x) x * 100
+
+rates <- c(0.01, 0.05)
+scaled <- scale(rates)
+
+#: fn(libname: character, pkgname: character) -> NULL
+.onLoad <- function(libname, pkgname) {
+  cat("tally loaded\n")
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text
+$ ry load . -e 'print(scaled)'
+tally loaded
+Loaded tally: 4 definitions bound lazily, 0 top-level statements run, in 10 ms.
+[1] 1 5
+```
+
+ry trusts `@pure` without checking the body. Scripts, test files and the console have no such
+restriction. The [reference](/reference/type-system#a-package-files-top-level) lists every allowed
+form.
+
 ## Clearing a finding
 
 An annotation clears the finding, because the value now has a type. A value declared `Any`, or a

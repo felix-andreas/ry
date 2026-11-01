@@ -5,7 +5,8 @@ description: Load the R package you are working on from source, lazily, and relo
 
 ry loads the package you are developing straight from its sources, as `devtools::load_all()` does,
 but it parses a function only when you first call it, and after an edit it replaces exactly the
-definitions you changed. On a 14,000-line package a cold load is almost 10 times faster than
+definitions you changed. Under [strict mode](/type-checking/strict-mode), constants are bound the
+same lazy way. On a 14,000-line package a cold load is almost 10 times faster than
 `load_all()` and a reload after an edit about 60 times faster (see [Speed](#speed)).
 
 ```sh
@@ -15,7 +16,7 @@ ry load -f run.R   # load it, run a script, and exit
 
 ```text
 $ ry load -e 'count_words("the quick fox")'
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 3 ms.
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 3 ms.
 [1] 3
 ```
 
@@ -28,7 +29,7 @@ then edit a file and run the next command, ry reloads first, so the command sees
 > greet()
 [1] "first version"
 > greet()        # after editing R/greet.R
-Reloaded replpkg: 1 function rebound, in 2 ms.
+Reloaded replpkg: 1 definition rebound, in 2 ms.
 [1] "second, edited version"
 ```
 
