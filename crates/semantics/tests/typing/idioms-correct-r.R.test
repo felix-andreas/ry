@@ -1168,3 +1168,20 @@ half: <T: numeric> fn(n: T) -> integer
 halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
 wrong: Unknown
 137..148 error[type-mismatch] expected `T[]`, found `character[]`
+
+#---- delayed_assign_binds_a_local_that_shadows_base
+read_header <- function(read_bytes) {
+  delayedAssign("length", read_bytes(2))
+  length * 2
+}
+#++++
+read_header: <T> fn(read_bytes: fn(double) -> T) -> Unknown
+
+#---- assign_into_another_environment_binds_no_local
+scaled <- function(n) {
+  assign("length", n, envir = globalenv())
+  length * 2
+}
+#++++
+scaled: Unknown
+69..75 error[type-mismatch] expected a numeric value (`integer` or `double`), found `fn(x: Any) -> integer`

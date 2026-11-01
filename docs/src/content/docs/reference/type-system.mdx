@@ -2810,6 +2810,13 @@ Inside any function body, the S3 dispatch variables `.Generic`, `.Method`, `.Cla
 `NextMethod`, and group-generic dispatch bind them in the method's frame and any function can be
 called as a method. At the top level they are unresolved names.
 
+Inside a function body, `assign("name", value)` and `delayedAssign("name", value)` with a string
+literal name and no other argument bind `name` in the function's frame, as R does. A later read of
+`name` sees that local binding, typed `Unknown`, rather than an outer one, so after
+`delayedAssign("length", parse_int(read_bytes(2)))` the call `read_bytes(length)` does not read
+base's `length`. A call that names an environment, as in `assign("x", 1, envir = globalenv())`,
+binds nothing locally.
+
 A top-level `globalVariables(c("a", "b"))` or `utils::globalVariables(...)` call with literal string
 arguments declares those names as bound dynamically for the whole package, which suppresses the
 unresolved-name warning for them everywhere.

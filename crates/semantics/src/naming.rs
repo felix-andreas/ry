@@ -475,6 +475,27 @@ impl Context<'_> {
                     self.naming.native_routine_reads.insert(routine);
                 }
                 match builtin_callee {
+                    // `assign("name", v)` and `delayedAssign("name", v)` bind `name` in the
+                    // calling frame, so a later read of `name` sees that binding and not an
+                    // outer one such as base's `length`. Its value is not tracked.
+                    Some("assign" | "delayedAssign")
+                        if self.current_function_depth() > 0
+                            && let [first, second] = &module[arguments][..]
+                            && matches!(first.name.as_deref(), None | Some("x"))
+                            && matches!(second.name.as_deref(), None | Some("value"))
+                            && let Some(target) = first.value
+                            && let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(target) =>
+                    {
+                        self.resolve_arguments(&module[arguments]);
+                        let slot = self.frame_slot(
+                            &module[text],
+                            module.range(target),
+                            BindingKind::Local,
+                        );
+                        self.record_write(slot, Reach::Implicit);
+                        return;
+                    }
                     // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
                     // value and keep every write of those names alive.
                     Some("on.exit") => {
