@@ -57,7 +57,7 @@ const HAS_ATTR: u32 = 1 << 9;
 const HAS_TAG: u32 = 1 << 10;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Format {
+pub enum Format {
     Xdr,
     Binary,
     Ascii,
@@ -733,16 +733,70 @@ pub unsafe fn unserialize(bytes: &[u8], hook: Sexp) -> R<Sexp> {
 
 struct Writer {
     bytes: Vec<u8>,
+    format: Format,
     references: FxHashMap<Sexp, usize>,
 }
 
 impl Writer {
     fn integer(&mut self, value: i32) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
+        match self.format {
+            Format::Xdr => self.bytes.extend_from_slice(&value.to_be_bytes()),
+            Format::Binary => self.bytes.extend_from_slice(&value.to_le_bytes()),
+            Format::Ascii if value == i32::MIN => self.bytes.extend_from_slice(b"NA\n"),
+            Format::Ascii => self.bytes.extend_from_slice(format!("{value}\n").as_bytes()),
+        }
     }
 
     fn real(&mut self, value: f64) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
+        match self.format {
+            Format::Xdr => self.bytes.extend_from_slice(&value.to_be_bytes()),
+            Format::Binary => self.bytes.extend_from_slice(&value.to_le_bytes()),
+            Format::Ascii => {
+                let text = if values::is_na(value) {
+                    "NA".to_string()
+                } else if value.is_nan() {
+                    "NaN".to_string()
+                } else if value.is_infinite() {
+                    if value > 0.0 { "Inf" } else { "-Inf" }.to_string()
+                } else {
+                    crate::format::c_general(value, 16, false)
+                };
+                self.bytes.extend_from_slice(text.as_bytes());
+                self.bytes.push(b'\n');
+            }
+        }
+    }
+
+    /// The bytes of a string whose length the caller already wrote. The ASCII format escapes
+    /// them into one whitespace-free word, which the reader unescapes.
+    fn text(&mut self, text: &[u8]) {
+        if self.format != Format::Ascii {
+            self.bytes.extend_from_slice(text);
+            return;
+        }
+        for &byte in text {
+            match byte {
+                b'\n' => self.bytes.extend_from_slice(b"\\n"),
+                b'\t' => self.bytes.extend_from_slice(b"\\t"),
+                b'\r' => self.bytes.extend_from_slice(b"\\r"),
+                b'\\' => self.bytes.extend_from_slice(b"\\\\"),
+                b'"' => self.bytes.extend_from_slice(b"\\\""),
+                b'\'' => self.bytes.extend_from_slice(b"\\'"),
+                b'!'..=b'~' => self.bytes.push(byte),
+                _ => self.bytes.extend_from_slice(format!("\\{byte:03o}").as_bytes()),
+            }
+        }
+        self.bytes.push(b'\n');
+    }
+
+    fn raw(&mut self, bytes: &[u8]) {
+        if self.format != Format::Ascii {
+            self.bytes.extend_from_slice(bytes);
+            return;
+        }
+        for byte in bytes {
+            self.bytes.extend_from_slice(format!("{byte:02x}\n").as_bytes());
+        }
     }
 
     fn length(&mut self, length: usize) {
@@ -932,7 +986,7 @@ impl Writer {
                 let name = values::primitive_name(object);
                 self.integer(if kind == SexpType::Builtin { 8 } else { 7 });
                 self.integer(name.len() as i32);
-                self.bytes.extend_from_slice(name.as_bytes());
+                self.text(name.as_bytes());
             }
             SexpType::Char => {
                 if object == known.na_string {
@@ -942,7 +996,7 @@ impl Writer {
                     self.flags(9, levels, false, false, false);
                     let bytes = object.bytes();
                     self.integer(bytes.len() as i32);
-                    self.bytes.extend_from_slice(bytes);
+                    self.text(bytes);
                 }
             }
             SexpType::Logical | SexpType::Integer => {
@@ -1001,7 +1055,7 @@ impl Writer {
             SexpType::Raw => {
                 self.flags(24, levels, object.is_object(), has_attributes, false);
                 self.length(length(object));
-                self.bytes.extend_from_slice(values::raws(object));
+                self.raw(values::raws(object));
                 if has_attributes {
                     self.item(object.attrib())?;
                 }
@@ -1020,23 +1074,45 @@ impl Writer {
     fn charsxp_text(&mut self, text: &str) {
         self.integer(9 | ((gp::UTF8 as i32) << 12));
         self.integer(text.len() as i32);
-        self.bytes.extend_from_slice(text.as_bytes());
+        self.text(text.as_bytes());
     }
 }
 
-/// Serializes `object` in GNU R's XDR format, version 3.
-pub unsafe fn serialize(object: Sexp) -> R<Vec<u8>> {
+/// Serializes `object` in GNU R's format: version 2 or 3, as XDR, native binary or ASCII.
+pub unsafe fn serialize(object: Sexp, format: Format, version: i32) -> R<Vec<u8>> {
+    let magic: &[u8] = match format {
+        Format::Xdr => b"X\n",
+        Format::Binary => b"B\n",
+        Format::Ascii => b"A\n",
+    };
     let mut writer = Writer {
-        bytes: b"X\n".to_vec(),
+        bytes: magic.to_vec(),
+        format,
         references: FxHashMap::default(),
     };
-    writer.integer(3);
+    writer.integer(version);
     writer.integer(0x040602);
-    writer.integer(0x030500);
-    writer.integer(5);
-    writer.bytes.extend_from_slice(b"UTF-8");
+    if version == 2 {
+        writer.integer(0x020300);
+    } else {
+        writer.integer(0x030500);
+        writer.integer(5);
+        writer.text(b"UTF-8");
+    }
     writer.item(object)?;
     Ok(writer.bytes)
+}
+
+/// Reads the `version` argument of the serialization internals: `NULL` means version 3.
+unsafe fn serialization_version(argument: Sexp) -> R<i32> {
+    if argument == nil() {
+        return Ok(3);
+    }
+    match values::as_integer_scalar(argument) {
+        2 => Ok(2),
+        3 => Ok(3),
+        _ => Err(error("version must be 2 or 3")),
+    }
 }
 
 // Lazy-load databases.
@@ -1142,10 +1218,7 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     }
     let bytes = crate::connections::read_binary(call.arg(0))?;
     let body = match bytes.get(..5) {
-        Some(b"RDX2\n" | b"RDX3\n") => &bytes[5..],
-        Some(b"RDA2\n" | b"RDA3\n" | b"RDB2\n" | b"RDB3\n") => {
-            return Err(call.error("load() supports only the XDR workspace format save() writes by default"));
-        }
+        Some(b"RDX2\n" | b"RDX3\n" | b"RDA2\n" | b"RDA3\n" | b"RDB2\n" | b"RDB3\n") => &bytes[5..],
         _ => return Err(call.error("the input does not start with a magic number compatible with loading from a connection")),
     };
     let mut bindings = unserialize(body, nil())?;
@@ -1161,8 +1234,7 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `saveToConn(names, con, ascii, version, envir, eval.promises)`: writes the bindings as a
-/// `save()` file. The data is always XDR, which every reader accepts; `ascii = TRUE` changes
-/// only GNU R's encoding, not what `load()` returns.
+/// `save()` file, `RDA` plus ASCII data when `ascii` is TRUE and `RDX` plus XDR otherwise.
 unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     if names.kind() != SexpType::String {
@@ -1176,8 +1248,15 @@ unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
     let items = saved_bindings(call, names, env, force, false)?;
     let bindings = values::pairlist(&items, SexpType::Pairlist)?;
     crate::heap().root(bindings);
-    let mut bytes = b"RDX3\n".to_vec();
-    bytes.extend(serialize(bindings)?);
+    let version = serialization_version(call.arg(3))?;
+    let format = if values::as_logical_scalar(call.arg(2)) == 0 {
+        Format::Xdr
+    } else {
+        Format::Ascii
+    };
+    let letter = if format == Format::Ascii { "A" } else { "X" };
+    let mut bytes = format!("RD{letter}{version}\n").into_bytes();
+    bytes.extend(serialize(bindings, format, version)?);
     crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
 }
@@ -1282,8 +1361,14 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
     Ok(result)
 }
 
+/// `serializeToConn(object, con, ascii, version, hook)`, behind `saveRDS`.
 unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
-    let bytes = serialize(call.arg(0))?;
+    let format = if values::as_logical_scalar(call.arg(2)) == 0 {
+        Format::Xdr
+    } else {
+        Format::Ascii
+    };
+    let bytes = serialize(call.arg(0), format, serialization_version(call.arg(3))?)?;
     crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
 }
@@ -1298,8 +1383,20 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     unserialize(&bytes, call.arg(1))
 }
 
+/// `serialize(object, con, type, version, hook)`, where `type` is 0 for XDR, 1 or 2 for ASCII
+/// and 3 for native binary, and `serializeb(object, con, xdr, version, hook)`.
 unsafe fn do_serialize(call: &Call<'_>) -> R<Sexp> {
-    let bytes = serialize(call.arg(0))?;
+    let selector = values::as_integer_scalar(call.arg(2));
+    let format = if call.name() == "serializeb" {
+        if selector == 0 { Format::Binary } else { Format::Xdr }
+    } else {
+        match selector {
+            1 | 2 => Format::Ascii,
+            3 => Format::Binary,
+            _ => Format::Xdr,
+        }
+    };
+    let bytes = serialize(call.arg(0), format, serialization_version(call.arg(3))?)?;
     let connection = call.arg(1);
     if connection == nil() {
         let result = alloc(SexpType::Raw, bytes.len())?;
