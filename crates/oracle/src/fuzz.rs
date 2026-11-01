@@ -61,7 +61,7 @@ const WORDS: [&str; 8] = ["alpha", "b", "", "Gamma", "delta e", "x1", "NA", "zz"
 
 impl Generator {
     fn block_text(&mut self) -> String {
-        match self.rng.below(24) {
+        match self.rng.below(26) {
             0..=3 => self.hot_scalar_loop(),
             4..=5 => self.vector_writes(),
             6 => self.while_and_repeat(),
@@ -81,6 +81,8 @@ impl Generator {
             20 => self.integer_arithmetic(),
             21 => self.matrix_block(),
             22 => self.ill_typed_block(),
+            23 => self.constant_defaults(),
+            24 => self.loop_variable_aliasing(),
             _ => self.global_scalars(),
         }
     }
@@ -477,6 +479,28 @@ impl Generator {
             text.push('\n');
         }
         text
+    }
+
+    /// An atomic or `NULL` default may be bound without a promise, so `missing()`, reassigning
+    /// the formal, and a later default that reads it must all still behave as in GNU R.
+    fn constant_defaults(&mut self) -> String {
+        let k = self.block;
+        let default = ["1L", "2.5", "NULL", "\"word\"", "TRUE", "NA"][self.rng.below(6)];
+        let calls = 2 + self.rng.below(4);
+        format!(
+            "cd{k} <- function(x = {default}, y = x) {{\n  first <- missing(x)\n  if (is.null(x)) x <- 0L\n  x <- c(x, 1L)\n  list(first, missing(y), x, y)\n}}\nfor (r in 1:{calls}) cd{k}()\nstr(cd{k}())\nstr(cd{k}(5L))\nstr(cd{k}(y = 3))\nprint(identical(cd{k}(), cd{k}()))\nnd{k} <- function(n = {default}) {{ n <- 7L; n }}\nprint(nd{k}())\nprint(nd{k}())\n"
+        )
+    }
+
+    /// A loop may overwrite its scalar in place when only the binding holds it, so every way
+    /// of keeping a reference to the loop value must see the value of its own iteration.
+    fn loop_variable_aliasing(&mut self) -> String {
+        let k = self.block;
+        let values = ["c(1.5, 2.5, 3.5)", "1:4", "c(TRUE, FALSE, NA)", "c(\"a\", \"b\")"]
+            [self.rng.below(4)];
+        format!(
+            "kept{k} <- list()\nclosures{k} <- list()\nfor (v in {values}) {{\n  kept{k}[[length(kept{k}) + 1L]] <- v\n  local({{ w <- v; closures{k}[[length(closures{k}) + 1L]] <<- function() w }})\n  alias{k} <- v\n}}\nstr(kept{k})\nstr(lapply(closures{k}, function(f) f()))\nprint(alias{k})\nprint(v)\nfor (v in {values}) {{ v <- rev(c(v, v)); last{k} <- v }}\nprint(last{k})\nenv{k} <- new.env()\nfor (v in {values}) assign(paste0(\"n\", length(ls(env{k}))), v, envir = env{k})\nstr(mget(sort(ls(env{k})), envir = env{k}))\n"
+        )
     }
 
     fn strings(&mut self) -> String {
