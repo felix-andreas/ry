@@ -6,7 +6,7 @@ use {
     syntax::testing::{SplitMix64, fuzz_iterations},
     table::{
         ColumnType, Schema, Table,
-        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, string_to_factor, to_r, to_series},
         ffi, io, ops,
         polars::prelude::{IntoColumn, PlSmallStr},
         query::{
@@ -3229,6 +3229,34 @@ fn files_read_and_write_through_the_file_system() {
     assert_eq!(
         back.schema().to_string(),
         "DataFrame{k: factor, v: integer[]}"
+    );
+}
+
+#[test]
+fn a_string_column_becomes_a_factor_with_sorted_levels() {
+    let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![3, 2, NA_INTEGER, 3, 1],
+            levels: vec!["asia".to_string(), "eu".to_string(), "us".to_string()],
+        }
+    );
+}
+
+#[test]
+fn an_all_missing_string_column_becomes_a_factor_without_levels() {
+    let column = column_of("k", strings(&["NA", "NA"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![NA_INTEGER, NA_INTEGER],
+            levels: vec![],
+        }
     );
 }
 

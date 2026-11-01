@@ -384,7 +384,6 @@ protects construction but nothing after it.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
 - The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
   would let compiled loops run strict arithmetic without the generic call.
-- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 - An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
   as well as the Array error, because the check runs after R's operator. Muffle the warning when the
@@ -510,10 +509,6 @@ change that does not pay.
    through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
    re-check. Target: hash the index, and sort by spelling only where output order is visible.
    Check first which maps rely on string order for deterministic output.
-7. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
-   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
-   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
-   only alongside other work in that file.
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
@@ -2018,11 +2013,18 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
-  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
-  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
-  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
-  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
+- **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
+  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena
+  commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
+  questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
+  The delay is process-wide and trades resident memory in every R program, so it stays at
+  mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
+  targeted fixes.
+- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
+  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
+  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
+  31 s for the same file. A factor representation that keeps the levels as a plain string array
+  and maps them only on demand would remove the 6 s.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
