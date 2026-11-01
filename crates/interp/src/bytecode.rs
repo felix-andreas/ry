@@ -1850,14 +1850,14 @@ struct Decoded<'a> {
     registers: *mut Sexp,
     /// The type feedback bytes, one per code word, or null when no optimizing tier is installed
     /// to read them.
-    feedback: *mut u8,
+    feedback: *mut i32,
 }
 
 impl Decoded<'_> {
     unsafe fn of(machine: &Machine<'_>) -> Self {
         let constants = machine.code.cdr();
         let feedback = match interp().bytecode.tier {
-            Some(_) => values::raws_mut(constants.element(FEEDBACK)).as_mut_ptr(),
+            Some(_) => values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr(),
             None => std::ptr::null_mut(),
         };
         Decoded {
@@ -1872,7 +1872,7 @@ impl Decoded<'_> {
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= value_kind(value);
+            *self.feedback.add(pc) |= i32::from(value_kind(value));
         }
     }
 }

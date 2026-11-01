@@ -914,7 +914,7 @@ pub unsafe fn apply_closure_moved(
     heap.untrack_references(promargs);
     // Untracking a cell stops its tail from counting too, which the rest of the list needs.
     promargs.cdr().increment_refcount();
-    run_closure(call, function, env, sys_parent, promargs)
+    run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
