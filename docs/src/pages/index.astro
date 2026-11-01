@@ -4034,6 +4034,7 @@ ry check .</code></pre>
             .path > .venn {
                 margin: 0;
                 max-width: none;
+                container-type: inline-size;
             }
             .path > .seg-steps {
                 flex-direction: column;
@@ -4078,7 +4079,7 @@ ry check .</code></pre>
             }
             @media (min-width: 900px) {
                 .path {
-                    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
                     column-gap: clamp(1.5rem, 3.5vw, 3rem);
                     row-gap: 1rem;
                 }
@@ -4096,7 +4097,9 @@ ry check .</code></pre>
                 .path > .venn {
                     grid-row: 1 / 3;
                     grid-column: 2;
-                    align-self: center;
+                    align-self: start;
+                    position: sticky;
+                    top: 6rem;
                 }
                 /* Half the frame is too narrow for code beside output, so the output sits below the code. */
                 .path > .stage .stage-body {
@@ -4106,6 +4109,12 @@ ry check .</code></pre>
                 .path > .stage .pane + .pane {
                     border-left: 0;
                     border-top: 1px solid var(--border);
+                }
+            }
+            @media (max-width: 420px) {
+                .seg-steps [role="tab"] {
+                    font-size: 14px;
+                    gap: 0.6rem;
                 }
             }
             @media (max-width: 899px) {
