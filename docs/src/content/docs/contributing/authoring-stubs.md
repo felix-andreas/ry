@@ -4,9 +4,15 @@ description: The .Rtypes declaration format, overload sets, export manifests, an
 ---
 
 This page is for contributors who edit the shipped stub corpus, and for anyone writing a project's
-own stubs. The corpus lives in the repository's top-level `types/` directory: about 950 typed
-declarations in eleven `.Rtypes` files, plus an `.exports` [manifest](#export-manifests) for every
-namespace R ships and for fifteen CRAN namespaces. The typing rules the stubs feed are in the
+own stubs. The corpus lives in the repository's top-level `types/` directory: about 1,700 typed
+declarations in 77 `.Rtypes` files, plus an `.exports` [manifest](#export-manifests) for every
+namespace R ships and for every CRAN package in the benchmark dependency set.
+
+Shipping a package's types means dropping `types/<namespace>.Rtypes` (and its manifest) into that
+directory and nothing else: `crates/semantics/build.rs` embeds every file it finds there. R's own
+packages load first, in search-path order, then the CRAN namespaces alphabetically, then ry's
+standard library. Every namespace that is not one of R's own packages or the standard library is
+[conditional](#conditional-namespaces), so its names exist only in projects that use the package. The typing rules the stubs feed are in the
 [typing reference](/reference/type-system), and the user-facing introduction is
 [Stubs](/type-checking/stubs).
 
@@ -223,10 +229,9 @@ overwrite a manifest recorded against a newer R than the running one, because re
 older R would silently drop the names the newer version added, and every use of one would become a
 false `unresolved` finding.
 
-A manifest does not need an `.Rtypes` file beside it. Fifteen namespaces have a manifest and no
-typed declarations at all, so every name from them is `Unknown`: `tibble`, `tidyr`, `readr`, `purrr`,
-`stringr`, `forcats`, `lubridate`, `magrittr`, `rlang`, `glue`, `scales`, `knitr`, `jsonlite`, `R6`,
-and `tidyverse`. What they contribute is a *known export set*. Attaching a package whose exports the
+A manifest does not need an `.Rtypes` file beside it. Some namespaces, such as `tibble`, `tidyr`,
+`forcats`, `magrittr`, `glue`, `scales`, `knitr` and `tidyverse`, have a manifest and no typed
+declarations at all, so every name from them is `Unknown`. What they contribute is a *known export set*. Attaching a package whose exports the
 checker cannot list turns off unresolved-name detection for the whole project, as the
 [typing reference](/reference/type-system#naming-and-scoping) specifies, so without its manifest a
 single `library(stringr)` would silence every typo. Adding typed declarations for any of these packages later is purely additive:
@@ -358,8 +363,8 @@ un-exports it from the namespace that declared it.
 ### Conditional namespaces
 
 Some shipped namespaces describe packages R does not attach by default: `data.table`, `dplyr`,
-`ggplot2`, and `testthat` come with types, and the [manifest-only](#export-manifests) CRAN set comes
-without. Folding them in unconditionally would let `fread`, `mutate`, or `str_to_upper` resolve in a
+`ggplot2`, `testthat` and the benchmark packages come with types, and the
+[manifest-only](#export-manifests) CRAN set comes without. Folding them in unconditionally would let `fread`, `mutate`, or `str_to_upper` resolve in a
 project that never uses them, stealing a typo warning. So a conditional namespace joins the library
 only when the project uses the package, and any one of these signals is enough:
 

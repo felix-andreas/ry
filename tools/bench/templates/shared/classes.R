@@ -5,12 +5,13 @@
 # An S4 class with a validity check and a generic.
 #: @type Quantity@ID@ {list{amount: double[], unit: character}}
 
-#: @if-unknown fn(...: Any) -> Quantity@ID@
 methods::setClass( # ry: allow(object-system)
   "Quantity@ID@",
   representation(amount = "numeric", unit = "character"),
   validity = function(object) {
-    if (length(object@unit) != 1L) "unit must be a single string" else TRUE
+    #: character[]
+    unit <- object@unit
+    if (length(unit) != 1L) "unit must be a single string" else TRUE
   }
 )
 

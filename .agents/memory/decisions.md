@@ -3510,3 +3510,49 @@ explicit allocators".
   agree. Edits to crates `libr` does not link (the formatter, the IDE layer) leave it alone.
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
+
+# Decision record: what typing finbench in strict mode settled
+
+## Shipped stubs are whatever `types/` holds
+
+- **Before.** `stubs.rs` listed every shipped `.Rtypes` and `.exports` file by hand, and a second
+  hand list named the conditional namespaces. A stub added to `types/` without editing both lists
+  either never shipped or was always active, which made a package's names resolve in projects that
+  never use it.
+- **Now.** `crates/semantics/build.rs` scans `types/`, embeds every file, orders the stubs (R's own
+  packages in search-path order, CRAN namespaces alphabetically, `ry` last, so later sources
+  override earlier ones the way R's search path does) and derives `CONDITIONAL_NAMESPACES` as every
+  namespace except R's own packages and `ry`. One source of truth: the directory.
+- `QUALIFIED_ONLY_NAMESPACES` stubs are gated by activation like conditional ones, so an inactive
+  package's `pkg::name` stays a manifest lookup rather than a typed call.
+
+## Override-stub problems are computed after `PackageMetadata` exists
+
+- `stub_library` is a HIGH-durability memo. Computed before the `PackageMetadata` singleton input
+  existed, it saw no active namespaces and was never re-verified, so a project with any
+  `stubs/*.Rtypes` lost every shipped conditional namespace. `cli.rs` creates the metadata input
+  first; `check_keeps_declared_packages_active_beside_override_stubs` in `test_cli.rs` pins it.
+
+## Strict mode implies type errors
+
+- `[check] strict = true` without `typing` used to report the strict findings but no type errors,
+  which made a strict project look clean while its calls did not type. Strict now turns typing on
+  (`diagnostics.rs`); `typing = false` beside it no longer turns type errors off. Strict code is
+  fully typed by definition, so there is no useful strict-but-untyped mode.
+
+## An all-`Any` overload does not veto agreement among unchecked fits
+
+- With an unchecked (`Unknown` or `Any`) argument every candidate fits, and the call is `Unknown`
+  unless the fits agree. A catch-all fallback such as `rep`'s `fn(...) -> Any` always disagreed, so
+  every overloaded call with one unknown argument was `Unknown`, the largest strict friction in the
+  port. `overloaded_call` (`check.rs`) drops all-`Any` fits when a more specific fit exists, then
+  applies the agreement rule. Rejected: taking the union of the fits' results. It is sound, but it
+  turns silence into false operand errors downstream (operators do not dispatch per union member),
+  against "the checker presumes R code is correct".
+
+## `$`, `[` and `[[` dispatch to a class's subset method
+
+- A stub or project method named `$.class`, `[.class` or `[[.class` types the access on a value of
+  nominal type `class` (`subset_method_result` in `check.rs`), as R's S3 dispatch would run it. It
+  is consulted before the structural read, so an opaque type such as httr2's `request` gets typed
+  field reads without exposing a representation.

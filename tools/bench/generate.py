@@ -179,7 +179,9 @@ def generate_package(args, domain, domain_templates, shared_templates):
             namespace.update(fill(line, values) for line in template.ns)
             exports.extend(exported_names(code))
             used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", code + template.test))
-            lines += code.count("\n") + 1
+            # Counting the code without its annotations makes `--typed` generate the same program
+            # as an untyped run with the same seed, so the two can be timed against each other.
+            lines += ANNOTATION.sub("", code).count("\n") + 1
             label = label or template.name
         stem = f"{label.replace('_', '-')}-{index:04d}"
         write(os.path.join(root, "R", f"{stem}.R"), f"# {package}: {label}\n\n" + "\n".join(code_parts))
@@ -264,10 +266,10 @@ REGISTRY = {
     "AzureAuth": "get_azure_token", "AzureKeyVault": "key_vault", "AzureStor": "storage_endpoint",
     "AzureTableStor": "table_endpoint", "brio": "read_lines", "cachem": "cache_mem", "callr": "r",
     "cli": "cli_text", "data.table": "data.table", "DBI": "dbConnect", "devtools": "load_all",
-    "digest": "digest", "doParallel": "registerDoParallel", "esgtoolkit": "simdiff",
+    "digest": "sha1", "doParallel": "registerDoParallel", "esgtoolkit": "simdiff",
     "FLSSS": "FLSSS", "foreach": "foreach", "fs": "path", "git2r": "init", "httr": "GET",
     "httr2": "request", "jsonlite": "fromJSON", "lgr": "get_logger", "loadfast": "load_fast",
-    "lubridate": "ymd", "memoise": "memoise", "methods": "new", "NlcOptim": "solnl",
+    "lubridate": "make_date", "memoise": "memoise", "methods": "new", "NlcOptim": "solnl",
     "odbc": "odbc", "ompr": "MIPModel", "ompr.roi": "with_ROI", "openxlsx": "read.xlsx",
     "parallel": "mclapply", "partitions": "parts", "pdftools": "pdf_text",
     "PerformanceAnalytics": "Return.calculate", "plumber": "pr", "polars": "as_polars_df",
@@ -276,16 +278,22 @@ REGISTRY = {
     "RcppSimdJson": "fparse", "readr": "read_csv", "readxl": "read_excel", "renv": "snapshot",
     "Rglpk": "Rglpk_solve_LP", "rlang": "abort", "rmgarch": "dccspec", "rugarch": "ugarchspec",
     "rvest": "read_html", "snakecase": "to_snake_case", "stats": "sd", "stringr": "str_detect",
-    "testthat": "test_that", "tools": "file_ext", "tryCatchLog": "tryCatchLog", "utils": "head",
+    "testthat": "test_that", "tools": "file_ext", "tryCatchLog": "tryCatchLog", "utils": "str",
     "uuid": "UUIDgenerate", "withr": "with_dir", "xml2": "read_xml", "xts": "xts",
-    "YieldCurve": "Nelson.Siegel", "zoo": "zoo",
+    "YieldCurve": "NSrates", "zoo": "zoo",
 }
 
 
 def dependencies_file():
     names = [name.split(">=")[0] for name in IMPORTS]
     packages = ",\n  ".join(f'"{name}"' for name in names)
-    entries = ",\n    ".join(f"`{name}` = function(...) {name}::{REGISTRY[name]}(...)" for name in names if name in REGISTRY)
+    # The registry only names each class system to reference its package, so its lint is allowed.
+    allow = {"R6": " # ry: allow(object-system)"}
+    listed = [name for name in names if name in REGISTRY]
+    entries = "\n    ".join(
+        f"`{name}` = function(...) {name}::{REGISTRY[name]}(...){'' if index == len(listed) - 1 else ','}{allow.get(name, '')}"
+        for index, name in enumerate(listed)
+    )
     return DEPENDENCIES.replace("@PACKAGES@", packages).replace("@ENTRIES@", entries)
 
 

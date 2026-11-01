@@ -24,8 +24,8 @@ setGeneric : fn(name: character, [def]: Any, ...: Any) -> character
 setMethod : fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
 setValidity : Any
 setRefClass : Any
-representation : @pure Any
-signature : @pure Any
+representation : @pure fn(...: character) -> list[character]
+signature : @pure fn(...: character) -> character[]
 callNextMethod : Any
 getMethod : Any
 selectMethod : Any

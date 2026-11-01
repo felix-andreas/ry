@@ -15,16 +15,17 @@ Sys.setenv(NOT_CRAN = "true", TESTTHAT_CPUS = "1")
 # pkgload refuses to load a package whose Imports are not installed, and a few of them
 # (polars needs a newer R, Rblpapi needs the Bloomberg SDK) cannot be installed here. The code
 # reaches them only through `::` inside injectable or guarded branches, so the tests run on a
-# copy whose DESCRIPTION leaves the missing packages out.
+# copy whose DESCRIPTION leaves the missing packages out. An installed package can still fail to
+# load (Rglpk without its system library), so the test is loading it, not finding it installed.
 package_dir <- file.path(tempfile("bench"), basename(normalizePath(args[[1]])))
 dir.create(dirname(package_dir))
 file.copy(normalizePath(args[[1]]), dirname(package_dir), recursive = TRUE)
 description <- read.dcf(file.path(package_dir, "DESCRIPTION"))
 imports <- trimws(strsplit(description[, "Imports"], ",")[[1]])
 names <- sub("\\s*\\(.*", "", imports)
-available <- names %in% rownames(installed.packages())
+available <- vapply(names, function(name) suppressWarnings(requireNamespace(name, quietly = TRUE)), logical(1))
 if (any(!available)) {
-  message("not installed, skipped in Imports: ", paste(names[!available], collapse = ", "))
+  message("cannot be loaded, skipped in Imports: ", paste(names[!available], collapse = ", "))
   description[, "Imports"] <- paste(imports[available], collapse = ",\n    ")
   write.dcf(description, file.path(package_dir, "DESCRIPTION"))
 }
