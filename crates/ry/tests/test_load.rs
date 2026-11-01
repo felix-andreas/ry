@@ -106,10 +106,14 @@ fn a_package_loads_with_collate_imports_s3_and_s4() {
         );
         let printed = text(&output);
         assert!(output.status.success(), "{printed}");
-        assert!(
-            printed.contains("Loaded demo: 5 definitions bound lazily, 5 top-level statements run"),
-            "{printed}"
-        );
+        // ry's runtime holds the three S4 definitions back until `norm1` is first called.
+        let summary = if *runtime == "ry" {
+            "Loaded demo: 5 definitions bound lazily, 2 top-level statements run, \
+             3 S4 definitions held back until first use"
+        } else {
+            "Loaded demo: 5 definitions bound lazily, 5 top-level statements run"
+        };
+        assert!(printed.contains(summary), "{printed}");
         assert!(printed.contains("hello ry !"), "{printed}");
         assert!(printed.contains("$5"), "{printed}");
         assert!(printed.contains("42 3 4"), "{printed}");
@@ -387,6 +391,131 @@ fn depends_attach_and_deleted_s4_definitions_are_undone() {
     assert!(printed.contains("attached: TRUE 3"), "{printed}");
     assert!(printed.contains("2 registrations undone"), "{printed}");
     assert!(printed.contains("left: FALSE FALSE"), "{printed}");
+}
+
+/// A package whose S4 definitions ry's runtime may hold back.
+const SHAPES: &[(&str, &str)] = &[
+    (
+        "DESCRIPTION",
+        "Package: shapes\nVersion: 1.0\nCollate: 'a.R' 'b.R'\n",
+    ),
+    ("NAMESPACE", "exportPattern(\".\")\n"),
+    (
+        "R/a.R",
+        "SIDES <- 4\n\
+         Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
+         setValidity(\"Sq\", function(object) if (object@side < 0) \"negative side\" else TRUE)\n\
+         setGeneric(\"area\", function(shape) standardGeneric(\"area\"))\n\
+         setMethod(\"area\", \"Sq\", function(shape) shape@side^2)\n",
+    ),
+    (
+        "R/b.R",
+        "helper <- function() SIDES\n\
+         setGeneric(\"perimeter\", function(shape) standardGeneric(\"perimeter\"))\n\
+         setMethod(\"perimeter\", \"Sq\", function(shape) SIDES * shape@side)\n",
+    ),
+];
+
+#[test]
+fn held_back_s4_definitions_behave_as_if_run_eagerly() {
+    if !r_available() {
+        return;
+    }
+    let probe = "cat('probe:', isVirtualClass('Sq'), existsMethod('area', 'Sq'), \
+                 area(Sq(side = 3)), perimeter(new('Sq', side = 2)), \
+                 tryCatch(validObject(Sq(side = -1)), error = function(e) 'invalid'), \
+                 is(Sq(side = 1), 'Sq'), if (exists('ORIGIN')) ORIGIN@side, \
+                 sort(getGenerics(asNamespace('shapes'))), '\\n')";
+    // Without `ORIGIN`, every S4 definition stays held back after the load; with it, the load
+    // itself needs the class and runs the definitions placed before `ORIGIN` at that point.
+    let origin = "ORIGIN <- new(\"Sq\", side = 0)\n";
+    for (uses_class, lazy_summary, expected) in [
+        (
+            false,
+            "1 top-level statement run, 6 S4 definitions held back until first use",
+            "FALSE TRUE 9 8 invalid TRUE ",
+        ),
+        (
+            true,
+            "8 top-level statements run, in",
+            "FALSE TRUE 9 8 invalid TRUE 0 ",
+        ),
+    ] {
+        let mut files = SHAPES.to_vec();
+        let second = if uses_class {
+            files[3]
+                .1
+                .replacen("setMethod", &format!("{origin}setMethod"), 1)
+        } else {
+            files[3].1.to_owned()
+        };
+        files[3].1 = &second;
+        let mut printed = Vec::new();
+        for lazy in ["TRUE", "FALSE"] {
+            let root = package(&files);
+            let reload = format!(
+                "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
+                root.path().display().to_string()
+            );
+            let output = ry_load(root.path(), &[&reload, probe]);
+            let text = text(&output);
+            assert!(output.status.success(), "{text}");
+            let line = text
+                .lines()
+                .find(|line| line.starts_with("probe:"))
+                .unwrap_or_else(|| panic!("no probe line in {text}"))
+                .to_owned();
+            let summary = text
+                .lines()
+                .rfind(|line| line.starts_with("Loaded shapes"))
+                .unwrap_or_else(|| panic!("no load summary in {text}"))
+                .to_owned();
+            printed.push((text, line, summary));
+        }
+        let (lazy, eager) = (&printed[0], &printed[1]);
+        assert_eq!(lazy.1, eager.1, "lazy:\n{}\neager:\n{}", lazy.0, eager.0);
+        assert!(lazy.1.contains(expected), "{}", lazy.0);
+        assert!(lazy.2.contains(lazy_summary), "{}", lazy.0);
+        let statements = if uses_class { 8 } else { 7 };
+        assert!(
+            eager
+                .2
+                .contains(&format!("{statements} top-level statements run, in")),
+            "{}",
+            eager.0
+        );
+    }
+}
+
+#[test]
+fn a_reload_while_s4_definitions_are_held_back_keeps_them_working() {
+    if !r_available() {
+        return;
+    }
+    for (edit, expected) in [
+        // A reload that leaves the S4 definitions alone keeps them held back.
+        (("R/b.R", "SIDES", "SIDES + 0"), "after: 9 8"),
+        // A reload that reruns one of them runs them all first.
+        (("R/a.R", "shape@side^2", "shape@side^3"), "after: 27 8"),
+    ] {
+        let root = package(SHAPES);
+        let (file, from, to) = edit;
+        let path = root.path().join(file);
+        let edited = fs::read_to_string(&path)
+            .expect("read")
+            .replacen(from, to, 1);
+        let script = format!(
+            "writeLines({edited:?}, {path:?})\n\
+             load_all({root:?})\n\
+             cat('after:', area(Sq(side = 3)), perimeter(Sq(side = 2)), '\\n')\n",
+            path = path.display().to_string(),
+            root = root.path().display().to_string(),
+        );
+        let output = ry_load(root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{printed}");
+        assert!(printed.contains(expected), "{printed}");
+    }
 }
 
 #[test]
