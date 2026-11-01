@@ -15,8 +15,8 @@
 
 ry checks, formats, loads and runs R from one tool configured by one `ry.toml`. Its type system
 sits on top of R and works on the code you already have. You can stop at checking plain R, add
-types as `#:` comments that keep the code plain R, switch to inline types, or move to ry's own
-records, tagged unions and typed table, and turn on strict mode to reject untyped code.
+types as `#:` comments that keep the code plain R, switch to inline types, or go fully typed with
+ry's own records, tagged unions and typed table, and turn on strict mode to reject untyped code.
 [Why ry](https://ry-lang.org/why-ry) walks through the four steps.
 
 Its parser is written for tooling: it says what is missing and keeps analyzing the rest of the file.

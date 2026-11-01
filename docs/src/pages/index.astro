@@ -52,70 +52,112 @@ const lspFeatures = [
     },
 ];
 
-const analysisTabs = [
+// Every snippet below was run through the real binary (`ry check`, `ry run --runtime ry`), and
+// its output is pasted verbatim; re-run rather than hand-edit.
+type Sample = { key: string; label: string; code: string; command: string; output: string };
+
+const runtimeTabs: Sample[] = [
     {
-        key: "lint",
-        label: "Lints",
-        split: "1fr",
-        file: "R/sales.R",
-        config: "no configuration",
-        note:
-            "Unresolved names and lints, with no setup.",
+        key: "unions",
+        label: "Tagged unions",
+        code: `alias Shape = :Circle(radius: double) | :Rect(width: double, height: double)
+
+area <- function(shape: Shape) -> double {
+  match (shape) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+
+area(:Rect(width = 3, height = 4))`,
+        command: "ry run --runtime ry shapes.R",
+        output: `[1] 12`,
     },
     {
-        key: "types",
-        label: "Type errors",
-        split: "1.3fr",
-        file: "R/pricing.R",
-        config: "ry.toml · [check] typing = true",
-        note:
-            "Annotations are <code>#:</code> comments.",
+        key: "nominal",
+        label: "Nominal types",
+        code: `type UserId = integer
+type OrderId = integer
+
+cancel <- function(order: OrderId) -> character "cancelled"
+
+user <- @UserId(7L)
+cancel(user)`,
+        command: "ry check",
+        output: `type-mismatch
+
+  x expected \`OrderId\`, found \`UserId\`
+   --[orders.R:7:8]
+ 6 | user <- @UserId(7L)
+ 7 | cancel(user)
+   |        ^^^^`,
     },
     {
-        key: "inference",
-        label: "Inference",
-        split: "2fr",
-        file: "R/booking.R",
-        config: "ry.toml · [check] typing = true",
-        note:
-            "No annotations. Inferred signatures shown in grey.",
+        key: "records",
+        label: "Records",
+        code: `alias Person = record{name: character, age: integer}
+
+greet <- function(person: Person) -> character paste("hi", person$name)
+
+ada <- (name = "ada", age = 36L)
+greet(ada)
+ada$email`,
+        command: "ry run --runtime ry people.R",
+        output: `[1] "hi ada"
+Error in ada$email :
+  the record has no field \`email\`; its fields are \`age\`, \`name\``,
+    },
+    {
+        key: "stdlib",
+        label: "Standard library",
+        code: `ids <- List.map_try(Str.split_on("3,1,x", ","), Str.to_integer)
+
+match (ids) {
+  :Ok(values) => List.sum(values)
+  :Err(reason) => reason
+}`,
+        command: "ry run --runtime ry ids.R",
+        output: `:InvalidNumStr`,
     },
 ];
 
-// The migration story. Each step's output is captured from the real binary
-// (`ry check` on a project with the matching ry.toml); re-capture rather than hand-edit.
-const migrationSteps = [
+const migrationTabs: Sample[] = [
     {
-        step: "1",
-        title: "Check the code you have",
-        note: "No configuration, nothing to annotate.",
-        href: "/guides/checking",
+        key: "step-check",
+        label: "1. Check the code you have",
         code: `net_price <- function(price, rate) {
   price * (1 - ratee)
 }`,
-        kind: "warn",
-        name: "unresolved",
-        message: "I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?",
+        command: "ry check",
+        output: `unresolved
+
+  ! I could not resolve \`ratee\` in this package, its imports, or builtins. Did you mean \`rate\`?
+   --[R/pricing.R:2:16]
+ 1 | net_price <- function(price, rate) {
+ 2 |   price * (1 - ratee)
+   |                ^^^^^`,
     },
     {
-        step: "2",
-        title: "Type your code",
-        note: "<code>#:</code> comments keep it plain R that GNU R runs.",
-        href: "/type-checking/overview",
+        key: "step-comments",
+        label: "2. Type your code",
         code: `#: fn(price: double, rate: double) -> double
 net_price <- function(price, rate) {
   price * (1 - rate)
 }
+
 net_price(100, "0.2")`,
-        kind: "err",
-        name: "type-mismatch",
-        message: "expected `double`, found `character`",
+        command: "ry check",
+        output: `type-mismatch
+
+  x expected \`double\`, found \`character\`
+   --[R/pricing.R:6:16]
+ 5 |
+ 6 | net_price(100, "0.2")
+   |                ^^^^^`,
     },
     {
-        step: "3",
-        title: "Switch to inline types",
-        note: "Also checked when the script runs on ry's runtime.",
-        href: "/type-checking/inline-annotations",
+        key: "step-inline",
+        label: "3. Switch to inline types",
         code: `net_price <- function(
   price: double,
   rate: double
@@ -124,15 +166,13 @@ net_price(100, "0.2")`,
 }
 rate <- eval(parse(text = '"0.2"'))
 net_price(100, rate)`,
-        kind: "run",
-        name: "$ ry run --runtime ry pricing.R",
-        message: "Error in net_price(100, rate) :\n  argument `rate` must be `double`, not `character`",
+        command: "ry run --runtime ry pricing.R",
+        output: `Error in net_price(100, rate) :
+  argument \`rate\` must be \`double\`, not \`character\``,
     },
     {
-        step: "4",
-        title: "Move to ry's types",
-        note: "Model data with records and tagged unions, then turn on strict mode.",
-        href: "/type-checking/records-and-tags",
+        key: "step-ry",
+        label: "4. Go fully typed",
         code: `alias Payment = :Paid(amount: double) | :Pending
 
 balance <- function(payment: Payment) -> double {
@@ -140,44 +180,92 @@ balance <- function(payment: Payment) -> double {
     :Paid(amount = a) => a
   }
 }`,
-        kind: "err",
-        name: "non-exhaustive-match",
-        message: "this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm",
+        command: "ry check",
+        output: `non-exhaustive-match
+
+  x this \`match\` does not handle \`:Pending\`: add an arm for it, or a catch-all \`_ => ...\` arm
+   --[R/payments.R:4:3]
+ 3 | balance <- function(payment: Payment) -> double {
+ 4 |   match (payment) {
+   |   ^^^^^^^^^^^^^^^`,
     },
 ];
 
+const escapeHtml = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-const formatterTabs = [
-    {
-        key: "spacing",
-        label: "Spacing",
-        file: "totals.R",
-        meta: "operators, commas, quotes",
-        note: "Spaces around operators and after commas, double quotes.",
-    },
-    {
-        key: "braces",
-        label: "Braces & loops",
-        file: "regions.R",
-        meta: "loop and if bodies",
-        note: "Loop bodies, and if bodies that span lines, always get braces.",
-    },
-    {
-        key: "indent",
-        label: "Indentation",
-        file: "options.R",
-        meta: "multi-line call arguments",
-        note: "One indent step per level. Line breaks are kept.",
-    },
-    {
-        key: "annotations",
-        label: "Annotations",
-        file: "pricing.R",
-        meta: "#: type annotations",
-        note:
-            "Valid annotations are normalized. Others are left as written.",
-    },
-];
+const KEYWORDS = new Set([
+    "function", "if", "else", "for", "while", "in", "return", "match", "alias", "type",
+    "TRUE", "FALSE", "NULL", "NA",
+]);
+const TYPE_NAMES = new Set([
+    "double", "integer", "character", "logical", "record", "Result", "Shape", "Person",
+    "Payment", "UserId", "OrderId",
+]);
+
+// A small R tokenizer that emits the same `t-*` classes as the captured editor mocks.
+function highlightR(source: string): string {
+    const token =
+        /(#.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(\b\d+(?:\.\d+)?L?\b)|([:@][A-Z]\w*)|([A-Za-z_.][\w.]*)|(\s+)|(.)/gm;
+    return source
+        .split("\n")
+        .map((line, index) => {
+            let html = "";
+            for (const match of line.matchAll(token)) {
+                const [text, comment, string, number, tag, word] = match;
+                const escaped = escapeHtml(text);
+                let cls = "t-op";
+                if (comment) cls = "t-com";
+                else if (string) cls = "t-str";
+                else if (number) cls = "t-num";
+                else if (tag) cls = "t-type";
+                else if (word)
+                    cls = KEYWORDS.has(word)
+                        ? "t-kw"
+                        : TYPE_NAMES.has(word)
+                          ? "t-type"
+                          : line.slice((match.index ?? 0) + text.length).startsWith("(")
+                            ? "t-fn"
+                            : "t-id";
+                else if (/^\s+$/.test(text)) {
+                    html += escaped;
+                    continue;
+                }
+                html += `<span class="${cls}">${escaped}</span>`;
+            }
+            return `<div class="cl"><span class="ln" aria-hidden="true">${index + 1}</span><span class="cx">${html}</span></div>`;
+        })
+        .join("\n");
+}
+
+// Colors raw `ry` output the way the terminal shows it.
+function terminal(command: string, output: string): string {
+    const lines = output.split("\n").map((line, index) => {
+        const escaped = escapeHtml(line);
+        if (line === "") return `<div class="tl gap"></div>`;
+        if (index === 0 && /^[a-z-]+$/.test(line)) {
+            const severity = output.includes("\n  ! ") ? "dwarn" : "derr";
+            return `<div class="tl"><span class="${severity}">${escaped}</span></div>`;
+        }
+        const message = line.match(/^  ([x!]) (.*)$/);
+        if (message) {
+            const severity = message[1] === "x" ? "derr" : "dwarn";
+            return `<div class="tl msg"><span class="${severity}">  ${message[1]} </span><span class="dmsg">${escapeHtml(message[2])}</span></div>`;
+        }
+        if (line.startsWith("   --[")) return `<div class="tl"><span class="darrow">${escaped}</span></div>`;
+        const gutter = line.match(/^( *\d* \|)(.*)$/);
+        if (gutter) {
+            const rest = gutter[2];
+            const body = /^ *\^+$/.test(rest)
+                ? rest.replace(/\^+/, (carets) => `<span class="dcaret-err">${carets}</span>`)
+                : escapeHtml(rest);
+            return `<div class="tl"><span class="dgutter">${escapeHtml(gutter[1])}</span>${body}</div>`;
+        }
+        if (line.startsWith("Error")) return `<div class="tl msg"><span class="derr">${escaped}</span></div>`;
+        return `<div class="tl msg">${escaped}</div>`;
+    });
+    return [`<div class="tl"><span class="sh">$</span> ${escapeHtml(command)}</div>`, ...lines].join("\n");
+}
 
 const ideCode = `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com"># one sale, and what is left of it after fees</span></span></div>
 <div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">sale</span><span class="inlay" data-for="inlay">: list{region: character, amount: double, closed: logical}</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">, </span><span class="t-id">closed</span><span class="t-op"> = </span><span class="t-kw">TRUE</span><span class="t-op">)</span></span></div>
@@ -190,25 +278,6 @@ const ideCode = `<div class="cl" data-line="1"><span class="ln" aria-hidden="tru
 <div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-id">label</span><span class="t-op">)</span></span></div>`;
 
 const analysisCode = {
-    lint: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">read_sales</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">path</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-op">  </span><span class="t-fn">read.csv</span><span class="t-op">(</span><span class="t-id">path</span><span class="t-op">, </span><span class="t-id">stringsAsFactors</span><span class="t-op"> = </span><span class="t-kw">FALSE</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"></span></div>
-<div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-id">top_regions</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-id">n</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">  </span><span class="t-id">ranked</span><span class="t-op"> </span><span class="squig warn"><span class="t-op">=</span></span><span class="t-op"> </span><span class="t-id">sales</span><span class="t-op">[</span><span class="t-fn">order</span><span class="t-op">(-</span><span class="t-id">sales</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">), ]</span></span></div>
-<div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-op">  </span><span class="t-fn">head</span><span class="t-op">(</span><span class="t-fn">unique</span><span class="t-op">(</span><span class="t-id">ranked</span><span class="t-op">$</span><span class="t-id">region</span><span class="t-op">), </span><span class="t-id">n</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"></span></div>
-<div class="cl" data-line="10"><span class="ln" aria-hidden="true">10</span><span class="cx"><span class="t-id">report</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-id">regions</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="11"><span class="ln" aria-hidden="true">11</span><span class="cx"><span class="t-op">  </span><span class="t-fn">message</span><span class="t-op">(</span><span class="squig warn"><span class="t-id">nrwo</span></span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">), </span><span class="t-str">" rows in "</span><span class="t-op">, </span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">regions</span><span class="t-op">), </span><span class="t-str">" regions"</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="12"><span class="ln" aria-hidden="true">12</span><span class="cx"><span class="t-op">  </span><span class="t-fn">invisible</span><span class="t-op">(</span><span class="t-id">regions</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="13"><span class="ln" aria-hidden="true">13</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="14"><span class="ln" aria-hidden="true">14</span><span class="cx"></span></div>
-<div class="cl" data-line="15"><span class="ln" aria-hidden="true">15</span><span class="cx"><span class="t-id">sales</span><span class="t-op"> &lt;- </span><span class="t-fn">read_sales</span><span class="t-op">(</span><span class="t-str">"sales.csv"</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="16"><span class="ln" aria-hidden="true">16</span><span class="cx"><span class="t-id">regions</span><span class="t-op"> &lt;- </span><span class="t-fn">top_regions</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-num">5</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="17"><span class="ln" aria-hidden="true">17</span><span class="cx"></span></div>
-<div class="cl" data-line="18"><span class="ln" aria-hidden="true">18</span><span class="cx"><span class="t-id">verbose</span><span class="t-op"> &lt;- </span><span class="squig warn"><span class="t-id">T</span></span></span></div>
-<div class="cl" data-line="19"><span class="ln" aria-hidden="true">19</span><span class="cx"><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-id">verbose</span><span class="t-op">) </span><span class="t-fn">report</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-id">regions</span><span class="t-op">)</span></span></div>`,
     types: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#: fn(gross: </span><span class="t-type">double</span><span class="t-com">, rate: </span><span class="t-type">double</span><span class="t-com">) -&gt; </span><span class="t-type">double</span></span></div>
 <div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">net_of_fees</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
 <div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">  </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
@@ -227,53 +296,9 @@ const analysisCode = {
 <div class="cl" data-line="16"><span class="ln" aria-hidden="true">16</span><span class="cx"><span class="t-id">quote</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">)</span></span></div>
 <div class="cl" data-line="17"><span class="ln" aria-hidden="true">17</span><span class="cx"><span class="t-id">total</span><span class="t-op"> &lt;- </span><span class="t-fn">book_total</span><span class="t-op">(</span><span class="t-id">quote</span><span class="t-op">)</span></span></div>
 <div class="cl" data-line="18"><span class="ln" aria-hidden="true">18</span><span class="cx"><span class="t-id">label</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"total: "</span><span class="t-op">, </span><span class="t-id">total</span><span class="t-op">)</span></span></div>`,
-    inference: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">net_of_fees</span><span class="inlay is-on">: &lt;T: numeric, U: numeric&gt; fn(gross: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-op">  </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"></span></div>
-<div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-id">fee_rate</span><span class="inlay is-on">: &lt;T&gt; fn(region: T) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">  </span><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-id">region</span><span class="t-op"> == </span><span class="t-str">"north"</span><span class="t-op">) </span><span class="t-num">0.18</span><span class="t-op"> </span><span class="t-kw">else</span><span class="t-op"> </span><span class="t-num">0.22</span></span></div>
-<div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"></span></div>
-<div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-id">book_total</span><span class="inlay is-on">: &lt;T, U: numeric&gt; fn(rows: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">rows</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="10"><span class="ln" aria-hidden="true">10</span><span class="cx"><span class="t-op">  </span><span class="t-fn">net_of_fees</span><span class="t-op">(</span><span class="t-id">rows</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="11"><span class="ln" aria-hidden="true">11</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="12"><span class="ln" aria-hidden="true">12</span><span class="cx"></span></div>
-<div class="cl" data-line="13"><span class="ln" aria-hidden="true">13</span><span class="cx"><span class="t-id">quote</span><span class="inlay is-on">: list{region: character, amount: double}</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="14"><span class="ln" aria-hidden="true">14</span><span class="cx"><span class="t-id">total</span><span class="t-op"> &lt;- </span><span class="t-fn">book_total</span><span class="t-op">(</span><span class="t-id">quote</span><span class="t-op">, </span><span class="squig err"><span class="t-str">"0.18"</span></span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="15"><span class="ln" aria-hidden="true">15</span><span class="cx"><span class="t-id">label</span><span class="inlay is-on">: character</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"total: "</span><span class="t-op">, </span><span class="t-id">total</span><span class="t-op">)</span></span></div>`,
 };
 
 const analysisOutput = {
-    lint: `<div class="tl"><span class="sh">$</span> ry check</div>
-<div class="tl"><span class="dwarn">assignment-operator</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="dwarn">  ! </span><span class="dmsg">Use &lt;-, not =, for assignment</span></div>
-<div class="tl"><span class="darrow">   --[R/sales.R:6:10]</span></div>
-<div class="tl"><span class="dgutter"> 5 |</span> top_regions &lt;- function(sales, n) {</div>
-<div class="tl"><span class="dgutter"> 6 |</span>   ranked = sales[order(-sales$amount), ]</div>
-<div class="tl"><span class="dgutter">   |</span>          <span class="dcaret-warn">^</span></div>
-<div class="tl"><span class="dgutter"> 7 |</span>   head(unique(ranked$region), n)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dwarn">unresolved</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="dwarn">  ! </span><span class="dmsg">I could not resolve \`nrwo\` in this package, its imports, or builtins. Did you mean \`nrow\`?</span></div>
-<div class="tl"><span class="darrow">    --[R/sales.R:11:11]</span></div>
-<div class="tl"><span class="dgutter"> 10 |</span> report &lt;- function(sales, regions) {</div>
-<div class="tl"><span class="dgutter"> 11 |</span>   message(nrwo(sales), &quot; rows in &quot;, length(regions), &quot; regions&quot;)</div>
-<div class="tl"><span class="dgutter">    |</span>           <span class="dcaret-warn">^^^^</span></div>
-<div class="tl"><span class="dgutter"> 12 |</span>   invisible(regions)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dwarn">boolean-shorthand</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="dwarn">  ! </span><span class="dmsg">Use TRUE, not T, for Boolean values</span></div>
-<div class="tl"><span class="darrow">    --[R/sales.R:18:12]</span></div>
-<div class="tl"><span class="dgutter"> 17 |</span> </div>
-<div class="tl"><span class="dgutter"> 18 |</span> verbose &lt;- T</div>
-<div class="tl"><span class="dgutter">    |</span>            <span class="dcaret-warn">^</span></div>
-<div class="tl"><span class="dgutter"> 19 |</span> if (verbose) report(sales, regions)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dsum">3 problems in 1 file</span></div>`,
     types: `<div class="tl"><span class="sh">$</span> ry check</div>
 <div class="tl"><span class="derr">type-mismatch</span></div>
 <div class="tl gap"></div>
@@ -285,28 +310,9 @@ const analysisOutput = {
 <div class="tl"><span class="dgutter"> 14 |</span> }</div>
 <div class="tl gap"></div>
 <div class="tl"><span class="dsum">1 problem in 1 file</span></div>`,
-    inference: `<div class="tl"><span class="sh">$</span> ry check</div>
-<div class="tl"><span class="derr">type-mismatch</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="derr">  x </span><span class="dmsg">expected a numeric value (\`integer\` or \`double\`), found \`character\`</span></div>
-<div class="tl"><span class="darrow">    --[R/booking.R:14:28]</span></div>
-<div class="tl"><span class="dgutter"> 13 |</span> quote &lt;- list(region = &quot;north&quot;, amount = 1240.5)</div>
-<div class="tl"><span class="dgutter"> 14 |</span> total &lt;- book_total(quote, &quot;0.18&quot;)</div>
-<div class="tl"><span class="dgutter">    |</span>                            <span class="dcaret-err">^^^^^^</span></div>
-<div class="tl"><span class="dgutter"> 15 |</span> label &lt;- paste0(&quot;total: &quot;, total)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dsum">1 problem in 1 file</span></div>`,
 };
 
 const formatterCode = {
-    spacing: {
-        before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">totals</span><span class="t-op">&lt;-</span><span class="t-fn">sapply</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">,</span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">s</span><span class="t-op">)</span><span class="t-id">s</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">top</span><span class="t-op">&lt;-</span><span class="t-id">sales</span><span class="t-op">[</span><span class="t-id">totals</span><span class="t-op">&gt;</span><span class="t-id">threshold</span><span class="t-op"> ,]</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">'kept: '</span><span class="t-op">,</span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">),</span><span class="t-str">' of '</span><span class="t-op">,</span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">)))</span></span></div>`,
-        after: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">totals</span><span class="t-op"> &lt;- </span><span class="t-fn">sapply</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">s</span><span class="t-op">) </span><span class="t-id">s</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">top</span><span class="t-op"> &lt;- </span><span class="t-id">sales</span><span class="t-op">[</span><span class="t-id">totals</span><span class="t-op"> &gt; </span><span class="t-id">threshold</span><span class="t-op">, ]</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"kept: "</span><span class="t-op">, </span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">), </span><span class="t-str">" of "</span><span class="t-op">, </span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">)))</span></span></div>`,
-    },
     braces: {
         before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-kw">for</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> </span><span class="t-kw">in</span><span class="t-op"> </span><span class="t-id">regions</span><span class="t-op">) </span><span class="t-fn">accumulate</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">)</span></span></div>
 <div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-kw">if</span><span class="t-op">(</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">)==</span><span class="t-num">0</span><span class="t-op">)</span></span></div>
@@ -317,28 +323,6 @@ const formatterCode = {
 <div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">) == </span><span class="t-num">0</span><span class="t-op">) {</span></span></div>
 <div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="ws">··</span><span class="t-fn">warning</span><span class="t-op">(</span><span class="t-str">"no rows"</span><span class="t-op">)</span></span></div>
 <div class="cl is-changed" style="--i:5"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">}</span></span></div>`,
-    },
-    indent: {
-        before: `<div class="cl" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">opts</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="ws">······</span><span class="t-id">host</span><span class="t-op"> = </span><span class="t-str">"localhost"</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="ws">·</span><span class="t-id">port</span><span class="t-op"> = </span><span class="t-num">8080</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="ws">········</span><span class="t-id">retries</span><span class="t-op"> = </span><span class="t-num">3</span></span></div>
-<div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-op">)</span></span></div>`,
-        after: `<div class="cl" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">opts</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="ws">··</span><span class="t-id">host</span><span class="t-op"> = </span><span class="t-str">"localhost"</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="ws">··</span><span class="t-id">port</span><span class="t-op"> = </span><span class="t-num">8080</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="ws">··</span><span class="t-id">retries</span><span class="t-op"> = </span><span class="t-num">3</span></span></div>
-<div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-op">)</span></span></div>`,
-    },
-    annotations: {
-        before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#:fn( gross:</span><span class="t-type">double</span><span class="t-com">,rate:</span><span class="t-type">double</span><span class="t-com"> )-&gt;</span><span class="t-type">double</span></span></div>
-<div class="cl" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">margin</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-com">#: list[ named : </span><span class="t-type">double</span><span class="t-com"> ]</span></span></div>
-<div class="cl" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-id">weights</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">a</span><span class="t-op"> = </span><span class="t-num">1.0</span><span class="t-op">)</span></span></div>`,
-        after: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#: fn(gross: </span><span class="t-type">double</span><span class="t-com">, rate: </span><span class="t-type">double</span><span class="t-com">) -&gt; </span><span class="t-type">double</span></span></div>
-<div class="cl" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">margin</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-com">#: list[named: </span><span class="t-type">double</span><span class="t-com">]</span></span></div>
-<div class="cl" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-id">weights</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">a</span><span class="t-op"> = </span><span class="t-num">1.0</span><span class="t-op">)</span></span></div>`,
     },
 };
 
@@ -504,384 +488,224 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <section id="pitch" class="band showband accent-violet">
+            <section id="toolchain" class="band showband accent-cyan">
                 <div class="band-inner">
                     <header class="band-head">
-                        <h2>One toolchain and a type system for R</h2>
-                        <p class="lede">
-                            Agents are now writing and changing old R code
-                            bases, and what they write needs checking that does
-                            not depend on someone reading every line. ry checks
-                            the R you have, adds types and its own data types on top
-                            of it (R++), and
-                            lets strict mode keep only typed code (R--).
-                        </p>
+                        <h2>One toolchain</h2>
+                        <p class="lede">Checks, formats and navigates the R you have today.</p>
+                    </header>
+                    <div class="showcase" data-tabs="toolchain">
+                        <div class="seg" role="tablist" aria-label="Tools">
+                            <button role="tab" id="tab-checker" aria-controls="panel-checker" aria-selected="true" tabindex="0">Type checker</button>
+                            <button role="tab" id="tab-formatter" aria-controls="panel-formatter" aria-selected="false" tabindex="-1">Formatter</button>
+                            <button role="tab" id="tab-lsp" aria-controls="panel-lsp" aria-selected="false" tabindex="-1">Language server</button>
+                        </div>
+                        <div class="stage split" role="tabpanel" id="panel-checker" aria-labelledby="tab-checker" tabindex="0" style="--split: 1.3fr">
+                            <div class="stage-body">
+                                <div class="pane pane-src">
+                                    <div class="code" set:html={analysisCode.types} />
+                                </div>
+                                <div class="pane pane-out">
+                                    <div class="term" set:html={analysisOutput.types} />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="stage split fmt" role="tabpanel" id="panel-formatter" aria-labelledby="tab-formatter" tabindex="0" hidden>
+                            <div class="stage-body">
+                                <div class="pane pane-src">
+                                    <div class="code" set:html={formatterCode.braces.before} />
+                                </div>
+                                <div class="pane pane-out">
+                                    <div class="code" set:html={formatterCode.braces.after} />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="lsp-panel" role="tabpanel" id="panel-lsp" aria-labelledby="tab-lsp" tabindex="0" hidden>
+                        <div
+                            class="showcase ide"
+                            data-tabs="ide"
+                            data-feature="completion"
+                        >
+                            <div
+                                class="seg"
+                                role="tablist"
+                                aria-label="Language server features"
+                            >
+                                {
+                                    lspFeatures.map((feature, index) => (
+                                        <button
+                                            role="tab"
+                                            id={`tab-${feature.key}`}
+                                            data-key={feature.key}
+                                            aria-controls="ide-panel"
+                                            aria-selected={
+                                                index === 0 ? "true" : "false"
+                                            }
+                                            tabindex={index === 0 ? 0 : -1}
+                                        >
+                                            {feature.label}
+                                        </button>
+                                    ))
+                                }
+                            </div>
+
+                            <div
+                                class="stage"
+                                role="tabpanel"
+                                id="ide-panel"
+                                aria-labelledby="tab-completion"
+                                tabindex="0"
+                            >
+                                <div class="stage-head">
+                                    <span class="ftabs">
+                                        <span class="ftab is-active">sales.R</span>
+                                        <span class="ftab">report.R</span>
+                                    </span>
+                                    <span class="stage-meta"
+                                        ><span class="dot" aria-hidden="true"
+                                        ></span>ry</span
+                                    >
+                                </div>
+
+                                <div class="stage-body ide-body">
+                                    <div class="code-scroll">
+                                        <div class="code" set:html={ideCode} />
+                                    </div>
+                                    <div class="peek" data-for="references">
+                                        <div class="peek-head">
+                                            <span class="peek-count">3</span> references
+                                        </div>
+                                        <div class="peek-row">
+                                            <span class="peek-file">R/sales.R</span
+                                            ><span class="peek-pos">4:1</span><span
+                                                class="peek-src"
+                                                ><mark>margin</mark> &lt;- function(gross,
+                                                rate) gross * (1 - rate)</span
+                                            >
+                                        </div>
+                                        <div class="peek-row">
+                                            <span class="peek-file">R/sales.R</span
+                                            ><span class="peek-pos">6:8</span><span
+                                                class="peek-src"
+                                                >net &lt;- <mark>margin</mark
+                                                >(sale$amount, 0.18)</span
+                                            >
+                                        </div>
+                                        <div class="peek-row">
+                                            <span class="peek-file">R/report.R</span
+                                            ><span class="peek-pos">2:28</span><span
+                                                class="peek-src"
+                                                >paste0(sale$region, " ", <mark
+                                                    >margin</mark
+                                                >(sale$amount, rate))</span
+                                            >
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="runtime" class="band showband band-spotlight accent-violet">
+                <div class="band-inner">
+                    <header class="band-head">
+                        <h2>A backwards-compatible R runtime</h2>
+                        <p class="lede">Runs your R unchanged, and adds the types R is missing.</p>
+                    </header>
+                    <div class="showcase" data-tabs="runtime">
+                    <div class="seg" role="tablist" aria-label="Runtime features">
+                        {
+                            runtimeTabs.map((tab, index) => (
+                                <button
+                                    role="tab"
+                                    id={`tab-${tab.key}`}
+                                    data-key={tab.key}
+                                    aria-controls={`panel-${tab.key}`}
+                                    aria-selected={index === 0 ? "true" : "false"}
+                                    tabindex={index === 0 ? 0 : -1}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))
+                        }
+                    </div>
+                    {
+                        runtimeTabs.map((tab, index) => (
+                            <div
+                                class="stage split"
+                                style="--split: 1.4fr"
+                                role="tabpanel"
+                                id={`panel-${tab.key}`}
+                                aria-labelledby={`tab-${tab.key}`}
+                                tabindex="0"
+                                hidden={index !== 0}
+                            >
+                                <div class="stage-body">
+                                    <div class="pane pane-src">
+                                        <div class="code" set:html={highlightR(tab.code)} />
+                                    </div>
+                                    <div class="pane pane-out">
+                                        <div class="term" set:html={terminal(tab.command, tab.output)} />
+                                    </div>
+                                </div>
+                            </div>
+                        ))
+                    }
+                    </div>
+                </div>
+            </section>
+
+            <section id="migrate" class="band showband accent-emerald">
+                <div class="band-inner">
+                    <header class="band-head">
+                        <h2>Take your R code into the future</h2>
+                        <p class="lede">Use ry today on the code you have, and move it to typed code one step at a time.</p>
                     </header>
                     <div class="venn"><Venn id="ry-venn-home" /></div>
-                    <ol class="migrate">
+                    <div class="showcase" data-tabs="migrate">
+                    <div class="seg" role="tablist" aria-label="Steps">
                         {
-                            migrationSteps.map((step) => (
-                                <li class="mig-step">
-                                    <p class="step-label">
-                                        Step {step.step}
-                                    </p>
-                                    <h3>
-                                        <a href={step.href}>{step.title}</a>
-                                    </h3>
-                                    <p class="mig-note" set:html={step.note} />
-                                    <pre class="codeblock mig-code"><code>{step.code}</code></pre>
-                                    <div class="term mig-out">
-                                        <div class={`tl d${step.kind}`}>
-                                            {step.name}
-                                        </div>
-                                        {step.kind === "run" ? (
-                                            <div class="tl msg">{step.message}</div>
-                                        ) : (
-                                            <div class="tl msg">
-                                                <span class={`d${step.kind}`}>
-                                                    {step.kind === "err" ? "x" : "!"}
-                                                </span>{" "}
-                                                <span class="dmsg">{step.message}</span>
-                                            </div>
-                                        )}
-                                    </div>
-                                </li>
-                            ))
-                        }
-                    </ol>
-                    <p class="band-foot">
-                        <a class="doclink" href="/why-ry"
-                            >Why ry <span aria-hidden="true">→</span></a
-                        >
-                    </p>
-                </div>
-            </section>
-
-            <section id="language-server" class="band showband accent-cyan">
-                <div class="band-inner">
-                    <header class="band-head">
-                        <h2>Language server</h2>
-                        <p class="lede">
-                            Works in any editor that supports LSP.
-                        </p>
-                    </header>
-
-                    <div
-                        class="showcase ide"
-                        data-tabs="ide"
-                        data-feature="completion"
-                    >
-                        <div
-                            class="seg"
-                            role="tablist"
-                            aria-label="Language server features"
-                        >
-                            {
-                                lspFeatures.map((feature, index) => (
-                                    <button
-                                        role="tab"
-                                        id={`tab-${feature.key}`}
-                                        data-key={feature.key}
-                                        aria-controls="ide-panel"
-                                        aria-selected={
-                                            index === 0 ? "true" : "false"
-                                        }
-                                        tabindex={index === 0 ? 0 : -1}
-                                    >
-                                        {feature.label}
-                                    </button>
-                                ))
-                            }
-                        </div>
-
-                        <div
-                            class="stage"
-                            role="tabpanel"
-                            id="ide-panel"
-                            aria-labelledby="tab-completion"
-                            tabindex="0"
-                        >
-                            <div class="stage-head">
-                                <span class="ftabs">
-                                    <span class="ftab is-active">sales.R</span>
-                                    <span class="ftab">report.R</span>
-                                </span>
-                                <span class="stage-meta"
-                                    ><span class="dot" aria-hidden="true"
-                                    ></span>ry</span
+                            migrationTabs.map((tab, index) => (
+                                <button
+                                    role="tab"
+                                    id={`tab-${tab.key}`}
+                                    data-key={tab.key}
+                                    aria-controls={`panel-${tab.key}`}
+                                    aria-selected={index === 0 ? "true" : "false"}
+                                    tabindex={index === 0 ? 0 : -1}
                                 >
-                            </div>
-
-                            <div class="stage-body ide-body">
-                                <div class="code-scroll">
-                                    <div class="code" set:html={ideCode} />
-                                </div>
-                                <div class="peek" data-for="references">
-                                    <div class="peek-head">
-                                        <span class="peek-count">3</span> references
-                                    </div>
-                                    <div class="peek-row">
-                                        <span class="peek-file">R/sales.R</span
-                                        ><span class="peek-pos">4:1</span><span
-                                            class="peek-src"
-                                            ><mark>margin</mark> &lt;- function(gross,
-                                            rate) gross * (1 - rate)</span
-                                        >
-                                    </div>
-                                    <div class="peek-row">
-                                        <span class="peek-file">R/sales.R</span
-                                        ><span class="peek-pos">6:8</span><span
-                                            class="peek-src"
-                                            >net &lt;- <mark>margin</mark
-                                            >(sale$amount, 0.18)</span
-                                        >
-                                    </div>
-                                    <div class="peek-row">
-                                        <span class="peek-file">R/report.R</span
-                                        ><span class="peek-pos">2:28</span><span
-                                            class="peek-src"
-                                            >paste0(sale$region, " ", <mark
-                                                >margin</mark
-                                            >(sale$amount, rate))</span
-                                        >
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="stage-foot">
-                                <span class="foot-notes">
-                                    {
-                                        lspFeatures.map((feature) => (
-                                            <span
-                                                class="foot-note"
-                                                data-for={feature.key}
-                                            >
-                                                {feature.note}
-                                            </span>
-                                        ))
-                                    }
-                                </span>
-                                <span class="foot-methods" aria-hidden="true">
-                                    {
-                                        lspFeatures.map((feature) => (
-                                            <code
-                                                class="foot-method"
-                                                data-for={feature.key}
-                                            >
-                                                {feature.method}
-                                            </code>
-                                        ))
-                                    }
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <p class="band-foot">
-                        <a class="doclink" href="/guides/editors"
-                            >Editor features <span aria-hidden="true"
-                                >→</span
-                            ></a
-                        >
-                    </p>
-                </div>
-            </section>
-
-            <section
-                id="code-analysis"
-                class="band showband band-spotlight accent-violet"
-            >
-                <div class="band-inner">
-                    <header class="band-head">
-                        <h2>Checker</h2>
-                        <p class="lede">
-                            Lints out of the box. Type checking with
-                            <code>[check] typing = true</code>.
-                        </p>
-                    </header>
-
-                    <div class="showcase" data-tabs="check">
-                        <div
-                            class="seg"
-                            role="tablist"
-                            aria-label="What ry check reports"
-                        >
-                            {
-                                analysisTabs.map((tab, index) => (
-                                    <button
-                                        role="tab"
-                                        id={`tab-${tab.key}`}
-                                        aria-controls={`panel-${tab.key}`}
-                                        aria-selected={
-                                            index === 0 ? "true" : "false"
-                                        }
-                                        tabindex={index === 0 ? 0 : -1}
-                                    >
-                                        {tab.label}
-                                    </button>
-                                ))
-                            }
-                        </div>
-
-                        {
-                            analysisTabs.map((tab, index) => (
-                                <div
-                                    class="stage split"
-                                    role="tabpanel"
-                                    id={`panel-${tab.key}`}
-                                    aria-labelledby={`tab-${tab.key}`}
-                                    tabindex="0"
-                                    hidden={index !== 0}
-                                    style={`--split: ${tab.split}`}
-                                >
-                                    <div class="stage-head">
-                                        <span class="ftabs">
-                                            <span class="ftab is-active">
-                                                {tab.file}
-                                            </span>
-                                        </span>
-                                        <span class="stage-meta">
-                                            {tab.config}
-                                        </span>
-                                    </div>
-                                    <div class="stage-body">
-                                        <div class="pane pane-src">
-                                            <div
-                                                class="code"
-                                                set:html={analysisCode[tab.key]}
-                                            />
-                                        </div>
-                                        <div class="pane pane-out">
-                                            <div
-                                                class="term"
-                                                set:html={
-                                                    analysisOutput[tab.key]
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                    <div class="stage-foot">
-                                        <span
-                                            class="foot-note is-on"
-                                            set:html={tab.note}
-                                        />
-                                        <code class="foot-method is-on">
-                                            exit 1
-                                        </code>
-                                    </div>
-                                </div>
+                                    {tab.label}
+                                </button>
                             ))
                         }
                     </div>
-
-                    <p class="band-foot">
-                        <a class="doclink" href="/type-checking/overview"
-                            >Tour <span aria-hidden="true">→</span></a
-                        >
-                        <a class="doclink" href="/reference/diagnostic-codes"
-                            >Diagnostic codes <span aria-hidden="true">→</span></a
-                        >
-                    </p>
-                </div>
-            </section>
-
-            <section id="formatter" class="band showband accent-emerald dotted">
-                <div class="band-inner">
-                    <header class="band-head">
-                        <h2>Formatter</h2>
-                        <p class="lede">
-                            Normalizes spacing, indentation, and braces. Keeps
-                            your line breaks.
-                        </p>
-                    </header>
-
-                    <div class="showcase fmt" data-tabs="fmt">
-                        <div
-                            class="seg"
-                            role="tablist"
-                            aria-label="Formatter examples"
-                        >
-                            {
-                                formatterTabs.map((tab, index) => (
-                                    <button
-                                        role="tab"
-                                        id={`tab-${tab.key}`}
-                                        aria-controls={`panel-${tab.key}`}
-                                        aria-selected={
-                                            index === 0 ? "true" : "false"
-                                        }
-                                        tabindex={index === 0 ? 0 : -1}
-                                    >
-                                        {tab.label}
-                                    </button>
-                                ))
-                            }
-                        </div>
-
-                        {
-                            formatterTabs.map((tab, index) => (
-                                <div
-                                    class="stage split"
-                                    role="tabpanel"
-                                    id={`panel-${tab.key}`}
-                                    aria-labelledby={`tab-${tab.key}`}
-                                    tabindex="0"
-                                    hidden={index !== 0}
-                                >
-                                    <div class="stage-head">
-                                        <span class="ftabs">
-                                            <span class="ftab is-active">
-                                                {tab.file}
-                                            </span>
-                                        </span>
-                                        <span class="stage-meta">
-                                            {tab.meta}
-                                        </span>
+                    {
+                        migrationTabs.map((tab, index) => (
+                            <div
+                                class="stage split"
+                                role="tabpanel"
+                                id={`panel-${tab.key}`}
+                                aria-labelledby={`tab-${tab.key}`}
+                                tabindex="0"
+                                hidden={index !== 0}
+                            >
+                                <div class="stage-body">
+                                    <div class="pane pane-src">
+                                        <div class="code" set:html={highlightR(tab.code)} />
                                     </div>
-                                    <div class="stage-body">
-                                        <div class="pane pane-src">
-                                            <div class="pane-label">
-                                                as written
-                                            </div>
-                                            <div
-                                                class="code"
-                                                set:html={
-                                                    formatterCode[tab.key]
-                                                        .before
-                                                }
-                                            />
-                                        </div>
-                                        <div class="pane pane-out">
-                                            <div class="pane-label">ry fmt</div>
-                                            <div
-                                                class="code"
-                                                set:html={
-                                                    formatterCode[tab.key].after
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                    <div class="stage-foot">
-                                        <code class="foot-cmd is-on">
-                                            <span class="sh">$</span> ry fmt
-                                            --diff {tab.file}
-                                        </code>
-                                        <span
-                                            class="foot-note is-on"
-                                            set:html={tab.note}
-                                        />
+                                    <div class="pane pane-out">
+                                        <div class="term" set:html={terminal(tab.command, tab.output)} />
                                     </div>
                                 </div>
-                            ))
-                        }
+                            </div>
+                        ))
+                    }
                     </div>
-
-                    <p class="band-foot">
-                        <a class="doclink" href="/reference/formatting-rules"
-                            >Formatter rules <span aria-hidden="true">→</span
-                            ></a
-                        >
-                    </p>
                 </div>
             </section>
 
@@ -890,27 +714,9 @@ const year = new Date().getFullYear();
                 <div class="closer-scrim" aria-hidden="true"></div>
                 <div class="col closer-col">
                     <h2>Install</h2>
-                    <div class="steps">
-                        <div class="step">
-                            <p class="step-label">1 &middot; Install</p>
-                            <pre
-                                class="codeblock"><code>cargo install --git https://github.com/felix-andreas/ry ry-lang</code></pre>
-                        </div>
-                        <div class="step">
-                            <p class="step-label">
-                                2 &middot; Run it on your project
-                            </p>
-                            <pre
-                                class="codeblock"><code>ry fmt .     <span class="c-muted"># format</span>
-ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
-                        </div>
-                    </div>
-                    <p class="band-note">
-                        No Rust toolchain? Download a
-                        <a class="inline-link" href="https://github.com/felix-andreas/ry/releases"
-                            >prebuilt release</a
-                        >, or install the VS Code extension, which bundles one.
-                    </p>
+                    <pre
+                        class="codeblock"><code>cargo install --git https://github.com/felix-andreas/ry ry-lang
+ry check .</code></pre>
                     <div class="cta-cluster">
                         <a class="cta cta-lg" href="/getting-started"
                             >Get started</a
@@ -1892,9 +1698,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 const reduce = window.matchMedia(
                     "(prefers-reduced-motion: reduce)",
                 ).matches;
-                const tablist = root.querySelector('[role="tablist"]');
+                const tablist = root.querySelector(':scope > [role="tablist"]');
                 const tabs = Array.from(
-                    root.querySelectorAll('[role="tab"]'),
+                    root.querySelectorAll(':scope > [role="tablist"] > [role="tab"]'),
                 ) as HTMLElement[];
                 if (!tabs.length) return;
                 const sharedPanel = root.classList.contains("ide");
@@ -3068,31 +2874,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 padding: 0.02rem 0.32rem;
                 font-size: 0.86em;
             }
-            .steps {
-                display: grid;
-                gap: 1.25rem;
-                margin: 1.4rem 0 0;
-            }
-            .step .codeblock {
-                margin: 0.5rem 0 0;
-            }
-            .step-label {
-                margin: 0;
-                font-family: "Geist Mono", monospace;
-                font-size: 0.78rem;
-                letter-spacing: 0.03em;
-                color: var(--muted);
-            }
-            .band-note {
-                margin: 1.1rem 0 0;
-                max-width: 58ch;
-                color: var(--muted);
-                font-size: 0.95rem;
-            }
-            .band-note code {
-                color: var(--foreground);
-                font-size: 0.88em;
-            }
 
             .doclink {
                 display: inline-flex;
@@ -3128,59 +2909,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 max-width: 660px;
                 margin: 0 auto 2.4rem;
                 color: var(--foreground);
-            }
-            .migrate {
-                list-style: none;
-                margin: 0;
-                padding: 0;
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
-                gap: 1.4rem;
-            }
-            .mig-step {
-                display: flex;
-                flex-direction: column;
-                min-width: 0;
-                background: var(--card);
-                border: 1px solid var(--border);
-                border-radius: var(--radius);
-                padding: 1.1rem 1.2rem 1.2rem;
-                --code-size: 0.8rem;
-                --lh: 1.6;
-            }
-            .mig-step h3 {
-                margin: 0.2rem 0 0.3rem;
-                font-size: 1.15rem;
-                font-weight: 600;
-            }
-            .mig-step h3 a:hover {
-                text-decoration: underline;
-            }
-            .mig-note {
-                margin: 0;
-                color: var(--muted);
-                font-size: 0.92rem;
-            }
-            .mig-note code {
-                color: var(--foreground);
-            }
-            .mig-code {
-                margin-top: 0.9rem;
-                font-size: 0.76rem;
-                font-variant-ligatures: none;
-                line-height: 1.6;
-                padding: 0.8rem 0.95rem;
-                flex: 1;
-            }
-            .mig-out {
-                margin-top: 0.5rem;
-                padding: 0.6rem 0.2rem 0;
-            }
-            .mig-out .drun {
-                color: var(--muted);
-            }
-            .mig-out .tl {
-                white-space: pre-wrap;
             }
             .codeblock {
                 margin: 1.4rem 0 0;
@@ -3218,7 +2946,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 grid-row: 1;
             }
             /* One shared grid cell, so switching tabs never shifts the page. */
-            .showcase > .stage {
+            .showcase > .stage,
+            .showcase > .lsp-panel {
                 grid-row: 2;
                 grid-column: 1;
             }
@@ -4052,6 +3781,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 overflow: hidden;
                 border-bottom: none;
                 display: grid;
+                grid-template-columns: minmax(0, 1fr);
                 align-items: center;
                 min-height: clamp(36rem, 92vh, 54rem);
             }
@@ -4077,6 +3807,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .closer-col {
                 position: relative;
                 z-index: 2;
+                width: 100%;
                 max-width: var(--prose);
                 margin: 0 auto;
                 /* Set by the closer parallax handler; never set under reduced motion. */

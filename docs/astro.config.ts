@@ -94,7 +94,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: "4. Move to ry's types",
+					label: "4. Go fully typed",
 					items: [
 						{ slug: 'type-checking/records-and-tags' },
 						{ slug: 'type-checking/frames' },
