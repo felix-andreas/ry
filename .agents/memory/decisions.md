@@ -3254,3 +3254,13 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+## `just ry` builds ry's runtime; ry-lang does not depend on libr
+
+- `ry run` loads ry's runtime (`libR.so`) beside the executable at run time, and libr is a separate
+  cdylib, so `cargo run -p ry-lang` never builds it. `just ry` builds `-p ry-lang -p libr` first,
+  and `just build` builds the whole workspace; the not-found error names both.
+- A nightly artifact dependency (`artifact = "cdylib"`) was rejected: every `ry-lang` build,
+  including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
+  still lose the library, because the artifact path points into the build directory. Embedding
+  the library in the binary would double its size for users who never run code.

@@ -1,8 +1,20 @@
 default:
     @just --list
 
+# Run ry from source, e.g. `just ry check` or `just ry run script.R`. ry's runtime (libR) is a
+# separate library that `ry run` loads at run time, so cargo would not build it for `cargo run`.
+# Build warnings show only when the build fails, so they do not bury ry's own output.
+# It runs in the directory you call it from, so relative paths mean what you typed.
+[no-cd]
+[no-exit-message]
 ry *args:
-    @cargo run -q -- {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! output=$(cargo build --color always -q --manifest-path "{{ justfile_directory() }}/Cargo.toml" -p ry-lang -p libr 2>&1); then
+    	printf '%s\n' "$output" >&2
+    	exit 1
+    fi
+    exec "${CARGO_TARGET_DIR:-{{ justfile_directory() }}/target}/debug/ry" {{ args }}
 
 test *args:
     cargo test -- --nocapture {{ args }}
@@ -73,8 +85,9 @@ install-extension:
     just build-extension pre-release --out ../../release/dev/ry.vsix
     code --install-extension release/dev/ry.vsix
 
-build:
-    cargo build
+# Build every binary and ry's runtime (libR), e.g. `just build --release`.
+build *args:
+    cargo build --workspace --exclude zed_ry {{ args }}
 
 zigbuild $target *args:
     cargo zigbuild --target {{ target }} {{ args }}

@@ -220,7 +220,7 @@ fn ry_runtime_library() -> Result<PathBuf, ReplError> {
         }
     }
     Err(ReplError(format!(
-        "ry's runtime (libR.so) was not found beside {}; build it with `cargo build -p libr` or set RY_LIBR",
+        "ry's runtime (libR.so) was not found beside {}; build it with `just build` or `cargo build -p libr`, or set RY_LIBR to its path",
         executable.display()
     )))
 }
