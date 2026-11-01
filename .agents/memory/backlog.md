@@ -23,12 +23,10 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **`unz` connections** are missing (`.Internal(unz)`), which fails every openxlsx and readxl round trip.
-- **`grepRaw`** is missing, so renv's `.onLoad` fails.
 - **parallel cannot fork or open sockets.** `mc_fork` and the other fork routines error, so `mclapply` and `registerDoParallel(cores = 2)` fail, and `makeCluster` needs `.Internal(serverSocket)` (`decisions.md`, "parallel's natives without fork").
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Time and scale.** ry's suites run 1.7x to 2.1x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
+- **Per-test time.** At 300,000 lines the test blocks run 1.7x to 2.1x GNU R's time, while whole processes are close to parity because GNU R spends minutes in testthat's per-file `gc()`. The gap is spread across the interpreter core rather than one hot spot: bytecode `step`, environment-chain lookup (`Heap::frame_cell`), `match_args`, and an allocation per binding and promise on every closure call. Basic operations measured alone are 2x to 4x GNU R's (a closure call, `seq`, `tryCatch`, `format`, `rlang::enquo`). Call overhead and cached global lookup belong to the JIT tier's call work (`decisions.md`, "the JIT tier"); vector kernels such as arithmetic and `sum` are already at or ahead of GNU R.
 
 ## Open: the package loader
 

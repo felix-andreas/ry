@@ -170,3 +170,10 @@ the package, follows it. `--json` writes every comparison, and `--keep` keeps ea
 report and stderr. Pass `--ry target/release/ry` for timings, with `libR.so` built beside it
 (`cargo build --release -p ry-lang -p libr`). `MEMORY.md` records the current rates.
 
+The two time ratios answer different questions. Suite time adds up the `test_that()` blocks, so
+it measures evaluation. Process wall time also counts what happens between blocks, and at the full
+benchmark size (`--lines 300000 --files 500`) that is dominated by testthat calling `gc()` after
+every test file that registered a teardown. A full collection with the whole package loaded takes
+about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still match GNU R
+end to end.
+
