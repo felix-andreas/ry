@@ -6,9 +6,9 @@
 use crate::Db;
 use crate::diagnostics::TypeRenderer;
 use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField, RestParameter, Ty,
-    TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null, scalar,
-    substitute_rigid, union_of, unknown,
+    Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField,
+    RestParameter, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null,
+    scalar, substitute_rigid, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
@@ -1371,10 +1371,15 @@ impl<'db> Lowering<'db> {
                             .map_or(0, |semicolon| {
                                 fields
                                     .iter()
-                                    .filter(|(_, field)| field.text_range().end() <= semicolon.text_range().start())
+                                    .filter(|(_, field)| {
+                                        field.text_range().end() <= semicolon.text_range().start()
+                                    })
                                     .count()
                             });
-                        Some(FrameKind::GroupBy { lazy, keys: keys as u32 })
+                        Some(FrameKind::GroupBy {
+                            lazy,
+                            keys: keys as u32,
+                        })
                     }
                     other => other,
                 };
@@ -1386,7 +1391,11 @@ impl<'db> Lowering<'db> {
                             .unwrap_or_else(|| unknown(self.db));
                         RecordField {
                             name: Name::new(self.db, name),
-                            ty: if frame.is_some() { column_type(self.db, ty) } else { ty },
+                            ty: if frame.is_some() {
+                                column_type(self.db, ty)
+                            } else {
+                                ty
+                            },
                             optional: false,
                         }
                     })
@@ -1496,10 +1505,28 @@ impl<'db> Lowering<'db> {
             "DataFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None)),
             "LazyFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None)),
             "GroupBy" => {
-                return Ty::new(self.db, TyKind::Frame(FrameKind::GroupBy { lazy: false, keys: 0 }, None));
+                return Ty::new(
+                    self.db,
+                    TyKind::Frame(
+                        FrameKind::GroupBy {
+                            lazy: false,
+                            keys: 0,
+                        },
+                        None,
+                    ),
+                );
             }
             "LazyGroupBy" => {
-                return Ty::new(self.db, TyKind::Frame(FrameKind::GroupBy { lazy: true, keys: 0 }, None));
+                return Ty::new(
+                    self.db,
+                    TyKind::Frame(
+                        FrameKind::GroupBy {
+                            lazy: true,
+                            keys: 0,
+                        },
+                        None,
+                    ),
+                );
             }
             _ => {}
         }

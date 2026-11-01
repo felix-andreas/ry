@@ -17,8 +17,8 @@ use crate::metadata::{
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
-    TypeScheme, map_child_types, substitute_rigid, union_of,
+    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty,
+    TyKind, TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,

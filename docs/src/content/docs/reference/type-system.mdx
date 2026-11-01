@@ -1794,7 +1794,10 @@ an `if` without `else`, or a helper that returns `NULL` on some path, and the co
 not reach the call on that path. So `type <- switch(type, logical = "a logical %s", integer =
 "an integer %s")` followed by `sprintf(type, kind)` is clean. A parameter the body does not
 reassign, and a variable whose assignment is annotated, keep their `NULL`, so passing a
-`name: character | NULL` parameter on to a `character` parameter is still reported.
+`name: character | NULL` parameter on to a `character` parameter is still reported. An unannotated
+parameter with a `NULL` default is a placeholder of the same kind: in
+`function(H = NULL, Z) { ...; if (quadratic) scale_by(Z, H) }`, where `quadratic` was set from an
+`is.null(H)` test, `H` passes to a numeric parameter without its `NULL`.
 
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The

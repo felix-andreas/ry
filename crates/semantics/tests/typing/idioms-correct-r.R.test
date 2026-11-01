@@ -616,3 +616,19 @@ matches <- function(truth, flag) {
 }
 #++++
 matches: <T> fn(truth: T, flag: logical) -> logical
+
+#---- a_null_default_is_a_placeholder_at_a_numeric_parameter
+scale_by <- function(Z, H) Z * H * Z
+solve <- function(H = NULL, Z) {
+  if (is.null(H)) {
+    quadratic <- 0
+  } else if (norm(H, "I") == 0) {
+    quadratic <- 0
+  } else {
+    quadratic <- 1
+  }
+  if (quadratic) scale_by(Z, H) else Z
+}
+#++++
+scale_by: <T: numeric> fn(Z: T, H: T) -> T
+solve: <T: numeric> fn([H]: T | NULL, Z: T) -> T

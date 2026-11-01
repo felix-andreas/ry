@@ -7,9 +7,8 @@ use crate::annotations::NamedDefinition;
 use crate::diagnostics::nearest_name;
 use crate::stubs::stubs;
 use crate::types::{
-    FrameKind,
-    Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, for_each_child_type,
-    map_child_types, scalar, substitute_rigid, union_of, unknown,
+    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
+    for_each_child_type, map_child_types, scalar, substitute_rigid, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, RefCell};
@@ -389,9 +388,8 @@ impl<'db> InferenceTable<'db> {
                 Err(UnifyError::Mismatch(a, b))
             }
             // A frame whose columns are unknown makes no claim to check.
-            (TyKind::Frame(_, None), TyKind::Frame(..)) | (TyKind::Frame(..), TyKind::Frame(_, None)) => {
-                Ok(())
-            }
+            (TyKind::Frame(_, None), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None)) => Ok(()),
             (TyKind::Frame(_, Some(left)), TyKind::Frame(_, Some(right))) => {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
@@ -906,9 +904,8 @@ impl<'db> InferenceTable<'db> {
             {
                 false
             }
-            (TyKind::Frame(_, None), TyKind::Frame(..)) | (TyKind::Frame(..), TyKind::Frame(_, None)) => {
-                true
-            }
+            (TyKind::Frame(_, None), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None)) => true,
             (TyKind::Frame(_, Some(actual_columns)), TyKind::Frame(_, Some(expected_columns)))
                 if actual_columns.len() == expected_columns.len() =>
             {
@@ -935,19 +932,24 @@ impl<'db> InferenceTable<'db> {
             }
             // `as.list` turns a frame into the list of its columns, which is how `lapply`,
             // `Map` and `Filter` iterate one. A plan or a grouping is not a list of columns.
-            (TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _), TyKind::List(_) | TyKind::NamedList(_)) => false,
+            (
+                TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _),
+                TyKind::List(_) | TyKind::NamedList(_),
+            ) => false,
             (TyKind::Frame(_, None), TyKind::List(_) | TyKind::NamedList(_)) => true,
-            (TyKind::Frame(_, Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
-                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
-            {
+            (
+                TyKind::Frame(_, Some(columns)),
+                TyKind::List(element) | TyKind::NamedList(element),
+            ) if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) => {
                 let joined = union_of(db, columns.iter().map(|column| column.ty));
                 self.unify(db, *element, joined).is_ok()
             }
-            (TyKind::Frame(_, Some(columns)), TyKind::List(element) | TyKind::NamedList(element)) => {
-                columns
-                    .iter()
-                    .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
-            }
+            (
+                TyKind::Frame(_, Some(columns)),
+                TyKind::List(element) | TyKind::NamedList(element),
+            ) => columns
+                .iter()
+                .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1)),
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
             // to the first item and reject the rest. An empty `list()` says nothing about `T`,
             // so it leaves `T` open; binding it to the empty join would fail every constraint
@@ -1161,7 +1163,7 @@ impl<'db> InferenceTable<'db> {
 
     /// The one fact the rendered type cannot show: `fn(s: U) -> U` prints the same
     /// whether `U` accepts anything or only numbers.
-    fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
+    pub(crate) fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let TyKind::Var(var) = ty.kind(db) else {
             return None;
         };
@@ -1498,7 +1500,8 @@ fn constraint_rejects<'db>(
         let every_member_admissible = members
             .iter()
             .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
-        return (!every_member_admissible).then_some(UnifyError::ConstraintRejected(constraint, ty));
+        return (!every_member_admissible)
+            .then_some(UnifyError::ConstraintRejected(constraint, ty));
     }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
@@ -1712,9 +1715,18 @@ mod tests {
 fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
     match (left, right) {
         (
-            FrameKind::GroupBy { lazy: left_lazy, keys: left_keys },
-            FrameKind::GroupBy { lazy: right_lazy, keys: right_keys },
-        ) => left_lazy == right_lazy && (left_keys == right_keys || left_keys == 0 || right_keys == 0),
+            FrameKind::GroupBy {
+                lazy: left_lazy,
+                keys: left_keys,
+            },
+            FrameKind::GroupBy {
+                lazy: right_lazy,
+                keys: right_keys,
+            },
+        ) => {
+            left_lazy == right_lazy
+                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
+        }
         _ => left == right,
     }
 }
