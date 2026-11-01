@@ -1323,7 +1323,7 @@ impl Flags {
     }
 
     fn get(&self, index: usize) -> bool {
-        self.words[index / 64] >> (index % 64) & 1 == 1
+        (self.words[index / 64] >> (index % 64)) & 1 == 1
     }
 
     fn set(&mut self, index: usize) {
@@ -2087,5 +2087,42 @@ impl Moments {
         self.m2_y += later.m2_y + delta_y * delta_y * weight;
         self.co += later.co + delta_x * delta_y * weight;
         self.count = count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Flags;
+
+    #[test]
+    fn appended_flags_keep_every_slot_at_any_offset() {
+        for first_len in [0, 1, 63, 64, 65, 130] {
+            for second_len in [0, 1, 63, 64, 65, 130] {
+                let pattern = |index: usize| index % 3 == 0 || index % 7 == 1;
+                let mut first = Flags::new(first_len);
+                (0..first_len)
+                    .filter(|index| pattern(*index))
+                    .for_each(|index| first.set(index));
+                let mut second = Flags::new(second_len);
+                (0..second_len)
+                    .filter(|index| !pattern(*index))
+                    .for_each(|index| second.set(index));
+                first.append(&second);
+                assert_eq!(first.len, first_len + second_len);
+                assert_eq!(first.words.len(), first.len.div_ceil(64));
+                for index in 0..first.len {
+                    let expected = if index < first_len {
+                        pattern(index)
+                    } else {
+                        !pattern(index - first_len)
+                    };
+                    assert_eq!(
+                        first.get(index),
+                        expected,
+                        "{first_len} + {second_len} at {index}"
+                    );
+                }
+            }
+        }
     }
 }

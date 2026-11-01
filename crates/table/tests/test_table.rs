@@ -3246,6 +3246,20 @@ fn a_string_column_becomes_a_factor_with_sorted_levels() {
     );
 }
 
+#[test]
+fn an_all_missing_string_column_becomes_a_factor_without_levels() {
+    let column = column_of("k", strings(&["NA", "NA"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![NA_INTEGER, NA_INTEGER],
+            levels: vec![],
+        }
+    );
+}
+
 fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {
     to_series(PlSmallStr::from(name), vector)
         .unwrap_or_else(|error| panic!("cannot build {name}: {error}"))

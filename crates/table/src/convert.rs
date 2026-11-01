@@ -232,8 +232,8 @@ pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
     )?))
 }
 
-/// A string column as a factor with R's default levels, its distinct values sorted, as
-/// `factor(x)` makes them.
+/// A string column as a factor with its distinct values as levels, sorted in byte order, which is
+/// what `factor(x)` gives in R's C locale.
 ///
 /// The codes come from one pass that numbers each distinct string as it first appears, so the
 /// strings are hashed once and never copied; sorting then touches only the distinct values, and
@@ -252,7 +252,7 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
                 distinct.push(value);
                 (distinct.len() - 1) as u32
             }),
-            None => 0,
+            None => u32::MAX,
         });
     }
     drop(numbering);
@@ -262,9 +262,10 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
     for (position, first_seen) in order.iter().enumerate() {
         rank[*first_seen as usize] = position as u32;
     }
-    codes
-        .par_iter_mut()
-        .for_each(|code| *code = rank[*code as usize]);
+    codes.par_iter_mut().for_each(|code| {
+        // A missing row's code is masked by the validity bitmap, so any level stands in for it.
+        *code = rank.get(*code as usize).copied().unwrap_or(0)
+    });
     let dtype = DataType::from_frozen_categories(FrozenCategories::new(
         order
             .iter()
