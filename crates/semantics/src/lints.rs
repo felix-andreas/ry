@@ -1,7 +1,7 @@
 use {
     crate::{
         Db, SourceFile,
-        diagnostics::{Diagnostic, Severity},
+        diagnostics::{Applicability, Diagnostic, Severity},
         is_s3_method_name, item_naming, item_spans,
         naming::BindingKind,
         parse, s3_generics,
@@ -71,7 +71,12 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             .filter_map(|span| item_naming(db, span.item).as_ref())
             .flat_map(|naming| naming.bindings.values())
             .map(|binding| binding.name.as_str())
-            .filter(|name| object_system_function(name).is_some())
+            .filter(|name| {
+                syntax
+                    .unless_redefined
+                    .iter()
+                    .any(|(function, _)| function == name)
+            })
             .collect();
         diagnostics.extend(
             syntax
@@ -122,9 +127,10 @@ pub fn file_syntax_lints(db: &dyn Db, file: SourceFile, config: LintConfig) -> S
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct SyntaxLints {
     always: Vec<Diagnostic>,
-    /// Findings on a bare call to a class-defining function, keyed by its name. A file that
-    /// binds `setClass` itself calls its own function, not the methods one, so these hold
-    /// only when the file does not redefine the name.
+    /// Findings that hold only while the file does not bind the name they are keyed by: a bare
+    /// call to a class-defining function (a file that binds `setClass` calls its own function),
+    /// and `T` or `F` (a file that binds `T`, even as a parameter, may mean that binding, and
+    /// the fix to `TRUE` would change what the code does).
     unless_redefined: Vec<(String, Diagnostic)>,
 }
 
@@ -214,7 +220,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),
                 SyntaxKind::PARAMETER => parameter_name_lint(&red, config, diagnostics),
                 SyntaxKind::NAME if annotation_depth == 0 => {
-                    boolean_shorthand_lint(&red, config, diagnostics);
+                    boolean_shorthand_lint(&red, config, &mut lints.unless_redefined);
                 }
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
@@ -237,7 +243,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
 fn boolean_shorthand_lint(
     name: &SyntaxNode,
     config: &LintConfig,
-    diagnostics: &mut Vec<Diagnostic>,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
 ) {
     let Some(token) = name.first_token() else {
         return;
@@ -284,14 +290,20 @@ fn boolean_shorthand_lint(
         ),
         _ => return,
     };
+    let mut diagnostics = Vec::new();
     push_lint(
-        diagnostics,
+        &mut diagnostics,
         config.boolean_shorthand,
         Severity::Warning,
         "boolean-shorthand",
         token.text_range(),
         message,
         Some((title, replacement)),
+    );
+    unless_redefined.extend(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| (token.text().to_owned(), diagnostic)),
     );
 }
 
@@ -442,11 +454,18 @@ fn trailing_comma_lint(
     config: &LintConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut last_comma = None;
+    // The comma, and the removal that also takes the blanks after it, so `g(1, )` becomes
+    // `g(1)` rather than `g(1 )`.
+    let mut last_comma: Option<(TextRange, TextRange)> = None;
     for element in argument_list.children_with_tokens() {
         match element {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => {
-                last_comma = Some(token.text_range());
+                last_comma = Some((token.text_range(), token.text_range()));
+            }
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::WHITESPACE => {
+                if let Some((_, removal)) = &mut last_comma {
+                    *removal = removal.cover(token.text_range());
+                }
             }
             NodeOrToken::Node(node) if node.kind() == SyntaxKind::ARGUMENT => {
                 last_comma = None;
@@ -454,18 +473,26 @@ fn trailing_comma_lint(
             _ => {}
         }
     }
-    if let Some(range) = last_comma {
-        push_lint(
-            diagnostics,
-            config.trailing_comma,
-            // R reads the comma as an empty argument, which only fails when the callee
-            // evaluates it (`c(1, )`); a closure that leaves it unforced runs fine, so the
-            // comma is a style finding, not a certain run-time error.
-            Severity::Warning,
-            "trailing-comma",
-            range,
-            "Unexpected comma after last argument",
-            Some(("Remove the trailing comma", "")),
+    let Some((comma, removal)) = last_comma else {
+        return;
+    };
+    // R reads the comma as an empty argument, which only fails when the callee evaluates it
+    // (`c(1, )`); a closure that leaves it unforced runs fine, so the comma is a style finding,
+    // not a certain run-time error.
+    if let Some(severity) = lint_severity(config.trailing_comma, Some(Severity::Warning)) {
+        diagnostics.push(
+            Diagnostic::new(
+                comma,
+                severity,
+                "trailing-comma",
+                "Unexpected comma after last argument".to_owned(),
+            )
+            .with_fix(
+                Applicability::Safe,
+                "Remove the trailing comma".to_owned(),
+                removal,
+                String::new(),
+            ),
         );
     }
 }
@@ -534,9 +561,12 @@ fn push_lint(
     if let Some(severity) = lint_severity(level, Some(default_severity)) {
         let diagnostic = Diagnostic::new(range, severity, code, message.into());
         diagnostics.push(match fix {
-            Some((title, replacement)) => {
-                diagnostic.with_fix(title.to_owned(), range, replacement.to_owned())
-            }
+            Some((title, replacement)) => diagnostic.with_fix(
+                Applicability::Safe,
+                title.to_owned(),
+                range,
+                replacement.to_owned(),
+            ),
             None => diagnostic,
         });
     }

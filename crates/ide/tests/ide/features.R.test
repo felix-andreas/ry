@@ -62,6 +62,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*, 44..50
 rename: 2 edit(s)
+calls double: in g [44..50] | out
 signature: fn(x: double) -> double
 parameters: [x: double]
 action: Add inferred type annotation for `g`
@@ -104,6 +105,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*, 45..51
 rename: 2 edit(s)
+calls helper: in caller [45..51] | out
 signature: fn(x: double) -> double
 parameters: [x: double]
 action: Add inferred type annotation for `caller`
@@ -195,6 +197,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*, 45..51, 74..80
 rename: 3 edit(s)
+calls helper: in caller [45..51], also [74..80] | out
 signature: fn(x: double) -> double
 parameters: [x: double]
 action: Add inferred type annotation for `caller`
@@ -217,6 +220,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*, 45..51
 rename: 2 edit(s)
+calls helper: in caller [45..51] | out
 signature: none
 action: Add inferred type annotation for `helper`
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
@@ -667,7 +671,10 @@ action: Add inferred type annotation for `p`
 action: Add inferred type annotations for the whole file
   edit 55..55 -> "#: Any\n"
 completion: none
+hint @9Class =
 hint @56: Any
+hint @106signature =
+hint @116definition =
 
 #---- generic_from_setmethod
 setGeneric("area", function(shape) standardGeneric("area"))
@@ -677,9 +684,14 @@ hover 70..76: character
 definition 12..16
 references: 12..16*, 52..56, 71..75
 rename: 3 edit(s)
+calls area: in  | out
 signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
 parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
 completion: none
+hint @11name =
+hint @19def =
+hint @78signature =
+hint @88definition =
 
 #---- call_of_a_script_generic_navigates_to_its_declaration
 setGeneric("area", function(shape) standardGeneric("area"))
@@ -691,8 +703,13 @@ hover-definition: global 12..16
 definition 12..16
 references: 12..16*, 52..56, 71..75, 107..111
 rename: 4 edit(s)
+calls area: in (top level) [107..111] | out
 signature: none
 completion (24): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, Arg
+hint @11name =
+hint @19def =
+hint @78signature =
+hint @88definition =
 
 #---- declaring_string_of_a_generic_reaches_its_calls
 setGeneric("ar$0ea", function(shape) standardGeneric("area"))
@@ -702,9 +719,12 @@ hover 11..17: character
 definition 12..16
 references: 12..16*, 52..56, 60..64
 rename: 3 edit(s)
+calls area: in (top level) [60..64] | out
 signature: fn(name: character, [def]: Any, ...: Any) -> character
 parameters: [name: character] | [def]: Any | ...: Any
 completion: none
+hint @11name =
+hint @19def =
 
 #---- signature_vector_classes
 setClass("A", representation())
@@ -722,6 +742,9 @@ action: Add inferred type annotation for `q`
 action: Add inferred type annotations for the whole file
   edit 81..81 -> "#: Any\n"
 completion: none
+hint @9Class =
+hint @53signature =
+hint @66definition =
 hint @82: Any
 
 #==== type_definition
@@ -916,3 +939,52 @@ action: Add inferred type annotations for the whole file
   edit 23..23 -> "  #: character\n"
 completion: none
 hint @32: character
+
+#==== parameter_hints
+#---- positional_arguments_name_their_parameters
+grow <- function(principal, rate, years = 1L) principal * (1 + rate)^years
+rate <- 0.05
+a <- grow(100, rate, 3L)
+b <- grow(r = 0.1, 100, 2L)
+c <- grow(100)
+#++++
+hint @4: <T: numeric, U: numeric, V: numeric> fn(principal: T, rate: U, [years]: V) -> double
+hint @79: double
+hint @89: double
+hint @98principal =
+hint @109years =
+hint @114: double
+hint @132principal =
+hint @137years =
+#---- exact_names_do_not_also_claim_a_prefix
+g <- function(rate, rate_max, years) rate + rate_max + years
+a <- g(rate = 0.1, 0.2, 3)
+#++++
+hint @1: <T: numeric> fn(rate: T, rate_max: T, years: T) -> T
+hint @62: double
+hint @80rate_max =
+hint @85years =
+
+#---- partial_names_skip_parameters_after_dots
+f <- function(abc, ..., abd) abc
+a <- f(ab = 1, 2, 3)
+#++++
+hint @1: <T, U> fn(abc: T, ...: Any, [abd]: U) -> T
+hint @34: double
+
+#---- forwarded_dots_take_no_slot
+grow <- function(principal, rate, years) principal * rate * years
+wrap <- function(...) grow(1, ..., 3)
+#++++
+hint @4: <T: numeric> fn(principal: T, rate: T, years: T) -> T
+hint @70: fn(...: Any) -> double
+hint @93principal =
+
+#---- piped_values_get_no_hint
+scale_by <- function(values, factor, offset) values * factor + offset
+a <- c(1, 2) |> scale_by(2, 3)
+#++++
+hint @8: <T: numeric> fn(values: T, factor: T, offset: T) -> T
+hint @71: double[]
+hint @95factor =
+hint @98offset =

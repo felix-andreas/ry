@@ -3006,14 +3006,22 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- `ry check --fix` that applies `Diagnostic.fix` from the command line.
-- More quick fixes: an unused binding (remove or prefix), a missing `library()` for a namespaced name,
-  and an annotation that disagrees with the inline one.
-- Semantic tokens: a `defaultLibrary` modifier for stub-declared functions, and coloring of
-  `$` fields and frame columns.
-- The outline does not show sections inside function bodies (folding does).
-- `code_action` recomputes the file's diagnostics and suppressions on every request, and editors send
-  one per cursor move. Reuse the last published set for the document instead.
+- More quick fixes: a missing `library()` for a namespaced name.
+- `missing_arms_fix` takes its indent from the previous physical line, so after a continuation
+  line the new arms are misindented, and it inserts `\n` in a CRLF file.
+- A finding in a file with a syntax error still says "`ry check --fix` applies it", though
+  `--fix` skips such files.
+- `pkg::name` is always a library token, even when `pkg` is the project's own package.
+- Semantic tokens: coloring of `$` fields and frame columns.
+- Call hierarchy covers project top-level functions only; a local helper or a library function
+  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+- Not done from rust-analyzer's list, with the reason:
+  - Code lens (run test, references count): needs client commands the VS Code extension does not
+    register yet; add them together.
+  - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
+  - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
+    are where they help.
+  - Document highlight already exists.
 
 ## Open: editor latency at 300,000 lines
 
