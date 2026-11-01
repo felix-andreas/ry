@@ -192,6 +192,26 @@
           in
           pkgs.devshell.mkShell {
             motd = "";
+            # libR links zlib, bzip2 and xz (crates/libr/build.rs). `packages` only extends PATH,
+            # so the linker finds them through LIBRARY_PATH and the loader through LD_LIBRARY_PATH.
+            env =
+              let
+                compressionLibraries = pkgs.lib.makeLibraryPath [
+                  pkgs.zlib
+                  pkgs.bzip2
+                  pkgs.xz
+                ];
+              in
+              [
+                {
+                  name = "LIBRARY_PATH";
+                  prefix = compressionLibraries;
+                }
+                {
+                  name = "LD_LIBRARY_PATH";
+                  prefix = compressionLibraries;
+                }
+              ];
             packages = with pkgs; [
               just
               evcxr
