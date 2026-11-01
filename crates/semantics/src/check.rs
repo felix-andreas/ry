@@ -4593,6 +4593,22 @@ impl<'db> Checker<'db, '_> {
         if is_expr_type(self.db, resolved) {
             return resolved;
         }
+        // R rejects `-NULL`, but a value that is only sometimes `NULL` is negated where the code
+        // has ruled that out, as in `if (length(k)) res <- res[-k]`. A bare `NULL` stays an error.
+        let resolved = match resolved.kind(self.db) {
+            TyKind::Union(members)
+                if members.iter().any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
+            {
+                union_of(
+                    self.db,
+                    members
+                        .iter()
+                        .copied()
+                        .filter(|member| !matches!(member.kind(self.db), TyKind::Null)),
+                )
+            }
+            _ => resolved,
+        };
         match self.classify_numeric_operand(resolved) {
             NumericOperand::Concrete(shape, atomic) => self.shaped(shape, atomic),
             NumericOperand::ConcreteUnion(parts) => {

@@ -632,3 +632,12 @@ solve <- function(H = NULL, Z) {
 #++++
 scale_by: <T: numeric> fn(Z: T, H: T) -> T
 solve: <T: numeric> fn([H]: T | NULL, Z: T) -> T
+
+#---- negating_a_value_that_may_be_null_negates_the_value
+drop_marked <- function(res, labels) {
+  k <- if (any(labels == "")) which(labels == "") else NULL
+  if (length(k)) res <- res[-k]
+  res
+}
+negate_nothing <- function() -NULL
+#++++
