@@ -2,20 +2,27 @@
 //!
 //! A memoized analysis result is built once and then only read, so it does not need a
 //! B-tree's spare node capacity or its per-node allocations. These types hold their entries in
-//! one exactly sized, sorted boxed slice: a lookup is a binary search, iteration is in key
-//! order (the same order a `BTreeMap` gives), and an empty one allocates nothing.
+//! one exactly sized, sorted array: a lookup is a binary search, iteration is in key order (the
+//! same order a `BTreeMap` gives), and an empty one allocates nothing.
+//!
+//! The array is a `ThinVec`, which keeps its length beside the elements, so a map is one
+//! pointer wide. A per-item record holds a couple of dozen of these and most are empty, so the
+//! width of an empty one is most of the record's size.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    iter, slice,
+use {
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        iter, slice,
+    },
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
-pub struct SortedMap<K, V>(Box<[(K, V)]>);
+pub struct SortedMap<K, V>(ThinVec<(K, V)>);
 
 impl<K, V> Default for SortedMap<K, V> {
     fn default() -> SortedMap<K, V> {
-        SortedMap(Box::default())
+        SortedMap(ThinVec::new())
     }
 }
 
@@ -68,7 +75,7 @@ impl<K: Ord, V> FromIterator<(K, V)> for SortedMap<K, V> {
         entries.reverse();
         entries.dedup_by(|(later, _), (kept, _)| later == kept);
         entries.reverse();
-        SortedMap(entries.into_boxed_slice())
+        SortedMap(ThinVec::from(entries))
     }
 }
 
@@ -82,11 +89,11 @@ impl<'a, K: Ord, V> IntoIterator for &'a SortedMap<K, V> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
-pub struct SortedSet<K>(Box<[K]>);
+pub struct SortedSet<K>(ThinVec<K>);
 
 impl<K> Default for SortedSet<K> {
     fn default() -> SortedSet<K> {
-        SortedSet(Box::default())
+        SortedSet(ThinVec::new())
     }
 }
 
@@ -119,7 +126,7 @@ impl<K: Ord> FromIterator<K> for SortedSet<K> {
         let mut keys: Vec<K> = keys.into_iter().collect();
         keys.sort_unstable();
         keys.dedup();
-        SortedSet(keys.into_boxed_slice())
+        SortedSet(ThinVec::from(keys))
     }
 }
 

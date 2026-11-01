@@ -277,7 +277,7 @@ fn a_deep_reexport_chain_resolves_fully() {
 #[test]
 fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     let mut db = ProbeDatabase::default();
-    let settings = AnalysisSettings::new(&db, true);
+    let settings = AnalysisSettings::new(&db, true, true);
     let files = db.project(&[
         "typed <- function(x: integer) -> integer x\n",
         "untyped <- function(x) x + 1L\n",

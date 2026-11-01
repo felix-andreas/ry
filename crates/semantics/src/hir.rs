@@ -16,6 +16,7 @@ use {
         GreenElementAt, GreenNodeAt, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{is_expression_kind, name_text},
     },
+    thin_vec::ThinVec,
 };
 
 /// An expression's index in its [`Module`]. It stores the index plus one, so an
@@ -275,17 +276,17 @@ impl fmt::Debug for Symbol {
 /// handful of allocations rather than one per list, and every kind is `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
-    kinds: Vec<ExpressionKind>,
-    ranges: Vec<TextRange>,
-    patterns: Vec<Pattern>,
-    arguments: Vec<Argument>,
-    parameters: Vec<Parameter>,
-    expression_lists: Vec<ExprId>,
-    record_fields: Vec<RecordField>,
-    arms: Vec<MatchArm>,
-    pattern_lists: Vec<PatId>,
-    pattern_fields: Vec<PatternField>,
-    name_sites: Vec<NameSite>,
+    kinds: ThinVec<ExpressionKind>,
+    ranges: ThinVec<TextRange>,
+    patterns: ThinVec<Pattern>,
+    arguments: ThinVec<Argument>,
+    parameters: ThinVec<Parameter>,
+    expression_lists: ThinVec<ExprId>,
+    record_fields: ThinVec<RecordField>,
+    arms: ThinVec<MatchArm>,
+    pattern_lists: ThinVec<PatId>,
+    pattern_fields: ThinVec<PatternField>,
+    name_sites: ThinVec<NameSite>,
     text: String,
     pub root: Option<ExprId>,
 }
@@ -960,7 +961,7 @@ struct Lowering {
 }
 
 /// Moves `stack[mark..]` to the end of `store`.
-fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut Vec<T>) -> Span<T> {
+fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut ThinVec<T>) -> Span<T> {
     let start = store.len() as u32;
     store.extend(stack.drain(mark..));
     Span {

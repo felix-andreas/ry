@@ -9,7 +9,7 @@ use {
             render_findings, report, warn_config,
         },
         config::Config,
-        diagnostics::{apply_suppressions, document_diagnostics, file_is_strict},
+        diagnostics::{apply_suppressions, document_diagnostics},
     },
     repl::{Filtered, InputFilter},
     salsa::Setter,
@@ -65,7 +65,7 @@ impl Preflight {
     pub fn new(config: Config, path: PathBuf) -> Preflight {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        semantics::AnalysisSettings::new(&db, config.check.inline_annotations);
+        semantics::AnalysisSettings::new(&db, config.check.inline_annotations, config.check.strict);
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         ProjectFiles::new(&db, vec![file]);
         Preflight {
@@ -209,7 +209,7 @@ fn strict_errors(analysis: &ProjectAnalysis, config: &Config) -> Vec<Vec<Diagnos
         .files
         .iter()
         .map(|file| {
-            if !file.requested || !file_is_strict(&analysis.db, file.file, config) {
+            if !file.requested || !semantics::file_is_strict(&analysis.db, file.file) {
                 return Vec::new();
             }
             file.diagnostics
@@ -237,7 +237,7 @@ fn findings(
     config: &Config,
     source: &str,
 ) -> (Verdict, Vec<Diagnostic>) {
-    let strict = file_is_strict(db, file, config);
+    let strict = semantics::file_is_strict(db, file);
     // Plain R without strict mode has nothing to report, so it skips analysis entirely.
     if !strict && !has_inline_annotation(&semantics::parse(db, file).syntax_node()) {
         return (Verdict::Run, Vec::new());

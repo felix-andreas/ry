@@ -260,9 +260,10 @@ pub(crate) fn analyze_project(
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
         .durability(Durability::HIGH)
         .new(&db);
-    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
-        .durability(Durability::HIGH)
-        .new(&db);
+    let _: AnalysisSettings =
+        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
+            .durability(Durability::HIGH)
+            .new(&db);
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();

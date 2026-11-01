@@ -27,6 +27,7 @@ use {
         ast::{self, BinaryExpr, is_expression_kind},
         matching_nodes, paired_comment_definition,
     },
+    thin_vec::ThinVec,
 };
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
@@ -773,12 +774,27 @@ fn expression_annotations<'db>(
 pub struct AnalysisSettings {
     /// `[check] inline-annotations`. Off, inline annotations type nothing.
     pub inline_annotations: bool,
+    /// `[check] strict`: whether a file without a `# typing:` directive is strict. Only a
+    /// strict file's checks record the undetermined origins strict mode reports, which in
+    /// untyped code are about one per expression.
+    pub strict: bool,
 }
 
 /// Read only where an inline annotation exists, so a project without any never
 /// depends on the setting.
 pub fn inline_annotations_enabled(db: &dyn Db) -> bool {
     AnalysisSettings::try_get(db).is_none_or(|settings| *settings.inline_annotations(db))
+}
+
+/// A file's `# typing:` directive wins over `[check] strict`. Unset settings count as strict,
+/// so a host that installs none still sees every origin [`diagnostics::strict_diagnostics`]
+/// reports.
+pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
+    match file_typing_mode(db, file) {
+        Some(TypingMode::Strict) => true,
+        Some(TypingMode::On | TypingMode::Off) => false,
+        None => AnalysisSettings::try_get(db).is_none_or(|settings| *settings.strict(db)),
+    }
 }
 
 /// Package files first, in path order; the order decides last-writer-wins winners.
@@ -1590,7 +1606,7 @@ pub fn interface_group<'db>(
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct MemberExports<'db> {
     pub scheme: types::TypeScheme<'db>,
-    pub top_level_bindings: Box<[(Symbol, types::TypeScheme<'db>)]>,
+    pub top_level_bindings: ThinVec<(Symbol, types::TypeScheme<'db>)>,
 }
 
 /// Independent of which member was queried first: each round re-checks every member
@@ -1642,7 +1658,7 @@ fn member_exports<'db>(
         },
         None => MemberExports {
             scheme: unknown(),
-            top_level_bindings: Box::default(),
+            top_level_bindings: ThinVec::new(),
         },
     }
 }
@@ -1717,6 +1733,7 @@ fn check_item_against<'db>(
         annotations.root.as_deref(),
         &annotations.expressions,
         Some(globals),
+        file_is_strict(db, *item.file(db)),
     ))
 }
 
@@ -1791,6 +1808,7 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
             // so strict mode marks the whole binding.
             if check.errors.is_empty()
                 && check.strict_origins.is_empty()
+                && file_is_strict(db, *item.file(db))
                 && types::contains_unknown(db, exports.scheme.body)
                 && let Some(module) = item_hir(db, item)
                 && let Some(root) = module.root
@@ -2461,13 +2479,13 @@ mod tests {
             pattern_types: Default::default(),
             literal_expectations: Default::default(),
             loop_variables: Default::default(),
-            errors: Vec::new(),
-            strict_origins: Vec::new(),
+            errors: ThinVec::new(),
+            strict_origins: ThinVec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
             column_misses: Default::default(),
-            match_findings: Vec::new(),
+            match_findings: ThinVec::new(),
             callee_targets: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
@@ -2484,7 +2502,7 @@ mod tests {
         assert_eq!(once.scheme.as_ref(), Some(&unknown));
         assert_eq!(
             once.top_level_bindings,
-            [(hir::Symbol::new("value"), unknown)].into()
+            thin_vec::thin_vec![(hir::Symbol::new("value"), unknown)]
         );
     }
 
@@ -2592,6 +2610,7 @@ mod tests {
             !bad_check.errors.is_empty(),
             "character into numeric parameter must report"
         );
+        drop((use_check, bad_check));
 
         util.set_text(&mut db)
             .to("add <- function(x, y) y + x\n".to_owned());

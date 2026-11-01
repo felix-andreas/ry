@@ -3833,6 +3833,7 @@ dependencies = [
  "sniff",
  "stacker",
  "syntax",
+ "thin-vec",
 ]
 
 [[package]]

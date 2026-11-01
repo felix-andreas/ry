@@ -554,9 +554,12 @@ impl Worker {
         // durable as its least durable input, and nearly every memo reads the stubs or the
         // settings, so one LOW input would make a keystroke deep-verify the whole project.
         worker.install_stubs();
-        let _: AnalysisSettings = AnalysisSettings::builder(worker.config.check.inline_annotations)
-            .durability(Durability::MEDIUM)
-            .new(&worker.db);
+        let _: AnalysisSettings = AnalysisSettings::builder(
+            worker.config.check.inline_annotations,
+            worker.config.check.strict,
+        )
+        .durability(Durability::MEDIUM)
+        .new(&worker.db);
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
@@ -1428,12 +1431,16 @@ impl Worker {
                     Ok(config) => {
                         config_changed |= config != self.config;
                         let inline_annotations = config.check.inline_annotations;
+                        let strict = config.check.strict;
                         self.config = config;
                         let settings = AnalysisSettings::get(&self.db);
                         if *settings.inline_annotations(&self.db) != inline_annotations {
                             settings
                                 .set_inline_annotations(&mut self.db)
                                 .to(inline_annotations);
+                        }
+                        if *settings.strict(&self.db) != strict {
+                            settings.set_strict(&mut self.db).to(strict);
                         }
                         self.report_config_warnings();
                         self.publish_config_diagnostics(None);
