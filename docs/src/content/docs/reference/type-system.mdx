@@ -1549,6 +1549,8 @@ result's atomic type depends on the operator:
 - `/`, `^`, and `**` (R's parser alias for `^`) always give `double`.
 - Unary `-` keeps its operand's atomic type. A class with arithmetic methods negates to itself,
   because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a `matrix`.
+- R rejects `-NULL`, and so does the checker. A value that may be `NULL` negates as its other
+  members, because code like `if (length(k)) res <- res[-k]` negates only once the value exists.
 
 For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `integer[]`,
 `2L ^ 3L` is `double`, and `-c(foo = 1L, bar = 2L)` is `integer[]`. Every `%op%` operator other than

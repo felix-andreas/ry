@@ -641,3 +641,6 @@ drop_marked <- function(res, labels) {
 }
 negate_nothing <- function() -NULL
 #++++
+drop_marked: <T, U> fn(res: T, labels: U) -> Unknown
+negate_nothing: Unknown
+169..173 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
