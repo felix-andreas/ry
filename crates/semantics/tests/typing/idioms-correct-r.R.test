@@ -557,14 +557,14 @@ broken: fn(flag: logical) -> double
 #---- forwarding_a_formal_positionally_leaves_it_to_the_callee
 fast_svd <- function(m, tol) {
   if (missing(tol)) tol <- 1e-8
-  m * tol
+  list(m, tol)
 }
 pseudoinverse <- function(m, tol) fast_svd(m, tol)
 inverse <- function(m) pseudoinverse(m)
 #++++
-fast_svd: <T, U> fn(m: T, [tol]: U) -> Unknown
-pseudoinverse: <T, U> fn(m: T, [tol]: U) -> Unknown
-inverse: <T> fn(m: T) -> Unknown
+fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, Unknown}
+pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, Unknown}
+inverse: <T> fn(m: T) -> list{T, Unknown}
 
 #---- forwarding_a_formal_to_a_required_parameter_still_requires_it
 scale_by <- function(m, factor) m * factor
