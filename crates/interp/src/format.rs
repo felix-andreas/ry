@@ -239,17 +239,18 @@ pub fn format_logical(value: i32) -> &'static str {
 }
 
 /// A complex number's parts formatted together.
-pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFormat) -> String {
+pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFormat, digits: usize) -> String {
     if is_na_real(value.r) || is_na_real(value.i) {
         return "NA".into();
     }
-    let real_text = format_real_with(value.r, real, "NA");
-    let sign = if value.i < 0.0 || (value.i == 0.0 && value.i.is_sign_negative()) {
-        '-'
-    } else {
-        '+'
-    };
-    let imaginary_text = format_real_with(value.i.abs(), imaginary, "NA");
+    // GNU R rounds only to decide which parts print as zero and which sign the imaginary part
+    // shows; a nonzero part prints from its unrounded value.
+    let rounded = round_complex(value, digits);
+    let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
+    let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
+    let real_text = format_real_with(real_part, real, "NA");
+    let sign = if imaginary_part < 0.0 { '-' } else { '+' };
+    let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
     format!("{real_text}{sign}{imaginary_text}i")
 }
 
@@ -269,19 +270,6 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
     )
 }
 
-/// `value` with both parts rounded to `digits` significant digits of the larger part.
-fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
-    let magnitude = [value.r.abs(), value.i.abs()].into_iter().filter(|part| part.is_finite()).fold(0.0, f64::max);
-    if magnitude == 0.0 {
-        return value;
-    }
-    let decimals = digits as i32 - magnitude.log10().floor() as i32 - 1;
-    if decimals > 306 {
-        return value;
-    }
-    Rcomplex { r: crate::arith::round_digits(value.r, decimals), i: crate::arith::round_digits(value.i, decimals) }
-}
-
 pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
     let settings = Settings {
         digits,
@@ -290,7 +278,34 @@ pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
         nsmall: 0,
     };
     let (real, imaginary) = format_complex_common(&[value], settings);
-    format_complex_with(value, real, imaginary)
+    format_complex_with(value, real, imaginary, digits)
+}
+
+/// `value` rounded to `digits` significant digits relative to its larger part, as GNU R's
+/// `z_prec_r` rounds before printing: a part far smaller than the other one prints as zero.
+fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
+    let magnitude = [value.r.abs(), value.i.abs()]
+        .into_iter()
+        .filter(|part| part.is_finite())
+        .fold(0.0, f64::max);
+    if magnitude == 0.0 || digits > 22 {
+        return value;
+    }
+    let decimals = digits.max(1) as i32 - magnitude.log10().floor() as i32 - 1;
+    let round = |part: f64, decimals: i32| {
+        if !part.is_finite() {
+            return part;
+        }
+        if decimals > 306 {
+            let scale = 1.0e4;
+            return crate::arith::round_digits(part * scale, decimals - 4) / scale;
+        }
+        crate::arith::round_digits(part, decimals)
+    };
+    Rcomplex {
+        r: round(value.r, decimals),
+        i: round(value.i, decimals),
+    }
 }
 
 /// The display width of text in a terminal.
@@ -410,7 +425,7 @@ pub unsafe fn format_vector(
                     if is_na_real(value.r) || is_na_real(value.i) {
                         na_string.to_owned()
                     } else {
-                        format_complex_with(value, real, imaginary)
+                        format_complex_with(value, real, imaginary, settings.digits)
                     }
                 })
                 .collect();
@@ -487,11 +502,6 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             settings.scipen = values::as_integer_scalar(scientific);
         }
     }
-    if vector.kind() == SexpType::Environment {
-        return values::scalar_string(&crate::print::environment_label(vector)?);
-    }
-    let count = length(vector);
-    let result = alloc(SexpType::String, count)?;
     let min_width = if width == nil() {
         0
     } else {
@@ -540,8 +550,10 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             .map(Some)
             .collect(),
         SexpType::Nil => Vec::new(),
+        SexpType::Environment => vec![Some(crate::print::environment_label(vector)?)],
         _ => return Err(call.error("Found no format() method for class \"".to_string() + vector.kind().name() + "\"")),
     };
+    let result = alloc(SexpType::String, items.len())?;
     for (index, item) in items.into_iter().enumerate() {
         let charsxp = match item {
             Some(text) => values::mkchar(&text)?,

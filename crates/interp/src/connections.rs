@@ -3192,3 +3192,7 @@ mod tests {
         }
     }
 }
+
+fn truncate(line: &str) -> &str {
+    &line[..line.floor_char_boundary(line.len().min(30))]
+}

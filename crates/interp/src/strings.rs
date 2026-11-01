@@ -2329,6 +2329,29 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                 index = next;
                 continue;
             }
+            // TRE reads `(?:...)` as a group that does not capture, and `(?i)` or `(?i:...)` as
+            // a case-insensitive region, as PCRE does.
+            '(' if syntax == Syntax::Extended && chars.get(index + 1) == Some(&'?') => {
+                let flags_end = (index + 2..chars.len()).find(|&position| !matches!(chars[position], 'i' | '-'));
+                match flags_end.map(|position| (position, chars[position])) {
+                    Some((position, close @ (':' | ')'))) => {
+                        output.extend(&chars[index..=position]);
+                        if close == ':' {
+                            groups.push(start);
+                        }
+                        atom = None;
+                        quantified = false;
+                        index = position + 1;
+                        continue;
+                    }
+                    _ => {
+                        groups.push(start);
+                        output.push('(');
+                        atom = None;
+                        quantified = false;
+                    }
+                }
+            }
             '(' if syntax == Syntax::Perl && chars.get(index + 1) == Some(&'*') => {
                 index = translate_verb(&chars, index, &mut output);
                 continue;

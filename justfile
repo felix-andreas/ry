@@ -254,6 +254,15 @@ release-kind $version:
 corpus:
     Rscript tools/corpus/install.R
 
+# Download the corpus packages' source tarballs, which carry the tests binary installs lack.
+corpus-sources:
+    Rscript tools/corpus/sources.R
+
+# Run corpus packages' own tests under GNU R and ry's runtime: `just package-tests [--runtime ry] [PKG...]`.
+package-tests *args:
+    cargo build -q --release -p ry-lang -p libr
+    ORACLE_RY=target/release/ry cargo run -q --release -p oracle -- packages {{ args }}
+
 # The differential oracle: `just oracle verify`, `record`, `compare` or `show FILE`.
 oracle *args:
     cargo run -q -p oracle -- {{ args }}

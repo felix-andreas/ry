@@ -2652,26 +2652,18 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             expressions.push(arg.value);
         }
     }
-    // Dispatch: any data frame (or other classed argument with a method) takes over.
+    // S3 dispatch, as GNU R's `do_bind` does it: the first classed argument with a method
+    // picks it, and the method gets the `...` arguments alone, never `deparse.level`.
     let generic = if by_row { "rbind" } else { "cbind" };
     for arg in &items {
-        if arg.value.is_object() {
-            let classes = crate::dispatch::implicit_class(arg.value)?;
-            for index in 0..length(classes) {
-                let method_name = format!("{generic}.{}", char_str(classes.element(index)));
-                let symbol = values::install(&method_name)?;
-                if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
-                    let mut args = vec![Arg { tag: values::install("deparse.level")?, value: level_value }];
-                    args.extend(items.iter().copied());
-                    let promised: Vec<Arg> = args
-                        .iter()
-                        .map(|arg| Arg {
-                            tag: arg.tag,
-                            value: arg.value,
-                        })
-                        .collect();
-                    return eval::apply(nil(), method, &promised, call.env);
-                }
+        if !arg.value.is_object() {
+            continue;
+        }
+        let classes = crate::dispatch::implicit_class(arg.value)?;
+        for index in 0..length(classes) {
+            let symbol = values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
+            if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
+                return eval::apply(call.call, method, &items, call.env);
             }
         }
     }
@@ -2766,13 +2758,10 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 let expression = expressions[position];
                 let name = if arg.tag != nil() {
                     symbol_name(arg.tag).into_owned()
-                } else if deparse_level == 1 && expression.kind() == SexpType::Symbol {
+                } else if deparse_level >= 1 && expression.kind() == SexpType::Symbol {
                     symbol_name(expression).into_owned()
-                } else if deparse_level == 2 {
-                    crate::deparse::deparse_lines(expression, 500, crate::deparse::options::SIMPLE)
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default()
+                } else if deparse_level >= 2 && expression != nil() {
+                    crate::deparse::deparse_one_line(expression)
                 } else {
                     String::new()
                 };

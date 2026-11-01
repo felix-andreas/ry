@@ -197,7 +197,9 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
     crate::heap().root(expressions);
     for index in 0..length(expressions) {
         let expression = expressions.element(index);
-        if !run_toplevel(expression) {
+        // A script stops at its first error unless `options(error =)` holds a handler, which
+        // GNU R runs and then carries on with the next expression.
+        if !run_toplevel(expression) && crate::envir::get_option("error") == nil() {
             write_console(b"Execution halted\n", true);
             return Outcome::Failed;
         }

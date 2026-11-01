@@ -82,6 +82,7 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
 
 pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     ("C_BinCount", do_bin_count),
+    ("C_par", do_par),
     ("C_StemLeaf", do_stem_leaf),
     // Whether contour labels follow the contour, which every device ry opens does.
     ("C_contourDef", |_| unsafe { scalar_bool(true) }),

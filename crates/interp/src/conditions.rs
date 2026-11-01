@@ -219,7 +219,7 @@ pub unsafe fn format_error(call: Sexp, message: &str) -> String {
     if call == nil() {
         return format!("Error: {message}\n");
     }
-    let call_text = deparse::deparse_one_line(call);
+    let call_text = deparse::deparse_first_line(call);
     let first_line = message.lines().next().unwrap_or("");
     let width = call_text.chars().count() + first_line.chars().count();
     if 18 + width > 77 {

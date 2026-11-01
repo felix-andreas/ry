@@ -2058,6 +2058,30 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
   namespace, S3/S4, collation and reload tests on both runtimes.
 
+# Decision record: package tests through the oracle
+
+`oracle packages` (`crates/oracle/src/packages.rs`, `contributing/corpus-and-oracle.md`, "Package
+tests") runs each corpus package's own `tests/` under GNU R and under ry and reports pass or fail per
+package. It is the measure for "the corpus packages run on ry".
+
+- **A file passes when its process exits with status 0, and a package passes when every file
+  does**, which is the rule `R CMD check` applies to `tests/`. The `.Rout` files are not diffed,
+  because they carry timings, temporary paths and addresses; testthat's summary counts are read
+  from them and reported beside the verdict, which shows how far a failing package got.
+- **The pass rate counts only packages GNU R passes**, because a package whose tests fail on GNU R
+  (missing suggests, network, a display) says nothing about ry.
+- **GNU R's results are reused** for the same package version unless `--rerun-gnu-r`, since they
+  change only when the corpus does.
+- **Each file runs in its own process group under `--timeout`**, killed as a group, because a hung
+  test usually leaves a child (callr, processx) behind that would keep the pipe open.
+- **Run it against a copied binary** (`ORACLE_RY`), not `target/release/ry`, because a full run is
+  long and a rebuild under it changes the engine midway.
+
+Fixes the harness drove are classes, each with an oracle case under `crates/oracle/cases/`:
+`deparse.level` naming in `cbind`/`rbind` (read from the closure's `...` promises), the `Summary`
+group's `na.rm` reordering, list comparison coercion, `return` outside a function, POSIXlt balancing,
+graphical parameters, `file.append` and anonymous `file()` buffers.
+
 # Decision record: base R's linear algebra
 
 - **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.

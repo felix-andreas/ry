@@ -1,0 +1,20 @@
+[stdout]
+|     a     b     c 
+|  TRUE FALSE FALSE 
+| [1] FALSE  TRUE FALSE
+| [1]  TRUE FALSE
+| [1] "comparison of these types is not implemented"
+| [1] 1
+| h({
+|     x <- 1
+|     x + 1
+| })
+| Error in h({ : e
+| Error in f(aaaaaaaaaaaaaaaaaaaa = 1, bbbbbbbbbbbbbbbbbbbbbbbbbbb = 2,  : 
+|   boom
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

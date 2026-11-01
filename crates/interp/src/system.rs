@@ -34,7 +34,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("debug", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("undebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("isdebugged", 2, |_| unsafe { scalar_bool(false) }),
+    internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("browserText", 1, |call| unsafe { Err(call.error("no browser context to query")) }),
@@ -92,7 +92,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.remove", 1, |call| unsafe { map_paths(call, |path| std::fs::remove_file(path).is_ok()) }),
     internal("file.rename", 2, do_file_rename),
     internal("file.create", 2, |call| unsafe { map_paths(call, |path| std::fs::write(path, b"").is_ok()) }),
-    internal("file.append", 2, |call| unsafe { Err(call.error("file.append is not supported")) }),
+    internal("file.append", 2, do_file_append),
     internal("file.copy", 6, |call| unsafe { Err(call.error("file.copy is not supported")) }),
     internal("dir.create", 4, do_dir_create).invisible(),
     internal("file.access", 2, |call| unsafe { {
@@ -278,6 +278,36 @@ unsafe fn map_paths(call: &Call<'_>, function: impl Fn(&str) -> bool) -> R<Sexp>
         };
     }
     Ok(result)
+}
+
+/// `file.append(file1, file2)`: appends each `file2` to the recycled `file1`, reporting per pair
+/// whether it succeeded. A missing or unreadable `file2` is a failure, not an error.
+unsafe fn do_file_append(call: &Call<'_>) -> R<Sexp> {
+    let (targets, sources) = (call.arg(0), call.arg(1));
+    if targets.kind() != SexpType::String || sources.kind() != SexpType::String {
+        return Err(call.error("invalid 'file' argument"));
+    }
+    if length(targets) == 0 {
+        return Err(call.error("nothing to append to"));
+    }
+    let count = if length(sources) == 0 { 0 } else { length(targets).max(length(sources)) };
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        let target = values::string_at(targets, index % length(targets));
+        let source = values::string_at(sources, index % length(sources));
+        let appended = match (target, source) {
+            (Some(target), Some(source)) => append_file(&crate::connections::expand_path(&target), &crate::connections::expand_path(&source)).is_ok(),
+            _ => false,
+        };
+        values::ints_mut(result)[index] = appended as i32;
+    }
+    Ok(result)
+}
+
+fn append_file(target: &str, source: &str) -> std::io::Result<()> {
+    let bytes = std::fs::read(source)?;
+    let mut file = std::fs::OpenOptions::new().append(true).create(true).open(target)?;
+    std::io::Write::write_all(&mut file, &bytes)
 }
 
 unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
@@ -515,6 +545,7 @@ const POSIXLT_NAMES: [&str; 11] = [
     "sec", "min", "hour", "mday", "mon", "year", "wday", "yday", "isdst", "zone", "gmtoff",
 ];
 
+/// A POSIXlt list for `seconds` since the epoch.
 unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     let count = seconds.len();
     let fields: Vec<Sexp> = (0..11)
@@ -551,8 +582,8 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         values::ints_mut(fields[10])[index] = 0;
     }
     let list = values::list_vector(&fields)?;
-    let names = string_vector(&POSIXLT_NAMES)?;
-    values::set_attr(list, symbols().names, names)?;
+    let field_names = string_vector(&POSIXLT_NAMES)?;
+    values::set_attr(list, symbols().names, field_names)?;
     let class = string_vector(&["POSIXlt", "POSIXt"])?;
     values::set_attr(list, symbols().class, class)?;
     // Every zone is computed as UTC, but the names stay as given: a GMT time stays GMT, and the

@@ -716,7 +716,16 @@ pub unsafe fn try_builtin_dispatch(
             let group = if definition.generic == Generic::Ops { "Ops" } else { "matrixOps" };
             group_dispatch(group, definition.name, call, args, env)
         }
-        Generic::Math | Generic::Summary | Generic::Complex => {
+        Generic::Summary => {
+            // GNU R's `fixup_NaRm` moves `na.rm` last, adding `na.rm = FALSE` when the call has
+            // none, before it looks for an object to dispatch on, so a method may declare
+            // `na.rm` without a default. The method's call holds the evaluated arguments, as
+            // `do_summary` builds it.
+            let na_rm = symbols().na_rm;
+            let mut fixed: Vec<Arg> = args.iter().filter(|arg| arg.tag != na_rm).copied().collect();
+            let Some(first) = fixed.first().copied() else {
+                return Ok(None);
+            };
             if !first.value.is_object() {
                 return Ok(None);
             }
@@ -725,11 +734,27 @@ pub unsafe fn try_builtin_dispatch(
             {
                 return Ok(Some(value));
             }
-            let group = match definition.generic {
-                Generic::Math => "Math",
-                Generic::Summary => "Summary",
-                _ => "Complex",
+            let value = match args.iter().rev().find(|arg| arg.tag == na_rm) {
+                Some(arg) => arg.value,
+                None => values::scalar_logical(0)?,
             };
+            fixed.push(Arg { tag: na_rm, value });
+            let head = if call.kind() == SexpType::Language { call.car() } else { op };
+            let mut items = vec![(nil(), head)];
+            items.extend(fixed.iter().map(|arg| (arg.tag, arg.value)));
+            let fixed_call = values::pairlist(&items, SexpType::Language)?;
+            group_dispatch("Summary", definition.name, fixed_call, &fixed, env)
+        }
+        Generic::Math | Generic::Complex => {
+            if !first.value.is_object() {
+                return Ok(None);
+            }
+            if first.value.has_gp(gp::S4_OBJECT)
+                && let Some(value) = s4_dispatch(op, call, args, env)?
+            {
+                return Ok(Some(value));
+            }
+            let group = if definition.generic == Generic::Math { "Math" } else { "Complex" };
             group_dispatch(group, definition.name, call, args, env)
         }
     }
@@ -1014,7 +1039,7 @@ pub unsafe fn primitive_methods(op: Sexp) -> Option<(Sexp, Sexp)> {
 
 /// `R_possible_dispatch`: dispatches primitive `op` through the methods package when it made
 /// the primitive generic. `None` means the primitive's own code runs.
-unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     if !interp().globals.allow_primitive_methods {
         return Ok(None);
     }
@@ -1033,6 +1058,9 @@ unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option
         let arguments = eval::args_pairlist(&promised)?;
         let method = crate::methods::quick_method_check(arguments, methods, generic)?;
         match method.kind() {
+            // The default method of an internal generic such as `as.vector` stands for the
+            // internal code itself; calling it would dispatch again.
+            SexpType::Closure if values::inherits(method, "internalDispatchMethod") => return Ok(None),
             SexpType::Closure => {
                 let value = apply_closure(call, method, &promised, env, None)?;
                 return Ok(Some(value));

@@ -1,0 +1,55 @@
+[stdout]
+| null device 
+|           1 
+| pdf pdf 
+|   2   3 
+| [1] TRUE
+| [1] TRUE
+| pdf 
+|   2 
+| pdf 
+|   3 
+| pdf 
+|   3 
+| pdf 
+|   3 
+| [1] "null device" ""            "pdf"        
+| null device 
+|           1 
+| [1] "null device" ""            ""           
+| null device 
+|           1 
+| [1] 25 50 44 46 2d 31 2e 34
+| pdf 
+|   2 
+| [1] "null device" "pdf"         ""           
+| [1] "null device" ""            ""           
+| [1] "null device"
+| [1] "p001.pdf"
+| null device 
+|           1 
+| pdf 
+|   2 
+|     p     q 
+|  TRUE FALSE 
+|     p     q 
+| FALSE FALSE 
+|    p    q 
+| TRUE TRUE 
+| p q 
+| 2 3 
+| attr(,"foo")
+| [1] "a"
+|    [,1] [,2]
+| a FALSE TRUE
+| b FALSE TRUE
+|   [,1] [,2]
+| a TRUE TRUE
+| b TRUE TRUE
+| NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

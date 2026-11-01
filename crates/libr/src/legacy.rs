@@ -91,6 +91,13 @@ pub unsafe extern "C" fn SETLENGTH(object: Sexp, length: R_xlen_t) {
         }
         let runtime = runtime();
         runtime.heap.mark_resizable(object);
+        // data.table's finalizer sets a scratch vector's length past its allocation, only so
+        // that GNU R's memory accounting sees over-allocated columns being freed, and then
+        // drops the vector. Growing past the allocation would expose memory ry does not own,
+        // so the length stays.
+        if length > object.capacity() {
+            return Ok(());
+        }
         runtime.heap.resize_vector(object, length)?;
         Ok(())
     })

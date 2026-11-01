@@ -484,12 +484,13 @@ unsafe fn set_primitive_methods_routine(call: &NativeCall<'_>) -> R<Sexp> {
         }
         return values::scalar_bool(previous);
     }
+    // An internal generic such as `as.vector` is a closure whose default method is an
+    // `internalDispatchMethod`; its `internal` slot names the `.Internal` function that
+    // dispatches, as in GNU R's `R_set_prim_method`.
     let op = if matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
         op
-    } else if op.kind() == SexpType::Closure && op.has_gp(gp::S4_OBJECT) {
-        // An `internalDispatchMethod` such as `unlist`'s default names in its `internal`
-        // slot the `.Internal` function that dispatches.
-        let internal = values::get_attr(op, values::install("internal")?);
+    } else if crate::coerce::is_s4(op) {
+        let internal = slot_value(op, "internal")?;
         let internal_name = values::first_string(internal).unwrap_or_default().into_owned();
         crate::builtins::internal_function(values::install(&internal_name)?).ok_or_else(|| {
             call.error(format!(

@@ -31,7 +31,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             Some(package) => builtin_libraries::load(package, &path),
             None => no_host(call),
         }
-    }),
+    }).invisible(),
     internal("dyn.unload", 1, no_host),
     internal("is.loaded", 3, |call| unsafe {
         let name = values::first_string(call.arg(0))

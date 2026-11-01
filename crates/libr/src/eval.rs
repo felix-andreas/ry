@@ -52,7 +52,7 @@ struct Interpreter;
 
 impl Evaluator for Interpreter {
     unsafe fn eval(&self, expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
-        interp::eval::eval(expression, env)
+        eval(expression, env)
     }
 
     unsafe fn apply(
@@ -96,6 +96,7 @@ impl Evaluator for Interpreter {
     }
 
     unsafe fn force_and_call(&self, call: Sexp, count: c_int, env: Sexp) -> ApiResult<Sexp> {
+        normalize_argument_cells(call)?;
         let function = call.car();
         let function = if function.kind() == SexpType::Symbol {
             interp::eval::find_fun(function, env)?
@@ -293,7 +294,28 @@ unsafe fn paste(args: &[Arg]) -> ApiResult<String> {
 }
 
 pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
+    normalize_argument_cells(expression)?;
     interp::eval::eval(expression, env)
+}
+
+/// Retypes the argument cells of every call in `expression` to pairlist cells. Native code
+/// often builds a call as `LCONS(fun, LCONS(arg, R_NilValue))`, whose argument cells are
+/// LANGSXP; GNU R walks any cons cell there, while the interpreter walks pairlist cells only,
+/// so it would see no arguments at all.
+unsafe fn normalize_argument_cells(expression: Sexp) -> ApiResult<()> {
+    if expression.kind() != SexpType::Language {
+        return Ok(());
+    }
+    normalize_argument_cells(expression.car())?;
+    let mut cell = expression.cdr();
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        if cell.kind() == SexpType::Language {
+            runtime().heap.retype(cell, SexpType::Pairlist)?;
+        }
+        normalize_argument_cells(cell.car())?;
+        cell = cell.cdr();
+    }
+    Ok(())
 }
 
 pub unsafe fn force_promise(promise: Sexp) -> ApiResult<Sexp> {
@@ -319,7 +341,7 @@ pub unsafe fn deparse_call(call: Sexp) -> Option<String> {
     if call.kind() == SexpType::Nil {
         return None;
     }
-    Some(interp::deparse::deparse_one_line(call))
+    Some(interp::deparse::deparse_first_line(call))
 }
 
 /// An unwind as the condition object R handlers receive.
@@ -361,7 +383,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let restarts = state.restarts.take();
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
-        let result = interp::eval::eval(expression, env);
+        let result = eval(expression, env);
         let state = interp::interp();
         state.handlers = handlers;
         state.restarts = restarts;
@@ -663,7 +685,7 @@ unsafe fn native_call(builtin_call: &Call<'_>, kind: RoutineKind, external2: boo
             }
             let list = runtime()
                 .heap
-                .alloc_triple(SexpType::Language, *name, list, nil)?;
+                .alloc_triple(SexpType::Pairlist, *name, list, nil)?;
             runtime().heap.root(list);
             if external2 {
                 call_native(

@@ -17,6 +17,18 @@ unsafe extern "C" {
     fn lgamma(x: f64) -> f64;
     fn expm1(x: f64) -> f64;
     fn log1p(x: f64) -> f64;
+    // C99's complex functions, which GNU R calls. A `double complex` has the ABI of a struct of
+    // two doubles, which `Rcomplex` is.
+    fn csqrt(z: Rcomplex) -> Rcomplex;
+    fn cexp(z: Rcomplex) -> Rcomplex;
+    fn ccos(z: Rcomplex) -> Rcomplex;
+    fn csin(z: Rcomplex) -> Rcomplex;
+    fn ctan(z: Rcomplex) -> Rcomplex;
+    fn cacos(z: Rcomplex) -> Rcomplex;
+    fn casin(z: Rcomplex) -> Rcomplex;
+    fn catan(z: Rcomplex) -> Rcomplex;
+    fn ccosh(z: Rcomplex) -> Rcomplex;
+    fn csinh(z: Rcomplex) -> Rcomplex;
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -648,8 +660,8 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     Ok(result)
 }
 
-/// The result attributes of a binary operation: dims must agree, names come from the operand
-/// as long as the result, and other attributes are copied from both, the first taking
+/// The result attributes of a binary arithmetic operation: dims must agree, names come from the
+/// operand as long as the result, and other attributes are copied from both, the first taking
 /// precedence.
 pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
     check_conformable(left, right, call)?;
@@ -1125,14 +1137,8 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     }
     let left = values::materialize(comparable(call.arg(0))?)?;
     let right = values::materialize(comparable(call.arg(1))?)?;
-    let allowed = |value: Sexp| value.kind().is_atomic() || value == nil();
+    let allowed = |value: Sexp| value.kind().is_atomic() || value.kind() == SexpType::List || value == nil();
     if !allowed(left) || !allowed(right) {
-        if left.kind() == SexpType::List || right.kind() == SexpType::List {
-            return Err(call.error(format!(
-                "comparison ({}) is possible only for atomic and list types",
-                call.name()
-            )));
-        }
         return Err(call.error(format!(
             "comparison ({}) is possible only for atomic and list types",
             call.name()
@@ -1142,18 +1148,21 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
     let result = alloc(SexpType::Logical, count)?;
-    let kind = coerce::higher_type(
-        if left == nil() {
-            SexpType::Logical
-        } else {
-            left.kind()
-        },
-        if right == nil() {
-            SexpType::Logical
-        } else {
-            right.kind()
-        },
-    );
+    // A list operand takes the other operand's type, element by element, as GNU R's `relop`
+    // coerces it; two lists have no common type.
+    let operand_kind = |value: Sexp| if value == nil() { SexpType::Logical } else { value.kind() };
+    let kind = match (operand_kind(left), operand_kind(right)) {
+        (SexpType::List, SexpType::List) => {
+            return Err(call.error("comparison of these types is not implemented"));
+        }
+        (SexpType::List, other) | (other, SexpType::List) => other,
+        (left, right) => coerce::higher_type(left, right),
+    };
+    let (left, right) = if left.kind() == SexpType::List || right.kind() == SexpType::List {
+        (coerce_vector(left, kind)?, coerce_vector(right, kind)?)
+    } else {
+        (left, right)
+    };
     match kind {
         SexpType::String => {
             let left = coerce_vector(left, SexpType::String)?;
@@ -1603,28 +1612,79 @@ unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp
     for index in 0..count {
         let z = values::complexes(operand)[index];
         let value = match function {
-            Math::Sqrt => {
-                let modulus = z.r.hypot(z.i);
-                let real = ((modulus + z.r) / 2.0).sqrt();
-                let imaginary = ((modulus - z.r) / 2.0).sqrt().copysign(z.i);
-                Rcomplex {
-                    r: real,
-                    i: imaginary,
-                }
-            }
-            Math::Exp => {
-                let scale = z.r.exp();
-                Rcomplex {
-                    r: scale * z.i.cos(),
-                    i: scale * z.i.sin(),
-                }
-            }
+            Math::Sqrt => csqrt(z),
+            Math::Exp => cexp(z),
+            Math::Cos => ccos(z),
+            Math::Sin => csin(z),
+            Math::Tan => complex_tan(z),
+            Math::Acos => complex_acos(z),
+            Math::Asin => complex_asin(z),
+            Math::Atan => complex_atan(z),
+            Math::Cosh => ccosh(z),
+            Math::Sinh => csinh(z),
+            Math::Tanh => times_minus_i(complex_tan(times_i(z))),
+            Math::Acosh => times_i(complex_acos(z)),
+            Math::Asinh => times_minus_i(complex_asin(times_i(z))),
+            Math::Atanh => times_minus_i(complex_atan(times_i(z))),
             _ => return Err(call.error("unimplemented complex function")),
         };
         values::complexes_mut(result)[index] = value;
     }
     values::copy_most_attributes(operand, result, true)?;
     Ok(result)
+}
+
+// GNU R's corrections of the C99 complex functions, from its `complex.c`.
+
+fn times_i(z: Rcomplex) -> Rcomplex {
+    Rcomplex { r: -z.i, i: z.r }
+}
+
+fn times_minus_i(z: Rcomplex) -> Rcomplex {
+    Rcomplex { r: z.i, i: -z.r }
+}
+
+/// Far from the real axis the tangent is `±i`, which some C libraries return as NaN.
+unsafe fn complex_tan(z: Rcomplex) -> Rcomplex {
+    let result = ctan(z);
+    if z.i.is_finite() && z.i.abs() > 25.0 {
+        return Rcomplex { r: 0.0, i: if z.i > 0.0 { 1.0 } else { -1.0 } };
+    }
+    result
+}
+
+/// On the real axis beyond ±1, continuous from below for `x >= 1` and from above for `x <= -1`.
+unsafe fn complex_asin(z: Rcomplex) -> Rcomplex {
+    if z.i == 0.0 && z.r.abs() > 1.0 {
+        let x = z.r;
+        let t1 = 0.5 * (x + 1.0).abs();
+        let t2 = 0.5 * (x - 1.0).abs();
+        let alpha = t1 + t2;
+        let mut imaginary = (alpha + (alpha * alpha - 1.0).sqrt()).ln();
+        if x > 1.0 {
+            imaginary = -imaginary;
+        }
+        return Rcomplex { r: (t1 - t2).asin(), i: imaginary };
+    }
+    casin(z)
+}
+
+unsafe fn complex_acos(z: Rcomplex) -> Rcomplex {
+    if z.i == 0.0 && z.r.abs() > 1.0 {
+        let asin = complex_asin(z);
+        return Rcomplex { r: std::f64::consts::FRAC_PI_2 - asin.r, i: -asin.i };
+    }
+    cacos(z)
+}
+
+unsafe fn complex_atan(z: Rcomplex) -> Rcomplex {
+    if z.r == 0.0 && z.i.abs() > 1.0 {
+        let y = z.i;
+        let real = if y > 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 };
+        let imaginary = 0.25 * (((1.0 + y) * (1.0 + y)) / ((1.0 - y) * (1.0 - y))).ln();
+        return Rcomplex { r: real, i: imaginary };
+    }
+    catan(z)
 }
 
 unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
