@@ -22,6 +22,8 @@ lists them all. The common ones:
 ```sh
 just ry check                       # build ry and its runtime if needed, then run `ry check`
 just build                          # every binary and ry's runtime (`just build --release`)
+just try                            # build ry and walk through every command in a demo project
+just try-editor                     # build ry and print how to point an editor at it
 just gate                           # tests, clippy -D warnings, and fmt --check
 just battery                        # all workspace tests, excluding zed_ry
 just fixture <group__case>          # one fixture case
@@ -30,6 +32,7 @@ just fuzz-deep                      # the long seeded fuzz run
 just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
 just repl-e2e                       # drive `ry R` and `ry run` through a pty
+just release-dry-run                # package and smoke-test this machine's release archive
 ```
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a

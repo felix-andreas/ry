@@ -16,6 +16,25 @@ ry *args:
     fi
     exec "${CARGO_TARGET_DIR:-{{ justfile_directory() }}/target}/debug/ry" {{ args }}
 
+# Build ry and walk through checking, typing, formatting, running and package loading in a demo project.
+try:
+    @tools/try.sh
+
+# Build ry and print how to point an editor's language client at it.
+try-editor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release -p ry-lang
+    ry="${CARGO_TARGET_DIR:-$PWD/target}/release/ry"
+    echo "ry's language server is \`$ry server\`. Point your editor at it:"
+    echo
+    echo "  VS Code:  install the ry extension, then set \"ry.path\": \"$ry\" in settings.json"
+    echo "  Zed:      in settings.json, \"lsp\": { \"ry\": { \"binary\": { \"path\": \"$ry\" } } }"
+    echo "  Neovim:   vim.lsp.config('ry', { cmd = { '$ry', 'server' }, filetypes = { 'r' } }); vim.lsp.enable('ry')"
+    echo "  Helix:    [language-server.ry] command = \"$ry\", args = [\"server\"] in languages.toml"
+    echo
+    echo "Or put it on your PATH, which every editor integration searches: export PATH=\"$(dirname "$ry"):\$PATH\""
+
 test *args:
     cargo test -- --nocapture {{ args }}
 
@@ -125,27 +144,6 @@ build-extension $kind *args:
     cp LICENSE editors/code
     just vsce package $release_flag {{ args }}
 
-publish $version $notes="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    just bump-version $version
-    just release $version
-    just publish-github $version "$notes"
-    just publish-marketplace $version
-
-publish-commit $version="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    if [ -z "{{ version }}" ]; then
-    	version=$(git rev-parse --short=6 HEAD)
-    	echo "info: using git revision $version as version"
-    fi
-    # A bare git revision is not `X.Y.Z`, so `release-kind` classifies it as a pre-release.
-    just release $version
-    just publish-github $version
-
 bump-version $version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -164,99 +162,53 @@ bump-version $version:
 
     cargo check # updates Cargo.lock
     git add Cargo.toml Cargo.lock editors/code/package.json
-    git commit -m "chore: Release v{{ version }}"
+    git commit -m "chore: release {{ version }}"
 
-release $version:
+# Build this machine's release archive into release/VERSION: `ry` and ry's runtime (libR) side by side.
+package version:
     #!/usr/bin/env bash
     set -euo pipefail
+    target=$(rustc -vV | sed -n 's/^host: //p')
+    build="${CARGO_TARGET_DIR:-target}/release"
+    dir="release/{{ version }}"
+    stage="$dir/ry-$target"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    case "$target" in
+    	*windows*)
+    		# ry's runtime is not built for Windows yet, so the archive carries the CLI alone.
+    		cargo build --release --locked -p ry-lang
+    		cp "$build/ry.exe" LICENSE "$stage/"
+    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE >/dev/null)
+    		;;
+    	*)
+    		cargo build --release --locked -p ry-lang -p libr
+    		library=libR.so
+    		case "$target" in *apple*) library=libR.dylib ;; esac
+    		cp "$build/ry" "$build/$library" LICENSE "$stage/"
+    		tar -czf "$dir/ry-$target.tar.gz" -C "$stage" .
+    		;;
+    esac
+    echo "$dir/ry-$target.$(case "$target" in *windows*) echo zip ;; *) echo tar.gz ;; esac)"
 
-    kind=$(just release-kind $version)
-    dir=release/$version
-
-    mkdir -p release
-    rm -rf $dir release/nix
-    mkdir -p $dir release/nix
-
-    cargo check
-
-    # zig cross-links macOS without an Apple SDK, so fail fast on a crate that links an Apple
-    # framework (see patches/iana-time-zone). Resolving the tree once makes a broken `cargo tree`
-    # fail the recipe instead of reading as "no such crate".
-    macos_tree=$(cargo tree --target aarch64-apple-darwin -p ry-lang -e normal --prefix none)
-
-    for package in core-foundation-sys core-foundation objc objc2 security-framework; do
-        if grep -qE "^$package v" <<< "$macos_tree"; then
-            echo "error: the macOS dependency graph pulls in '$package', which links an Apple framework;"
-            echo "       zig cannot link Apple frameworks without an SDK. See patches/iana-time-zone."
-            exit 1
-        fi
-    done
-
-    nix build .#ry-linux-x86_64 -o release/nix/x86_64-unknown-linux-gnu
-    nix build .#ry-macos-aarch64 -o release/nix/aarch64-apple-darwin
-    nix build .#ry-windows-x86_64 -o release/nix/x86_64-pc-windows-gnu
-
-    just package-tar x86_64-unknown-linux-gnu $dir
-    just package-tar aarch64-apple-darwin $dir
-    just package-zip x86_64-pc-windows-gnu $dir
-
-    rm -rf editors/code/bin
-    just build-extension $kind --out ../../$dir/ry.vsix
-
-    just build-platform-vsix x86_64-unknown-linux-gnu linux-x64 ry $dir $kind
-    just build-platform-vsix aarch64-apple-darwin darwin-arm64 ry $dir $kind
-    just build-platform-vsix x86_64-pc-windows-gnu win32-x64 ry.exe $dir $kind
-
-publish-github $version $notes="":
+# Package this machine's release archive, then install it into a scratch directory and smoke-test it.
+release-dry-run version="0.0.0-dry-run":
     #!/usr/bin/env bash
     set -euo pipefail
-
-    prerelease_flag=""
-    if [ "$(just release-kind $version)" = "pre-release" ]; then
-    	prerelease_flag="--prerelease"
+    archive=$(just package {{ version }} | tail -n 1)
+    tools/smoke-test.sh "$archive"
+    if command -v bun >/dev/null 2>&1; then
+    	(cd editors/code && bun install --frozen-lockfile >/dev/null)
+    	just build-extension pre-release --out "../../release/{{ version }}/ry.vsix"
+    	echo "release/{{ version }}/ry.vsix"
+    else
+    	echo "note: bun is not installed, so the VS Code extension was not packaged"
     fi
-    git push
-    gh release create $version $prerelease_flag \
-    	"release/$version/ry-x86_64-unknown-linux-gnu.tar.gz#ry CLI (linux-x64)" \
-    	"release/$version/ry-aarch64-apple-darwin.tar.gz#ry CLI (darwin-arm64)" \
-    	"release/$version/ry-x86_64-pc-windows-gnu.zip#ry CLI (win32-x64)" \
-    	"release/$version/ry.vsix#VS Code extension (client only)" \
-    	"release/$version/ry-linux-x64.vsix#VS Code extension (linux-x64)" \
-    	"release/$version/ry-darwin-arm64.vsix#VS Code extension (darwin-arm64)" \
-    	"release/$version/ry-win32-x64.vsix#VS Code extension (win32-x64)" \
-    	--notes "$notes"
-
-publish-github-update $version:
-    gh release upload $version \
-        "release/$version/ry-x86_64-unknown-linux-gnu.tar.gz#ry CLI (linux-x64)" \
-        "release/$version/ry-aarch64-apple-darwin.tar.gz#ry CLI (darwin-arm64)" \
-        "release/$version/ry-x86_64-pc-windows-gnu.zip#ry CLI (win32-x64)" \
-        "release/$version/ry.vsix#VS Code extension (client only)" \
-        "release/$version/ry-linux-x64.vsix#VS Code extension (linux-x64)" \
-        "release/$version/ry-darwin-arm64.vsix#VS Code extension (darwin-arm64)" \
-        "release/$version/ry-win32-x64.vsix#VS Code extension (win32-x64)" \
-        --clobber
-
-publish-marketplace $version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    release_flag=$(just vsce-release-flag $(just release-kind $version))
-
-    just vsce publish $release_flag --packagePath ../../release/$version/ry-linux-x64.vsix
-    just vsce publish $release_flag --packagePath ../../release/$version/ry-darwin-arm64.vsix
-    just vsce publish $release_flag --packagePath ../../release/$version/ry-win32-x64.vsix
-    just vsce publish $release_flag --packagePath ../../release/$version/ry.vsix
-
-package-tar target dir:
-    mkdir -p {{ dir }}/ry-{{ target }}
-    cp release/nix/{{ target }}/bin/ry {{ dir }}/ry-{{ target }}/ry
-    tar -czf {{ dir }}/ry-{{ target }}.tar.gz -C {{ dir }}/ry-{{ target }} ry
-
-package-zip target dir:
-    mkdir -p {{ dir }}/ry-{{ target }}
-    cp release/nix/{{ target }}/bin/ry.exe {{ dir }}/ry-{{ target }}/ry.exe
-    zip -j {{ dir }}/ry-{{ target }}.zip {{ dir }}/ry-{{ target }}/ry.exe
+    if command -v nix >/dev/null 2>&1; then
+    	nix build .#ry --no-link --print-out-paths
+    else
+    	echo "note: nix is not installed, so the nix package was not built"
+    fi
 
 # Clone r-lib repos to test formatting against.
 rlib-clone:

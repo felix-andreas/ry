@@ -1685,8 +1685,7 @@ edit. `backlog.md` tracks it.
 
 # Decision record: the Linux release binary links glibc 2.17 through zig
 
-**Status:** decided and implemented. The user directed one release build per platform, plus a
-native package for Nix users.
+**Status:** superseded by "Releases are built natively per platform, with the runtime beside the binary", which builds each archive on its own CI runner (glibc 2.35 floor). Kept for the reasoning about loaders and musl.
 
 **Problem.** The Linux release package was crane's native build against nixpkgs' glibc, so the
 shipped binary's ELF interpreter and RUNPATH were `/nix/store/...` paths. It started only on a
@@ -3582,6 +3581,29 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## Releases are built natively per platform, with the runtime beside the binary
+
+- **Before.** `just release` cross-built `ry` alone for three targets with nix and zig on one
+  machine, and the archives held a single `ry`. That was fine while ry was only a checker, but
+  ry's runtime is a second artifact (`libR.so`/`libR.dylib`) that links zlib, bzip2 and xz on
+  Linux, which zig's glibc 2.17 sysroot does not carry, and macOS cross-linking has only
+  libSystem stubs.
+- **Shape.** `.github/pending-release.yml` (moved into `.github/workflows/` by a maintainer)
+  builds each platform on its own runner with `just package VERSION`, smoke-tests the archive with
+  `tools/smoke-test.sh`, and publishes. `just package` is the one recipe CI and
+  `just release-dry-run` share, so a local dry run exercises the same packaging. An archive is
+  flat (`ry`, the runtime library, `LICENSE`), because `ry run` looks beside the executable first
+  and the Zed extension expects `ry` at the archive root; installers may move the library to
+  `../lib/ry/`, the other place ry looks. Windows archives carry `ry.exe` alone and use the MSVC
+  target, which native Windows runners build without MinGW.
+- **Linux glibc floor.** Native builds on `ubuntu-22.04` need glibc 2.35, up from 2.17. Accepted
+  for the beta; a manylinux-style container is the fix if users on older distributions ask.
+- **Nix.** The flake's toolchain comes from `rust-toolchain.toml` (rust-overlay's
+  `fromRustupToolchain`). `nix build` builds `ry` and libR, installs the library at
+  `lib/ry/libR.so`, and wraps `ry` with `R_HOME` defaulting to nixpkgs' R, because a Nix-built
+  binary cannot load another distribution's libR; a user-set `R_HOME` still wins. `ry-unwrapped` skips the wrapper. The zig cross outputs
+  remain for the checker-only binaries.
 
 ## In-place updates through nested targets
 
