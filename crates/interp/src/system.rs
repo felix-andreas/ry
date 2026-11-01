@@ -1905,6 +1905,11 @@ unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
 /// Linux, so the encoding names and conversions are the system's.
 unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     let input = call.arg(0);
+    // `iconvlist()` asks for the converter's encoding names with a NULL `x`. glibc cannot list
+    // them, so GNU R answers NULL there and `iconvlist()` reads utils' `iconvlist` file instead.
+    if input == nil() {
+        return Ok(nil());
+    }
     let from = values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
     let to = values::first_string(call.arg(2)).map_or_else(String::new, |name| name.into_owned());
     let substitute = values::string_at(call.arg(3), 0).map(|text| text.into_owned());
