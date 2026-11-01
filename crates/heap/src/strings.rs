@@ -5,9 +5,11 @@
 //! A `CHARSXP` caches its hash in the high half of the vector capacity field, which strings do not
 //! otherwise use, and keeps its `TRUELENGTH` in the low half ([`Sexp::char_truelength`]).
 
-use crate::object::{Sexp, gp};
-use hashbrown::HashTable;
-use std::hash::Hasher;
+use {
+    crate::object::{Sexp, gp},
+    hashbrown::HashTable,
+    std::hash::Hasher,
+};
 
 /// R's `cetype_t`, numbered as in GNU R.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,9 +94,10 @@ impl StringTable {
     }
 
     pub unsafe fn insert(&mut self, hash: u32, string: Sexp) {
-        self.table.insert_unique(spread(hash), string, |candidate| unsafe {
-            spread(candidate.char_hash())
-        });
+        self.table
+            .insert_unique(spread(hash), string, |candidate| unsafe {
+                spread(candidate.char_hash())
+            });
         self.young.push(string);
     }
 

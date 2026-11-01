@@ -7,19 +7,21 @@
 //! does, so scripts that plot as a side effect run to completion and read back the same
 //! `par()` values.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    coerce::coerce_vector,
-    format::c_general,
-    unwind::{R, error},
-    values::{
-        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
-        symbols,
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        coerce::coerce_vector,
+        format::c_general,
+        graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages},
+        unwind::{R, error},
+        values::{
+            self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
+            symbols,
+        },
     },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
+    std::cell::{Cell, RefCell},
 };
-use crate::graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages};
-use heap::object::{NA_INTEGER, Sexp, SexpType};
-use std::cell::{Cell, RefCell};
 
 pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("rgb", do_rgb),
@@ -905,8 +907,7 @@ unsafe fn open_device(spec: DeviceSpec) -> R<Sexp> {
     if !spec.bitmap
         && let Some(path) = spec.file.as_deref().and_then(|file| output_path(file, 1))
     {
-        std::fs::File::create(&path)
-            .map_err(|_| error(format!("cannot open file '{path}'")))?;
+        std::fs::File::create(&path).map_err(|_| error(format!("cannot open file '{path}'")))?;
     }
     add_device(Device {
         name: spec.name,
@@ -940,7 +941,8 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
         pointsize: values::as_real_scalar(call.arg(8)),
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
-        title: values::first_string(call.arg(11)).map_or_else(String::new, |title| title.into_owned()),
+        title: values::first_string(call.arg(11))
+            .map_or_else(String::new, |title| title.into_owned()),
     };
     open_device(spec)
 }
@@ -1157,7 +1159,11 @@ pub unsafe fn close_all_devices() -> R<()> {
     let devices = DEVICES.with(|devices| {
         let mut devices = devices.borrow_mut();
         devices.current = 0;
-        devices.slots.iter_mut().filter_map(Option::take).collect::<Vec<_>>()
+        devices
+            .slots
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect::<Vec<_>>()
     });
     publish_devices()?;
     for device in &devices {
@@ -1184,7 +1190,12 @@ unsafe fn write_device(device: &Device) -> R<()> {
         1.0 / device.unit_inches,
         &device.title,
     )
-    .map_err(|failure| error(format!("cannot write file '{}': {failure}", file_for_page(file, 1))))
+    .map_err(|failure| {
+        error(format!(
+            "cannot write file '{}': {failure}",
+            file_for_page(file, 1)
+        ))
+    })
 }
 
 /// `dev.size()`: the device's width and height in device units.
@@ -2887,7 +2898,12 @@ impl UserAxis {
 fn user_axes(device: &Device) -> [UserAxis; 2] {
     [false, true].map(|vertical| {
         let frames = axis_frames(device, vertical);
-        let ndc = |fraction: f64| lerp(frames.inner, lerp(frames.figure, lerp(frames.plot, fraction)));
+        let ndc = |fraction: f64| {
+            lerp(
+                frames.inner,
+                lerp(frames.figure, lerp(frames.plot, fraction)),
+            )
+        };
         let size = device.size[usize::from(vertical)];
         let [low, high] = frames.usr;
         let (start, end) = (ndc(0.0) * size, ndc(1.0) * size);
@@ -2926,7 +2942,11 @@ fn along_side(device: &Device, side: i32, at: f64, outer: bool) -> f64 {
         };
     }
     let [x, y] = user_axes(device);
-    if horizontal { x.inches(at) } else { y.inches(at) }
+    if horizontal {
+        x.inches(at)
+    } else {
+        y.inches(at)
+    }
 }
 
 fn push_shape(device: &mut Device, clip: Rect, shape: Shape) {
@@ -3104,7 +3124,9 @@ unsafe fn text_colour_at(
     let count = length(value);
     let missing = count > 0
         && match value.kind() {
-            SexpType::Logical | SexpType::Integer => values::ints(value)[index % count] == NA_INTEGER,
+            SexpType::Logical | SexpType::Integer => {
+                values::ints(value)[index % count] == NA_INTEGER
+            }
             SexpType::Real => values::reals(value)[index % count].is_nan(),
             SexpType::String => values::string_at(value, index % count).is_none(),
             _ => false,
@@ -3270,9 +3292,17 @@ fn push_symbol(
     };
     // An equilateral triangle about the centre, its apex up or down.
     let triangle = |up: bool| {
-        let r = if up { triangle_radius } else { -triangle_radius };
+        let r = if up {
+            triangle_radius
+        } else {
+            -triangle_radius
+        };
         let half_base = triangle_radius * 3f64.sqrt() / 2.0;
-        vec![[x, y + r], [x + half_base, y - r / 2.0], [x - half_base, y - r / 2.0]]
+        vec![
+            [x, y + r],
+            [x + half_base, y - r / 2.0],
+            [x - half_base, y - r / 2.0],
+        ]
     };
     let diamond = |half: f64| vec![[x, y - half], [x + half, y], [x, y + half], [x - half, y]];
     let polygon = |points: Vec<[f64; 2]>, fill: Colour, stroke: Option<Stroke>| Shape::Path {
@@ -3287,7 +3317,12 @@ fn push_symbol(
         fill,
         stroke,
     };
-    let plus = |half: f64| [vec![[x - half, y], [x + half, y]], vec![[x, y - half], [x, y + half]]];
+    let plus = |half: f64| {
+        [
+            vec![[x - half, y], [x + half, y]],
+            vec![[x, y - half], [x, y + half]],
+        ]
+    };
     let cross = |half: f64| {
         [
             vec![[x - half, y - half], [x + half, y + half]],
@@ -3314,7 +3349,11 @@ fn push_symbol(
             lines.extend(cross(radius));
         }
         9 => {
-            shapes.push(polygon(diamond(radius * std::f64::consts::SQRT_2), none, Some(stroke)));
+            shapes.push(polygon(
+                diamond(radius * std::f64::consts::SQRT_2),
+                none,
+                Some(stroke),
+            ));
             lines.extend(plus(radius * std::f64::consts::SQRT_2));
         }
         10 => {
@@ -3326,12 +3365,20 @@ fn push_symbol(
             let half_base = r * 3f64.sqrt() / 2.0;
             let shift = r / 4.0;
             shapes.push(polygon(
-                vec![[x, y + r - shift], [x + half_base, y - r / 2.0 - shift], [x - half_base, y - r / 2.0 - shift]],
+                vec![
+                    [x, y + r - shift],
+                    [x + half_base, y - r / 2.0 - shift],
+                    [x - half_base, y - r / 2.0 - shift],
+                ],
                 none,
                 Some(stroke),
             ));
             shapes.push(polygon(
-                vec![[x, y - r + shift], [x + half_base, y + r / 2.0 + shift], [x - half_base, y + r / 2.0 + shift]],
+                vec![
+                    [x, y - r + shift],
+                    [x + half_base, y + r / 2.0 + shift],
+                    [x - half_base, y + r / 2.0 + shift],
+                ],
                 none,
                 Some(stroke),
             ));
@@ -3346,7 +3393,11 @@ fn push_symbol(
         }
         14 => {
             shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.push(vec![[x - radius, y - radius], [x, y + radius], [x + radius, y - radius]]);
+            lines.push(vec![
+                [x - radius, y - radius],
+                [x, y + radius],
+                [x + radius, y - radius],
+            ]);
         }
         15 => shapes.push(polygon(square(square_half), colour, None)),
         16 => shapes.push(circle(radius, colour, None)),
@@ -3384,7 +3435,13 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
     let kind = values::first_string(call.arg(1))
         .and_then(|kind| kind.chars().next())
         .unwrap_or('p');
-    let (lty, col, bg, cex, lwd) = (call.arg(3), call.arg(4), call.arg(5), call.arg(6), call.arg(7));
+    let (lty, col, bg, cex, lwd) = (
+        call.arg(3),
+        call.arg(4),
+        call.arg(5),
+        call.arg(6),
+        call.arg(7),
+    );
     with_inline_pars(call, 8, |device| {
         let pars = device.pars.clone();
         let clip = clip_rect(device);
@@ -3446,7 +3503,11 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                     for pair in run.windows(2) {
                         let [from, to] = [pair[0], pair[1]];
                         steps.push(from);
-                        steps.push(if kind == 's' { [to[0], from[1]] } else { [from[0], to[1]] });
+                        steps.push(if kind == 's' {
+                            [to[0], from[1]]
+                        } else {
+                            [from[0], to[1]]
+                        });
                     }
                     if let Some(last) = run.last() {
                         steps.push(*last);
@@ -3455,7 +3516,11 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                 }
             }
             'h' => {
-                let base = y_axis.inches(if pars.ylog { 10f64.powf(pars.usr[2]) } else { 0.0 });
+                let base = y_axis.inches(if pars.ylog {
+                    10f64.powf(pars.usr[2])
+                } else {
+                    0.0
+                });
                 for (index, point) in points.iter().enumerate() {
                     if let Some(point) = point {
                         let stroke = stroke_with(
@@ -3507,11 +3572,21 @@ unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Vec<String>>>> {
                 return Ok(None);
             }
             let settings = crate::format::Settings::current();
-            let finite: Vec<f64> = at.iter().copied().filter(|value| value.is_finite()).collect();
+            let finite: Vec<f64> = at
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .collect();
             let format = crate::format::format_real_common(&finite, settings);
             Ok(Some(
                 at.iter()
-                    .map(|value| vec![crate::format::format_real_with(*value, format, "NA").trim().to_owned()])
+                    .map(|value| {
+                        vec![
+                            crate::format::format_real_with(*value, format, "NA")
+                                .trim()
+                                .to_owned(),
+                        ]
+                    })
                     .collect(),
             ))
         }
@@ -3565,7 +3640,11 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
         // The axis line sits at `pos` in the other axis's user coordinates, or on margin line
         // `line`; labels sit `mgp[2]` lines further out.
         let (axis_across, label_line) = if pos.is_finite() {
-            let across = if horizontal { y_axis.inches(pos) } else { x_axis.inches(pos) };
+            let across = if horizontal {
+                y_axis.inches(pos)
+            } else {
+                x_axis.inches(pos)
+            };
             let edge = margin_line(device, side, 0.0, outer);
             let step = pars.mex * device.line_inches();
             let offset = match side {
@@ -3574,14 +3653,23 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             };
             (across, offset + pars.mgp[1])
         } else {
-            (margin_line(device, side, line + pars.mgp[2], outer), line + pars.mgp[1])
+            (
+                margin_line(device, side, line + pars.mgp[2], outer),
+                line + pars.mgp[1],
+            )
         };
         let axis_colour = text_colour_at(col, 0, pars.fg, pars.bg)?;
         let ticks_colour = text_colour_at(col_ticks, 0, axis_colour, pars.bg)?;
         let axis_lty = line_type_at(lty, 0, pars.lty)?;
         let axis_lwd = real_at(lwd, 0, 1.0);
         let ticks_lwd = real_at(lwd_ticks, 0, axis_lwd);
-        let point = |along: f64, across: f64| if horizontal { [along, across] } else { [across, along] };
+        let point = |along: f64, across: f64| {
+            if horizontal {
+                [along, across]
+            } else {
+                [across, along]
+            }
+        };
         if tick && let (Some(first), Some(last)) = (shown.first(), shown.last()) {
             if axis_lwd > 0.0 {
                 push_line(
@@ -3595,7 +3683,11 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             // plot region's height or width instead.
             let plot = region_rect(device, 17);
             let length = if pars.tck.is_finite() {
-                let extent = if horizontal { plot.y1 - plot.y0 } else { plot.x1 - plot.x0 };
+                let extent = if horizontal {
+                    plot.y1 - plot.y0
+                } else {
+                    plot.x1 - plot.x0
+                };
                 pars.tck * extent
             } else {
                 pars.tcl * pars.mex * device.line_inches()
@@ -3609,7 +3701,10 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                     push_line(
                         device,
                         clip,
-                        vec![point(*along, axis_across), point(*along, axis_across + inwards)],
+                        vec![
+                            point(*along, axis_across),
+                            point(*along, axis_across + inwards),
+                        ],
                         stroke_with(&pars, ticks_colour, axis_lty, ticks_lwd),
                     );
                 }
@@ -3644,7 +3739,11 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             label_font
         };
         let label_colour = text_colour_at(col, 0, pars.col_axis, pars.bg)?;
-        let label_colour = if col == nil() || length(col) == 0 { pars.col_axis } else { label_colour };
+        let label_colour = if col == nil() || length(col) == 0 {
+            pars.col_axis
+        } else {
+            label_colour
+        };
         // A label that would come within `gap.axis` widths of "m" of the last one drawn is
         // left out.
         let gap = if gap_axis.is_finite() {
@@ -3655,7 +3754,10 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             1.0
         } * text_inches(&pars, "m", label_cex, label_font);
         let mut last_end = f64::NEG_INFINITY;
-        let ascending = shown.first().zip(shown.last()).is_none_or(|(first, last)| first.1 <= last.1);
+        let ascending = shown
+            .first()
+            .zip(shown.last())
+            .is_none_or(|(first, last)| first.1 <= last.1);
         let mut ordered = shown.clone();
         if !ascending {
             ordered.reverse();
@@ -3780,8 +3882,19 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
             let cex = pars.cex_main * pars.cex;
             if line.is_finite() {
                 push_margin_text(
-                    device, clip, 3, line, outer, along_x, &lines, 0, pars.adj, 0.0, cex,
-                    pars.font_main, pars.col_main,
+                    device,
+                    clip,
+                    3,
+                    line,
+                    outer,
+                    along_x,
+                    &lines,
+                    0,
+                    pars.adj,
+                    0.0,
+                    cex,
+                    pars.font_main,
+                    pars.col_main,
                 );
             } else {
                 // The main title is centred on the middle line of the top margin.
@@ -3792,30 +3905,75 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                 };
                 let anchor = [along_x, region.y1 + margin / 2.0];
                 push_text(
-                    device, clip, anchor, &lines, 0.0, pars.adj, 0.5, cex, pars.font_main,
+                    device,
+                    clip,
+                    anchor,
+                    &lines,
+                    0.0,
+                    pars.adj,
+                    0.5,
+                    cex,
+                    pars.font_main,
                     pars.col_main,
                 );
             }
         }
         if let Some(lines) = sub {
-            let at = if line.is_finite() { line } else { pars.mgp[0] + 1.0 };
+            let at = if line.is_finite() {
+                line
+            } else {
+                pars.mgp[0] + 1.0
+            };
             push_margin_text(
-                device, clip, 1, at, outer, along_x, &lines, 0, pars.adj, 0.0,
-                pars.cex_sub * pars.cex, pars.font_sub, pars.col_sub,
+                device,
+                clip,
+                1,
+                at,
+                outer,
+                along_x,
+                &lines,
+                0,
+                pars.adj,
+                0.0,
+                pars.cex_sub * pars.cex,
+                pars.font_sub,
+                pars.col_sub,
             );
         }
         if let Some(lines) = xlab {
             let at = if line.is_finite() { line } else { pars.mgp[0] };
             push_margin_text(
-                device, clip, 1, at, outer, along_x, &lines, 0, pars.adj, 0.0,
-                pars.cex_lab * pars.cex, pars.font_lab, pars.col_lab,
+                device,
+                clip,
+                1,
+                at,
+                outer,
+                along_x,
+                &lines,
+                0,
+                pars.adj,
+                0.0,
+                pars.cex_lab * pars.cex,
+                pars.font_lab,
+                pars.col_lab,
             );
         }
         if let Some(lines) = ylab {
             let at = if line.is_finite() { line } else { pars.mgp[0] };
             push_margin_text(
-                device, clip, 2, at, outer, along_y, &lines, 0, pars.adj, 0.0,
-                pars.cex_lab * pars.cex, pars.font_lab, pars.col_lab,
+                device,
+                clip,
+                2,
+                at,
+                outer,
+                along_y,
+                &lines,
+                0,
+                pars.adj,
+                0.0,
+                pars.cex_lab * pars.cex,
+                pars.font_lab,
+                pars.col_lab,
             );
         }
         Ok(())
@@ -3835,7 +3993,11 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
         let pars = device.pars.clone();
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
-        let count = if labels.is_empty() { 0 } else { x.len().max(labels.len()) };
+        let count = if labels.is_empty() {
+            0
+        } else {
+            x.len().max(labels.len())
+        };
         let char_width = device.char_inches()[0] * pars.cex;
         let offset = if offset.is_finite() { offset } else { 0.5 } * char_width;
         for index in 0..count {
@@ -3853,12 +4015,28 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
                 continue;
             }
             let label_cex = real_at(cex, index, 1.0);
-            let label_cex = if label_cex.is_finite() { label_cex } else { 1.0 } * pars.cex;
+            let label_cex = if label_cex.is_finite() {
+                label_cex
+            } else {
+                1.0
+            } * pars.cex;
             let colour = text_colour_at(col, index, pars.col, pars.bg)?;
             let label_font = real_at(font, index, f64::from(pars.font));
-            let label_font = if label_font.is_finite() { label_font as i32 } else { pars.font };
-            let mut hadj = adj.first().copied().filter(|value| value.is_finite()).unwrap_or(pars.adj);
-            let mut yadj = adj.get(1).copied().filter(|value| value.is_finite()).unwrap_or(0.5);
+            let label_font = if label_font.is_finite() {
+                label_font as i32
+            } else {
+                pars.font
+            };
+            let mut hadj = adj
+                .first()
+                .copied()
+                .filter(|value| value.is_finite())
+                .unwrap_or(pars.adj);
+            let mut yadj = adj
+                .get(1)
+                .copied()
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.5);
             let mut anchor = point;
             let position = real_at(pos, index, f64::NAN);
             if position.is_finite() {
@@ -3912,7 +4090,11 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
     with_inline_pars(call, 10, |device| {
         let pars = device.pars.clone();
         let clip = clip_rect(device);
-        let clip = if pars.xpd == 0 { region_rect(device, 8) } else { clip };
+        let clip = if pars.xpd == 0 {
+            region_rect(device, 8)
+        } else {
+            clip
+        };
         for index in 0..count {
             let Some(lines) = labels.get(index % labels.len()) else {
                 continue;
@@ -3952,7 +4134,11 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             let cex = if cex.is_finite() { cex } else { 1.0 } * pars.cex;
             let colour = text_colour_at(arguments[7], index, pars.col, pars.bg)?;
             let font = real_at(arguments[8], index, f64::from(pars.font));
-            let font = if font.is_finite() { font as i32 } else { pars.font };
+            let font = if font.is_finite() {
+                font as i32
+            } else {
+                pars.font
+            };
             let clip = if outer { device_rect(device) } else { clip };
             push_margin_text(
                 device, clip, side, line, outer, along, lines, pars.las, adj, padj, cex, font,
@@ -3966,7 +4152,9 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `rect(xleft, ybottom, xright, ytop, col, border, lty, lwd, ...)`.
 unsafe fn do_rect(call: &NativeCall<'_>) -> R<Sexp> {
-    let corners: Vec<Vec<f64>> = (0..4).map(|index| reals_of(call.arg(index))).collect::<R<_>>()?;
+    let corners: Vec<Vec<f64>> = (0..4)
+        .map(|index| reals_of(call.arg(index)))
+        .collect::<R<_>>()?;
     let (col, border, lty, lwd) = (call.arg(4), call.arg(5), call.arg(6), call.arg(7));
     let count = if corners.iter().any(Vec::is_empty) {
         0
@@ -4033,7 +4221,12 @@ unsafe fn do_polygon(call: &NativeCall<'_>) -> R<Sexp> {
         {
             let fill = colour_at(col, index, TRANSPARENT_WHITE, pars.bg)?;
             let outline = colour_at(border, index, pars.fg, pars.bg)?;
-            let stroke = stroke_with(&pars, outline, line_type_at(lty, index, pars.lty)?, pars.lwd);
+            let stroke = stroke_with(
+                &pars,
+                outline,
+                line_type_at(lty, index, pars.lty)?,
+                pars.lwd,
+            );
             push_shape(
                 device,
                 clip,
@@ -4094,7 +4287,9 @@ unsafe fn do_path(call: &NativeCall<'_>) -> R<Sexp> {
 /// code, col, lty, lwd, ...)`, whose heads are `length` inches long at `angle` degrees to the
 /// shaft, at the start (code 1), the end (2) or both (3).
 unsafe fn draw_segments(call: &NativeCall<'_>, arrows: bool) -> R<Sexp> {
-    let ends: Vec<Vec<f64>> = (0..4).map(|index| reals_of(call.arg(index))).collect::<R<_>>()?;
+    let ends: Vec<Vec<f64>> = (0..4)
+        .map(|index| reals_of(call.arg(index)))
+        .collect::<R<_>>()?;
     let (head_length, angle, code, style) = if arrows {
         (
             values::as_real_scalar(call.arg(4)),
@@ -4153,7 +4348,12 @@ unsafe fn draw_segments(call: &NativeCall<'_>, arrows: bool) -> R<Sexp> {
                 ]
             };
             if code & 1 != 0 {
-                push_line(device, clip, head(from, direction + std::f64::consts::PI), stroke);
+                push_line(
+                    device,
+                    clip,
+                    head(from, direction + std::f64::consts::PI),
+                    stroke,
+                );
             }
             if code & 2 != 0 {
                 push_line(device, clip, head(to, direction), stroke);
@@ -4220,7 +4420,11 @@ unsafe fn do_abline(call: &NativeCall<'_>) -> R<Sexp> {
                 (0..=100)
                     .map(|step| {
                         let plot_x = lerp([x0, x1], f64::from(step) / 100.0);
-                        let data_x = if pars.xlog { 10f64.powf(plot_x) } else { plot_x };
+                        let data_x = if pars.xlog {
+                            10f64.powf(plot_x)
+                        } else {
+                            plot_x
+                        };
                         let data_y = intercept + slope * data_x;
                         let plot_y = if pars.ylog { data_y.log10() } else { data_y };
                         [x_inches(plot_x), y_inches(plot_y)]
@@ -4308,7 +4512,10 @@ unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
     let dim = values::get_attr(image, symbols().dim);
     let (rows, columns) = if dim != nil() && length(dim) == 2 {
         let dim = coerce_vector(dim, SexpType::Integer)?;
-        (values::ints(dim)[0].max(0) as usize, values::ints(dim)[1].max(0) as usize)
+        (
+            values::ints(dim)[0].max(0) as usize,
+            values::ints(dim)[1].max(0) as usize,
+        )
     } else {
         return Err(error("invalid raster object"));
     };
@@ -4322,15 +4529,26 @@ unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
             }
         })
         .collect::<R<_>>()?;
-    let corners: Vec<Vec<f64>> = (1..5).map(|index| reals_of(call.arg(index))).collect::<R<_>>()?;
+    let corners: Vec<Vec<f64>> = (1..5)
+        .map(|index| reals_of(call.arg(index)))
+        .collect::<R<_>>()?;
     with_inline_pars(call, 7, |device| {
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
         let count = corners.iter().map(Vec::len).min().unwrap_or(0);
         for index in 0..count {
-            let (left, right) = (x_axis.inches(corners[0][index]), x_axis.inches(corners[2][index]));
-            let (bottom, top) = (y_axis.inches(corners[1][index]), y_axis.inches(corners[3][index]));
-            if [left, right, bottom, top].iter().any(|value| !value.is_finite()) {
+            let (left, right) = (
+                x_axis.inches(corners[0][index]),
+                x_axis.inches(corners[2][index]),
+            );
+            let (bottom, top) = (
+                y_axis.inches(corners[1][index]),
+                y_axis.inches(corners[3][index]),
+            );
+            if [left, right, bottom, top]
+                .iter()
+                .any(|value| !value.is_finite())
+            {
                 continue;
             }
             for row in 0..rows {
@@ -4379,7 +4597,9 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
             .iter()
             .map(|level| {
                 let format = crate::format::format_real_common(&[*level], settings);
-                crate::format::format_real_with(*level, format, "NA").trim().to_owned()
+                crate::format::format_real_with(*level, format, "NA")
+                    .trim()
+                    .to_owned()
             })
             .collect()
     } else {
@@ -4396,7 +4616,11 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
         let pars = device.pars.clone();
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
-        let grid = Grid { x: &x, y: &y, z: &z };
+        let grid = Grid {
+            x: &x,
+            y: &y,
+            z: &z,
+        };
         let mut placed: Vec<Rect> = Vec::new();
         for (index, level) in levels.iter().enumerate() {
             let colour = colour_at(col, index, pars.col, pars.bg)?;
@@ -4406,8 +4630,7 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                 line_type_at(lty, index, pars.lty)?,
                 real_at(lwd, index, pars.lwd),
             );
-            let label = (!labels.is_empty())
-                .then(|| format!(" {} ", labels[index % labels.len()]));
+            let label = (!labels.is_empty()).then(|| format!(" {} ", labels[index % labels.len()]));
             for line in contour_level(&grid, *level) {
                 let points: Vec<[f64; 2]> = line
                     .iter()
@@ -4418,8 +4641,7 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                     continue;
                 };
                 let width = text_inches(&pars, label, labcex, 1);
-                let height = HELVETICA_CAP_HEIGHT / 1000.0 * text_points(&pars, labcex)
-                    / 72.0;
+                let height = HELVETICA_CAP_HEIGHT / 1000.0 * text_points(&pars, labcex) / 72.0;
                 match flattest_window(&points, width, height, &placed) {
                     Some(window) => {
                         placed.push(window.bounds);
@@ -4513,8 +4735,7 @@ fn flattest_window(
         let straying = points[index..end_segment]
             .iter()
             .map(|point| {
-                ((point[0] - start[0]) * chord[1] - (point[1] - start[1]) * chord[0]).abs()
-                    / length
+                ((point[0] - start[0]) * chord[1] - (point[1] - start[1]) * chord[0]).abs() / length
             })
             .fold(0.0, f64::max);
         if best.as_ref().is_some_and(|(score, _)| *score <= straying) {
@@ -4539,7 +4760,10 @@ fn flattest_window(
             y1: centre[1] + half[1],
         };
         let overlaps = placed.iter().any(|other| {
-            bounds.x0 < other.x1 && other.x0 < bounds.x1 && bounds.y0 < other.y1 && other.y0 < bounds.y1
+            bounds.x0 < other.x1
+                && other.x0 < bounds.x1
+                && bounds.y0 < other.y1
+                && other.y0 < bounds.y1
         });
         if overlaps {
             continue;
@@ -4577,14 +4801,26 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
         let [x_axis, y_axis] = user_axes(device);
         let count = x.len().min(y.len());
         let columns = if count == 0 { 0 } else { data.len() / count };
-        let largest = data.iter().copied().filter(|value| value.is_finite()).fold(0.0, f64::max);
+        let largest = data
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(0.0, f64::max);
         let scale_to = values::as_real_scalar(inches);
         let size_inches = |value: f64| {
             if inches.kind() == SexpType::Logical && values::as_logical_scalar(inches) == 0 {
                 value * x_axis.scale.abs()
             } else {
-                let target = if scale_to.is_finite() && scale_to > 0.0 { scale_to } else { 1.0 };
-                if largest > 0.0 { value / largest * target } else { 0.0 }
+                let target = if scale_to.is_finite() && scale_to > 0.0 {
+                    scale_to
+                } else {
+                    1.0
+                };
+                if largest > 0.0 {
+                    value / largest * target
+                } else {
+                    0.0
+                }
             }
         };
         for index in 0..count {
@@ -4595,7 +4831,11 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
             let fill = colour_at(bg, index, TRANSPARENT_WHITE, pars.bg)?;
             let outline = colour_at(fg, index, pars.col, pars.bg)?;
             let stroke = Some(par_stroke(&pars, outline));
-            let datum = |column: usize| data.get(index + column * count).copied().unwrap_or(f64::NAN);
+            let datum = |column: usize| {
+                data.get(index + column * count)
+                    .copied()
+                    .unwrap_or(f64::NAN)
+            };
             match kind {
                 1 if columns >= 1 => push_shape(
                     device,
@@ -4641,7 +4881,9 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
 /// `clip(x1, x2, y1, y2)`: clips later drawing to a rectangle in user coordinates until the
 /// next plot.
 unsafe fn do_clip(call: &NativeCall<'_>) -> R<Sexp> {
-    let bounds: Vec<f64> = (0..4).map(|index| values::as_real_scalar(call.arg(index))).collect();
+    let bounds: Vec<f64> = (0..4)
+        .map(|index| values::as_real_scalar(call.arg(index)))
+        .collect();
     with_plot(|device| {
         let [x_axis, y_axis] = user_axes(device);
         let (x0, x1) = (x_axis.inches(bounds[0]), x_axis.inches(bounds[1]));
@@ -4667,7 +4909,12 @@ unsafe fn do_erase(call: &NativeCall<'_>) -> R<Sexp> {
             device,
             all,
             Shape::Path {
-                points: vec![[all.x0, all.y0], [all.x1, all.y0], [all.x1, all.y1], [all.x0, all.y1]],
+                points: vec![
+                    [all.x0, all.y0],
+                    [all.x1, all.y0],
+                    [all.x1, all.y1],
+                    [all.x0, all.y1],
+                ],
                 closed: true,
                 fill,
                 stroke: None,

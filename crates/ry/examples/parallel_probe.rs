@@ -2,20 +2,27 @@
 //! project-wide salsa queries. On throttled vCPUs check raw thread scaling (H) first.
 //! Usage: `WORKERS=4 cargo run --release -p ry-lang --example parallel_probe <package-dir>...`
 
-use semantics::diagnostics::file_diagnostics;
-use semantics::stubs::install_shipped_stubs;
-use semantics::types::{Name, Ty, TyKind, unknown};
-use semantics::{
-    Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache, global_scheme,
-    interface_sccs, item_naming, item_tree, package_definitions,
+use {
+    semantics::{
+        Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache,
+        diagnostics::file_diagnostics,
+        global_scheme, interface_sccs, item_naming, item_tree, package_definitions,
+        stubs::install_shipped_stubs,
+        types::{Name, Ty, TyKind, unknown},
+    },
+    std::{
+        collections::HashMap,
+        env, fs,
+        num::NonZero,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::Instant,
+    },
 };
-use std::collections::HashMap;
-use std::num::NonZero;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-use std::{env, fs, thread};
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static BLOCKS: AtomicUsize = AtomicUsize::new(0);

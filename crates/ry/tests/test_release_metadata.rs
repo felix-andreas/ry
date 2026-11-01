@@ -2,8 +2,10 @@
 //! any prerelease suffix (VS Code requires plain `major.minor.patch`). Zed is
 //! absent: its extension only locates an installed binary.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

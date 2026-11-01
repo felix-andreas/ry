@@ -1,60 +1,73 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
-use crate::cli::{
-    data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
-    sniff_data_file,
+use {
+    crate::{
+        cli::{
+            data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
+            sniff_data_file,
+        },
+        config::{
+            CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
+            INLINE_ANNOTATIONS_OFF, suggested_table,
+        },
+        diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
+        namespace::namespace_import_problems,
+        position::{LineColumn, LineIndex},
+    },
+    async_lsp::{
+        ClientSocket, ErrorCode, LanguageClient, LanguageServer, ResponseError,
+        client_monitor::ClientProcessMonitorLayer,
+        lsp_types::{self, request},
+        panic::CatchUnwindLayer,
+        router::Router,
+        server::LifecycleLayer,
+        tracing::TracingLayer,
+    },
+    futures::future::BoxFuture,
+    ide::{
+        CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
+        HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
+        classify_type_token,
+    },
+    salsa::{Durability, Setter},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        file_conditional_writers, file_interface_reads, item_naming, item_tree,
+        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics},
+        metadata::{
+            NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
+        },
+        stubs::{
+            StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+            shipped_stub_sources, stub_source_problems,
+        },
+    },
+    std::{
+        cmp::Reverse,
+        collections::{BTreeSet, HashMap, HashSet},
+        env, fs,
+        hash::{DefaultHasher, Hash, Hasher},
+        mem,
+        num::NonZero,
+        ops::{ControlFlow, Range},
+        panic::{self, AssertUnwindSafe},
+        path::{Path, PathBuf},
+        process,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+        time::{Duration, Instant},
+    },
+    syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name},
+    tokio::{runtime::Handle, sync::oneshot},
+    tower::ServiceBuilder,
 };
-use crate::config::{
-    CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
-    INLINE_ANNOTATIONS_OFF, suggested_table,
-};
-use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
-use crate::namespace::namespace_import_problems;
-use crate::position::{LineColumn, LineIndex};
-use async_lsp::client_monitor::ClientProcessMonitorLayer;
-use async_lsp::lsp_types::{self, request};
-use async_lsp::panic::CatchUnwindLayer;
-use async_lsp::router::Router;
-use async_lsp::server::LifecycleLayer;
-use async_lsp::tracing::TracingLayer;
-use async_lsp::{ClientSocket, ErrorCode, LanguageClient, LanguageServer, ResponseError};
-use futures::future::BoxFuture;
-use ide::{
-    CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
-    HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
-    classify_type_token,
-};
-use salsa::{Durability, Setter};
-use semantics::diagnostics::{Diagnostic, Severity, parse_stage_diagnostics};
-use semantics::metadata::{
-    NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
-    parse_description_collate, parse_description_dependencies, parse_description_package,
-    parse_namespace,
-};
-use semantics::stubs::{
-    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
-    shipped_stub_sources, stub_source_problems,
-};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-    file_conditional_writers, file_interface_reads, item_naming, item_tree,
-};
-use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::num::NonZero;
-use std::ops::{ControlFlow, Range};
-use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
-use std::{env, fs, mem, panic, process, thread};
-use syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name};
-use tokio::runtime::Handle;
-use tokio::sync::oneshot;
-use tower::ServiceBuilder;
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
@@ -1036,6 +1049,7 @@ impl Worker {
                 namespace,
                 overloads,
                 declaration,
+                documentation,
             } => {
                 let mut summary = if *overloads > 1 {
                     format!(
@@ -1049,6 +1063,9 @@ impl Worker {
                     declaration.and_then(|target| self.render_stub_source_location(target))
                 {
                     summary.push_str(&format!(" Declared at `{location}`."));
+                }
+                if let Some(documentation) = documentation {
+                    summary = format!("{documentation}\n\n{summary}");
                 }
                 Some(summary)
             }

@@ -12,9 +12,7 @@
 //! The base environment and the base namespace have no `Frame`: their cells hang off the symbols
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
-use crate::object::Sexp;
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells.
 const INDEX_THRESHOLD: usize = 8;
@@ -37,7 +35,10 @@ pub struct Frame {
 
 impl Frame {
     pub fn with_capacity(bindings: usize) -> Frame {
-        Frame { cells: SmallVec::with_capacity(bindings), ..Frame::default() }
+        Frame {
+            cells: SmallVec::with_capacity(bindings),
+            ..Frame::default()
+        }
     }
 
     pub fn cells(&self) -> &[Sexp] {
@@ -68,7 +69,11 @@ impl Frame {
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
     /// positive).
     pub fn set_hashed(&mut self, size: i32) {
-        self.hash_size = if size > 0 { size as u32 } else { HASH_MINIMUM_SIZE };
+        self.hash_size = if size > 0 {
+            size as u32
+        } else {
+            HASH_MINIMUM_SIZE
+        };
     }
 
     /// Marks every cell bound so far as a closure formal.
@@ -93,8 +98,11 @@ impl Frame {
         let mut size = self.hash_size as usize;
         let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
         let mut count = 0;
-        let hashes: Vec<usize> =
-            self.cells.iter().map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize).collect();
+        let hashes: Vec<usize> = self
+            .cells
+            .iter()
+            .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
+            .collect();
         for (position, hash) in hashes.iter().enumerate() {
             buckets[hash % size].insert(0, position);
             count += 1;
@@ -108,7 +116,11 @@ impl Frame {
                 buckets = grown;
             }
         }
-        buckets.iter().flatten().map(|&position| self.cells[position]).collect()
+        buckets
+            .iter()
+            .flatten()
+            .map(|&position| self.cells[position])
+            .collect()
     }
 
     /// Adds a cell whose symbol the frame does not bind yet.

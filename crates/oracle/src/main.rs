@@ -1,14 +1,18 @@
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::time::Duration;
-
-use clap::{Parser, Subcommand};
-use oracle::bench::{self, Summary};
-use oracle::{
-    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
-    gnu_r_available, install, packages, parse, render,
+use {
+    clap::{Parser, Subcommand},
+    oracle::{
+        Engine, EngineError, ProcessEngine,
+        bench::{self, Summary},
+        diff, engine_from_environment, expected_path, find_cases, gnu_r_available, install,
+        packages, parse, render,
+    },
+    packages::{PackageOutcome, Runtime, Settings},
+    std::{
+        path::{Path, PathBuf},
+        process::ExitCode,
+        time::Duration,
+    },
 };
-use packages::{PackageOutcome, Runtime, Settings};
 
 /// Differential testing of R engines against GNU R.
 #[derive(Parser)]
@@ -166,7 +170,15 @@ fn main() -> ExitCode {
             corpus,
             installed,
             packages,
-        } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, installed, packages),
+        } => run_packages(
+            runtime,
+            jobs,
+            timeout,
+            rerun_gnu_r,
+            corpus,
+            installed,
+            packages,
+        ),
         Command::Install {
             home,
             library,
@@ -312,11 +324,18 @@ fn run_install(
     let everything = match packages::closure(&corpus) {
         Ok(everything) => everything,
         Err(error) => {
-            eprintln!("cannot read {}: {error}; run `just corpus-sources` first", corpus.join("closure.txt").display());
+            eprintln!(
+                "cannot read {}: {error}; run `just corpus-sources` first",
+                corpus.join("closure.txt").display()
+            );
             return ExitCode::from(2);
         }
     };
-    let packages = if packages.is_empty() { everything } else { packages };
+    let packages = if packages.is_empty() {
+        everything
+    } else {
+        packages
+    };
     let settings = install::Settings {
         home: absolute(home.unwrap_or_else(|| corpus.join("ry-home"))),
         library: absolute(library.unwrap_or_else(|| corpus.join("ry-library"))),
@@ -325,16 +344,27 @@ fn run_install(
         timeout: Duration::from_secs(timeout),
     };
     if !settings.home.join("bin/R").exists() {
-        eprintln!("{} is not an R home; run `just ry-home` first", settings.home.display());
+        eprintln!(
+            "{} is not an R home; run `just ry-home` first",
+            settings.home.display()
+        );
         return ExitCode::from(2);
     }
     let report = |package: &str, outcome: &install::Outcome| {
         let line = match outcome {
-            install::Outcome::Installed { seconds, loaded: Ok(()) } => format!("installed {seconds:>6.1}s, loads"),
-            install::Outcome::Installed { seconds, loaded: Err(error) } => {
+            install::Outcome::Installed {
+                seconds,
+                loaded: Ok(()),
+            } => format!("installed {seconds:>6.1}s, loads"),
+            install::Outcome::Installed {
+                seconds,
+                loaded: Err(error),
+            } => {
                 format!("installed {seconds:>6.1}s, load failed: {error}")
             }
-            install::Outcome::Failed { seconds, error } => format!("failed    {seconds:>6.1}s: {error}"),
+            install::Outcome::Failed { seconds, error } => {
+                format!("failed    {seconds:>6.1}s: {error}")
+            }
             install::Outcome::Skipped(reason) => format!("skipped: {reason}"),
             install::Outcome::NoSources => "no sources".to_owned(),
         };
@@ -350,7 +380,11 @@ fn run_install(
         return ExitCode::FAILURE;
     }
     let (installed, loaded) = install::counts(&outcomes);
-    println!("{} packages: {installed} installed, {loaded} load; summary in {}", outcomes.len(), path.display());
+    println!(
+        "{} packages: {installed} installed, {loaded} load; summary in {}",
+        outcomes.len(),
+        path.display()
+    );
     let (total, installed, loaded) = install::summary_counts(&summary);
     println!("summary: {total} packages, {installed} installed, {loaded} load");
     ExitCode::SUCCESS
@@ -385,7 +419,11 @@ fn run_packages(
             return ExitCode::from(2);
         }
     };
-    let packages = if packages.is_empty() { everything.clone() } else { packages };
+    let packages = if packages.is_empty() {
+        everything.clone()
+    } else {
+        packages
+    };
     let settings = Settings {
         corpus: corpus.clone(),
         rscript: std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_owned()),
@@ -397,8 +435,10 @@ fn run_packages(
         timeout: Duration::from_secs(timeout),
         reuse_gnu_r: !rerun_gnu_r,
         installed: installed.then(|| packages::Installed {
-            home: std::path::absolute(corpus.join("ry-home")).unwrap_or_else(|_| corpus.join("ry-home")),
-            library: std::path::absolute(corpus.join("ry-library")).unwrap_or_else(|_| corpus.join("ry-library")),
+            home: std::path::absolute(corpus.join("ry-home"))
+                .unwrap_or_else(|_| corpus.join("ry-home")),
+            library: std::path::absolute(corpus.join("ry-library"))
+                .unwrap_or_else(|_| corpus.join("ry-library")),
         }),
     };
     let report = |package: &str, outcome: &PackageOutcome| {
@@ -420,7 +460,11 @@ fn run_packages(
     // The summary always covers the whole closure, reading recorded results for the rest.
     let all = packages::run_all(&settings, &everything, &[], &|_, _| {});
     let summary = packages::summary(&all);
-    let path = corpus.join("tests").join(if installed { "summary-installed.md" } else { "summary.md" });
+    let path = corpus.join("tests").join(if installed {
+        "summary-installed.md"
+    } else {
+        "summary.md"
+    });
     if let Err(error) = std::fs::write(&path, &summary) {
         eprintln!("cannot write {}: {error}", path.display());
         return ExitCode::FAILURE;
@@ -446,7 +490,12 @@ fn default_ry() -> PathBuf {
     )
 }
 
-fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json: Option<&Path>) -> ExitCode {
+fn run_bench(
+    packages: &[PathBuf],
+    options: &bench::Options,
+    verbose: bool,
+    json: Option<&Path>,
+) -> ExitCode {
     if packages.is_empty() {
         eprintln!("name at least one package directory");
         return ExitCode::from(2);
@@ -467,10 +516,21 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
     println!();
     println!(
         "{:<10} {:>6} {:>8} {:>6} {:>8} {:>8} {:>8} {:>10} {:>10} {:>7}",
-        "package", "tests", "match", "rate", "differs", "missing", "ry pass", "GNU R s", "ry s", "ry/R"
+        "package",
+        "tests",
+        "match",
+        "rate",
+        "differs",
+        "missing",
+        "ry pass",
+        "GNU R s",
+        "ry s",
+        "ry/R"
     );
     for summary in &summaries {
-        let suite = |seconds: Option<f64>| seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"));
+        let suite = |seconds: Option<f64>| {
+            seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"))
+        };
         let ratio = match (summary.gnu_r_suite_seconds, summary.ry_suite_seconds) {
             (Some(gnu_r), Some(ry)) if gnu_r > 0.0 => format!("{:.2}x", ry / gnu_r),
             _ => "-".to_string(),
@@ -489,7 +549,9 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
             ratio
         );
     }
-    println!("Suite times count only the tests. Process wall time, which adds startup and loading the package:");
+    println!(
+        "Suite times count only the tests. Process wall time, which adds startup and loading the package:"
+    );
     for summary in &summaries {
         println!(
             "  {}: GNU R {:.2} s, ry {:.2} s",
@@ -509,6 +571,12 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
             return ExitCode::FAILURE;
         }
     }
-    let all_match = summaries.iter().all(|summary| summary.matching == summary.tests);
-    if all_match { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    let all_match = summaries
+        .iter()
+        .all(|summary| summary.matching == summary.tests);
+    if all_match {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

@@ -1,0 +1,5 @@
+# Formatting-only commits, skipped by GitHub's blame view and by
+# git blame --ignore-revs-file .git-blame-ignore-revs.
+
+# rustfmt.toml's import settings applied under nightly rustfmt
+3c7a3d90028bb960f1c86ba9f7544fffbcb36714

@@ -6,15 +6,17 @@ description: Every ry command and flag, the exit codes, and the JSON output
 ```sh
 ry check [PATHS]   # report problems
 ry fmt [PATHS]     # format files in place
-ry server          # the language server, over stdio; your editor starts it
-ry repl            # an R console with typed completion
-ry run FILE        # run an R script and exit
+ry run [FILE]      # run an R script on ry's runtime; without one, open ry's console
+ry R [FILE]        # the same on GNU R
 ry load [PATH]     # load an R package from source, run code against it, and exit
+ry server          # the language server, over stdio; your editor starts it
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `repl`, `run`, and `load` need R: they
-use the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must
-be built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
+`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, and `load` need R. They use
+the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
+built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
+own runtime needs that installation too, because it still reads base R's R code and the default
+packages from it.
 
 ## check
 
@@ -47,50 +49,59 @@ ry fmt --diff    # show the changes without writing them, and exit 1 if any
 touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
-## server, repl, run, and load
+## run and R
+
+```sh
+ry run script.R a b   # run on ry's runtime; the script reads a and b with commandArgs(TRUE)
+ry run                # ry's console
+ry run -i setup.R     # run setup.R, then open the console
+ry R script.R         # run on GNU R
+ry R                  # a GNU R console with ry's highlighting and completion
+```
+
+Options go before the file, because everything after the file is the script's: `ry run script.R --help` hands `--help` to the script. A top-level error
+stops a script with exit status 1, as with `Rscript`, and so does `q(status = 1)`. The output is
+only what the script prints, with no startup banner.
+
+Before anything runs, both commands check the script, and the console checks each command, against
+the project's `ry.toml`. They print the [inline annotation](/type-checking/inline-annotations)
+warnings, and in [strict mode](/type-checking/strict-mode) they print every error and refuse code
+that has one.
+
+The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at
+function boundaries](/type-checking/inline-annotations#running-annotated-code), and GNU R runs the
+script with them erased. ry's runtime is under construction: a script that calls something it
+lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
+package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which are written
+when the device closes or the script ends; `jpeg` and `postscript` devices open but write no image
+yet. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+sees `TRUE`.
+
+The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
+guide](/guides/console) describes what its completion knows. Started inside an R package, `ry R`
+[loads it](/guides/loading-packages) and reloads what changed before each command, and `--no-load`
+turns that off. ry's console does not load the package yet. `--keybindings` and `--no-load` apply
+only to a console, so passing either with a script is a usage error. With `-i FILE`, the file is
+checked under its own name before the console opens, and a strict-mode refusal exits 1.
+
+With standard input piped (`echo '1 + 1' | ry run`), the console skips the editor, the prompt and
+the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves
+like `R --no-echo`, except that it keeps going after an error.
+
+`ry repl` still works. It is the earlier name of `ry R`'s console, and it keeps its `-f FILE`, which
+is `ry R -i FILE`.
+
+## load and server
+
+`ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
+current directory) on ry's runtime, then runs each `-e EXPR` and the `-f FILE` script, and exits
+like `ry run`. `ry load --r-entry` prints the R code that gives a plain R session the same
+`load_all()`, for `source(pipe("ry load --r-entry"))`. `load_all()` is also available in `ry run`
+scripts and in `ry R` scripts and consoles, but not yet in ry's console.
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
 `--experimental-features range_formatting` lets the server format a selection instead of the whole
 file.
-
-With standard input piped (`echo '1 + 1' | ry repl`), the console skips the editor, the prompt and
-the startup banner, evaluates each line, prints the result, and exits at the end of input. It
-behaves like `R --no-echo`, except that it keeps going after an error.
-
-`ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
-before the first prompt. [The console guide](/guides/console) describes what its completion knows.
-Started inside an R package, `ry repl` [loads it](/guides/loading-packages) and reloads what changed
-before each command; `--no-load` turns that off. `ry repl --runtime ry` (or `RY_RUNTIME=ry`) runs
-the console on ry's own interpreter, which loads no package and runs no startup code.
-
-`ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
-`Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
-startup banner is not printed, so the output is only what the script prints. Arguments after the
-file reach the script through `commandArgs(trailingOnly = TRUE)`. Put `--` before an argument that
-starts with a dash: `ry run script.R -- --verbose`.
-
-Before anything runs, `ry run` checks the script and `ry repl` checks each command against the
-project's `ry.toml`. They print the [inline annotation](/type-checking/inline-annotations) warnings,
-and in [strict mode](/type-checking/strict-mode) they print every error and refuse code that has
-one. GNU R then runs the script with its inline annotations erased.
-
-`ry run --runtime ry script.R` (or `RY_RUNTIME=ry`) runs the script on ry's own interpreter instead
-of GNU R. It still reads base R's R code and the default packages from the GNU R installation, so R
-must be installed, but no GNU R code runs. Unlike on GNU R, it also turns [inline
-annotations](/type-checking/inline-annotations#running-annotated-code) into checks at function
-boundaries. This runtime is under construction: a script that calls
-something it lacks stops with an error naming it, such as a missing `.Internal` or a native routine
-of a default package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which
-are written when the device closes or the script ends; `jpeg` and `postscript` devices open but
-write no image yet.
-
-`ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
-current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
-Unlike `ry run`, it uses ry's own runtime by default, and `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`)
-loads on GNU R instead.
-`ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
-`source(pipe("ry load --r-entry"))`. `load_all()` is also available in `ry run` on either runtime and in `ry repl` on GNU R, but not yet
-in `ry repl --runtime ry`.
 
 ## debug
 
@@ -101,11 +112,12 @@ a workspace and reports where time and memory go. Both are developer aids for wo
 
 - **0**: nothing found, or nothing to reformat.
 - **1**: `check` counted a finding (warnings count, unless `--min-severity error`), `fmt --check` or
-  `--diff` found a file to change, `run` or `load` hit an error in the script or the package, `run`
-  refused a script in strict mode, or the server stopped after an analysis panic.
+  `--diff` found a file to change, `run`, `R` or `load` hit an error in the script or the package,
+  strict mode refused a script, or the server stopped after an analysis panic. A script that calls
+  `q(status = n)` exits with `n`.
 - **2**: ry could not do its job. That is a usage error, invalid TOML in `ry.toml`, a path that does
-  not exist, a file or stub it cannot read, an invalid `exclude` pattern, for `load` a path inside
-  no package, or, for `repl`, `run`, and `load`, no usable R. A `2` overrides a `1`, so a broken
+  not exist, a file, script or stub it cannot read, an invalid `exclude` pattern, for `load` a path
+  inside no package, or, for `run`, `R`, and `load`, no usable R or no ry runtime library. A `2` overrides a `1`, so a broken
   setup never looks like ordinary findings.
 
 A [misspelled key](/reference/configuration#mistakes-in-rytoml) in `ry.toml` is only a warning, not

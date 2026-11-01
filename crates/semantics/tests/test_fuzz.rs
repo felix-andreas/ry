@@ -1,15 +1,17 @@
 //! Fuzz harness for the semantic pipeline. `FUZZ_ITERS` scales the per-generator budget;
 //! runs are deterministic per seed.
 
-use salsa::Setter as _;
-use semantics::diagnostics::file_diagnostics;
-use semantics::stubs::install_shipped_stubs;
-use semantics::testing::{
-    check_semantics_input, check_semantics_invariants, render_semantics as render,
+use {
+    salsa::Setter as _,
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::file_diagnostics,
+        stubs::install_shipped_stubs,
+        testing::{check_semantics_input, check_semantics_invariants, render_semantics as render},
+    },
+    std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    syntax::testing::{SplitMix64, fuzz_iterations, program_corpus_sources},
 };
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use syntax::testing::{SplitMix64, fuzz_iterations, program_corpus_sources};
 
 const NAMES: &[&str] = &["a", "b", "f", "g", "x", "helper"];
 

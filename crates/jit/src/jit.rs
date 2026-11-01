@@ -16,16 +16,18 @@ mod analysis;
 mod codegen;
 mod runtime;
 
-use analysis::Refusal;
-use heap::object::{Header, Sexp, SexpType, gp};
-use interp::{
-    bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
-    heap, interp,
-    unwind::{R, error},
-    values,
+use {
+    analysis::Refusal,
+    heap::object::{Header, Sexp, SexpType, gp},
+    interp::{
+        bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
+        heap, interp,
+        unwind::{R, error},
+        values,
+    },
+    runtime::{Activation, Compiled, MAX_COMPILES},
+    std::{cell::Cell, ffi::c_void, panic::resume_unwind},
 };
-use runtime::{Activation, Compiled, MAX_COMPILES};
-use std::{cell::Cell, ffi::c_void, panic::resume_unwind};
 
 /// How the JIT is configured for the session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -72,7 +74,11 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1),
     };
     ENTRY_LIMIT.with(|limit| limit.set(entries));
-    bytecode::set_tier(Some(Tier { enter, back_edge, back_edge_threshold: back_edges }));
+    bytecode::set_tier(Some(Tier {
+        enter,
+        back_edge,
+        back_edge_threshold: back_edges,
+    }));
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
@@ -131,7 +137,10 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
 unsafe fn describe(code: Sexp) -> String {
     unsafe {
         let source = code.cdr().element(bytecode::SOURCE);
-        interp::deparse::deparse_one_line(source).chars().take(60).collect()
+        interp::deparse::deparse_one_line(source)
+            .chars()
+            .take(60)
+            .collect()
     }
 }
 
@@ -153,10 +162,18 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
                 "jit: compiled {} ({} speculations; tier 0 runs: {})",
                 describe(machine.code),
                 plan.speculations.len(),
-                if steps.is_empty() { "nothing".to_string() } else { steps.join(", ") }
+                if steps.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    steps.join(", ")
+                }
             );
         }
-        let osr = plan.loop_headers.iter().map(|&block| plan.insts[plan.blocks[block].start].pc).collect();
+        let osr = plan
+            .loop_headers
+            .iter()
+            .map(|&block| plan.insts[plan.blocks[block].start].pc)
+            .collect();
         let compiled = Box::new(Compiled {
             entry,
             enclosure,
@@ -232,14 +249,25 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         match result as usize {
             runtime::DECLINED => return None,
-            runtime::DEOPTIMIZED => return Some(TierExit::Resume { pc: activation.resume_pc, pending: activation.pending.take() }),
+            runtime::DEOPTIMIZED => {
+                return Some(TierExit::Resume {
+                    pc: activation.resume_pc,
+                    pending: activation.pending.take(),
+                });
+            }
             _ => {}
         }
         Some(TierExit::Finished(match Sexp::from_raw(result) {
             // An error parked by a helper whose failure compiled code does not branch on.
-            Some(_) if activation.pending.is_some() => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
+            Some(_) if activation.pending.is_some() => Err(activation
+                .pending
+                .take()
+                .unwrap_or_else(|| error("compiled code failed without an error"))),
             Some(value) => Ok(value),
-            None => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
+            None => Err(activation
+                .pending
+                .take()
+                .unwrap_or_else(|| error("compiled code failed without an error"))),
         }))
     }
 }
