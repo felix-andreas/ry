@@ -6572,11 +6572,69 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let ty = self.infer_ordinary_call(id, range, callee, arguments);
+        if let Some(sequence) = self.integer_seq(callee, arguments, ty) {
+            return self.record(id, sequence);
+        }
         if let Some(verb) = self.dataframe_verb(callee) {
             return self.refine_dataframe_call(verb, arguments).unwrap_or(ty);
         }
         let function = self.table_function(callee);
         self.refine_table_call(id, function, arguments, ty)
+    }
+
+    /// Base `seq` without `by` or a length is R's `from:to`, an integer vector whenever
+    /// `from` is a whole number, and `seq(x)` alone is `seq_len` or `seq_along`, always
+    /// integer. The stub's numeric candidates cannot tell `1` from `1.5`, so they say
+    /// `double[]`; this refines that answer from the arguments as written.
+    fn integer_seq(&self, callee: ExprId, arguments: &[Argument], ty: Ty<'db>) -> Option<Ty<'db>> {
+        let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
+            return None;
+        };
+        let deferred = self.naming.deferred_non_locals.contains(&callee);
+        if name.as_str() != "seq"
+            || self.naming.resolutions.contains_key(&callee)
+            || self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project("seq", deferred))
+        {
+            return None;
+        }
+        let resolved = self.table.resolve(self.db, ty);
+        let numeric_sequence = matches!(
+            resolved.kind(self.db),
+            TyKind::Vector(element)
+                if matches!(element.kind(self.db), TyKind::Scalar(Atomic::Double | Atomic::Integer))
+        );
+        if !numeric_sequence {
+            return None;
+        }
+        let mut from = None;
+        let mut positional = 0usize;
+        for argument in arguments {
+            match self.module.argument_name(argument).as_deref() {
+                None if positional == 0 => {
+                    from = argument.value;
+                    positional += 1;
+                }
+                None if positional == 1 => positional += 1,
+                Some("from") => from = argument.value,
+                Some("to") => {}
+                _ => return None,
+            }
+        }
+        let from = from?;
+        let whole = self.is_whole_double(from)
+            || self.recorded.get(&from).is_some_and(|&from_ty| {
+                matches!(
+                    self.table.resolve(self.db, from_ty).kind(self.db),
+                    TyKind::Scalar(Atomic::Integer)
+                )
+            });
+        let alone = arguments.len() == 1
+            && arguments
+                .first()
+                .is_some_and(|argument| argument.name.is_none());
+        (whole || alone).then(|| self.shaped(OperandShape::Vector, Atomic::Integer))
     }
 
     fn infer_ordinary_call(

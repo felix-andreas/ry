@@ -50,6 +50,26 @@ seq_along(c(1L, 2L))
 #++++
 integer[]
 
+#---- seq_from_a_whole_number_is_integer_vector
+seq(1, 10)
+#++++
+integer[]
+
+#---- seq_from_a_fraction_is_double_vector
+seq(0.5, 3)
+#++++
+double[]
+
+#---- seq_with_by_is_double_vector
+seq(1, 10, by = 2)
+#++++
+double[]
+
+#---- seq_of_one_number_is_integer_vector
+seq(2.5)
+#++++
+integer[]
+
 #---- toupper_is_character
 toupper("x")
 #++++
