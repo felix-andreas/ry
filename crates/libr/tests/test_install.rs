@@ -275,6 +275,39 @@ fn the_r_level_half_runs_on_ry() {
     assert_eq!(output, "Hello, ry! 9 30 \n3 installed from inst/ \ngreet.Rd \n");
 }
 
+/// Rcpp turns dynamic symbols off and only then registers its routines, and still calls the
+/// unregistered `sourceCppContext` by name, because registering turns dynamic lookup back on.
+#[test]
+fn registering_routines_restores_dynamic_lookup() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-source");
+    drop(std::fs::remove_dir_all(&root));
+    std::fs::create_dir_all(root.join("src")).expect("a source directory");
+    let files = [
+        ("DESCRIPTION", "Package: lookup\nVersion: 0.1\nTitle: Symbol lookup\nLicense: UPL-1.0\nNeedsCompilation: yes\n"),
+        ("NAMESPACE", "useDynLib(lookup, .registration = TRUE)\n"),
+        (
+            "src/lookup.c",
+            "#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+             SEXP lookup_registered(void) { return Rf_ScalarInteger(1); }\n\
+             SEXP lookup_unregistered(void) { return Rf_ScalarInteger(2); }\n\
+             static const R_CallMethodDef entries[] = {{\"lookup_registered\", (DL_FUNC) &lookup_registered, 0}, {NULL, NULL, 0}};\n\
+             void R_init_lookup(DllInfo *dll) { R_useDynamicSymbols(dll, FALSE); R_registerRoutines(dll, NULL, entries, NULL, NULL); }\n",
+        ),
+    ];
+    for (path, text) in files {
+        std::fs::write(root.join(path), text).expect("a source file");
+    }
+    let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-library");
+    drop(std::fs::remove_dir_all(&library));
+    rcmd::install(home(), &root, &library, &no_test_load()).expect("install lookup");
+    let script = format!(
+        ".libPaths('{}')\nlibrary(lookup)\n\
+         cat(.Call('lookup_registered', PACKAGE = 'lookup'), .Call('lookup_unregistered', PACKAGE = 'lookup'), '\\n')\n",
+        library.display()
+    );
+    assert_eq!(run_home("Rscript", &["-e", &script], &library), "1 2 \n");
+}
+
 #[test]
 fn the_front_ends_run_r_code_on_ry() {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));

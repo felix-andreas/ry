@@ -288,6 +288,11 @@ pub unsafe extern "C" fn R_registerRoutines(
         let dll = dll
             .as_mut()
             .ok_or_else(|| error("R_registerRoutines called without a DllInfo"))?;
+        // GNU R resets both lookup flags here, so a library that turns dynamic symbols off
+        // before registering (Rcpp does) still resolves unregistered names such as
+        // `sourceCppContext` by string.
+        dll.use_dynamic_symbols = !dll.handle.is_null();
+        dll.force_symbols = false;
         dll.c_routines = copy_c_routines(c_routines);
         dll.call_routines = copy_call_routines(call_routines);
         dll.fortran_routines = copy_c_routines(fortran_routines);
