@@ -56,6 +56,9 @@ async-lsp.workspace = true
 tower.workspace = true
 futures.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(not(unix))'.dependencies]
 tokio-util.workspace = true
 

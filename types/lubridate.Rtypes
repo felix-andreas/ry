@@ -10,24 +10,24 @@
 # Date and POSIXct gain Period and Duration offsets once lubridate is loaded,
 # through S4 methods on `+` and `-`. A stub that names `+.Date` replaces base's
 # whole overload set, so base's candidates are repeated first.
-+.Date : fn(e1: Date, e2: double) -> Date
-+.Date : fn(e1: double, e2: Date) -> Date
++.Date : fn(e1: Date, e2: double[]) -> Date
++.Date : fn(e1: double[], e2: Date) -> Date
 +.Date : fn(e1: Date, e2: difftime) -> Date
 +.Date : fn(e1: difftime, e2: Date) -> Date
 +.Date : fn(e1: Date, e2: Period | Duration) -> Date
 +.Date : fn(e1: Period | Duration, e2: Date) -> Date
 -.Date : fn(e1: Date, e2: Date) -> difftime
--.Date : fn(e1: Date, e2: double) -> Date
+-.Date : fn(e1: Date, e2: double[]) -> Date
 -.Date : fn(e1: Date, e2: difftime) -> Date
 -.Date : fn(e1: Date, e2: Period | Duration) -> Date
-+.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
-+.POSIXct : fn(e1: double, e2: POSIXct) -> POSIXct
++.POSIXct : fn(e1: POSIXct, e2: double[]) -> POSIXct
++.POSIXct : fn(e1: double[], e2: POSIXct) -> POSIXct
 +.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
 +.POSIXct : fn(e1: difftime, e2: POSIXct) -> POSIXct
 +.POSIXct : fn(e1: POSIXct, e2: Period | Duration) -> POSIXct
 +.POSIXct : fn(e1: Period | Duration, e2: POSIXct) -> POSIXct
 -.POSIXct : fn(e1: POSIXct, e2: POSIXct) -> difftime
--.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
+-.POSIXct : fn(e1: POSIXct, e2: double[]) -> POSIXct
 -.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
 -.POSIXct : fn(e1: POSIXct, e2: Period | Duration) -> POSIXct
 

@@ -1035,7 +1035,7 @@ pub unsafe fn run_closure(
     promargs: Sexp,
     entry: Entry,
 ) -> R<Sexp> {
-    moves::entering_closure(env)?;
+    moves::entering_closure(function, env)?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -1693,7 +1693,10 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index + 1);
         }
-        let result = eval(arg.value, call.env);
+        let result = match interp().debugger.is_some() {
+            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env)),
+            false => eval(arg.value, call.env),
+        };
         interp().srcref = saved;
         crate::heap().release_handles(mark);
         match result {
@@ -1933,6 +1936,7 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     if srcref != nil() {
         values::set_attr(closure, symbols().srcref, srcref)?;
     }
+    moves::created_closure(closure)?;
     Ok(closure)
 }
 
@@ -2924,6 +2928,9 @@ pub unsafe fn complex_assign(
     while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
         binding_env = binding_env.enclosure();
     }
+    // Ending a move into this frame hands the caller `base` back, which makes it shared, and
+    // must come before any level changes in place, since an inner level is an element of it.
+    crate::moves::modifying(base)?;
     if values::maybe_shared(base)
         || locked
         || index_assigns
@@ -3087,7 +3094,12 @@ pub unsafe fn eval_all(expressions: Sexp, env: Sexp) -> R<Sexp> {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index);
         }
-        let result = eval(expressions.element(index), env);
+        let result = match interp().debugger.is_some() {
+            true => {
+                crate::debugger::statement().and_then(|()| eval(expressions.element(index), env))
+            }
+            false => eval(expressions.element(index), env),
+        };
         interp().srcref = saved;
         crate::heap().release_handles(mark);
         match result {

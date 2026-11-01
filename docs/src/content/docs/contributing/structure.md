@@ -229,7 +229,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   `DataFrame` value, its readers, writers and conversions. **`data_table.rs`**: data.table queries
   answered on ry's engine when the result is guaranteed identical, and declined to data.table
   otherwise.
-- **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Dict` and `Set`, typed by
+- **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, typed by
   `types/ry.Rtypes`.
 - **`testing.rs`**: the fuzz contracts of the interpreter, shared by the in-tree harness and the
   coverage-guided targets.
@@ -335,4 +335,7 @@ and `R CMD` scripts, and the three front-end scripts); `ry-rcmd assemble` is its
 `install`, `shlib` and `config` are `R CMD INSTALL`, `R CMD SHLIB` and `R CMD config`.
 `r_command_line` and `rscript_command_line` parse GNU R's front-end arguments into a `Session`
 that `main.rs` runs through `ry_run` in the home's `libR.so`. `src/install.R` is the R-level
-half of `R CMD INSTALL`, embedded and run on ry after the compile.
+half of `R CMD INSTALL`, embedded and run on ry after the compile. `Platform::of_home` reads
+the home's `etc/Makeconf` to choose the Unix or Windows (Rtools) conventions; on Windows the
+front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` and `Rterm.exe`. The package
+uses `crates/ry/build.rs` as its build script, for the Windows stack size and manifest.

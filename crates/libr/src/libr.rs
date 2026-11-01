@@ -81,6 +81,7 @@ pub mod linpack;
 pub mod lists;
 pub mod macho;
 pub mod memory;
+pub mod print;
 pub mod rmath;
 pub mod serialize;
 pub mod strings;

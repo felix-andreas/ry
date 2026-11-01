@@ -2,13 +2,19 @@
 #@ param VERSION int 1 9
 #@ ns exportClasses(ModelCard@ID@)
 # Model serving: a plumber router, request validation and response formatting.
-methods::setClass("ModelCard@ID@", representation(name = "character", coefficients = "numeric"))
+#: @type ModelCard@ID@ {list{name: character, coefficients: double[]}}
 
+methods::setClass("ModelCard@ID@", representation(name = "character", coefficients = "numeric")) # ry: allow(object-system)
+
+#: fn(card: ModelCard@ID@, x: double[]) -> double
 predict_card_@ID@ <- function(card, x) {
-  stopifnot(length(x) == length(card@coefficients) - 1L)
-  sum(card@coefficients * c(1, x))
+  #: double[]
+  coefficients <- card@coefficients
+  stopifnot(length(x) == length(coefficients) - 1L)
+  sum(coefficients * c(1, x))
 }
 
+#: fn(body: Any) -> double[]
 validate_request_@ID@ <- function(body) {
   if (!is.list(body) || is.null(body$features)) {
     rlang::abort("features are required", class = "bad_request")
@@ -16,6 +22,7 @@ validate_request_@ID@ <- function(body) {
   as.numeric(unlist(body$features))
 }
 
+#: fn(card: ModelCard@ID@, json: character) -> json
 handle_request_@ID@ <- function(card, json) {
   body <- jsonlite::fromJSON(json, simplifyVector = FALSE)
   result <- tryCatch(
@@ -25,14 +32,18 @@ handle_request_@ID@ <- function(card, json) {
   jsonlite::toJSON(result, auto_unbox = TRUE)
 }
 
+#: fn(card: ModelCard@ID@) -> Plumber
 build_router_@ID@ <- function(card) {
   router <- plumber::pr()
-  plumber::pr_post(router, "/v@VERSION@/predict", function(req) {
+  #: fn(req: Any) -> json
+  handler <- function(req) {
     handle_request_@ID@(card, req$postBody)
-  })
+  }
+  plumber::pr_post(router, "/v@VERSION@/predict", handler)
 }
 #@ test
 test_that("serving @ID@ validates requests", {
+  #: @new ModelCard@ID@
   card <- methods::new("ModelCard@ID@", name = "m", coefficients = c(1, 2, 3))
   ok <- jsonlite::fromJSON(handle_request_@ID@(card, '{"features": [1, 1]}'))
   expect_equal(ok$prediction, 6)

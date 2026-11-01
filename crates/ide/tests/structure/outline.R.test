@@ -38,6 +38,7 @@ token "value" Parameter
 token "clean" Function
 token "item" Parameter
 token "helper" Function
+lens references "outer"
 
 #---- sections_nest_items
 # Setup ----
@@ -63,6 +64,8 @@ token "x" Parameter
 token "x" Parameter
 token "run" Function
 token "double_it" Function
+lens references "double_it"
+lens references "run"
 
 #---- section_without_items
 # Nothing here ----
@@ -95,6 +98,7 @@ token "y" Parameter
 token "list" Function
 token "x" Parameter
 token "y" Parameter
+lens references "f"
 
 #---- comment_runs_and_regions
 # region setup
@@ -148,6 +152,7 @@ fold 0..=4 Block
 fold 1..=2 Section
 fold 3..=4 Section
 token "f" Function
+lens references "f"
 
 #---- sections_inside_function_nest_helpers
 f <- function(data) {
@@ -187,6 +192,7 @@ token "value" Parameter
 token "report" Function
 token "clean" Function
 token "data" Parameter
+lens references "f"
 
 #---- bare_separator_has_no_symbol
 a <- 1
@@ -216,6 +222,7 @@ token "list" Function
 token "x" Parameter
 token "x" Parameter
 token "report" Function
+lens references "report"
 
 #---- trailing_comments_do_not_fold
 x <- 1 # one
@@ -228,3 +235,44 @@ symbol x (Value) at "x"
 symbol y (Value) at "y"
 symbol z (Value) at "z"
 fold 2..=3 Comment
+
+#==== code_lenses
+#---- tests_and_run_file
+library(testthat)
+helper <- function(x) x + 1
+test_that("adds one", {
+  expect_equal(helper(1), 2)
+})
+testthat::test_that(desc = "named description", expect_true(TRUE))
+test_that(paste("built", "name"), expect_true(TRUE))
+#++++
+symbol helper (Function fn(x)) at "helper"
+fold 2..=3 Block
+token "library" LibraryFunction
+token "helper" Function
+token "x" Parameter
+token "x" Parameter
+token "test_that" Function
+token "expect_equal" Function
+token "helper" Function
+token "testthat" Namespace
+token "test_that" LibraryFunction
+token "expect_true" Function
+token "test_that" Function
+token "paste" LibraryFunction
+token "expect_true" Function
+lens run file at line 0
+lens references "helper"
+lens test "adds one" at line 2
+lens test "named description" at line 5
+
+#---- definitions_alone_have_nothing_to_run
+square <- function(x) x^2
+limit <- 10
+#++++
+symbol square (Function fn(x)) at "square"
+symbol limit (Value) at "limit"
+token "square" Function
+token "x" Parameter
+token "x" Parameter
+lens references "square"

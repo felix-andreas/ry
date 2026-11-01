@@ -1,16 +1,19 @@
 use {
     crate::{
         AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
+        TypeDefinitions,
         annotations::{
-            Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind,
-            lower_annotation, lower_inline_annotation, statement_inline_site,
+            Annotation, Slot, comment_slots, inline_slots, is_type_kind, lower_inline_annotation,
+            statement_inline_site,
         },
         check::{
             ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError,
             TypeErrorKind, column_element,
         },
+        comment_annotation,
         exhaustiveness::{MatchFinding, MatchFindingKind},
-        file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
+        file_comment_annotations, file_conditional_writers, file_definitions, file_syntax_sites,
+        file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
@@ -31,11 +34,7 @@ use {
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
-    std::{
-        collections::{BTreeMap, BTreeSet},
-        mem,
-        ops::Range,
-    },
+    std::{collections::BTreeSet, mem, ops::Range},
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
         paired_comment_definition,
@@ -209,7 +208,9 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     let root = parsed.syntax_node();
     let sites = file_syntax_sites(db, file);
     for node in sites.nodes(&root, SiteRole::Annotation) {
-        let annotation = lower_annotation(db, &node);
+        let Some(annotation) = comment_annotation(db, file, &node) else {
+            continue;
+        };
         for (message, range) in &annotation.errors {
             diagnostics.push(Diagnostic::new(
                 *range,
@@ -333,7 +334,9 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
         .iter()
         .flat_map(|parent| statement_annotations(parent))
     {
-        let annotation = lower_annotation(db, &node);
+        let Some(annotation) = comment_annotation(db, file, &node) else {
+            continue;
+        };
         if !annotation.definitions.is_empty()
             || annotation.strict.is_some()
             || !annotation.errors.is_empty()
@@ -369,7 +372,9 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             continue;
         }
         // A block that failed to lower already owns a diagnostic.
-        let annotation = lower_annotation(db, &node);
+        let Some(annotation) = comment_annotation(db, file, &node) else {
+            continue;
+        };
         if !annotation.errors.is_empty() || !annotation.typing_errors.is_empty() {
             continue;
         }
@@ -566,7 +571,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             }
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
+                non_local_read(db, file, item_index, *expression)
             else {
                 continue;
             };
@@ -640,10 +645,52 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// Shared by the ordinary check and strict mode so they cannot disagree.
 /// `Tolerated`: undefined, but silenced by an attached package whose exports
 /// cannot be known; strict mode reports exactly these.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum NonLocalRead {
     Resolvable,
     Tolerated,
     Unresolved { suggestion: Option<String> },
+}
+
+/// Each item's non-local reads that do not resolve, by item position, classified once: the
+/// ordinary check reports the unresolved ones and strict mode the tolerated ones, and the
+/// classification probes several project-wide name tables per read.
+#[salsa::tracked(returns(ref))]
+fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId, NonLocalRead)>> {
+    item_spans(db, file)
+        .iter()
+        .enumerate()
+        .map(|(item_index, span)| {
+            let (Some(check), Some(naming)) =
+                (item_check(db, span.item), item_naming(db, span.item))
+            else {
+                return Vec::new();
+            };
+            naming
+                .non_locals
+                .iter()
+                .filter_map(|(expression, name)| {
+                    let read = classify_non_local_read(
+                        db, file, item_index, &check, naming, expression, *name,
+                    );
+                    (read != NonLocalRead::Resolvable).then_some((*expression, read))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// How the non-local read at `expression` of the item at `item_index` resolves.
+fn non_local_read(
+    db: &dyn Db,
+    file: SourceFile,
+    item_index: usize,
+    expression: ExprId,
+) -> &NonLocalRead {
+    file_unresolved_non_locals(db, file)
+        .get(item_index)
+        .and_then(|reads| reads.iter().find(|(read, _)| *read == expression))
+        .map_or(&NonLocalRead::Resolvable, |(_, read)| read)
 }
 
 /// Guards run cheapest first: most non-local reads resolve through frame slots.
@@ -729,22 +776,34 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let mut known: BTreeSet<String> = stubs(db)
-        .map(|library| library.nominals.iter().cloned().collect())
+    let definitions = TypeDefinitions::of(file);
+    let stub_nominals = stubs(db).map(|library| &library.nominals);
+    let is_known = |name: &str| {
+        stub_nominals.is_some_and(|nominals| nominals.contains(name))
+            || definitions.get(db, Name::new(db, name)).is_some()
+    };
+    let unknown: Vec<&(String, TextRange)> = references
+        .into_iter()
+        .filter(|(name, _)| !is_known(name))
+        .collect();
+    if unknown.is_empty() {
+        return Vec::new();
+    }
+
+    // Only a miss pays for the whole vocabulary, which the suggestion ranks.
+    let mut known: BTreeSet<String> = stub_nominals
+        .map(|nominals| nominals.iter().cloned().collect())
         .unwrap_or_default();
     if let Some(files) = ProjectFiles::try_get(db) {
         for name in project_type_definitions(db, files).keys() {
             known.insert(name.text(db).to_owned());
         }
     }
-    // A script's own declarations shadow the project namespace.
     for definition in file_type_definitions(db, file) {
         known.insert(definition.name.text(db).to_owned());
     }
-
-    references
+    unknown
         .into_iter()
-        .filter(|(name, _)| !known.contains(name))
         .map(|&(ref name, range)| {
             let suggestion = nearest_name(
                 name,
@@ -779,7 +838,7 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// The depth and vector findings use the typing code so they vanish when typing is off.
 fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    let definitions = visible_type_definitions(db, file);
+    let definitions = TypeDefinitions::of(file);
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
     let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
@@ -796,7 +855,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
         for (element, range) in &annotation.vector_elements {
-            if vector_element_atomic(db, *element, &definitions, stub_nominals) {
+            if vector_element_atomic(db, *element, definitions, stub_nominals) {
                 continue;
             }
             let mut renderer = TypeRenderer::default();
@@ -809,7 +868,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
         // infers its arguments through the representation check.
         let declared_arity = |name: &str| {
             definitions
-                .get(name)
+                .get(db, Name::new(db, name))
                 .map(|definition| definition.parameters.len())
                 .or_else(|| stub_nominals.contains(name).then_some(0))
         };
@@ -867,7 +926,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
         if let Some((name, range)) = &annotation.new_nominal
             && !ambiguous.is_some_and(|ambiguous| ambiguous.contains_key(name.text(db)))
             && definitions
-                .get(name.text(db))
+                .get(db, *name)
                 .is_some_and(|definition| definition.alias)
         {
             diagnostics.push(Diagnostic::new(
@@ -905,60 +964,38 @@ fn file_annotation_references<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> Vec<AnnotationReferences<'db>> {
-    let root = parse(db, file).syntax_node();
-    let sites = file_syntax_sites(db, file);
-    let mut annotations: Vec<Annotation<'db>> = sites
-        .nodes(&root, SiteRole::Annotation)
+    let references = |annotation: &Annotation<'db>| AnnotationReferences {
+        typing_errors: annotation.typing_errors.clone(),
+        vector_elements: annotation.vector_elements.clone(),
+        applied_references: annotation.applied_references.clone(),
+        nominal_references: annotation.nominal_references.clone(),
+        new_nominal: annotation
+            .new_nominal
+            .as_ref()
+            .map(|(name, _, range)| (*name, *range)),
+    };
+    let mut collected: Vec<AnnotationReferences<'db>> = file_comment_annotations(db, file)
         .iter()
-        .map(|node| lower_annotation(db, node))
+        .map(|(_, annotation)| references(annotation))
         .collect();
+    let sites = file_syntax_sites(db, file);
     if sites.any(SiteRole::InlineSite) && inline_annotations_enabled(db) {
-        annotations.extend(
+        let root = parse(db, file).syntax_node();
+        collected.extend(
             sites
                 .nodes(&root, SiteRole::InlineSite)
                 .iter()
-                .map(|site| lower_inline_annotation(db, site)),
+                .map(|site| references(&lower_inline_annotation(db, site))),
         );
     }
-    annotations
-        .into_iter()
-        .map(|annotation| AnnotationReferences {
-            typing_errors: annotation.typing_errors,
-            vector_elements: annotation.vector_elements,
-            applied_references: annotation.applied_references,
-            nominal_references: annotation.nominal_references,
-            new_nominal: annotation.new_nominal.map(|(name, _, range)| (name, range)),
-        })
-        .filter(|references| {
-            !references.typing_errors.is_empty()
-                || !references.vector_elements.is_empty()
-                || !references.applied_references.is_empty()
-                || !references.nominal_references.is_empty()
-                || references.new_nominal.is_some()
-        })
-        .collect()
-}
-
-/// The stubs' and the project's declarations, with a script's own declarations shadowing them.
-fn visible_type_definitions<'db>(
-    db: &'db dyn Db,
-    file: SourceFile,
-) -> BTreeMap<String, NamedDefinition<'db>> {
-    let mut definitions = BTreeMap::new();
-    if let Some(library) = stubs(db) {
-        for (name, definition) in &library.type_definitions {
-            definitions.insert(name.text(db).to_owned(), definition.clone());
-        }
-    }
-    if let Some(files) = ProjectFiles::try_get(db) {
-        for (name, definition) in project_type_definitions(db, files) {
-            definitions.insert(name.text(db).to_owned(), definition.clone());
-        }
-    }
-    for definition in file_type_definitions(db, file) {
-        definitions.insert(definition.name.text(db).to_owned(), definition);
-    }
-    definitions
+    collected.retain(|references| {
+        !references.typing_errors.is_empty()
+            || !references.vector_elements.is_empty()
+            || !references.applied_references.is_empty()
+            || !references.nominal_references.is_empty()
+            || references.new_nominal.is_some()
+    });
+    collected
 }
 
 /// A statement annotated both ways must say the same thing both ways. Slots are compared
@@ -970,7 +1007,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
     if statements.is_empty() && definitions_both_ways.is_empty() {
         return Vec::new();
     }
-    let definitions = visible_type_definitions(db, file);
+    let definitions = TypeDefinitions::of(file);
     let mut diagnostics = Vec::new();
     for candidate in statements.iter().chain(definitions_both_ways) {
         let pair = match candidate {
@@ -979,12 +1016,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                 continue;
             }
             AgreementCandidate::Definition(pair) => {
-                if !same_type(
-                    db,
-                    pair.inline_compared,
-                    pair.comment_compared,
-                    &definitions,
-                ) {
+                if !same_type(db, pair.inline_compared, pair.comment_compared, definitions) {
                     diagnostics.push(Diagnostic {
                         range: pair.range,
                         severity: Severity::Warning,
@@ -1007,12 +1039,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             }
             AgreementCandidate::Slot(pair) => pair,
         };
-        if same_type(
-            db,
-            pair.inline_compared,
-            pair.comment_compared,
-            &definitions,
-        ) {
+        if same_type(db, pair.inline_compared, pair.comment_compared, definitions) {
             continue;
         }
         // Each side renders on its own, so its type parameters keep their written names.
@@ -1155,7 +1182,9 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
         };
         let signature = (site.kind() == SyntaxKind::FUNCTION_DEF).then_some(&site);
         let comment_slots = comment_slots(db, &comment, signature);
-        let lowered_comment = lower_annotation(db, &comment);
+        let Some(lowered_comment) = comment_annotation(db, file, &comment) else {
+            continue;
+        };
         // Type parameters compare by position, so `<T>` and `<U>` over the same signature
         // agree; each binder's constraint is compared on its own.
         let comment_binders = lowered_comment
@@ -1278,7 +1307,9 @@ fn definition_agreement_candidates<'db>(
     let mut candidates = Vec::new();
     for (inline_node, comment) in pairs {
         let inline = lower_inline_annotation(db, &inline_node);
-        let lowered_comment = lower_annotation(db, &comment);
+        let Some(lowered_comment) = comment_annotation(db, file, &comment) else {
+            continue;
+        };
         if !inline.errors.is_empty() || !lowered_comment.errors.is_empty() {
             continue;
         }
@@ -1458,7 +1489,7 @@ fn same_type<'db>(
     db: &'db dyn Db,
     left: Ty<'db>,
     right: Ty<'db>,
-    definitions: &BTreeMap<String, NamedDefinition<'db>>,
+    definitions: TypeDefinitions,
 ) -> bool {
     left == right
         || canonical_type(db, left, definitions, 0) == canonical_type(db, right, definitions, 0)
@@ -1467,7 +1498,7 @@ fn same_type<'db>(
 fn canonical_type<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    definitions: &BTreeMap<String, NamedDefinition<'db>>,
+    definitions: TypeDefinitions,
     depth: usize,
 ) -> Ty<'db> {
     // An alias cycle is reported elsewhere; past this depth the type is compared as written.
@@ -1477,7 +1508,7 @@ fn canonical_type<'db>(
     match ty.kind(db) {
         TyKind::Named(name, arguments) => {
             if let Some(definition) = definitions
-                .get(name.text(db))
+                .get(db, *name)
                 .filter(|definition| definition.alias)
             {
                 let expanded = apply_definition(db, definition, arguments);
@@ -1507,7 +1538,7 @@ fn canonical_type<'db>(
 fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
-    definitions: &BTreeMap<String, NamedDefinition<'db>>,
+    definitions: TypeDefinitions,
     stub_nominals: &FxHashSet<String>,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
@@ -1515,9 +1546,9 @@ fn vector_element_atomic<'db>(
     loop {
         return match current.kind(db) {
             TyKind::Scalar(_) | TyKind::Rigid(_) | TyKind::Unknown | TyKind::Any => true,
-            TyKind::Named(name, _) => {
-                let name = name.text(db);
-                match definitions.get(name) {
+            TyKind::Named(interned, _) => {
+                let name = interned.text(db);
+                match definitions.get(db, *interned) {
                     Some(definition) if definition.alias => {
                         if expanding.iter().any(|seen| seen == name) {
                             return false;
@@ -1666,7 +1697,10 @@ fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRan
         file_syntax_sites(db, file).nodes(&parse(db, file).syntax_node(), SiteRole::Declaration);
     for node in declarations {
         let annotation = match node.kind() {
-            SyntaxKind::ANNOTATION => lower_annotation(db, &node),
+            SyntaxKind::ANNOTATION => match comment_annotation(db, file, &node) {
+                Some(annotation) => annotation.clone(),
+                None => continue,
+            },
             SyntaxKind::TYPE_DEFINITION => {
                 // A `#:` block spelling the same definition directly above is the same
                 // declaration, so the inline site stands for both.
@@ -2369,18 +2403,11 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         let item = span.item;
         let offset = span.range.start();
-        let (Some(check), Some(module), Some(naming)) = (
-            item_check(db, item),
-            item_hir(db, item),
-            item_naming(db, item),
-        ) else {
+        let (Some(module), Some(naming)) = (item_hir(db, item), item_naming(db, item)) else {
             continue;
         };
         for (expression, name) in &naming.non_locals {
-            if !matches!(
-                classify_non_local_read(db, file, item_index, &check, naming, expression, *name),
-                NonLocalRead::Tolerated
-            ) {
+            if *non_local_read(db, file, item_index, *expression) != NonLocalRead::Tolerated {
                 continue;
             }
             diagnostics.push(Diagnostic::new(module.range(*expression) + offset, Severity::Error, "strict", format!(
@@ -3122,9 +3149,9 @@ fn whole_lines(text: &str, range: TextRange) -> Option<TextRange> {
 }
 
 /// One arm per missing case, each stopping with an error, inserted on their own lines before
-/// the `match`'s closing brace and indented like the arm above. A `match` written on one line
-/// gets no fix, since there is no line to put the arms on. Unsafe: the arms silence the finding
-/// without handling anything.
+/// the `match`'s closing brace, indented like the first arm and ended like the file's lines. A
+/// `match` written on one line gets no fix, since there is no line to put the arms on. Unsafe:
+/// the arms silence the finding without handling anything.
 fn missing_arms_fix(
     text: &str,
     missing: &[String],
@@ -3140,14 +3167,30 @@ fn missing_arms_fix(
     if !before[line_start..].trim().is_empty() || line_start <= usize::from(expression.start()) {
         return None;
     }
-    let previous = before[..line_start - 1]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
-    let previous_line = &before[previous..line_start - 1];
-    let indent = &previous_line[..previous_line.len() - previous_line.trim_start().len()];
+    // The first line after the `match` line is the first arm (or a comment beside it), which
+    // sets the arms' indent even when a later arm continues over several lines. With no arm yet,
+    // the arms go one level inside the closing brace.
+    let first_line_end = usize::from(expression.start())
+        + text.get(usize::from(expression.start())..)?.find('\n')?
+        + 1;
+    let indent = before
+        .get(first_line_end..line_start)
+        .unwrap_or_default()
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line[..line.len() - line.trim_start().len()].to_owned())
+        .unwrap_or_else(|| {
+            let brace_line = &before[line_start..];
+            format!("{brace_line}  ")
+        });
+    let newline = if before[..line_start].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let arms: String = missing
         .iter()
-        .map(|case| format!("{indent}{case} => stop(\"not handled yet\")\n"))
+        .map(|case| format!("{indent}{case} => stop(\"not handled yet\"){newline}"))
         .collect();
     let title = if missing.len() == 1 {
         format!("Add an arm for `{}`", missing[0])

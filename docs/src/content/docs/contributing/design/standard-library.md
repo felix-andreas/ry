@@ -1,6 +1,6 @@
 ---
 title: The standard library
-description: "Design draft: ry's Roc-style standard library of Result, List, Str, Num, Dict and Set functions, how its names stay out of R's way, how it is typed, and how it loads"
+description: "Design draft: ry's Roc-style standard library of Result, List, Str, Num, Bool, Dict and Set functions, how its names stay out of R's way, how it is typed, and how it loads"
 ---
 
 This draft designs ry's standard library: a set of typed, native functions modeled on Roc's
@@ -60,7 +60,7 @@ every environment a program could have defined a name in comes before `package:r
   object of class `map`, and no shipped package has generics with these names.
 
 No exported name of base R or of a package with a shipped export manifest (`types/*.exports`)
-starts with `Result.`, `List.`, `Str.`, `Num.`, `Dict.` or `Set.`, which a test pins. The
+starts with `Result.`, `List.`, `Str.`, `Num.`, `Bool.`, `Dict.` or `Set.`, which a test pins. The
 recommended packages (Matrix, MASS, survival and the rest) have no shipped manifest, so the claim is
 unverified for them. Names that differ only in case, such as `list.files` and `set.seed`, are
 distinct R names and are not affected.
@@ -99,8 +99,9 @@ that exists only for Roc's type system or memory model.
 | --- | --- |
 | `Result` | `is_ok`, `is_err`, `with_default`, `map`, `map_err`, `map_both`, `map2`, `and_then`, `on_err` |
 | `List` | `len`, `is_empty`, `get`, `set`, `update`, `append`, `prepend`, `concat`, `single`, `repeat`, `reverse`, `join`, `map`, `map_with_index`, `map2`, `map3`, `map4`, `join_map`, `keep_if`, `drop_if`, `keep_oks`, `keep_errs`, `map_try`, `walk`, `walk_backwards`, `walk_until`, `walk_backwards_until`, `walk_with_index`, `walk_with_index_until`, `walk_from`, `walk_from_until`, `walk_try`, `for_each`, `for_each_try`, `any`, `all`, `contains`, `count_if`, `find_first`, `find_last`, `find_first_index`, `find_last_index`, `first`, `last`, `take_first`, `take_last`, `drop_first`, `drop_last`, `drop_at`, `sublist`, `split_at`, `split_first`, `split_last`, `split_on`, `split_on_list`, `chunks_of`, `intersperse`, `sort_with`, `sort_asc`, `sort_desc`, `swap`, `replace`, `append_if_ok`, `prepend_if_ok`, `concat_utf8`, `with_capacity`, `reserve`, `sum`, `product`, `min`, `max`, `starts_with`, `ends_with` |
-| `Str` | `is_empty`, `concat`, `join_with`, `split_on`, `repeat`, `starts_with`, `ends_with`, `contains`, `trim`, `trim_start`, `trim_end`, `drop_prefix`, `drop_suffix`, `with_prefix`, `replace_each`, `replace_first`, `replace_last`, `split_first`, `split_last`, `count_utf8_bytes`, `to_utf8`, `from_utf8`, `from_utf8_lossy`, `with_ascii_lowercased`, `with_ascii_uppercased`, `caseless_ascii_equals`, `walk_utf8`, `walk_utf8_with_index` |
-| `Num` | `to_str`, `compare`, `min`, `max`, `is_lt`, `is_gt`, `is_lte`, `is_gte`, `is_approx_eq`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `is_multiple_of`, `is_finite`, `is_infinite`, `abs`, `abs_diff`, `neg`, `ceiling`, `floor`, `round`, `pow`, `sin`, `cos`, `tan`, `atan`, `add_checked`, `sub_checked`, `mul_checked`, `add_saturated`, `sub_saturated`, `mul_saturated`, `div_checked`, `div_trunc_checked`, `div_ceil_checked`, `rem_checked`, `sqrt_checked`, `log_checked` |
+| `Str` | `is_empty`, `concat`, `join_with`, `split_on`, `repeat`, `starts_with`, `ends_with`, `contains`, `trim`, `trim_start`, `trim_end`, `drop_prefix`, `drop_suffix`, `with_prefix`, `replace_each`, `replace_first`, `replace_last`, `split_first`, `split_last`, `count_utf8_bytes`, `to_utf8`, `from_utf8`, `from_utf8_lossy`, `with_ascii_lowercased`, `with_ascii_uppercased`, `caseless_ascii_equals`, `walk_utf8`, `walk_utf8_with_index`, `to_utf16`, `from_utf16`, `from_utf16_lossy`, `to_utf32`, `from_utf32`, `from_utf32_lossy` |
+| `Num` | `to_str`, `compare`, `min`, `max`, `is_lt`, `is_gt`, `is_lte`, `is_gte`, `is_approx_eq`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `is_multiple_of`, `is_finite`, `is_infinite`, `abs`, `abs_diff`, `neg`, `ceiling`, `floor`, `round`, `pow`, `sin`, `cos`, `tan`, `atan`, `add_checked`, `sub_checked`, `mul_checked`, `add_saturated`, `sub_saturated`, `mul_saturated`, `div_checked`, `div_trunc_checked`, `div_ceil_checked`, `rem_checked`, `sqrt_checked`, `log_checked`, `add`, `sub`, `mul`, `div`, `div_trunc`, `div_ceil`, `rem`, `pow_int`, `sqrt`, `log`, `asin`, `acos`, `is_nan`, `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, `shift_left_by`, `shift_right_by`, `shift_right_zf_by`, `count_one_bits`, `count_leading_zero_bits`, `count_trailing_zero_bits`, `pi`, `tau`, `e` |
+| `Bool` | `true`, `false`, `and`, `or`, `not`, `is_eq`, `is_not_eq` |
 | `Dict` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all`, `reserve`, `clear` |
 | `Set` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `reserve` |
 
@@ -136,6 +137,21 @@ that exists only for Roc's type system or memory model.
   wider integer for `pow` to stay in.
 - **`List.sort_asc` and `List.sort_desc` take numbers only**, as Roc's do; `List.sort_with` sorts
   anything.
+- **An unchecked operation stops with an R error where Roc crashes or returns `NaN`.** `Num.add`
+  and its siblings stop on integer overflow and on a `NaN` result, the divisions on a zero divisor,
+  `Num.sqrt` and `Num.log` outside their domain, and `Num.asin` and `Num.acos` outside -1 to 1.
+  Each error names the `_checked` variant that returns a tag instead. `Num.is_nan` is the one
+  function that accepts `NaN`.
+- **Bit operations work on the 32-bit two's complement and stop where the pattern is `NA`.** R's
+  smallest integer, `-2147483648`, is `NA`, so a result with that bit pattern (`Num.bitwise_not`
+  of `2147483647L`, `Num.shift_left_by(1L, 31L)`) is an error. Every other pattern is an ordinary
+  integer, which is why shifts can wrap as Roc's do while `add_wrap` stays skipped.
+- **Constants are values.** `Bool.true`, `Bool.false`, `Num.pi`, `Num.tau` and `Num.e` are bound
+  in `package:ry` like the functions and declared in the stub as plain types (`Num.pi : double`).
+  Under `ry R`, each is an active binding that stops with the same explanation as a function.
+- **The UTF-16 and UTF-32 conversions** follow Roc's newer `Str` builtins and fail with `:BadUtf16`
+  and `:BadUtf32`. A zero code unit or code point counts as bad, because an R string cannot hold
+  NUL.
 
 Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_rev` here as
 `walk`, `walk_until` and `walk_backwards`, `map_ok` as `map`, `ok_or` as `with_default`, `rev` as
@@ -143,7 +159,6 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
 
 ### Skipped
 
-- **`Bool`**: R's `TRUE`, `FALSE`, `!`, `&&`, `||` and `identical` already cover it.
 - **`Box`, `Hash`, `Inspect`, `Encode` and `Decode`**: `Box` controls Roc's memory layout, which ry's
   heap decides by itself, and the others exist to serve Roc's abilities, which ry does not have
   (traits are declined). R's `print`, `format` and `serialize` play the inspection and encoding
@@ -154,15 +169,20 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
   `Set.with_capacity` are not: an empty collection has no key vector until its first key fixes the
   key type, so there is nothing to size. Roc's `Str` capacity functions are skipped because a
   string is an immutable `CHARSXP`.
-- **Bitwise operations, shifts and wrapping arithmetic** (`bitwise_and`, `shift_left_by`,
-  `add_wrap` and the rest): R's 32-bit integer reserves its smallest value for `NA`, so wrapping
-  has no total definition, and R's `bitwAnd` family already covers the bit operations.
-  `Num.pow_int` is skipped for the same overflow reason; `Num.pow` returns a double.
-- **Unchecked `sqrt` and `log`, and `asin`, `acos` and `is_nan`**: they produce `NaN` for part of
-  their domain, which the library never returns. `Num.sqrt_checked` and `Num.log_checked` remain,
-  and R's own functions cover the rest.
-- **`Num.pi`, `Num.tau` and `Num.e`**: R's `pi` and `exp(1)` already exist, and a constant is not a
-  function the stub could type as one.
+- **Wrapping arithmetic** (`add_wrap`, `sub_wrap`, `mul_wrap`): R's 32-bit integer reserves its
+  smallest value for `NA`, so wrapping arithmetic would have to stop at that one value, and code
+  that wants wrapping (hashing, checksums) wants it total.
+- **Per-width functions and constants** (`to_i8`, `to_u64_checked`, `min_i32`, `max_f64`,
+  `int_cast`, `bytes_to_u16`, `f64_to_parts` and the rest): R has exactly one integer and one
+  double type, which `Num.to_integer_checked` and `Num.to_double` convert between, and
+  `.Machine` holds their limits. `Num.to_frac` is `Num.to_double`.
+- **`Num.with_decimal_point`, `without_decimal_point` and the `Dec` functions**: R has no decimal
+  type.
+- **Effectful variants** (`List.walk!`, `List.map!`, `Result.on_err!` and the rest): R does not
+  track effects, so the plain function already runs any effect, and `List.for_each` and
+  `List.for_each_try` cover the loops that exist only for their effects.
+- **`Dict.is_eq`, `Set.is_eq` and the other `Eq` implementations**: `Bool.is_eq` compares any two
+  values by `identical()`, which already ignores a collection's order.
 - **An `Option` module**: Roc has none, and returns a `Result` with a descriptive error tag instead
   (`:Err(:ListWasEmpty)`). Code that wants an optional value writes `:Some(x) | :None` directly.
 - **`List.range` and `Str.len`**: R's `seq_len` and `seq` already build ranges. A string length
