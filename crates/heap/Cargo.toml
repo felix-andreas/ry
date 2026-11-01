@@ -12,6 +12,7 @@ path = "src/heap.rs"
 [dependencies]
 hashbrown = "0.16"
 rustc-hash.workspace = true
+smallvec = { version = "1.15", features = ["union"] }
 
 [dev-dependencies]
 syntax = { path = "../syntax" }

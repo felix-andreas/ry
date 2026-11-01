@@ -74,3 +74,8 @@ lto = true
 inherits = "release"
 strip = false
 debug = true
+
+# Full debug info for polars needs more memory than a 16 GB machine has, and line tables are
+# enough to symbolize a profile of a dependency.
+[profile.profiling.package."*"]
+debug = "line-tables-only"
