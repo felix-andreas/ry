@@ -114,6 +114,30 @@ are faster on every group-by question (2 to 39 times), every join (2 to 4 times)
 added-column `:=` loops (5 to 6 times), a filtered `:=` loop (1.4 times) and the keyed rolling
 join (2 times). The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
 
-data.table's other helpers (`fread`, `fwrite`, `rbindlist`, `melt`, `shift`, `setorder` and so on) are also
-faster in the table engine, but calls from R reach those kernels only when the runtime routes them there,
-which it does not do yet. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the measurements.
+Calls to data.table's other functions (`fread`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`
+and the rest) run data.table's own C code through ry's C API, so their results are data.table's by
+construction. `tools/bench/table/ops.R` times them on the db-benchmark group-by file (10 million
+rows, 4 threads), once under GNU R and once under `ry run --runtime ry`, and both runs give the same
+checksums. Times are in seconds.
+
+| Operation | GNU R | ry |
+|---|---|---|
+| `fread` | 3.09 | 2.32 |
+| `fwrite` | 0.76 | 1.27 |
+| `setkey` | 0.43 | 0.45 |
+| `setorder` | 0.88 | 0.95 |
+| `unique` | 0.073 | 0.121 |
+| `uniqueN` | 0.11 | 0.15 |
+| `rbindlist` | 0.85 | 1.22 |
+| `melt` | 1.21 | 1.56 |
+| `dcast` | 0.20 | 0.21 |
+| `shift` | 0.024 | 0.024 |
+| `fifelse` | 0.086 | 0.081 |
+| `fcoalesce` | 0.062 | 0.065 |
+| `nafill` | 0.082 | 0.083 |
+| `rleid` | 0.025 | 0.025 |
+| `between` | 0.016 | 0.021 |
+| `%chin%` | 0.077 | 0.092 |
+| `tstrsplit` | 5.79 | 6.59 |
+
+Each cell is the faster of two runs.
