@@ -13,13 +13,13 @@ check. All three columns compute the same result.
 
 | program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
 | --- | ---: | ---: | ---: | ---: |
-| closures | 0.782 s | 0.381 s | 0.405 s | 2.1x |
-| drawdown | 0.309 s | 0.021 s | 0.021 s | 14.9x |
-| fib | 0.081 s | 0.088 s | 0.090 s | 0.9x |
-| log_rank | 0.099 s | 0.063 s | 0.062 s | 1.6x |
-| loop_sum | 0.247 s | 0.047 s | 0.047 s | 5.2x |
-| vasicek | 0.036 s | 0.041 s | 0.041 s | 0.9x |
-| vector_arith | 0.177 s | 0.122 s | 0.121 s | 1.5x |
+| closures | 0.622 s | 0.376 s | 0.392 s | 1.7x |
+| drawdown | 0.315 s | 0.023 s | 0.023 s | 13.7x |
+| fib | 0.084 s | 0.093 s | 0.098 s | 0.9x |
+| log_rank | 0.095 s | 0.068 s | 0.068 s | 1.4x |
+| loop_sum | 0.255 s | 0.047 s | 0.048 s | 5.4x |
+| vasicek | 0.040 s | 0.043 s | 0.045 s | 0.9x |
+| vector_arith | 0.145 s | 0.119 s | 0.126 s | 1.2x |
 
 Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R 4.3.3 with its
 bytecode compiler on. `just bench-why` builds ry and regenerates the table on your machine.

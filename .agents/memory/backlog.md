@@ -317,9 +317,10 @@ protects construction but nothing after it.
   4,400 instructions per `rnorm` call), as GNU R does. Caching the state against the binding's
   identity would make `vasicek` match GNU R; it is still about 10% behind, with `qnorm` and the
   twister refill the rest of the cost.
-- **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
-  `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
-  so they are tier-0 or base gaps, not JIT ones.
+- **Two oracle cases fail under both `ry` and `ry-jit`** (`stats__arima_and_kalman` and
+  `stats__lbfgsb` differ from GNU R in late digits), so they are tier-0 or native gaps, not JIT
+  ones. Run the oracle against a release build with `ORACLE_RY=target/release/ry` after building
+  both `ry-lang` and `libr`: the JIT lives in `libR`, so building `ry-lang` alone tests a stale JIT.
 - **Base gaps seen while benchmarking:** `sum()` of doubles does not follow GNU R's long-double
   accumulation or its NaN-before-NA precedence exactly; a factor inside a list prints its codes;
   `cov` and `sd` route through an R-level fallback instead of a native `C_cov`; `pkg::name` for a
