@@ -43,6 +43,25 @@ pub trait ConsoleHooks: Send {
     fn before_command(&mut self) -> Option<String>;
 }
 
+/// Sees R input before the engine parses it: each top-level command typed at the console, and a
+/// script fed whole.
+pub trait InputFilter: Send {
+    fn filter(&mut self, input: &str) -> Filtered;
+    /// Ctrl-C at the console drops the input the filter holds.
+    fn interrupt(&mut self) {}
+}
+
+/// What an [`InputFilter`] does with a piece of input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filtered {
+    /// Evaluate this text in place of the input, and of any input held before it.
+    Run(String),
+    /// The command is unfinished: keep it and read its next line at a continuation prompt.
+    Hold,
+    /// Drop the input, and any held before it, unevaluated.
+    Refuse,
+}
+
 #[derive(Default)]
 pub struct RunOptions {
     pub keybindings: Keybindings,
@@ -60,6 +79,7 @@ pub struct RunOptions {
     pub batch: bool,
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
+    pub filter: Option<Box<dyn InputFilter>>,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so
@@ -76,32 +96,18 @@ pub fn run_on_ry_runtime(
     file: Option<&std::path::Path>,
     input: Option<&str>,
     arguments: &[String],
+    flags: RuntimeFlags,
 ) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
-    let library_path = ry_runtime_library()?;
-    // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
-    // dynamic linker satisfy them from it.
-    let library = unsafe {
-        libloading::os::unix::Library::open(
-            Some(&library_path),
-            libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
-        )
-    }
-    .map_err(|error| {
-        ReplError(format!(
-            "failed to load ry's runtime at {}: {error}",
-            library_path.display()
-        ))
-    })?;
-    let library: &'static libloading::os::unix::Library = Box::leak(Box::new(library));
-    type Run =
-        unsafe extern "C" fn(*const c_char, *const c_char, c_int, *const *const c_char) -> c_int;
-    let run = unsafe { library.get::<Run>(b"ry_run\0") }.map_err(|error| {
-        ReplError(format!(
-            "{} is not ry's runtime: {error}",
-            library_path.display()
-        ))
-    })?;
+    let library = ry_runtime()?;
+    type Run = unsafe extern "C" fn(
+        *const c_char,
+        *const c_char,
+        c_int,
+        *const *const c_char,
+        c_int,
+    ) -> c_int;
+    let run = runtime_entry::<Run>(library, "ry_run")?;
     let path = file
         .map(|file| CString::new(file.to_string_lossy().as_bytes()))
         .transpose()
@@ -124,8 +130,69 @@ pub fn run_on_ry_runtime(
             nullable(&input),
             pointers.len() as c_int,
             pointers.as_ptr(),
+            flags.bits(),
         )
     })
+}
+
+/// What ry's runtime does with inline type annotations; mirrors the `RUN_FLAG_*` bits of
+/// `libr::eval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeFlags {
+    /// Inline annotations become checks at function boundaries.
+    pub annotation_checks: bool,
+}
+
+impl RuntimeFlags {
+    fn bits(self) -> std::ffi::c_int {
+        std::ffi::c_int::from(self.annotation_checks)
+    }
+}
+
+/// Runs the interactive console on ry's own runtime instead of GNU R. Only the editor, the
+/// completer and the filter of `options` apply: ry's runtime has no `.Call` routines to register
+/// and runs no startup code.
+pub fn run_console_on_ry_runtime(
+    options: RunOptions,
+    flags: RuntimeFlags,
+) -> Result<i32, ReplError> {
+    use std::ffi::{c_char, c_int, c_uchar};
+    let library = ry_runtime()?;
+    type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
+    type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
+    let repl = runtime_entry::<Repl>(library, "ry_repl")?;
+    console::install_for_ry_runtime(options)?;
+    eprintln!("ry console on ry's runtime. Type q() or Ctrl-D to quit.");
+    Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
+}
+
+fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
+    let library_path = ry_runtime_library()?;
+    // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
+    // dynamic linker satisfy them from it.
+    let library = unsafe {
+        libloading::os::unix::Library::open(
+            Some(&library_path),
+            libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
+        )
+    }
+    .map_err(|error| {
+        ReplError(format!(
+            "failed to load ry's runtime at {}: {error}",
+            library_path.display()
+        ))
+    })?;
+    Ok(Box::leak(Box::new(library)))
+}
+
+fn runtime_entry<T: Copy>(
+    library: &'static libloading::os::unix::Library,
+    name: &str,
+) -> Result<T, ReplError> {
+    let symbol = format!("{name}\0");
+    unsafe { library.get::<T>(symbol.as_bytes()) }
+        .map(|symbol| *symbol)
+        .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
 fn ry_runtime_library() -> Result<PathBuf, ReplError> {

@@ -1000,15 +1000,17 @@ pub unsafe fn quote_error(message: &str) -> Unwind {
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
 /// `input` and then the file at `path` (either may be null), and returns the exit status: 0 on
 /// success, 1 after an error, 2 when the session could not start. `arguments` are what
-/// `commandArgs(trailingOnly = TRUE)` returns. This is the entry point of `ry run --runtime ry`
-/// and `ry load`.
+/// `commandArgs(trailingOnly = TRUE)` returns, and `flags` are the [`RUN_FLAGS`] bits. This is
+/// the entry point of `ry run --runtime ry` and `ry load`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_run(
     path: *const c_char,
     input: *const c_char,
     count: c_int,
     arguments: *const *const c_char,
+    flags: c_int,
 ) -> c_int {
+    apply_flags(flags);
     let path = (!path.is_null())
         .then(|| String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned());
     let input = (!input.is_null())
@@ -1059,6 +1061,93 @@ pub unsafe extern "C" fn ry_run(
         interp::session::Outcome::Failed => 1,
     }
 }
+
+/// `ry_run` and `ry_repl` flag: inline type annotations become checks at function
+/// boundaries. Off when the project turns inline annotations off.
+pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
+
+/// Every flag `ry_run` and `ry_repl` understand.
+pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS;
+
+unsafe fn apply_flags(flags: c_int) {
+    runtime();
+    interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
+}
+
+/// Reads one chunk of console input after showing `prompt`: writes at most `length - 1` bytes
+/// and a NUL into `buffer`, and returns 1, or 0 at the end of input. The same contract as
+/// GNU R's `R_ReadConsole` hook without its history flag.
+pub type ReadConsole = unsafe extern "C" fn(*const c_char, *mut u8, c_int) -> c_int;
+
+/// Runs ry's runtime as an interactive console: starts the session, then reads input through
+/// `read` and evaluates it until the input ends. Returns 0, or 2 when the session could not
+/// start. This is `ry repl --runtime ry`'s entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
+    apply_flags(flags);
+    let options = interp::session::StartOptions {
+        command_args: vec!["ry".to_owned()],
+        vanilla: false,
+    };
+    if let Err(unwind) = interp::session::start(options) {
+        interp::session::report_toplevel(unwind);
+        crate::boundary::write_console(b"ry: base R did not load\n", true);
+        return 2;
+    }
+    install_interrupt_handler();
+    let mut buffer = vec![0u8; 64 * 1024];
+    interp::session::run_console(|prompt| {
+        use std::io::Write;
+        if let Err(error) = std::io::stdout().flush() {
+            crate::boundary::write_console(
+                format!("ry: cannot write output: {error}\n").as_bytes(),
+                true,
+            );
+        }
+        // A prompt never holds a NUL, so the empty fallback is unreachable.
+        let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
+        let mut input = Vec::new();
+        // A line longer than the buffer arrives in several chunks; only the last one ends the
+        // line, and the text is decoded once it is whole, so no character is split.
+        loop {
+            if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
+                return (!input.is_empty()).then(|| String::from_utf8_lossy(&input).into_owned());
+            }
+            let end = buffer
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(buffer.len());
+            input.extend_from_slice(&buffer[..end]);
+            // A reader may stop one byte short of the contract's limit, so a chunk is taken as
+            // cut off whenever it comes within two bytes of the buffer's end.
+            if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                return Some(String::from_utf8_lossy(&input).into_owned());
+            }
+            prompt = std::ffi::CString::default();
+        }
+    });
+    crate::boundary::run_pending_finalizers();
+    0
+}
+
+/// While the console reads input its terminal is raw, so Ctrl-C reaches the line editor; while
+/// code runs it arrives as SIGINT and interrupts the evaluation, not the process.
+#[cfg(unix)]
+fn install_interrupt_handler() {
+    extern "C" fn request_interrupt(_signal: c_int) {
+        interp::unwind::INTERRUPT_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // SAFETY: the handler only performs an atomic store, which is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = request_interrupt as *const () as usize;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn install_interrupt_handler() {}
 
 unsafe fn installed_evaluator(what: &str) -> ApiResult<&'static dyn Evaluator> {
     evaluator().ok_or_else(|| {

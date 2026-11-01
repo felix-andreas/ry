@@ -3,9 +3,11 @@ title: Getting started
 description: What ry is, how to install it, and your first check
 ---
 
-ry is a fast checker, language server, and formatter for R, written in Rust. It finds mistakes in
-your R code before it runs (a misspelled name, a wrong argument, a `NULL` you forgot) and works on
-the code you already have, with nothing to annotate or configure first.
+ry is a type-checked toolchain for R, written in Rust: a checker, a language server, a formatter, a
+package loader, and a console. It finds mistakes in your R code before it runs (a misspelled name, a
+wrong argument, a `NULL` you forgot) and works on the code you already have, with nothing to
+annotate or configure first. It is also growing into an implementation of R itself, which
+[Why ry](/why-ry#where-ry-is-going) describes.
 
 ## Install
 
@@ -79,3 +81,4 @@ type-mismatch
 - [Why ry](/why-ry): what it is good at, and what it deliberately leaves out
 - [Checking code](/guides/checking): every kind of finding, and how to silence one
 - [Type checking](/type-checking/overview): how inference and annotations work
+- [Loading packages](/guides/loading-packages): `ry load` and `ry repl` run a package from its sources, lazily

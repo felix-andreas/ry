@@ -2142,3 +2142,65 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 
 Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer
 and gives NA on overflow, where R gives a double.
+
+# Decision record: inline annotations at run time
+
+ry's runtime checks a function's inline parameter and return types at its boundary, and erases
+binding annotations. GNU R, through `ry run` and `ry repl`, reads the erased program. The contract
+is the typing reference, "Inline annotations at run time".
+
+**Why check at all.** An annotation that the runtime ignores can be false forever without anyone
+noticing, because the checker trusts it at every call site in other files. A boundary check turns
+a wrong annotation into an error at the call that broke it. It also gives the JIT a type guarantee
+inside the body: after entry, a `double` parameter is known to be stored as logical, integer or
+double, so a guard on it is redundant.
+
+**Why parameters are checked when forced.** Checking on entry would force every annotated
+argument, which changes R semantics (laziness, `missing()`, `substitute()`, a never-used argument
+that would fail). The promise carries `gp::CHECKED_PROMISE`, and `force_promise` runs the check
+before storing the value: a failed check leaves the promise unforced and still checked, so code
+that catches the error cannot read an unchecked value, and the JIT guarantee below holds. A promise
+forwarded through `...` is pending in several typed frames, and forcing it checks every one; the
+bit is cleared only once no frame still holds it. A value that is already computed (a constant, a forced promise) is
+checked on entry, because there is no later moment to hook.
+
+**Why storage masks.** A check is one bit test of the value's `SEXPTYPE` against a `u32` mask
+(`crates/interp/src/annotations.rs`). Each mask is at least as loose as the static type (vector
+shape ignored, the numeric promotion order admitted, an alias, class, type variable, `Any` or frame
+unchecked), so a value the checker would accept never fails at run time. Element types and
+attributes would need a walk of the value, which is not cheap enough to run on every call.
+
+**Where the signature lives.** Lowering a `function` registers its masks in a map keyed by the
+formals pairlist (or the body, for a function without parameters), which closures share by pointer,
+so a closure copy (`environment<-`) keeps its checks and `formals()`, `body()` and `deparse()` see no
+change. The signature also holds the definition's body (and the formal names, for messages), and a
+closure matches only when its body is that same object: `function` builds closures from whatever
+formals it is handed, so `rlang::new_function(formals(f), body)` would otherwise inherit `f`'s
+checks. The key carries `gp::TYPED_DEFINITION`, so an untyped call pays one header bit test. The map
+holds a weak reference per entry, whose key identity guards against a dead object's address being
+reused; dead entries are swept when the map doubles. A function without parameters whose body is a
+constant or a symbol has no unique key and is not checked.
+
+**Why bindings are not checked.** `x: T <- v` would need a check on every assignment and a choice
+about later reassignments, and the checker already reports a wrong value statically. Erasing it
+keeps assignment as cheap as plain R.
+
+**The JIT.** A compiled call site whose argument types the checker proved can skip the check, because
+the mask test is pure and its failure path is an ordinary R error. The pending-check stack
+(`annotations::State::pending`, popped by frame depth at closure exit) is the only state a compiled
+frame has to honor.
+
+**Opt-out and strict mode.** `[check] inline-annotations = false` erases annotations and registers no
+checks (`RuntimeFlags::annotation_checks`), so the setting means the same thing in analysis and at
+run time. Before running, `ry run` and `ry repl` check the code as a one-file project
+(`crates/ry/src/preflight.rs`): they print the `inline-annotation` and `annotation-mismatch`
+warnings, and in strict mode they refuse code with an error. Other findings stay `ry check`'s, so a
+plain script runs exactly as before; a script with no inline annotation and no strict mode skips the
+analysis.
+
+**The console sees whole commands.** The editor hands the console filter one line at a time, so the
+filter holds an unfinished command and releases it whole. "Unfinished" is
+`syntax::input_is_unfinished`: every syntax error is marked `incomplete` (an opener never closed,
+or raised with only trivia left), which the parser knows and a range check cannot, because an error
+at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
+first lines R had already read, leaving R mid-command.
