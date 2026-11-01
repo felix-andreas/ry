@@ -637,6 +637,7 @@ unsafe fn import(
     needed: Option<HashSet<PlSmallStr>>,
 ) -> R<Table> {
     let mut imported = Vec::with_capacity(columns.len());
+    let mut string_codes = Vec::new();
     for column in columns {
         if needed
             .as_ref()
@@ -644,20 +645,40 @@ unsafe fn import(
         {
             continue;
         }
-        imported.push(import_column(column)?.into_column());
+        let (series, codes) = import_column(column)?;
+        if let Some(codes) = codes {
+            string_codes.push((column.name.clone(), codes));
+        }
+        imported.push(series.into_column());
     }
     let frame = DataFrame::new(height, imported).map_err(|failure| error(failure.to_string()))?;
-    Table::new(frame).map_err(|failure| error(failure.to_string()))
+    let mut table = Table::new(frame).map_err(|failure| error(failure.to_string()))?;
+    for (name, codes) in string_codes {
+        table
+            .set_string_codes(&name, codes.codes, codes.first_rows)
+            .map_err(|failure| error(failure.to_string()))?;
+    }
+    Ok(table)
 }
 
-unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
+/// A character column's rows numbered by distinct CHARSXP, as `Table::set_string_codes` takes
+/// them.
+struct ImportedCodes {
+    codes: Vec<u32>,
+    first_rows: Vec<u32>,
+}
+
+unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCodes>)> {
     let name = column.name.clone();
     let vector = values::materialize(column.vector)?;
     Ok(match column.kind {
         // The engine reads integer and double data where R keeps it, see the module docs.
-        ColumnType::Integer => convert::borrow_integer(name, values::ints(vector)),
-        ColumnType::Double => convert::borrow_double(name, values::reals(vector)),
-        ColumnType::Logical => to_series(name, RVector::Logical(values::ints(vector).to_vec()))?,
+        ColumnType::Integer => (convert::borrow_integer(name, values::ints(vector)), None),
+        ColumnType::Double => (convert::borrow_double(name, values::reals(vector)), None),
+        ColumnType::Logical => (
+            to_series(name, RVector::Logical(values::ints(vector).to_vec()))?,
+            None,
+        ),
         ColumnType::Character => {
             // R interns its strings, so a column repeats a few CHARSXPs. Each distinct one
             // converts once, and the column gathers them, which copies a 16-byte view per row.
@@ -665,19 +686,26 @@ unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
             let mut positions: FxHashMap<Sexp, IdxSize> = FxHashMap::default();
             let mut distinct = Vec::new();
             let mut indices = Vec::with_capacity(length(vector));
+            // The same numbering is the column's grouping codes: R interns its strings, so equal
+            // strings are the same CHARSXP and the codes cost no string comparison.
+            let mut codes = Vec::with_capacity(length(vector));
+            let mut first_rows = Vec::new();
             let mut has_na = false;
             for index in 0..length(vector) {
                 let charsxp = vector.element(index);
                 if charsxp == na {
                     has_na = true;
                     indices.push(IdxSize::MAX);
+                    codes.push(0);
                     continue;
                 }
                 let position = *positions.entry(charsxp).or_insert_with(|| {
                     distinct.push(values::char_str(charsxp));
+                    first_rows.push(index as u32);
                     (distinct.len() - 1) as IdxSize
                 });
                 indices.push(position);
+                codes.push(position as u32 + 1);
             }
             let indices = if has_na {
                 IdxCa::from_iter_options(
@@ -689,10 +717,11 @@ unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
             } else {
                 IdxCa::from_vec(PlSmallStr::EMPTY, indices)
             };
-            StringChunked::from_iter_values(name, distinct.iter().map(AsRef::as_ref))
+            let series = StringChunked::from_iter_values(name, distinct.iter().map(AsRef::as_ref))
                 .take(&indices)
                 .map_err(|failure| error(failure.to_string()))?
-                .into_series()
+                .into_series();
+            (series, Some(ImportedCodes { codes, first_rows }))
         }
         ColumnType::Factor => {
             let levels = values::get_attr(vector, symbols().levels);
@@ -700,13 +729,14 @@ unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
             if levels.len() != length(values::get_attr(vector, symbols().levels)) {
                 return Err(error("a factor level is NA"));
             }
-            to_series(
+            let series = to_series(
                 name,
                 RVector::Factor {
                     codes: values::ints(vector).to_vec(),
                     levels,
                 },
-            )?
+            )?;
+            (series, None)
         }
     })
 }

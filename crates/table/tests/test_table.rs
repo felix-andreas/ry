@@ -1540,6 +1540,50 @@ fn random_table(rng: &mut SplitMix64, rows: usize) -> Table {
     ])
 }
 
+/// `table` with a character column `g4` whose rows are numbered by distinct string, as the R
+/// bridge numbers them, so grouping by it takes the kernels' string digit.
+fn with_string_key(rng: &mut SplitMix64, mut table: Table) -> Table {
+    let rows = table.height();
+    let distinct = if rng.chance(1, 4) {
+        5_000
+    } else {
+        1 + rng.below(6)
+    };
+    let values: Vec<Option<String>> = (0..rows)
+        .map(|_| {
+            // Reversed digits make the strings' order differ from their order of appearance.
+            (!rng.chance(1, 10)).then(|| {
+                let number = rng.below(distinct);
+                format!("k{}", number.to_string().chars().rev().collect::<String>())
+            })
+        })
+        .collect();
+    let mut numbers = std::collections::HashMap::new();
+    let mut first_rows = Vec::new();
+    let codes: Vec<u32> = values
+        .iter()
+        .enumerate()
+        .map(|(row, value)| match value {
+            None => 0,
+            Some(value) => *numbers.entry(value.clone()).or_insert_with(|| {
+                first_rows.push(row as u32);
+                first_rows.len() as u32
+            }),
+        })
+        .collect();
+    table
+        .set_column(
+            to_series(PlSmallStr::from("g4"), RVector::Character(values))
+                .expect("a character column converts")
+                .into_column(),
+        )
+        .expect("the column has the table's height");
+    table
+        .set_string_codes("g4", codes, first_rows)
+        .expect("the codes fit the column");
+    table
+}
+
 /// A table to join [`random_table`] to: its keys overlap that table's, and its factor has the
 /// levels in another order plus one that table lacks.
 fn random_lookup(rng: &mut SplitMix64, rows: usize) -> Table {
@@ -1774,7 +1818,8 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             1 + rng.below(400)
         };
         let table = random_table(&mut rng, rows);
-        let keys = ["g1", "g2", "g3"];
+        let table = with_string_key(&mut rng, table);
+        let keys = ["g1", "g2", "g3", "g4"];
         let mut by = Vec::new();
         for key in keys {
             if rng.chance(1, 2) {
