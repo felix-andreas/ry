@@ -420,13 +420,8 @@ fn dynamic_symbols(library: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// `cargo test` writes the crate's fresh shared library next to the test executable.
 fn libr_path() -> PathBuf {
-    let executable = std::env::current_exe().expect("the test executable has a path");
-    executable
-        .parent()
-        .expect("the test executable lives in a directory")
-        .join("libR.so")
+    harness::library_dir().join("libR.so")
 }
 
 /// Every function and variable the headers declare is exported, so a package that compiles

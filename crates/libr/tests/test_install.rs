@@ -21,14 +21,14 @@ fn home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ry-home");
-        let deps = std::env::current_exe()
-            .expect("the test executable")
-            .parent()
-            .expect("its directory")
-            .to_path_buf();
+        let deps = library_dir();
         // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test,
         // in the profile directory the test itself runs from.
-        let profile_directory = deps.parent().expect("the profile directory");
+        let executable = std::env::current_exe().expect("the test executable");
+        let profile_directory = executable
+            .ancestors()
+            .find(|ancestor| ancestor.parent().is_some_and(|parent| parent.ends_with("target")))
+            .expect("the profile directory");
         let mut build = Command::new(env!("CARGO"));
         build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
         if profile_directory

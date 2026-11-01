@@ -143,7 +143,7 @@ unsafe extern "C" fn capture_console(
 /// layout, where the test executable and the library can land in different directories). The
 /// nearest ancestor holding `libR.so` wins; the copy in `target/<profile>` is only refreshed by
 /// `cargo build`.
-fn library_dir() -> PathBuf {
+pub fn library_dir() -> PathBuf {
     let executable = std::env::current_exe().expect("the test executable has a path");
     let directory = executable
         .parent()
