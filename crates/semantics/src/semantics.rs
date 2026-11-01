@@ -1875,6 +1875,7 @@ mod tests {
         let integer = types::scalar(&db, types::Atomic::Integer);
         let check = check::ItemCheck {
             expression_types: Default::default(),
+            pattern_types: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),

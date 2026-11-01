@@ -94,7 +94,7 @@ hint @64: fn(item: T) -> T
 #---- at_field_rhs
 obj@fie$0ld
 #++++
-hover 0..9: Unknown
+hover 4..9: field: Unknown
 definition: none
 references: none
 rename: none

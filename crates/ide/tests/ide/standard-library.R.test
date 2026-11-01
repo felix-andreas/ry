@@ -60,3 +60,34 @@ references: none
 rename: none
 signature: none
 completion (1): Result
+
+#---- hover_on_a_library_alias_shows_its_definition
+#: fn(r: Res$0ult<integer, character>) -> integer
+unwrap <- function(r) Result.with_default(r, 0L)
+#++++
+hover 9..15: @alias Result<T, U> {:Ok(T) | :Err(U)}
+hover-definition: package ry (0 declaration(s), declared in stub source 11 at `Result`)
+definition: stub source 11 at `Result`
+references: 9..15
+rename: none
+signature: none
+completion (1): Result
+
+#---- hint_drops_an_impossible_vector_member
+type Position = record{x: double, y: double}
+#: fn(p: Position) -> double
+position_value <- function(p) p$x
+summa$0rise <- function(positions) vapply(positions, position_value, numeric(1))
+#++++
+hover 108..117: summarise: fn(positions: list[Position] | Position[]) -> double[]
+hover-definition: global 108..117
+definition 108..117
+references: 108..117*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotation for `summarise`
+  edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
+action: Add inferred type annotations for the whole file
+  edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
+completion (37): summarise, Summary, summary, summary.aov, summary.connection, Summary.data.frame, summary.data.frame, Summary.Date
+hint @117: fn(positions: list[Position]) -> double[]

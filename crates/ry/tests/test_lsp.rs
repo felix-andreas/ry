@@ -1910,6 +1910,60 @@ async fn annotation_bodies_get_semantic_tokens() {
 }
 
 #[tokio::test]
+async fn ry_syntax_gets_semantic_tokens() {
+    let mut context = setup_test(&[]).await;
+    let source = "type Shape<T> = :Circle(radius: T) | :Empty\n\
+                  area <- function(s: Shape<double>) {\n\
+                  \x20 match (s) {\n\
+                  \x20   :Circle(radius = r) => r\n\
+                  \x20   :Empty => 0\n\
+                  \x20 }\n\
+                  }\n";
+    let uri = context.open("R/tokens.R", source);
+    context.drain_diagnostics();
+    let tokens = context.semantic_tokens(&uri).await;
+    let lines: Vec<&str> = source.lines().collect();
+    let (mut line, mut column) = (0usize, 0usize);
+    let mut classified = Vec::new();
+    for token in &tokens.data {
+        line += token.delta_line as usize;
+        column = if token.delta_line == 0 {
+            column + token.delta_start as usize
+        } else {
+            token.delta_start as usize
+        };
+        let text = &lines[line][column..column + token.length as usize];
+        classified.push((text.to_owned(), token.token_type));
+    }
+    // Legend indices: type 0, typeParameter 1, parameter 2, operator 3, decorator 4,
+    // keyword 5, enumMember 6.
+    for expected in [
+        ("type", 5),
+        ("Shape", 0),
+        ("T", 1),
+        ("Circle", 6),
+        ("radius", 2),
+        ("Empty", 6),
+        ("match", 5),
+        ("=>", 3),
+    ] {
+        assert!(
+            classified
+                .iter()
+                .any(|(text, class)| text == expected.0 && *class == expected.1),
+            "{expected:?} missing from {classified:?}"
+        );
+    }
+    assert!(
+        !classified
+            .iter()
+            .any(|(text, _)| text == "area" || text == "s"),
+        "plain R names stay with the R grammar: {classified:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
 async fn stub_documents_are_served_with_parse_diagnostics() {
     let mut context = setup_test(&[]).await;
     let uri = context.open(

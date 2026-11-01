@@ -244,6 +244,10 @@ pub enum OperandExpectation {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
     pub expression_types: ExpressionTypes<'db>,
+    /// The type of the value each `match` pattern sees, narrowed to the members it can match,
+    /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
+    /// a pattern that cannot match records nothing.
+    pub pattern_types: PatternTypes<'db>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -287,6 +291,15 @@ pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
 impl<'db> ExpressionTypes<'db> {
     pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
         self.0.get(id.0 as usize)?.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
+pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
+
+impl<'db> PatternTypes<'db> {
+    pub fn get(&self, id: PatId) -> Option<Ty<'db>> {
+        *self.0.get(id.0 as usize)?
     }
 }
 
@@ -387,6 +400,7 @@ pub fn check_item_with_annotation<'db>(
         environment: Environment::default(),
         scheme_arena: Vec::new(),
         recorded: FxHashMap::default(),
+        recorded_patterns: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
@@ -546,6 +560,13 @@ pub fn check_item_with_annotation<'db>(
         *slot = Some(context.table.resolve(context.db, ty));
     }
     let expression_types = ExpressionTypes(expression_types.into_boxed_slice());
+    let mut pattern_types = vec![None; module.patterns.len()];
+    for (&id, &ty) in &context.recorded_patterns {
+        if let Some(slot) = pattern_types.get_mut(id.0 as usize) {
+            *slot = Some(context.table.resolve(context.db, ty));
+        }
+    }
+    let pattern_types = PatternTypes(pattern_types.into_boxed_slice());
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -583,6 +604,7 @@ pub fn check_item_with_annotation<'db>(
     ItemCheck {
         match_findings,
         expression_types,
+        pattern_types,
         errors,
         strict_origins: context.strict_origins,
         scheme,
@@ -783,6 +805,7 @@ struct Checker<'db, 'a> {
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: FxHashMap<ExprId, Ty<'db>>,
+    recorded_patterns: FxHashMap<PatId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
@@ -3065,6 +3088,7 @@ impl<'db> Checker<'db, '_> {
     ) {
         let module = self.module;
         let node = module.pattern(pattern);
+        self.recorded_patterns.insert(pattern, subject);
         match &node.kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
             PatternKind::Bind(leaf) => {
