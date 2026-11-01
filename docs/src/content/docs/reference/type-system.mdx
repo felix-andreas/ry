@@ -1248,10 +1248,12 @@ type, `x` would be an open variable and `c(x, x)` could not be typed. The rule h
 - With an overloaded callee, a formal takes a type only when every candidate that accepts the other
   arguments expects the same one. The overload is then chosen as usual, with the literal's inferred
   type among the arguments.
-- A formal whose expected type shares a type variable with the expected result type is an
-  accumulator, as `seen` is for `List.walk`'s `fn(S, T) -> S`. The result widens its type, so the
-  type the other arguments give it (such as an initial `list()`) is no context, and by the rule
-  above the literal takes no types.
+- A formal is an accumulator when its expected type shares a type variable with the expected
+  result type, and another argument of the call has exactly that variable as its type: `seen` is
+  one in `List.walk(xs, state: S, f: fn(S, T) -> S)`. The result widens the variable, so the type
+  the initial state gives it (such as an empty `list()`) is no context, and by the rule above the
+  literal takes no types. A variable fixed by a collection is not widened, so in
+  `List.update(xs, i, f: fn(T) -> T)` the literal's formal still takes the item type.
 - A literal with a formal after `...` takes no types, because R binds positional arguments to
   `...` before any later formal.
 - A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no

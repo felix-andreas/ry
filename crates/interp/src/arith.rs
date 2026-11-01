@@ -678,12 +678,12 @@ unsafe fn strict(
         return arrays::finish_result(call.call, &name, result);
     }
     let result = compute(call)?;
-    // R's operator may hand back an operand it was free to reuse, which is an Array here.
+    // R's operator may hand back an operand, which is an Array here and may still be bound to a
+    // variable, so unflag a copy rather than the operand itself.
     if result.is_array() {
-        if values::maybe_shared(result) {
-            return values::shallow_duplicate(result);
-        }
-        result.set_array(false);
+        let copy = values::shallow_duplicate(result)?;
+        copy.set_array(false);
+        return Ok(copy);
     }
     Ok(result)
 }

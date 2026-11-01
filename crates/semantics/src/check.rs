@@ -8818,10 +8818,24 @@ impl<'db> Checker<'db, '_> {
                 Some(ArgumentTarget::Rest) => function.variadic.as_ref().map(|rest| rest.element),
                 _ => None,
             };
-            // A formal whose expected type shares a type variable with the expected result is
-            // an accumulator, as `S` is in `fn(S, T) -> S`: the result widens it, so the type the
-            // other arguments give it (an initial `list()`) is no context. Read before the probe
-            // binds the variables.
+            // A formal is an accumulator, as `S` is in `walk(list, state: S, f: fn(S, T) -> S)`,
+            // when it shares a type variable with the callback's result and another argument is
+            // that bare variable, the initial state. The result widens such a variable, so the
+            // type the initial value gives it (an empty `list()`) is no context. A variable fixed
+            // by a collection, as `T` is in `update(list: List<T>, i, f: fn(T) -> T)`, is not
+            // widened, so its formal keeps the hint. Read before the probe binds the variables.
+            let state_vars: FxHashSet<InferenceVar> = targets
+                .iter()
+                .zip(deferred)
+                .filter(|(_, deferred)| !**deferred)
+                .filter_map(|(target, _)| target_ty(target))
+                .filter_map(
+                    |ty| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+                        TyKind::Var(var) => Some(*var),
+                        _ => None,
+                    },
+                )
+                .collect();
             let accumulators: Vec<Vec<bool>> = targets
                 .iter()
                 .zip(deferred)
@@ -8836,6 +8850,7 @@ impl<'db> Checker<'db, '_> {
                     let mut result_vars = FxHashSet::default();
                     self.table
                         .collect_unbound_vars(self.db, expected.ret, &mut result_vars);
+                    result_vars.retain(|var| state_vars.contains(var));
                     expected
                         .positional
                         .iter()

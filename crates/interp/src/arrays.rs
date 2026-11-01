@@ -295,10 +295,12 @@ pub unsafe fn check_operands(
             ));
         }
     }
-    let plain_items_fit = operands
-        .iter()
-        .filter(|value| !value.is_array())
-        .all(|&value| kind != Items::RyValues && item_kind(value).is_ok_and(|found| found == kind));
+    // No operator is defined on ry values, so their own message beats R's fallback error.
+    let plain_items_fit = kind == Items::RyValues
+        || operands
+            .iter()
+            .filter(|value| !value.is_array())
+            .all(|&value| item_kind(value).is_ok_and(|found| found == kind));
     if !plain_items_fit {
         return Ok(false);
     }

@@ -179,6 +179,10 @@ const ERRORS: &[(&str, &str)] = &[
         "points == points",
         "`==` is not defined for an Array of ry value items",
     ),
+    (
+        "points + 1",
+        "`+` is not defined for an Array of ry value items",
+    ),
     ("[2000000000L] * 2L", "produced a missing value at item 1"),
     ("[0] / [0]", "produced a missing value"),
     (

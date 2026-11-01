@@ -345,3 +345,11 @@ total <- List.walk([1L, 2L], list(), function(seen, item) List.append(seen, item
 #++++
 bytes: list{}
 total: list{}
+
+#---- an_update_callback_keeps_its_item_hint
+people <- [(name = "a", age = 1), (name = "b", age = 2)]
+renamed <- List.update(people, 1L, function(p) (name = p$nme, age = p$age))
+#++++
+people: Array<Record{age: double, name: character}>
+renamed: Unknown
+114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`

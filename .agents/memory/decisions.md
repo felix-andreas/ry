@@ -3644,7 +3644,7 @@ explicit allocators".
 - **Findings.** An operand error on a hinted formal's use becomes `ContextualParameter`, which names
   the formal and says the call supplied its type, and is reported on the use rather than the whole
   literal.
-- **Accumulators get no hint.** A formal whose expected type shares a type variable with the expected result (`S` in `fn(S, T) -> S`) is a fold accumulator. Hinting it with the initial state pinned `List.walk(xs, list(), \(seen, x) List.append(seen, x))` to `list{}`, which the widened result no longer fit. `parameter_hints_for` reads the variables before the probe binds them.
+- **Accumulators get no hint.** A formal whose expected type shares a type variable with the expected result (`S` in `fn(S, T) -> S`) is a fold accumulator, but only when another argument is that bare variable (the initial state); otherwise `List.update`'s `fn(T) -> T` lost its item hint and a field typo in the lambda went unreported. Hinting it with the initial state pinned `List.walk(xs, list(), \(seen, x) List.append(seen, x))` to `list{}`, which the widened result no longer fit. `parameter_hints_for` reads the variables before the probe binds them.
 - The spec is "Function literals in call arguments" in `reference/type-system.mdx`.
 
 ## ry refuses a `libR.so` built from other sources
