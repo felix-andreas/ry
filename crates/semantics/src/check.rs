@@ -1,7 +1,6 @@
 //! Expression inference walk: Hindley–Milner over one item's HIR. Branches roll
 //! back through an undo log instead of cloning the environment.
 
-use crate::{DataPath, Db, data_file_layout};
 use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::exhaustiveness::{MatchFinding, match_findings};
@@ -24,6 +23,7 @@ use crate::types::{
     contains_inference_var, erase_vars, for_each_child_type, map_child_types, native_record, null,
     scalar, substitute_rigid, type_size, union_of, unknown,
 };
+use crate::{DataPath, Db, data_file_layout};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2780,11 +2780,11 @@ impl<'db> Checker<'db, '_> {
             return Some(format!("`:{}` carries no payload.", name.as_str()));
         }
         let Some((_, Some(tag_payload))) = found else {
-            let nearest = nearest_name(
-                name.as_str(),
-                tags.iter().map(|(tag, _)| *tag),
-            )?;
-            return Some(format!("The value has no tag `:{}`. Did you mean `:{nearest}`?", name.as_str()));
+            let nearest = nearest_name(name.as_str(), tags.iter().map(|(tag, _)| *tag))?;
+            return Some(format!(
+                "The value has no tag `:{}`. Did you mean `:{nearest}`?",
+                name.as_str()
+            ));
         };
         let payload = (*payload)?;
         let PatternKind::Record { fields, .. } = &self.module.pattern(payload).kind else {
@@ -2793,8 +2793,13 @@ impl<'db> Checker<'db, '_> {
         let TyKind::NativeRecord(native) = tag_payload.kind(self.db) else {
             return None;
         };
-        let known: Vec<&str> = native.iter().map(|field| field.name.text(self.db)).collect();
-        let unknown = fields.iter().find(|field| !known.contains(&field.name.as_str()))?;
+        let known: Vec<&str> = native
+            .iter()
+            .map(|field| field.name.text(self.db))
+            .collect();
+        let unknown = fields
+            .iter()
+            .find(|field| !known.contains(&field.name.as_str()))?;
         let suggestion = nearest_name(unknown.name.as_str(), known.iter().copied())
             .map(|nearest| format!(" Did you mean `{nearest}`?"))
             .unwrap_or_default();
@@ -4697,8 +4702,7 @@ impl<'db> Checker<'db, '_> {
                     _ => return unknown_columns,
                 },
                 "select" | "col.names" => {
-                    let Some(names) = value.and_then(|value| literal_strings(module, value))
-                    else {
+                    let Some(names) = value.and_then(|value| literal_strings(module, value)) else {
                         return unknown_columns;
                     };
                     let names = names.into_iter().map(|(name, _)| name).collect();
@@ -4856,7 +4860,10 @@ impl<'db> Checker<'db, '_> {
     ) -> Option<Ty<'db>> {
         let module = self.module;
         let db = self.db;
-        let subject = arguments.first().filter(|first| first.name.is_none())?.value?;
+        let subject = arguments
+            .first()
+            .filter(|first| first.name.is_none())?
+            .value?;
         let columns = self.frame_columns_of(subject)?;
         let frame = variable_name(module, subject);
         for argument in &arguments[1..] {
@@ -4922,7 +4929,10 @@ impl<'db> Checker<'db, '_> {
         let Some(list) = matched[0] else {
             return unknown_columns;
         };
-        let ExpressionKind::Call { callee, arguments: items } = &module.expression(list).kind
+        let ExpressionKind::Call {
+            callee,
+            arguments: items,
+        } = &module.expression(list).kind
         else {
             return unknown_columns;
         };
@@ -5062,7 +5072,13 @@ impl<'db> Checker<'db, '_> {
         let db = self.db;
         let matched = match_formals(
             arguments,
-            &["data", "id.vars", "measure.vars", "variable.name", "value.name"],
+            &[
+                "data",
+                "id.vars",
+                "measure.vars",
+                "variable.name",
+                "value.name",
+            ],
         );
         let subject = matched[0]?;
         let columns = self.frame_columns_of(subject)?;
@@ -5073,7 +5089,10 @@ impl<'db> Checker<'db, '_> {
             };
             let mut positions = Vec::new();
             for (name, range) in literal_strings(module, value)? {
-                match columns.iter().position(|column| column.name.text(db) == name) {
+                match columns
+                    .iter()
+                    .position(|column| column.name.text(db) == name)
+                {
                     Some(position) => positions.push(position),
                     None => checker.errors.push(TypeError {
                         range,
@@ -5086,7 +5105,9 @@ impl<'db> Checker<'db, '_> {
         let ids = listed(self, matched[1])?;
         let measures = listed(self, matched[2])?;
         let others = |listed: &[usize]| -> Vec<usize> {
-            (0..columns.len()).filter(|position| !listed.contains(position)).collect()
+            (0..columns.len())
+                .filter(|position| !listed.contains(position))
+                .collect()
         };
         let (ids, measures) = match (ids, measures) {
             (Some(ids), Some(measures)) => (ids, measures),
@@ -5115,8 +5136,11 @@ impl<'db> Checker<'db, '_> {
                     )
                 })
         });
-        let measure_types: Vec<Ty<'db>> =
-            measures.iter().filter_map(|&position| columns.get(position)).map(|column| column.ty).collect();
+        let measure_types: Vec<Ty<'db>> = measures
+            .iter()
+            .filter_map(|&position| columns.get(position))
+            .map(|column| column.ty)
+            .collect();
         let mut result: Vec<(String, Ty<'db>)> = ids
             .iter()
             .filter_map(|&position| columns.get(position))
@@ -8801,7 +8825,11 @@ fn match_formals(arguments: &[Argument], formals: &[&str]) -> Vec<Option<ExprId>
         .collect();
     let named: Vec<bool> = formals
         .iter()
-        .map(|formal| arguments.iter().any(|argument| argument.name.as_deref() == Some(*formal)))
+        .map(|formal| {
+            arguments
+                .iter()
+                .any(|argument| argument.name.as_deref() == Some(*formal))
+        })
         .collect();
     let mut open = (0..formals.len()).filter(|&position| !named[position]);
     for argument in arguments.iter().filter(|argument| argument.name.is_none()) {
@@ -8853,7 +8881,10 @@ fn frame_of<'db>(db: &'db dyn Db, columns: Vec<(String, Ty<'db>)>) -> Ty<'db> {
 }
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
-    Ty::new(db, TyKind::Named(Name::new(db, "factor".to_owned()), Vec::new()))
+    Ty::new(
+        db,
+        TyKind::Named(Name::new(db, "factor".to_owned()), Vec::new()),
+    )
 }
 
 /// The column type data.table gives values of several column types stacked together: the

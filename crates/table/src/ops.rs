@@ -15,13 +15,36 @@ use polars::prelude::{
     NewChunkedArray, PlSmallStr, Series, SortMultipleOptions, SortOptions, StringChunked,
     UniqueKeepStrategy,
 };
-use rustc_hash::FxHashSet;
+use polars_arrow::array::Array;
+use polars_arrow::bitmap::{Bitmap, MutableBitmap};
+use polars_buffer::Buffer;
+use polars_core::runtime::THREAD_POOL;
+use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     ColumnType, Error, Result, Table,
     convert::{enum_dtype, factor_levels},
+    kernel::{
+        CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
+        pack_map, pack_rows,
+    },
     query::{Aggregate, Executed, Output, Query, Select, Warning, build},
 };
+
+/// The row number's share of a packed sort key: a table has fewer than 2^32 rows.
+const ROW_BITS: u32 = 32;
+/// Up to this many key bits, `unique` and `uniqueN` mark each key in a flat table of 2^bits
+/// flags instead of sorting.
+const DENSE_BITS: u32 = 24;
+/// A radix sort over at most this many key bits sorts them in one pass.
+const ONE_PASS_BITS: u32 = 16;
+/// The digit width of each pass of a radix sort over more bits.
+const RADIX_BITS: u32 = 11;
+/// The longest string a view holds inline.
+const INLINE_BYTES: u32 = 12;
+/// Up to this many strings, `%chin%` compares each value against every string in the set.
+const SHORT_SET: usize = 8;
 
 /// Sorts the table in place by `by`, each column ascending or descending, as `setorder` does.
 /// `NA` sorts first and ties keep their order. The key is dropped, since `setorder` leaves the
@@ -30,14 +53,7 @@ pub fn set_order(table: &mut Table, by: &[(&str, bool)]) -> Result<()> {
     for (name, _) in by {
         require(table, name)?;
     }
-    let options = SortMultipleOptions::default()
-        .with_order_descending_multi(by.iter().map(|(_, descending)| *descending))
-        .with_nulls_last(false)
-        .with_maintain_order(true);
-    let sorted = table
-        .frame()
-        .sort(by.iter().map(|(name, _)| *name), options)?;
-    *table = Table::from_normalized(sorted);
+    *table = Table::from_normalized(sort_frame(table.frame(), by)?);
     Ok(())
 }
 
@@ -88,15 +104,21 @@ pub fn set_column_order(table: &mut Table, first: &[&str]) -> Result<()> {
 /// their original order, as `unique(x, by = ...)` does.
 pub fn unique_rows(table: &Table, by: &[&str]) -> Result<Table> {
     let subset: Vec<String> = subset(table, by)?;
-    let unique = table
-        .frame()
-        .unique_stable(Some(&subset), UniqueKeepStrategy::First, None)?;
+    let frame = table.frame();
+    if let Some(digits) = key_digits(frame, &subset)? {
+        let rows = first_rows(&digits, frame.height());
+        return Ok(Table::from_normalized(gather_frame(frame, &rows)?));
+    }
+    let unique = frame.unique_stable(Some(&subset), UniqueKeepStrategy::First, None)?;
     Ok(Table::from_normalized(unique))
 }
 
 /// How many distinct combinations of `by` the table holds, as `uniqueN(x, by = ...)` does.
 pub fn unique_count(table: &Table, by: &[&str]) -> Result<usize> {
     let subset = subset(table, by)?;
+    if let Some(digits) = key_digits(table.frame(), &subset)? {
+        return Ok(distinct_count(&digits, table.height()));
+    }
     let frame = table.frame().select(subset)?;
     Ok(frame
         .unique_stable(None, UniqueKeepStrategy::Any, None)?
@@ -309,15 +331,13 @@ pub fn dcast(
         Output::Table(grouped) => grouped,
         _ => return Err(Error::Query("dcast's grouping gave no table".into())),
     };
-    let options = SortMultipleOptions::default()
-        .with_nulls_last(false)
-        .with_maintain_order(true);
-    let grouped = grouped.frame().sort(by.iter().copied(), options.clone())?;
+    let ascending: Vec<(&str, bool)> = by.iter().map(|name| (*name, false)).collect();
+    let grouped = sort_frame(grouped.frame(), &ascending)?;
     let row_columns: Vec<Column> = rows
         .iter()
         .map(|name| grouped.column(name).cloned())
         .collect::<std::result::Result<_, _>>()?;
-    let row_ids = run_ids(&row_columns, grouped.height())?;
+    let row_ids = run_ids(&row_columns, grouped.height(), 0)?;
     let row_count = row_ids.last().map_or(0, |last| *last as usize + 1);
 
     let spread_column = grouped.column(spread)?.as_materialized_series();
@@ -445,8 +465,8 @@ pub fn fcoalesce(columns: &[&Column]) -> Result<Column> {
 pub fn rleid(columns: &[&Column]) -> Result<Column> {
     let length = columns.first().map_or(0, |column| column.len());
     let owned: Vec<Column> = columns.iter().map(|column| (*column).clone()).collect();
-    let ids = run_ids(&owned, length)?;
-    let ids: Vec<i32> = ids.into_iter().map(|id| id as i32 + 1).collect();
+    let ids = run_ids(&owned, length, 1)?;
+    let ids: Vec<i32> = ids.into_iter().map(|id| id as i32).collect();
     Ok(Int32Chunked::from_vec(PlSmallStr::from("rleid"), ids).into_column())
 }
 
@@ -470,6 +490,61 @@ pub fn nafill(column: &Column, fill: Fill) -> Result<Column> {
             type_name(column.dtype())
         )));
     }
+    let name = column.name().clone();
+    match (Vector::of(column), fill) {
+        (
+            Some(Vector::Integer {
+                values,
+                validity: Some(validity),
+            }),
+            Fill::Forward | Fill::Backward,
+        ) => {
+            let (values, validity) = carry(&values, &validity, fill == Fill::Backward);
+            return Ok(Vector::Integer {
+                values: Buffer::from(values),
+                validity,
+            }
+            .into_column(name));
+        }
+        (
+            Some(Vector::Double {
+                values,
+                validity: Some(validity),
+            }),
+            Fill::Forward | Fill::Backward,
+        ) => {
+            let (values, validity) = carry(&values, &validity, fill == Fill::Backward);
+            return Ok(Vector::Double {
+                values: Buffer::from(values),
+                validity,
+            }
+            .into_column(name));
+        }
+        (
+            Some(Vector::Double {
+                values,
+                validity: Some(validity),
+            }),
+            Fill::Value(value),
+        ) => {
+            let values = fill_rows(values.len(), |row| {
+                if validity.get_bit(row) {
+                    values[row]
+                } else {
+                    value
+                }
+            });
+            return Ok(Vector::Double {
+                values: Buffer::from(values),
+                validity: None,
+            }
+            .into_column(name));
+        }
+        (Some(Vector::Integer { .. } | Vector::Double { .. }), _) if column.null_count() == 0 => {
+            return Ok(column.clone());
+        }
+        _ => {}
+    }
     Ok(match fill {
         Fill::Forward => column.fill_null(FillNullStrategy::Forward(None))?,
         Fill::Backward => column.fill_null(FillNullStrategy::Backward(None))?,
@@ -486,6 +561,25 @@ pub fn nafill(column: &Column, fill: Fill) -> Result<Column> {
 /// Whether each value lies between the bounds, as `between(x, lower, upper)` does, with the
 /// bounds included unless `inclusive` is false. `NA` stays `NA`.
 pub fn between(column: &Column, lower: f64, upper: f64, inclusive: bool) -> Result<Column> {
+    let test = |value: f64| {
+        if inclusive {
+            value >= lower && value <= upper
+        } else {
+            value > lower && value < upper
+        }
+    };
+    let name = column.name().clone();
+    match Vector::of(column) {
+        Some(Vector::Double { values, validity }) => {
+            let values = pack_map(values.len(), &values, test);
+            return Ok(Vector::Logical { values, validity }.into_column(name));
+        }
+        Some(Vector::Integer { values, validity }) => {
+            let values = pack_map(values.len(), &values, |value| test(f64::from(value)));
+            return Ok(Vector::Logical { values, validity }.into_column(name));
+        }
+        _ => {}
+    }
     let values = column.cast(&DataType::Float64)?;
     let values = values.f64()?;
     let result: BooleanChunked = if inclusive {
@@ -499,19 +593,30 @@ pub fn between(column: &Column, lower: f64, upper: f64, inclusive: bool) -> Resu
 /// Whether each string is one of `set`, as `x %chin% set` does. `NA` matches an `NA` in the set.
 pub fn chin(column: &Column, set: &[Option<&str>]) -> Result<Column> {
     let text = column.cast(&DataType::String)?;
-    let strings = text.str()?;
+    let strings = text.str()?.rechunk();
     let wanted: FxHashSet<&str> = set.iter().flatten().copied().collect();
+    let listed: Vec<&str> = wanted.iter().copied().collect();
     let na_matches = set.iter().any(Option::is_none);
-    let result: BooleanChunked = strings
-        .iter()
-        .map(|value| {
-            Some(match value {
-                Some(value) => wanted.contains(value),
-                None => na_matches,
-            })
-        })
-        .collect();
-    Ok(result.with_name(column.name().clone()).into_column())
+    let Some(array) = strings.downcast_iter().next() else {
+        return Ok(BooleanChunked::full(column.name().clone(), false, 0).into_column());
+    };
+    // A short set is faster to scan than to hash into, and `%chin%` sets are usually short.
+    let values = pack_rows(array.len(), |row| {
+        if !array.is_valid(row) {
+            return na_matches;
+        }
+        let value = array.value(row);
+        if listed.len() <= SHORT_SET {
+            listed.contains(&value)
+        } else {
+            wanted.contains(value)
+        }
+    });
+    Ok(Vector::Logical {
+        values,
+        validity: None,
+    }
+    .into_column(column.name().clone()))
 }
 
 /// Splits each string on a fixed separator into one column per part, as
@@ -570,10 +675,10 @@ fn subset(table: &Table, by: &[&str]) -> Result<Vec<String>> {
     Ok(by.iter().map(|name| name.to_string()).collect())
 }
 
-/// The zero-based run id of each row: it grows wherever any column differs from the row before,
-/// with `NA` equal to `NA`.
-fn run_ids(columns: &[Column], length: usize) -> Result<Vec<u32>> {
-    let mut changed = BooleanChunked::full(PlSmallStr::EMPTY, false, length);
+/// The run id of each row, counting from `first`: it grows wherever any column differs from the
+/// row before, with `NA` equal to `NA`.
+fn run_ids(columns: &[Column], length: usize, first: u32) -> Result<Vec<u32>> {
+    let mut changed = vec![false; length];
     for column in columns {
         if column.len() != length {
             return Err(Error::Query(format!(
@@ -582,20 +687,704 @@ fn run_ids(columns: &[Column], length: usize) -> Result<Vec<u32>> {
                 column.len()
             )));
         }
-        let series = column.as_materialized_series();
-        let previous = series.shift(1);
-        let differs = series.not_equal_missing(&previous)?;
-        changed = &changed | &differs;
+        mark_changes(column, &mut changed)?;
     }
-    let mut ids = Vec::with_capacity(length);
-    let mut id = 0u32;
-    for (index, differs) in changed.iter().enumerate() {
-        if index > 0 && differs == Some(true) {
-            id += 1;
-        }
-        ids.push(id);
+    let counts: Vec<u32> = THREAD_POOL.install(|| {
+        changed
+            .par_chunks(CHUNK_ROWS)
+            .map(|chunk| chunk.iter().filter(|changed| **changed).count() as u32)
+            .collect()
+    });
+    let mut bases = Vec::with_capacity(counts.len());
+    let mut total = first;
+    for count in counts {
+        bases.push(total);
+        total += count;
     }
+    let mut ids = vec![0u32; length];
+    THREAD_POOL.install(|| {
+        ids.par_chunks_mut(CHUNK_ROWS)
+            .zip(changed.par_chunks(CHUNK_ROWS))
+            .zip(bases.par_iter())
+            .for_each(|((out, changed), base)| {
+                let mut id = *base;
+                for (slot, changed) in out.iter_mut().zip(changed) {
+                    id += u32::from(*changed);
+                    *slot = id;
+                }
+            });
+    });
     Ok(ids)
+}
+
+/// Sets `changed[row]` where the column's value at `row` differs from the one before it.
+fn mark_changes(column: &Column, changed: &mut [bool]) -> Result<()> {
+    fn mark(changed: &mut [bool], differs: impl Fn(usize) -> bool + Sync) {
+        THREAD_POOL.install(|| {
+            changed
+                .par_chunks_mut(CHUNK_ROWS)
+                .enumerate()
+                .for_each(|(index, chunk)| {
+                    let start = index * CHUNK_ROWS;
+                    for (offset, slot) in chunk.iter_mut().enumerate() {
+                        let row = start + offset;
+                        if row > 0 && differs(row) {
+                            *slot = true;
+                        }
+                    }
+                });
+        });
+    }
+    fn valid(validity: Option<&Bitmap>, row: usize) -> bool {
+        validity.is_none_or(|validity| validity.get_bit(row))
+    }
+    // Two `NA`s are equal, an `NA` and a value differ, and two values compare with `same`.
+    fn differs(validity: Option<&Bitmap>, row: usize, same: impl Fn() -> bool) -> bool {
+        match (valid(validity, row), valid(validity, row - 1)) {
+            (true, true) => !same(),
+            (false, false) => false,
+            _ => true,
+        }
+    }
+    match (Vector::of(column), column.dtype()) {
+        (Some(Vector::Integer { values, validity }), _) => mark(changed, |row| {
+            differs(validity.as_ref(), row, || values[row] == values[row - 1])
+        }),
+        (Some(Vector::Double { values, validity }), _) => mark(changed, |row| {
+            differs(validity.as_ref(), row, || {
+                let (value, previous) = (values[row], values[row - 1]);
+                value == previous || value.to_bits() == previous.to_bits()
+            })
+        }),
+        (Some(Vector::Logical { values, validity }), _) => mark(changed, |row| {
+            differs(validity.as_ref(), row, || {
+                values.get_bit(row) == values.get_bit(row - 1)
+            })
+        }),
+        (None, DataType::String) => {
+            let strings = column.as_materialized_series().str()?.rechunk();
+            if let Some(array) = strings.downcast_iter().next() {
+                mark(changed, |row| {
+                    differs(array.validity(), row, || {
+                        array.value(row) == array.value(row - 1)
+                    })
+                });
+            }
+        }
+        (None, DataType::Enum(..)) if let Some(codes) = Codes::of(column) => {
+            mark(changed, |row| {
+                differs(codes.validity.as_ref(), row, || {
+                    code_at(&codes.values, row) == code_at(&codes.values, row - 1)
+                })
+            });
+        }
+        _ => {
+            let series = column.as_materialized_series();
+            let differs = series.not_equal_missing(&series.shift(1))?;
+            for (row, (slot, differs)) in changed.iter_mut().zip(differs.iter()).enumerate() {
+                if row > 0 && differs == Some(true) {
+                    *slot = true;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn code_at(values: &CodeValues, row: usize) -> u32 {
+    match values {
+        CodeValues::U8(values) => u32::from(values[row]),
+        CodeValues::U16(values) => u32::from(values[row]),
+        CodeValues::U32(values) => values[row],
+    }
+}
+
+/// `values` with each `NA` replaced by the last value before it, or the next value after it when
+/// `backward`, as `nafill`'s `locf` and `nocb` do. Only the `NA`s with no value on that side stay.
+///
+/// The chunks fill in parallel, each from its own values, and then the `NA`s at a chunk's start
+/// (its end, when `backward`) take the nearest value of the chunks before (after) it.
+fn carry<T: Copy + Send + Sync>(
+    values: &[T],
+    validity: &Bitmap,
+    backward: bool,
+) -> (Vec<T>, Option<Bitmap>) {
+    let length = values.len();
+    let mut out = fill_rows(length, |row| values[row]);
+    // Per chunk: how many `NA`s its own values left unfilled, and the value it carries out.
+    let ends: Vec<(usize, Option<T>)> = THREAD_POOL.install(|| {
+        out.par_chunks_mut(CHUNK_ROWS)
+            .enumerate()
+            .map(|(index, chunk)| {
+                let start = index * CHUNK_ROWS;
+                let mut last: Option<T> = None;
+                let mut unfilled = 0usize;
+                let mut visit = |offset: usize, chunk: &mut [T]| {
+                    if validity.get_bit(start + offset) {
+                        last = Some(chunk[offset]);
+                    } else if let Some(value) = last {
+                        chunk[offset] = value;
+                    } else {
+                        unfilled += 1;
+                    }
+                };
+                if backward {
+                    for offset in (0..chunk.len()).rev() {
+                        visit(offset, chunk);
+                    }
+                } else {
+                    for offset in 0..chunk.len() {
+                        visit(offset, chunk);
+                    }
+                }
+                (unfilled, last)
+            })
+            .collect()
+    });
+    let mut incoming: Vec<Option<T>> = vec![None; ends.len()];
+    let mut carried: Option<T> = None;
+    let order: Vec<usize> = if backward {
+        (0..ends.len()).rev().collect()
+    } else {
+        (0..ends.len()).collect()
+    };
+    let mut unfilled = 0usize;
+    for index in order {
+        incoming[index] = carried;
+        let (left, last) = ends[index];
+        if carried.is_none() {
+            unfilled += left;
+        }
+        carried = last.or(carried);
+    }
+    THREAD_POOL.install(|| {
+        out.par_chunks_mut(CHUNK_ROWS)
+            .zip(ends.par_iter().zip(incoming.par_iter()))
+            .for_each(|(chunk, ((left, _), incoming))| {
+                if let Some(value) = incoming {
+                    let size = chunk.len();
+                    let range = if backward {
+                        size - left..size
+                    } else {
+                        0..*left
+                    };
+                    chunk[range].fill(*value);
+                }
+            });
+    });
+    if unfilled == 0 {
+        return (out, None);
+    }
+    let mut bits = MutableBitmap::with_capacity(length);
+    if backward {
+        bits.extend_constant(length - unfilled, true);
+        bits.extend_constant(unfilled, false);
+    } else {
+        bits.extend_constant(unfilled, false);
+        bits.extend_constant(length - unfilled, true);
+    }
+    (out, Some(bits.into()))
+}
+
+/// The frame sorted by `by`, each column ascending or descending, with `NA` first and ties in row
+/// order, as data.table's `setorder` and `setkey` sort.
+pub(crate) fn sort_frame(frame: &DataFrame, by: &[(&str, bool)]) -> Result<DataFrame> {
+    let mut digits = Vec::with_capacity(by.len());
+    for (name, descending) in by {
+        match order_digits(frame.column(name)?, *descending)? {
+            Some(digit) => digits.push(digit),
+            None => {
+                digits.clear();
+                break;
+            }
+        }
+    }
+    if !digits.is_empty()
+        && let Some(rows) = sorted_rows(&digits, frame.height())
+    {
+        return gather_frame(frame, &rows);
+    }
+    let options = SortMultipleOptions::default()
+        .with_order_descending_multi(by.iter().map(|(_, descending)| *descending))
+        .with_nulls_last(false)
+        .with_maintain_order(true);
+    Ok(frame.sort(by.iter().map(|(name, _)| *name), options)?)
+}
+
+/// One sort column coded as an integer per row whose order is the sort's: `NA` is 0 and comes
+/// first, and the other codes fit in `bits` bits.
+///
+/// Coding the columns this way is what makes sorting fast: the codes of every sort column and
+/// the row number pack into one `u64` or `u128`, and one parallel sort of those integers orders
+/// the rows. A string column codes as its rank among the column's distinct strings, which
+/// replaces string comparisons in the sort by one hash lookup per row.
+struct Digit {
+    codes: Vec<u64>,
+    bits: u32,
+}
+
+/// The sort columns coded as [`Digit`]s, or `None` when a column has a type the coding does not
+/// cover.
+fn key_digits(frame: &DataFrame, names: &[String]) -> Result<Option<Vec<Digit>>> {
+    let mut digits = Vec::with_capacity(names.len());
+    for name in names {
+        match order_digits(frame.column(name)?, false)? {
+            Some(digit) => digits.push(digit),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(digits))
+}
+
+fn order_digits(column: &Column, descending: bool) -> Result<Option<Digit>> {
+    if u32::try_from(column.len()).is_err() {
+        return Ok(None);
+    }
+    let digit = |codes: Vec<u64>, top: u64| Digit {
+        codes,
+        bits: u64::BITS - top.leading_zeros(),
+    };
+    Ok(Some(match Vector::of(column) {
+        Some(Vector::Integer { values, validity }) => {
+            let (low, high) = valid_range(&values, validity.as_ref(), i64::from);
+            let codes = fill_rows(values.len(), |row| {
+                if !valid(validity.as_ref(), row) {
+                    0
+                } else if descending {
+                    (high - i64::from(values[row])) as u64 + 1
+                } else {
+                    (i64::from(values[row]) - low) as u64 + 1
+                }
+            });
+            digit(codes, (high - low).max(0) as u64 + 1)
+        }
+        Some(Vector::Double { values, validity }) => {
+            // `NA` is 0 and `NaN` is 1, both before every number, as `setorder` places them.
+            let number = |row: usize| valid(validity.as_ref(), row) && !values[row].is_nan();
+            let mut low = u64::MAX;
+            let mut high = 0u64;
+            for row in 0..values.len() {
+                if number(row) {
+                    let bits = ordered_bits(values[row]);
+                    low = low.min(bits);
+                    high = high.max(bits);
+                }
+            }
+            let Some(top) = high.checked_sub(low).unwrap_or(0).checked_add(2) else {
+                return Ok(None);
+            };
+            let codes = fill_rows(values.len(), |row| {
+                if !valid(validity.as_ref(), row) {
+                    0
+                } else if values[row].is_nan() {
+                    1
+                } else if descending {
+                    high - ordered_bits(values[row]) + 2
+                } else {
+                    ordered_bits(values[row]) - low + 2
+                }
+            });
+            digit(codes, top)
+        }
+        Some(Vector::Logical { values, validity }) => {
+            let codes = fill_rows(values.len(), |row| {
+                if !valid(validity.as_ref(), row) {
+                    0
+                } else {
+                    1 + u64::from(values.get_bit(row) != descending)
+                }
+            });
+            digit(codes, 2)
+        }
+        None if matches!(column.dtype(), DataType::Enum(..)) => {
+            let (Some(codes), Some(levels)) = (Codes::of(column), factor_levels(column.dtype()))
+            else {
+                return Ok(None);
+            };
+            let levels = levels.len() as u64;
+            let values = fill_rows(column.len(), |row| {
+                if !valid(codes.validity.as_ref(), row) {
+                    0
+                } else if descending {
+                    levels - u64::from(code_at(&codes.values, row))
+                } else {
+                    u64::from(code_at(&codes.values, row)) + 1
+                }
+            });
+            digit(values, levels)
+        }
+        None if matches!(column.dtype(), DataType::String) => {
+            let (mut codes, distinct) = string_ranks(column)?;
+            if descending {
+                THREAD_POOL.install(|| {
+                    codes
+                        .par_iter_mut()
+                        .filter(|code| **code != 0)
+                        .for_each(|code| *code = distinct + 1 - *code);
+                });
+            }
+            digit(codes, distinct)
+        }
+        None => return Ok(None),
+    }))
+}
+
+/// Each string's rank among the column's distinct strings in byte order, counting from 1, with
+/// `NA` as 0, and how many distinct strings there are.
+///
+/// Each parallel run numbers the strings it meets in a hash map of its own, so the runs share
+/// nothing while they scan. The distinct strings of all runs are then sorted once, and each run
+/// translates its own numbers into ranks.
+fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
+    let strings = column.as_materialized_series().str()?.rechunk();
+    let Some(array) = strings.downcast_iter().next() else {
+        return Ok((Vec::new(), 0));
+    };
+    let length = array.len();
+    let runs = if length < PARALLEL_ROWS {
+        1
+    } else {
+        THREAD_POOL.current_num_threads().max(1) * 4
+    };
+    let run_length = length.div_ceil(runs).max(1);
+    let numbered: Vec<(Vec<&str>, Vec<u32>)> = THREAD_POOL.install(|| {
+        (0..length)
+            .step_by(run_length)
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|start| {
+                let mut inline: FxHashMap<u128, u32> = FxHashMap::default();
+                let mut long: FxHashMap<&str, u32> = FxHashMap::default();
+                let mut distinct: Vec<&str> = Vec::new();
+                let views = array.views();
+                let local = (start..(start + run_length).min(length))
+                    .map(|row| {
+                        if !array.is_valid(row) {
+                            return u32::MAX;
+                        }
+                        let view = views[row];
+                        // A string of up to 12 bytes lives inside its 16-byte view, so the view
+                        // (with the bytes past the string masked off) identifies it without
+                        // reading or hashing the string itself.
+                        if view.length <= INLINE_BYTES {
+                            let bits = view.as_u128() & inline_mask(view.length);
+                            if let Some(number) = inline.get(&bits) {
+                                return *number;
+                            }
+                            let number = distinct.len() as u32;
+                            distinct.push(array.value(row));
+                            inline.insert(bits, number);
+                            number
+                        } else {
+                            let value = array.value(row);
+                            *long.entry(value).or_insert_with(|| {
+                                distinct.push(value);
+                                (distinct.len() - 1) as u32
+                            })
+                        }
+                    })
+                    .collect();
+                (distinct, local)
+            })
+            .collect()
+    });
+    let mut sorted: Vec<&str> = numbered
+        .iter()
+        .flat_map(|(distinct, _)| distinct.iter().copied())
+        .collect();
+    THREAD_POOL.install(|| sorted.par_sort_unstable());
+    sorted.dedup();
+    let mut ranks = vec![0u64; length];
+    THREAD_POOL.install(|| {
+        ranks
+            .par_chunks_mut(run_length)
+            .zip(numbered.par_iter())
+            .for_each(|(out, (distinct, local))| {
+                let translation: Vec<u64> = distinct
+                    .iter()
+                    .map(|value| sorted.partition_point(|other| other < value) as u64 + 1)
+                    .collect();
+                for (slot, number) in out.iter_mut().zip(local) {
+                    *slot = translation.get(*number as usize).copied().unwrap_or(0);
+                }
+            });
+    });
+    Ok((ranks, sorted.len() as u64))
+}
+
+/// The mask that keeps a view's length and the first `length` bytes of its inline string.
+fn inline_mask(length: u32) -> u128 {
+    if length >= INLINE_BYTES {
+        u128::MAX
+    } else {
+        (1u128 << (32 + 8 * length)) - 1
+    }
+}
+
+/// The rows in the order the digits sort them, ties in row order, or `None` when the digits and
+/// the row number need more than 128 bits.
+fn sorted_rows(digits: &[Digit], height: usize) -> Option<Vec<u32>> {
+    let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
+    if bits + ROW_BITS <= u64::BITS {
+        Some(sort_packed::<u64>(digits, height))
+    } else if bits + ROW_BITS <= u128::BITS {
+        Some(sort_packed::<u128>(digits, height))
+    } else {
+        None
+    }
+}
+
+/// The first row of each distinct combination of the digits, in row order.
+fn first_rows(digits: &[Digit], height: usize) -> Vec<u32> {
+    let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
+    if bits <= DENSE_BITS {
+        let keys: Vec<u64> = packed_keys(digits, height, false);
+        let mut seen = vec![false; 1 << bits];
+        let mut rows = Vec::new();
+        for (row, key) in keys.iter().enumerate() {
+            let seen = &mut seen[*key as usize];
+            if !*seen {
+                *seen = true;
+                rows.push(row as u32);
+            }
+        }
+        return rows;
+    }
+    let Some(sorted) = sorted_rows(digits, height) else {
+        return (0..height as u32).collect();
+    };
+    let same = |left: u32, right: u32| {
+        digits
+            .iter()
+            .all(|digit| digit.codes[left as usize] == digit.codes[right as usize])
+    };
+    let mut rows: Vec<u32> = sorted
+        .iter()
+        .enumerate()
+        .filter(|(index, row)| *index == 0 || !same(sorted[index - 1], **row))
+        .map(|(_, row)| *row)
+        .collect();
+    THREAD_POOL.install(|| rows.par_sort_unstable());
+    rows
+}
+
+/// How many distinct combinations of the digits the rows hold.
+fn distinct_count(digits: &[Digit], height: usize) -> usize {
+    let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
+    if bits <= DENSE_BITS {
+        let keys: Vec<u64> = packed_keys(digits, height, false);
+        let mut seen = vec![false; 1 << bits];
+        let mut count = 0usize;
+        for key in keys {
+            let seen = &mut seen[key as usize];
+            count += usize::from(!*seen);
+            *seen = true;
+        }
+        return count;
+    }
+    fn count_sorted<T: Packed>(digits: &[Digit], height: usize) -> usize {
+        let mut keys: Vec<T> = packed_keys(digits, height, false);
+        THREAD_POOL.install(|| keys.par_sort_unstable());
+        keys.windows(2).filter(|pair| pair[0] != pair[1]).count() + usize::from(height > 0)
+    }
+    if bits <= u64::BITS {
+        count_sorted::<u64>(digits, height)
+    } else if bits <= u128::BITS {
+        count_sorted::<u128>(digits, height)
+    } else {
+        let mut keys: Vec<Vec<u64>> = (0..height)
+            .map(|row| digits.iter().map(|digit| digit.codes[row]).collect())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys.len()
+    }
+}
+
+/// An unsigned integer wide enough to hold the packed digits of a row.
+trait Packed: Copy + Ord + Send + Sync {
+    const ZERO: Self;
+    fn push(self, code: u64, bits: u32) -> Self;
+    fn low_row(self) -> u32;
+    /// The bits of the key from `shift` on, masked by `mask`.
+    fn digit(self, shift: u32, mask: u64) -> usize;
+}
+
+impl Packed for u64 {
+    const ZERO: Self = 0;
+    fn push(self, code: u64, bits: u32) -> Self {
+        self.checked_shl(bits).unwrap_or(0) | code
+    }
+    fn low_row(self) -> u32 {
+        self as u32
+    }
+    fn digit(self, shift: u32, mask: u64) -> usize {
+        ((self >> shift) & mask) as usize
+    }
+}
+
+impl Packed for u128 {
+    const ZERO: Self = 0;
+    fn push(self, code: u64, bits: u32) -> Self {
+        self.checked_shl(bits).unwrap_or(0) | u128::from(code)
+    }
+    fn low_row(self) -> u32 {
+        self as u32
+    }
+    fn digit(self, shift: u32, mask: u64) -> usize {
+        ((self >> shift) as u64 & mask) as usize
+    }
+}
+
+/// Each row's digits packed into one integer, the first digit highest, followed by the row
+/// number when `with_row`, so that sorting the integers sorts the rows stably.
+fn packed_keys<T: Packed>(digits: &[Digit], height: usize, with_row: bool) -> Vec<T> {
+    fill_rows(height, |row| {
+        let mut key = T::ZERO;
+        for digit in digits {
+            key = key.push(digit.codes[row], digit.bits);
+        }
+        if with_row {
+            key = key.push(row as u64, ROW_BITS);
+        }
+        key
+    })
+}
+
+fn sort_packed<T: Packed>(digits: &[Digit], height: usize) -> Vec<u32> {
+    let keys: Vec<T> = packed_keys(digits, height, true);
+    let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
+    let keys = radix_sort(keys, ROW_BITS, ROW_BITS + bits);
+    fill_rows(height, |index| keys[index].low_row())
+}
+
+/// Sorts the keys by their bits from `low` up to `high`, keeping keys that tie on those bits in
+/// their order, by least-significant-digit radix sort.
+///
+/// Each pass is a parallel stable counting sort: every task counts the digits of its slice, the
+/// counts give each task a disjoint run of output positions per digit, and the tasks then scatter
+/// their keys into those runs. The row number sits below `low`, so the sort never spends a pass on
+/// it, and a pass whose digit is the same for every key is skipped.
+fn radix_sort<T: Packed>(mut keys: Vec<T>, low: u32, high: u32) -> Vec<T> {
+    let total = high - low;
+    if total == 0 || keys.len() < 2 {
+        return keys;
+    }
+    let passes = if total <= ONE_PASS_BITS {
+        1
+    } else {
+        total.div_ceil(RADIX_BITS)
+    };
+    let width = total.div_ceil(passes);
+    let length = keys.len();
+    let tasks = if length < PARALLEL_ROWS {
+        1
+    } else {
+        THREAD_POOL.current_num_threads().max(1) * 4
+    };
+    let task_length = length.div_ceil(tasks);
+    let mut spare = vec![T::ZERO; length];
+    for pass in 0..passes {
+        let shift = low + pass * width;
+        let digit_bits = width.min(high - shift);
+        let buckets = 1usize << digit_bits;
+        let mask = (buckets - 1) as u64;
+        let counts: Vec<Vec<u32>> = THREAD_POOL.install(|| {
+            keys.par_chunks(task_length)
+                .map(|slice| {
+                    let mut counts = vec![0u32; buckets];
+                    for key in slice {
+                        counts[key.digit(shift, mask)] += 1;
+                    }
+                    counts
+                })
+                .collect()
+        });
+        if (0..buckets).any(|bucket| {
+            counts
+                .iter()
+                .map(|counts| counts[bucket] as usize)
+                .sum::<usize>()
+                == length
+        }) {
+            continue;
+        }
+        let mut starts = vec![vec![0usize; buckets]; counts.len()];
+        let mut position = 0usize;
+        for bucket in 0..buckets {
+            for (task, counts) in counts.iter().enumerate() {
+                starts[task][bucket] = position;
+                position += counts[bucket] as usize;
+            }
+        }
+        let out = Shared(spare.as_mut_ptr());
+        THREAD_POOL.install(|| {
+            keys.par_chunks(task_length)
+                .zip(starts.into_par_iter())
+                .for_each(|(slice, mut next)| {
+                    for key in slice {
+                        let slot = &mut next[key.digit(shift, mask)];
+                        // SAFETY: the counts reserve each task a run of positions per digit that
+                        // no other task's run overlaps, all of them inside `spare`, and the task
+                        // writes each position once.
+                        unsafe { out.write(*slot, *key) };
+                        *slot += 1;
+                    }
+                });
+        });
+        std::mem::swap(&mut keys, &mut spare);
+    }
+    keys
+}
+
+fn gather_frame(frame: &DataFrame, rows: &[u32]) -> Result<DataFrame> {
+    let columns: Vec<Column> = THREAD_POOL.install(|| {
+        frame
+            .columns()
+            .par_iter()
+            .map(|column| gather_column(column, rows, None, column.name().clone()))
+            .collect::<Result<_>>()
+    })?;
+    Ok(DataFrame::new(rows.len(), columns)?)
+}
+
+fn valid(validity: Option<&Bitmap>, row: usize) -> bool {
+    validity.is_none_or(|validity| validity.get_bit(row))
+}
+
+fn valid_range<T: Copy>(
+    values: &[T],
+    validity: Option<&Bitmap>,
+    widen: impl Fn(T) -> i64,
+) -> (i64, i64) {
+    let mut low = i64::MAX;
+    let mut high = i64::MIN;
+    for (row, value) in values.iter().enumerate() {
+        if valid(validity, row) {
+            low = low.min(widen(*value));
+            high = high.max(widen(*value));
+        }
+    }
+    if low > high { (0, 0) } else { (low, high) }
+}
+
+/// A double's bits rearranged so that unsigned order is numeric order, with `-0.0` equal to
+/// `0.0`.
+fn ordered_bits(value: f64) -> u64 {
+    let bits = (value + 0.0).to_bits();
+    if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | (1 << 63)
+    }
+}
+
+fn fill_rows<R: Send>(length: usize, value: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    fill(length, |start, out| {
+        for (offset, slot) in out.iter_mut().enumerate() {
+            slot.write(value(start + offset));
+        }
+    })
 }
 
 /// The type a column stacked from these pieces takes: the widest of logical, integer, double and

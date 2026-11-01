@@ -390,7 +390,9 @@ impl Context<'_> {
                     // the subject's slot.
                     Some("setnames" | "setcolorder") if !arguments.is_empty() => {
                         self.resolve_arguments(arguments);
-                        if let Some(subject) = arguments[0].value.filter(|_| arguments[0].name.is_none()) {
+                        if let Some(subject) =
+                            arguments[0].value.filter(|_| arguments[0].name.is_none())
+                        {
                             self.record_column_update(id, subject);
                         }
                         return;

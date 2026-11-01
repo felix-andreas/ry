@@ -3496,3 +3496,241 @@ fn unique_keeps_the_first_row_of_each_combination() {
     assert_eq!(get(&mut unique, "r"), strings(&["b", "a"]));
     assert_eq!(get(&mut unique, "c"), strings(&["y", "x"]));
 }
+
+/// R's order of two values of one column under `setorder`: `NA` first and `NaN` next in both
+/// directions, then the values ascending or descending, strings by their bytes.
+fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // 0 is `NA`, 1 is `NaN`, and 2 is a value.
+    let class = |row: usize| -> u8 {
+        match vector {
+            RVector::Logical(values) | RVector::Integer(values) => {
+                2 * u8::from(values[row] != NA_INTEGER)
+            }
+            RVector::Factor { codes, .. } => 2 * u8::from(codes[row] != NA_INTEGER),
+            RVector::Double(values) if is_na_real(values[row]) => 0,
+            RVector::Double(values) if values[row].is_nan() => 1,
+            RVector::Double(_) => 2,
+            RVector::Character(values) => 2 * u8::from(values[row].is_some()),
+        }
+    };
+    let (left_class, right_class) = (class(left), class(right));
+    if left_class != right_class || left_class < 2 {
+        return left_class.cmp(&right_class);
+    }
+    let ordering = match vector {
+        RVector::Logical(values) | RVector::Integer(values) => values[left].cmp(&values[right]),
+        RVector::Factor { codes, .. } => codes[left].cmp(&codes[right]),
+        RVector::Double(values) => values[left]
+            .partial_cmp(&values[right])
+            .unwrap_or(Ordering::Equal),
+        RVector::Character(values) => values[left]
+            .as_deref()
+            .map(str::as_bytes)
+            .cmp(&values[right].as_deref().map(str::as_bytes)),
+    };
+    if descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
+}
+
+/// A random column of `length` rows of one of the types the sort kernels code, with `NA`s, and
+/// `NaN`, `-0.0` and infinities among the doubles.
+fn random_column(rng: &mut SplitMix64, kind: usize, length: usize) -> RVector {
+    let distinct = 1 + rng.below(200);
+    match kind {
+        0 => RVector::Integer(
+            (0..length)
+                .map(|_| {
+                    if rng.chance(1, 10) {
+                        NA_INTEGER
+                    } else {
+                        rng.below(distinct) as i32 - 50
+                    }
+                })
+                .collect(),
+        ),
+        1 => RVector::Double(
+            (0..length)
+                .map(|_| match rng.below(12) {
+                    0 => NA_REAL,
+                    1 => f64::NAN,
+                    2 => -0.0,
+                    3 => f64::NEG_INFINITY,
+                    _ => (rng.below(distinct) as f64 - 50.0) / 4.0,
+                })
+                .collect(),
+        ),
+        2 => RVector::Logical(
+            (0..length)
+                .map(|_| [0, 1, NA_INTEGER][rng.below(3)])
+                .collect(),
+        ),
+        3 => RVector::Character(
+            (0..length)
+                .map(|_| {
+                    (!rng.chance(1, 10)).then(|| {
+                        format!("{}k{}", ["", "B", "a"][rng.below(3)], rng.below(distinct))
+                    })
+                })
+                .collect(),
+        ),
+        _ => RVector::Factor {
+            codes: (0..length)
+                .map(|_| {
+                    if rng.chance(1, 10) {
+                        NA_INTEGER
+                    } else {
+                        1 + rng.below(5) as i32
+                    }
+                })
+                .collect(),
+            levels: ["z", "b", "y", "a", "x"]
+                .iter()
+                .map(|level| level.to_string())
+                .collect(),
+        },
+    }
+}
+
+fn permuted(vector: &RVector, rows: &[usize]) -> RVector {
+    match vector {
+        RVector::Logical(values) => RVector::Logical(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Integer(values) => RVector::Integer(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Double(values) => RVector::Double(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Character(values) => {
+            RVector::Character(rows.iter().map(|row| values[*row].clone()).collect())
+        }
+        RVector::Factor { codes, levels } => RVector::Factor {
+            codes: rows.iter().map(|row| codes[*row]).collect(),
+            levels: levels.clone(),
+        },
+    }
+}
+
+/// The sort, unique and run kernels on tables large enough to split into parallel runs, against
+/// a reference that applies data.table's rules one row at a time.
+#[test]
+fn fuzz_sort_unique_and_runs_against_a_reference() {
+    let mut rng = SplitMix64(0x5047);
+    for _ in 0..fuzz_iterations(3) {
+        let length = 70_000 + rng.below(70_000);
+        let names = ["a", "b", "c", "row"];
+        let mut vectors: Vec<RVector> = (0..3)
+            .map(|_| {
+                let kind = rng.below(5);
+                random_column(&mut rng, kind, length)
+            })
+            .collect();
+        vectors.push(RVector::Integer((0..length as i32).collect()));
+        let by: Vec<(&str, bool)> = (0..1 + rng.below(3))
+            .map(|index| (names[index], rng.chance(1, 2)))
+            .collect();
+
+        let mut expected: Vec<usize> = (0..length).collect();
+        expected.sort_by(|left, right| {
+            by.iter()
+                .enumerate()
+                .map(|(index, (_, descending))| {
+                    r_order(&vectors[index], *left, *right, *descending)
+                })
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let columns: Vec<(&str, RVector)> =
+            names.iter().copied().zip(vectors.iter().cloned()).collect();
+        let mut x = frame(columns);
+        ops::set_order(&mut x, &by).unwrap_or_else(|error| panic!("{error}"));
+        for (name, vector) in names.iter().zip(&vectors) {
+            assert_eq!(
+                Read(get(&mut x, name)),
+                permuted(vector, &expected),
+                "column {name} sorted by {by:?}"
+            );
+        }
+
+        let x = frame(names.iter().copied().zip(vectors.iter().cloned()).collect());
+        let key_names: Vec<&str> = by.iter().map(|(name, _)| *name).collect();
+        let same = |left: usize, right: usize| {
+            (0..key_names.len()).all(|index| r_order(&vectors[index], left, right, false).is_eq())
+        };
+        // The sort above is stable, so the first row of each run of equal keys in `expected` is
+        // that combination's first row in the table. Direction does not change which rows are
+        // equal.
+        let mut firsts: Vec<usize> = expected
+            .iter()
+            .enumerate()
+            .filter(|(index, row)| *index == 0 || !same(expected[index - 1], **row))
+            .map(|(_, row)| *row)
+            .collect();
+        firsts.sort_unstable();
+        assert_eq!(
+            ops::unique_count(&x, &key_names).unwrap_or_else(|error| panic!("{error}")),
+            firsts.len(),
+            "uniqueN by {key_names:?}"
+        );
+        let mut unique = ops::unique_rows(&x, &key_names).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            get(&mut unique, "row"),
+            RVector::Integer(firsts.iter().map(|row| *row as i32).collect()),
+            "unique by {key_names:?}"
+        );
+
+        let key_columns: Vec<table::polars::prelude::Column> = key_names
+            .iter()
+            .zip(&vectors)
+            .map(|(name, vector)| column_of(name, vector.clone()))
+            .collect();
+        let runs = ops::rleid(&key_columns.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut run = 0;
+        let expected_runs: Vec<i32> = (0..length)
+            .map(|row| {
+                if row == 0 || !same(row - 1, row) {
+                    run += 1;
+                }
+                run
+            })
+            .collect();
+        assert_eq!(
+            vector(&runs),
+            RVector::Integer(expected_runs),
+            "rleid of {key_names:?}"
+        );
+
+        let gaps: Vec<f64> = (0..length)
+            .map(|row| {
+                if rng.chance(1, 3) || row < 5 || row + 5 > length {
+                    NA_REAL
+                } else {
+                    row as f64
+                }
+            })
+            .collect();
+        let gappy = column_of("g", RVector::Double(gaps.clone()));
+        for (fill, backward) in [(ops::Fill::Forward, false), (ops::Fill::Backward, true)] {
+            let mut expected = gaps.clone();
+            let mut last = NA_REAL;
+            let rows: Vec<usize> = if backward {
+                (0..length).rev().collect()
+            } else {
+                (0..length).collect()
+            };
+            for row in rows {
+                if is_na_real(expected[row]) {
+                    expected[row] = last;
+                } else {
+                    last = expected[row];
+                }
+            }
+            let filled = ops::nafill(&gappy, fill).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                Read(vector(&filled)),
+                RVector::Double(expected),
+                "nafill {fill:?}"
+            );
+        }
+    }
+}

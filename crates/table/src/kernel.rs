@@ -32,7 +32,7 @@ use crate::{ColumnType, Error, Result, Schema};
 /// costs more than it saves.
 pub(crate) const PARALLEL_ROWS: usize = 1 << 16;
 /// The rows one parallel task covers. A multiple of 64, so a task's bits fill whole words.
-const CHUNK_ROWS: usize = 1 << 16;
+pub(crate) const CHUNK_ROWS: usize = 1 << 16;
 
 /// A column of logical, integer or double values, with Arrow's validity bitmap marking `NA`.
 /// The value behind an `NA` is unspecified.
@@ -1269,6 +1269,20 @@ fn pack_byte<T: Copy>(values: &[T], test: &impl Fn(T) -> bool) -> u8 {
         byte |= u8::from(test(*value)) << bit;
     }
     byte
+}
+
+/// One bit per row, set where `test(row)` holds, computed in parallel.
+pub(crate) fn pack_rows(len: usize, test: impl Fn(usize) -> bool + Sync) -> Bitmap {
+    pack(len, |start, out| {
+        for (index, slot) in out.iter_mut().enumerate() {
+            let first = start + index * 8;
+            let mut byte = 0u8;
+            for (bit, row) in (first..(first + 8).min(len)).enumerate() {
+                byte |= u8::from(test(row)) << bit;
+            }
+            slot.write(byte);
+        }
+    })
 }
 
 pub(crate) fn pack_map<T: Copy + Sync>(

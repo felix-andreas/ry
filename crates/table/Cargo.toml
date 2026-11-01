@@ -47,3 +47,7 @@ syntax = { path = "../syntax" }
 [[bench]]
 name = "db_benchmark"
 harness = false
+
+[[bench]]
+name = "ops_benchmark"
+harness = false

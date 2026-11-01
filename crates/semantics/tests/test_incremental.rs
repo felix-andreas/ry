@@ -340,8 +340,14 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
     PackageMetadata::new(&db, Vec::new(), Default::default(), attached, None);
     let layouts = |prices: &str| {
         BTreeMap::from([
-            ("prices.csv".to_owned(), sniff::sniff_head(prices.as_bytes())),
-            ("trades.csv".to_owned(), sniff::sniff_head(b"id,size\n1,2\n")),
+            (
+                "prices.csv".to_owned(),
+                sniff::sniff_head(prices.as_bytes()),
+            ),
+            (
+                "trades.csv".to_owned(),
+                sniff::sniff_head(b"id,size\n1,2\n"),
+            ),
         ])
     };
     let data_files = DataFiles::new(&db, layouts("id,price\n1,2.5\n"));

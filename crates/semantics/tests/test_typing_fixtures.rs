@@ -166,14 +166,18 @@ fn render_with_strict(source: &str) -> String {
 /// is a data file, sniffed exactly as the hosts sniff a project's `.csv` files, and each case
 /// gets a fresh database because the data-file and metadata inputs are singletons.
 fn render_with_data_files(source: &str) -> String {
-    let files = split_files(source).unwrap_or_else(|| vec![("main.R".to_owned(), source.to_owned())]);
+    let files =
+        split_files(source).unwrap_or_else(|| vec![("main.R".to_owned(), source.to_owned())]);
     let mut db = RootDatabase::default();
     install_shipped_stubs(&db);
     let mut layouts = BTreeMap::new();
     let mut sources = Vec::new();
     for (path, text) in &files {
         if path.ends_with(".R") {
-            sources.push((path, SourceFile::new(&db, text.clone(), DocumentKind::Script)));
+            sources.push((
+                path,
+                SourceFile::new(&db, text.clone(), DocumentKind::Script),
+            ));
         } else {
             layouts.insert(path.clone(), sniff::sniff_head(text.as_bytes()));
         }
@@ -181,7 +185,13 @@ fn render_with_data_files(source: &str) -> String {
     DataFiles::new(&db, layouts);
     ProjectFiles::new(&db, sources.iter().map(|(_, file)| *file).collect());
     let attached = attached_union(&db, sources.iter().map(|(_, file)| *file));
-    let metadata = PackageMetadata::new(&db, Vec::new(), Default::default(), Default::default(), None);
+    let metadata = PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        Default::default(),
+        None,
+    );
     metadata.set_attached(&mut db).to(attached);
     let mut output = String::new();
     for (path, file) in &sources {
