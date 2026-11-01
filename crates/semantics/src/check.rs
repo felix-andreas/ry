@@ -5814,9 +5814,10 @@ impl<'db> Checker<'db, '_> {
     fn callable(&mut self, ty: Ty<'db>) -> Callable {
         let resolved = self.structural(ty);
         match resolved.kind(self.db) {
-            TyKind::Function(_) | TyKind::Any | TyKind::Unknown | TyKind::Named(..) => {
-                Callable::Yes
-            }
+            TyKind::Function(_) | TyKind::Any | TyKind::Unknown => Callable::Yes,
+            // A nominal left after projection is opaque (`matrix`, `Date`, `data.frame`): an R
+            // object with a class, never a closure, so R's function lookup skips it.
+            TyKind::Named(..) => Callable::No,
             TyKind::Rigid(_) => Callable::Untyped,
             TyKind::Var(_) => match self.table.open_constraint(self.db, resolved) {
                 Some(Constraint::Unconstrained) => Callable::Untyped,

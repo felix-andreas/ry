@@ -373,3 +373,17 @@ pick <- function(flag) {
 #++++
 pick: Unknown
 85..90 error[type-mismatch] field `alpah` does not exist in `list{alpha: integer} | list{beta: character}`. Did you mean `alpha`?
+
+#---- a_string_call_head_calls_the_function_of_that_name
+shout <- function(x) "toupper"(x)
+#++++
+shout: <T> fn(x: T) -> character
+
+#---- a_call_skips_a_local_holding_a_matrix
+flip <- function(phi, flag, m) {
+  phi <- as.matrix(c(phi))
+  if (flag) t <- 0.5 + 0.5 * cos(phi) else t <- phi
+  t(m)
+}
+#++++
+flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
