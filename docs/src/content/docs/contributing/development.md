@@ -63,6 +63,22 @@ workspace builds and its tests run on a machine with no R. Only running the cons
 end-to-end tests skip cleanly where R is missing; run `just repl-e2e` before you touch the console.
 [REPL design](/contributing/design/repl/) records how the embedding works.
 
+### ry's runtime is built separately
+
+`ry run` and `ry repl --runtime ry` load ry's own runtime, `libR.so`, from the directory of the
+`ry` executable. It is a separate crate (`libr`), so `cargo build -p ry-lang` does not rebuild it;
+`just ry` and `just build` do. To keep a leftover library from running old code, `ry` compares a
+hash of the runtime's sources with the one stored in `libR.so` right after loading it, and refuses
+a mismatch with exit status 2:
+
+```text
+  x ry's runtime (target/debug/libR.so) is out of date: it has build 8fcdf6d9f4862983, but this ry is build
+  | 2588183553632a45; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)
+```
+
+Build `libr` with the same profile as `ry` and the error goes away. The hash covers the sources
+of `libr` and the crates it links, so editing the formatter or the IDE layer never triggers it.
+
 ## Debugging
 
 - `ry server --debug`, or `RY_DEBUG=1` in the server's environment, adds a "Debug" section to every

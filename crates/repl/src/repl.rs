@@ -223,7 +223,39 @@ fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
             library_path.display()
         ))
     })?;
-    Ok(Box::leak(Box::new(library)))
+    let library: &'static libloading::os::unix::Library = Box::leak(Box::new(library));
+    let built_from = runtime_id(library);
+    if built_from.as_deref() != Some(RUNTIME_ID) {
+        return Err(ReplError(stale_runtime_message(
+            &library_path,
+            built_from.as_deref(),
+        )));
+    }
+    Ok(library)
+}
+
+/// The identity of the sources `ry` was built from, which `libR.so` must have been built from
+/// too (`crates/libr/build_identity.rs` defines it).
+const RUNTIME_ID: &str = env!("RY_RUNTIME_ID");
+
+/// `None` for a library that exports no identity, which predates the check.
+fn runtime_id(library: &'static libloading::os::unix::Library) -> Option<String> {
+    type RuntimeId = unsafe extern "C" fn() -> *const std::ffi::c_char;
+    let id = runtime_entry::<RuntimeId>(library, "ry_runtime_id").ok()?;
+    let pointer = unsafe { id() };
+    (!pointer.is_null()).then(|| {
+        unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+fn stale_runtime_message(library_path: &std::path::Path, built_from: Option<&str>) -> String {
+    format!(
+        "ry's runtime ({}) is out of date: it has build {}, but this ry is build {RUNTIME_ID}; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)",
+        library_path.display(),
+        built_from.unwrap_or("unknown"),
+    )
 }
 
 fn runtime_entry<T: Copy>(

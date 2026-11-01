@@ -1123,3 +1123,50 @@ fn an_unusable_r_home_stops_ry_s_runtime_with_one_actionable_message() {
         );
     }
 }
+
+/// A runtime library built from other sources than `ry` is refused with a message that names the
+/// fix, and exits 2. A stub library that exports a different identity stands in for the stale
+/// `libR.so`, so no runtime build is needed.
+#[cfg(unix)]
+#[test]
+fn a_runtime_with_another_build_identity_is_refused() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let source = directory.path().join("stub.c");
+    fs::write(
+        &source,
+        "const char *ry_runtime_id(void) { return \"0000000000000000\"; }\n",
+    )
+    .expect("write stub");
+    let library = directory.path().join("libR.so");
+    let compiled = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .status();
+    if !compiled.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: no C compiler to build a stub runtime");
+        return;
+    }
+    let script = directory.path().join("script.R");
+    fs::write(&script, "cat(\"unreached\\n\")\n").expect("write script");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .arg(&script)
+        .env("RY_LIBR", &library)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run the binary");
+    let stderr = String::from_utf8_lossy(&output.stderr).replace("\n  | ", " ");
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    for expected in [
+        "is out of date",
+        "it has build 0000000000000000",
+        "cargo build -p libr",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in: {stderr}"
+        );
+    }
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("unreached"));
+}

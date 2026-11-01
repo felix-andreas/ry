@@ -1131,6 +1131,14 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     }
 }
 
+/// The hash of the sources this library was built from, as a NUL-terminated string. The `ry`
+/// executable compares it with its own right after loading, because cargo builds `libR.so`
+/// separately and a stale one would otherwise run old code without any sign.
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_runtime_id() -> *const c_char {
+    concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
+}
+
 /// Runs R on ry's runtime the way `Rscript` does: starts the session (base R and the default
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
 /// `input` and then the file at `path` (either may be null), and returns the exit status: 0 on

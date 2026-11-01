@@ -3488,3 +3488,17 @@ explicit allocators".
   the formal and says the call supplied its type, and is reported on the use rather than the whole
   literal.
 - The spec is "Function literals in call arguments" in `reference/type-system.mdx`.
+
+## ry refuses a `libR.so` built from other sources
+
+- Cargo builds `libR.so` separately from `ry`, so after an edit to a shared crate (the parser, the
+  interpreter) a leftover library silently ran old code. `libr` and `repl` both hash the sources
+  (`src/`, `include/`, `build.rs`) of `libr` and every workspace crate it links, found by following
+  `path` dependencies (`crates/libr/build_identity.rs`, included by both build scripts).
+  `libR.so` exports the hash as `ry_runtime_id`, and `ry` compares it right after `dlopen`, then
+  exits 2 naming `just build` and `cargo build -p libr`.
+- Contents, not timestamps or a git commit: a rebuild or `touch` that changes nothing keeps the
+  identity, git is not needed, and the two binaries of one `cargo install` or release build always
+  agree. Edits to crates `libr` does not link (the formatter, the IDE layer) leave it alone.
+- Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
+  change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
