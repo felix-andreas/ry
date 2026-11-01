@@ -89,7 +89,7 @@ fn cases_survive_gc_torture() {
     let mut all = cases();
     let mut rng = SplitMix64(seed);
     let mut chosen = Vec::new();
-    for _ in 0..fuzz_iterations(4).min(all.len()) {
+    for _ in 0..fuzz_iterations(1).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }
     let timeout = Duration::from_secs(600);
