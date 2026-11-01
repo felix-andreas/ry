@@ -280,6 +280,12 @@ pub enum Intrinsic {
     },
     /// `Dict.get()`.
     DictGet,
+    /// `x$name` on a record of this layout, whose field is slot `index`, as the site's shape
+    /// cache recorded it.
+    Field {
+        layout: u32,
+        index: u32,
+    },
 }
 
 /// Where a directly called closure's argument comes from.
@@ -787,6 +793,15 @@ impl Builder<'_> {
         self.slot_of[&symbol]
     }
 
+    /// The layout and slot a `$` site's shape cache holds, once tier 0 has seen a record there.
+    fn cached_field(&self, shape: Sexp) -> Option<(u32, u32)> {
+        // SAFETY: the shape constant is the two-element integer vector the compiler made.
+        let &[layout, index] = (unsafe { values::ints(shape) }) else {
+            return None;
+        };
+        Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
+    }
+
     fn feedback_at(&self, pc: usize) -> Ty {
         from_feedback(self.feedback.get(pc).copied().unwrap_or(0))
     }
@@ -1133,7 +1148,35 @@ impl Builder<'_> {
                     Action::BranchIfObject { src: operand(0) }
                 }
             }
-            Op::CallTailUpdate | Op::Field => self.opaque_step(
+            Op::Field => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(4))) {
+                    Some((layout, index)) if feedback != Ty::Bottom => {
+                        // A boxed field is loaded as it is, so only an unboxed scalar's type is
+                        // something the read itself checks.
+                        let feedback = if feedback.is_unboxed() {
+                            feedback
+                        } else {
+                            Ty::Boxed
+                        };
+                        state.registers[operand(0)] = feedback;
+                        state.visible = Some(true);
+                        Action::Intrinsic {
+                            intrinsic: Intrinsic::Field { layout, index },
+                            dst: operand(0),
+                            args: vec![operand(1)],
+                            result: feedback,
+                        }
+                    }
+                    _ => self.opaque_step(
+                        state,
+                        Some((operand(0), feedback)),
+                        Vec::new(),
+                        Effect::Opaque,
+                    ),
+                }
+            }
+            Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 Vec::new(),

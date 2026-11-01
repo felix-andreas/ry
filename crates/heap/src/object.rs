@@ -452,8 +452,8 @@ pub const UNBOXED_SLOTS: usize = 64;
 /// 32 bits under one of these quiet-NaN prefixes, so the one-bit mask is enough to tell a raw
 /// slot from a handle. A double whose upper word happens to equal a prefix is stored boxed
 /// instead, which keeps every NaN payload (`NA_real_` among them) exact.
-const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
-const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
+pub const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
+pub const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
 
 impl Slot {
     fn encode(self) -> u64 {
@@ -510,6 +510,9 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
 
 /// Where a record's slots start.
 pub const RECORD_DATA_OFFSET: usize = size_of::<RecordObject>();
+/// Where a record's layout id and its unboxed-slot mask are, for compiled field reads.
+pub const RECORD_LAYOUT_OFFSET: usize = std::mem::offset_of!(RecordObject, layout);
+pub const RECORD_UNBOXED_OFFSET: usize = std::mem::offset_of!(RecordObject, unboxed);
 
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
