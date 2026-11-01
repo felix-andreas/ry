@@ -776,3 +776,22 @@ neg <- function(x) -x
 #++++
 neg: fn(x: double | NULL) -> double
 54..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | NULL`
+
+#---- a_formal_tested_by_an_rlang_type_predicate_takes_any_type
+is_string <- function(x) is.character(x) && length(x) == 1
+as_function <- function(x) {
+  if (is_string(x)) return(get(x, mode = "function"))
+  x
+}
+map <- function(.x, .f, ...) {
+  .f <- as_function(.f)
+  lapply(.x, .f, ...)
+}
+g <- function(xs) map(xs, function(d) d + 1)
+h <- function(xs) map(xs, "identity")
+#++++
+is_string: fn(x: Unknown) -> logical
+as_function: fn(x: Unknown) -> Any
+map: <T> fn(.x: Unknown, .f: T, ...: Any) -> Unknown
+g: <T> fn(xs: T) -> Unknown
+h: <T> fn(xs: T) -> Unknown
