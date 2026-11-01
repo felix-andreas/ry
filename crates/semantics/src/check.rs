@@ -353,6 +353,7 @@ pub fn check_item_with_annotation<'db>(
         pre_materialized: FxHashMap::default(),
         no_default_formals: FxHashSet::default(),
         non_local_slots: FxHashMap::default(),
+        string_values: FxHashMap::default(),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -763,6 +764,11 @@ struct Checker<'db, 'a> {
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: FxHashMap<Symbol, BindingId>,
     next_non_local_slot: u32,
+    /// The write of a binding whose only write is literal strings (`"a"` or `c("a", "b")`),
+    /// compared by site so a re-pass over the same write keeps it. `None` once a second write
+    /// site, or a write of anything else, appears. Queries read it for column names given through a variable
+    /// (`.SDcols = cols`, `(cols) := ...`).
+    string_values: FxHashMap<BindingId, Option<StringWrite>>,
 }
 
 /// The evaluation frame of one query `f[i, j, by]`.
@@ -2032,6 +2038,15 @@ impl<'db> Checker<'db, '_> {
         }
         if let ExpressionKind::NameRef(_) = self.module.expression(target).kind {
             if let Some(&slot) = self.naming.resolutions.get(&target) {
+                let literal = spelling != AssignSpelling::Super
+                    && literal_strings(self.module, value).is_some();
+                let write = StringWrite { target, value };
+                let tracked = match self.string_values.get(&slot) {
+                    None if literal => Some(write),
+                    Some(Some(existing)) if literal && *existing == write => Some(write),
+                    _ => None,
+                };
+                self.string_values.insert(slot, tracked);
                 if spelling == AssignSpelling::Super {
                     let written = self.table.resolve(self.db, value_ty);
                     self.join_enclosing_write(slot, written);
@@ -2055,7 +2070,42 @@ impl<'db> Checker<'db, '_> {
             }
             self.recorded.insert(target, value_ty);
         } else {
+            // `cols[2] <- "x"` and `names(cols) <- ...` change the strings `cols` holds.
+            let mut root = target;
+            loop {
+                match &self.module.expression(root).kind {
+                    ExpressionKind::Index { target, .. } | ExpressionKind::Field { target, .. } => {
+                        root = *target;
+                    }
+                    ExpressionKind::Call { arguments, .. } => {
+                        match arguments.first().and_then(|argument| argument.value) {
+                            Some(first) => root = first,
+                            None => break,
+                        }
+                    }
+                    ExpressionKind::Paren(inner) => root = *inner,
+                    _ => break,
+                }
+            }
+            if let Some(&slot) = self.naming.resolutions.get(&root) {
+                self.string_values.insert(slot, None);
+            }
             self.write_replacement_target(target, value, value_ty);
+        }
+    }
+
+    /// The column names `id` spells: a string, `c()` of strings, or a variable whose only
+    /// write is one of those. Each name carries the range of the literal that spells it.
+    fn column_names(&self, id: ExprId) -> Option<Vec<(String, TextRange)>> {
+        let module = self.module;
+        match &module.expression(id).kind {
+            ExpressionKind::NameRef(_) => {
+                let slot = self.naming.resolutions.get(&id)?;
+                let write = self.string_values.get(slot)?.as_ref()?;
+                literal_strings(module, write.value)
+            }
+            ExpressionKind::Paren(inner) => self.column_names(*inner),
+            _ => literal_strings(module, id),
         }
     }
 
@@ -6429,6 +6479,35 @@ impl<'db> Checker<'db, '_> {
                 }
                 chosen
             }
+            // A variable holding column names, as `cols <- c("a", "b")` makes it.
+            ExpressionKind::NameRef(_) if let Some(names) = self.column_names(selection) => {
+                self.infer(selection);
+                let mut chosen = vec![false; columns.len()];
+                let mut complete = true;
+                for (name, range) in &names {
+                    match columns
+                        .iter()
+                        .position(|column| column.name.text(db) == name.as_str())
+                    {
+                        Some(index) => {
+                            if let Some(slot) = chosen.get_mut(index) {
+                                *slot = true;
+                            }
+                        }
+                        None => {
+                            complete = false;
+                            self.errors.push(TypeError {
+                                range: *range,
+                                kind: column_does_not_exist(db, name, frame, columns),
+                            });
+                        }
+                    }
+                }
+                if !complete {
+                    return None;
+                }
+                chosen
+            }
             ExpressionKind::Binary {
                 operator: BinaryOperator::Sequence,
                 lhs,
@@ -6764,40 +6843,26 @@ impl<'db> Checker<'db, '_> {
         let mut updates: Option<Vec<(String, Ty<'db>, Option<ExprId>)>> = Some(Vec::new());
         match arguments {
             [left, right] if left.name.is_none() && right.name.is_none() => {
-                // The left side names columns; it is never read. `(cols) := v` evaluates `cols`
-                // for the names, which is the same set when `cols` is a literal.
-                let left_value = left
+                // The left side names columns: a bare name is the column itself, and `(cols)`
+                // evaluates `cols`, whose names are known when it holds literal strings.
+                let names: Option<Vec<String>> = match left
                     .value
-                    .map(|value| match &module.expression(value).kind {
-                        ExpressionKind::Paren(inner)
-                            if matches!(
-                                &module.expression(*inner).kind,
-                                ExpressionKind::Literal(LiteralKind::String(_))
-                                    | ExpressionKind::Call { .. }
-                            ) =>
+                    .map(|value| (value, &module.expression(value).kind))
+                {
+                    Some((_, ExpressionKind::NameRef(name))) => Some(vec![name.to_string()]),
+                    Some((value, _)) => {
+                        let names = self
+                            .column_names(value)
+                            .map(|names| names.into_iter().map(|(name, _)| name).collect());
+                        if names.is_none()
+                            || matches!(&module.expression(value).kind, ExpressionKind::Paren(_))
                         {
-                            *inner
+                            self.infer(value);
                         }
-                        _ => value,
-                    });
-                let names: Option<Vec<String>> =
-                    match left_value.map(|value| &module.expression(value).kind) {
-                        Some(ExpressionKind::NameRef(name)) => Some(vec![name.to_string()]),
-                        Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
-                            Some(vec![name.to_string()])
-                        }
-                        Some(ExpressionKind::Call { callee, arguments })
-                            if variable_name(module, *callee).as_deref() == Some("c") =>
-                        {
-                            string_literals(module, arguments)
-                        }
-                        _ => {
-                            if let Some(value) = left.value {
-                                self.infer(value);
-                            }
-                            None
-                        }
-                    };
+                        names
+                    }
+                    None => None,
+                };
                 let items: Option<Vec<ExprId>> =
                     right
                         .value
@@ -7671,6 +7736,41 @@ fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<RecordField<'d
 }
 
 /// `None` unless every argument is an unnamed string literal.
+/// The only write to a binding, when its value is literal strings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StringWrite {
+    target: ExprId,
+    value: ExprId,
+}
+
+/// The strings of `"a"` or `c("a", "b")`, each with its literal's range.
+fn literal_strings(module: &Module, value: ExprId) -> Option<Vec<(String, TextRange)>> {
+    let expression = module.expression(value);
+    match &expression.kind {
+        ExpressionKind::Literal(LiteralKind::String(text)) => {
+            Some(vec![(text.to_string(), expression.range)])
+        }
+        ExpressionKind::Call { callee, arguments }
+            if variable_name(module, *callee).as_deref() == Some("c") =>
+        {
+            arguments
+                .iter()
+                .map(|argument| {
+                    let item = argument.value.filter(|_| argument.name.is_none())?;
+                    let expression = module.expression(item);
+                    match &expression.kind {
+                        ExpressionKind::Literal(LiteralKind::String(text)) => {
+                            Some((text.to_string(), expression.range))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+        _ => None,
+    }
+}
+
 fn string_literals(module: &Module, arguments: &[Argument]) -> Option<Vec<String>> {
     arguments
         .iter()

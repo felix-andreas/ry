@@ -2448,8 +2448,20 @@ columns of one name, so such a result has unknown columns, as does any other `.S
 as `patterns()` or column positions.
 
 `c("a", "b") := lapply(.SD, g)` assigns the applied columns to the named ones in order, and
-`(c("a", "b")) := ...` does the same. A left side that is a variable, such as `(cols) := ...`,
-names columns ry cannot see, so the updated frame has unknown columns.
+`(c("a", "b")) := ...` does the same. Column names can also come from a variable, in `.SDcols = cols`
+and `(cols) := ...`, when the variable is assigned once, in the same function, to a string or a
+`c()` of strings:
+
+```r
+relabel <- function(sales) {
+  cols <- c("units", "price")
+  sales[, (cols) := lapply(.SD, as.character), .SDcols = cols]
+}
+```
+
+A misspelled name is then reported on its string in the assignment. A variable written more than
+once, changed in place (`cols[2] <- "team"`), or assigned in another top-level statement names
+columns ry cannot see, so the result has unknown columns.
 
 #### Column updates
 

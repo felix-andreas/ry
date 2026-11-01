@@ -420,6 +420,45 @@ labelled: frame{team: character[], units: character[], price: character[]}
 orders: frame{id: integer[], units: integer[]}
 doubled: frame{id: integer[], units: double[]}
 
+#---- a_local_name_vector_selects_and_assigns_columns
+relabel <- function() {
+  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  cols <- c("units", "price")
+  sales[, (cols) := lapply(.SD, as.character), .SDcols = cols]
+}
+pick <- function() {
+  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  cols <- "units"
+  sales[, .SD, .SDcols = cols]
+}
+misspelled <- function() {
+  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  cols <- c("units", "prise")
+  sales[, .SD, .SDcols = cols]
+}
+#++++
+relabel: fn() -> frame{team: character[], units: character[], price: character[]}
+pick: fn() -> frame{units: integer[]}
+misspelled: Unknown
+470..477 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
+
+#---- a_name_vector_written_twice_leaves_the_columns_unknown
+relabel <- function(wide) {
+  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  cols <- "units"
+  if (wide) cols <- c("units", "price")
+  sales[, .SD, .SDcols = cols]
+}
+shifted <- function() {
+  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  cols <- c("units", "price")
+  cols[2] <- "team"
+  sales[, .SD, .SDcols = cols]
+}
+#++++
+relabel: fn(wide: logical) -> frame
+shifted: fn() -> frame
+
 #---- assigning_through_a_name_vector_leaves_the_columns_unknown
 sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 cols <- c("units", "price")
