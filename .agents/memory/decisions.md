@@ -3306,3 +3306,33 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+# Decision record: HIR as struct-of-arrays, lowered from the green tree
+
+- **Previous shape.** `Module` held `expressions: Vec<Expression { kind, range }>` and
+  `patterns: Vec<Pattern>`, and each composite kind owned its lists (`Box<[Argument]>`,
+  `Box<[Parameter]>`, `Box<[ExprId]>`, `Box<[MatchArm]>` and the pattern lists), one allocation
+  per list. Literal text was a `String`. Lowering walked rowan's red tree, which allocates and
+  frees a cursor node for every node it visits, and grew fresh vectors per item, then shrank them.
+- **What was weak.** About 60% of `item_hir`'s samples were red-cursor work, allocation was about
+  12% of cold-check CPU, and the grow-then-shrink pattern touched about twice the memory the memo
+  kept. Owned lists also made every kind non-`Copy`, so readers cloned lists to release a borrow.
+- **Target shape (`crates/semantics/src/hir.rs`).** An `ExprId` indexes separate `kinds` and
+  `ranges` arrays, because inference reads kinds and mostly only diagnostics read ranges. Each
+  list type has one side array in the module and a kind holds a `Span<T>` (`u32` start and
+  length) into it; `module[span]` is the slice. Literal text is a `Symbol`, so every HIR kind is
+  `Copy`. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
+  per-kind child vector. Lowering reads the green tree through `syntax::GreenNodeAt` (green node
+  plus absolute start), collects each list on a scratch stack and seals it into its side array
+  once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
+  the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
+  rule of the data-oriented record above.
+- **Kept deliberately.** `ExprId` allocation order is the old one, so ids, fixtures and every
+  downstream map are unchanged. `Module` still owns plain vectors and compares by value, so salsa
+  backdating works as before.
+- **Impact.** Findings are byte-identical on the three benchmark code bases. In interleaved runs
+  the cold check used 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS
+  than the list-owning HIR. The checker also records expression types in a vector indexed by
+  `ExprId` instead of a hash map (`RecordedTypes` in `check.rs`), since the memoized
+  `ExpressionTypes` was already dense. IDE scans that need both kind and range go through
+  `Module::expressions`, which zips the two arrays.
