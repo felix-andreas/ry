@@ -27,7 +27,7 @@ use crate::types::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use syntax::TextRange;
+use syntax::{TextRange, TextSize};
 use syntax::native_values::accepts_native;
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -128,6 +128,29 @@ pub enum TypeErrorKind<'db> {
         frame: Option<Symbol>,
         columns: Vec<String>,
         suggestion: Option<String>,
+    },
+    /// A join condition whose two columns hold values the join cannot compare, such as
+    /// integers and strings.
+    IncompatibleJoinColumns {
+        condition: String,
+        x: Ty<'db>,
+        i: Ty<'db>,
+    },
+    /// An ordering join condition (`<`, `<=`, `>`, `>=`) on a column of strings.
+    OrderedJoinOnText {
+        condition: String,
+        column: String,
+        found: Ty<'db>,
+    },
+    /// `roll =` on a join with a condition other than `==`.
+    RollingNonEquiJoin,
+    /// `:=` writing into part of a column, or recycling one value into it, a value of a type the
+    /// column converts with loss: strings into a logical or numeric column, or a fractional
+    /// number into an integer one.
+    LossyColumnWrite {
+        column: String,
+        column_ty: Ty<'db>,
+        found: Ty<'db>,
     },
     /// A query's `i` that is neither a filter nor row positions.
     BadRowIndex {
@@ -756,12 +779,52 @@ struct JoinSides<'db> {
     i: Option<Vec<RecordField<'db>>>,
 }
 
-/// One `on =` key: `x` names the queried frame's column and `y` the joined frame's.
+/// One `on =` condition: `x` names the queried frame's column and `y` the joined frame's.
 struct JoinKey {
     x: String,
     y: String,
+    operator: JoinOperator,
     x_range: TextRange,
     y_range: TextRange,
+}
+
+impl JoinKey {
+    /// The condition as written in data.table's string form, for a diagnostic.
+    fn text(&self) -> String {
+        format!("{} {} {}", self.x, self.operator.symbol(), self.y)
+    }
+}
+
+/// The comparison of a join condition. Only `==` compares strings; an ordering compares numbers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinOperator {
+    Equal,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+}
+
+impl JoinOperator {
+    fn symbol(self) -> &'static str {
+        match self {
+            JoinOperator::Equal => "==",
+            JoinOperator::Less => "<",
+            JoinOperator::LessEqual => "<=",
+            JoinOperator::Greater => ">",
+            JoinOperator::GreaterEqual => ">=",
+        }
+    }
+}
+
+/// One column of a join's output. The layout mirrors the engine's `join_layout` in
+/// `crates/table/src/query.rs`, which is the authority on names and order.
+struct JoinedColumn<'db> {
+    field: RecordField<'db>,
+    /// Whether the values come from the joined frame `i`.
+    from_i: bool,
+    /// The index of the `on` condition whose `i` values the column carries.
+    condition: Option<usize>,
 }
 
 /// Inferred once before signature matching, so an overload probe re-matches without
@@ -5799,6 +5862,12 @@ impl<'db> Checker<'db, '_> {
         let i_value = i.and_then(|argument| argument.value);
         let mut source_columns = subject_columns.clone();
         let mut join = None;
+        let mut layout = None;
+        let each_i = by
+            .and_then(|argument| argument.value)
+            .is_some_and(|value| {
+                matches!(&module.expression(value).kind, ExpressionKind::NameRef(name) if name == ".EACHI")
+            });
         if let Some(on_value) = on.and_then(|argument| argument.value) {
             // The joined frame evaluates in the caller's scope, not the queried frame's.
             let joined = i_value.map(|value| {
@@ -5813,11 +5882,32 @@ impl<'db> Checker<'db, '_> {
                     });
                     let joined_name = i_value.and_then(|value| variable_name(module, value));
                     match join_keys(module, on_value) {
-                        Some(keys) => self.join_columns(
-                            &keys,
-                            (frame, subject_columns.as_deref()),
-                            (joined_name, joined_columns.as_deref()),
-                        ),
+                        Some(keys) => {
+                            if let Some(roll) = named("roll")
+                                && let Some(roll_value) = roll.value
+                                && keys.iter().any(|key| key.operator != JoinOperator::Equal)
+                                && !matches!(
+                                    &module.expression(roll_value).kind,
+                                    ExpressionKind::Literal(LiteralKind::Logical(false))
+                                )
+                            {
+                                self.errors.push(TypeError {
+                                    range: roll.name_range.map_or_else(
+                                        || module.expression(roll_value).range,
+                                        |name| name.cover(module.expression(roll_value).range),
+                                    ),
+                                    kind: TypeErrorKind::RollingNonEquiJoin,
+                                });
+                            }
+                            layout = self.join_columns(
+                                &keys,
+                                (frame, subject_columns.as_deref()),
+                                (joined_name, joined_columns.as_deref()),
+                            );
+                            layout.as_ref().map(|layout| {
+                                layout.iter().map(|column| column.field.clone()).collect()
+                            })
+                        }
                         None => {
                             self.infer(on_value);
                             None
@@ -5844,8 +5934,27 @@ impl<'db> Checker<'db, '_> {
                 }
             };
         }
+        // Under `by = .EACHI`, `j` runs once per row of `i`, so every column carrying `i`'s
+        // values holds that row's one value.
+        let scope_columns = match (&layout, each_i) {
+            (Some(layout), true) => Some(
+                layout
+                    .iter()
+                    .map(|column| RecordField {
+                        ty: if column.from_i {
+                            column_element(db, column.field.ty)
+                        } else {
+                            column.field.ty
+                        },
+                        ..column.field.clone()
+                    })
+                    .collect(),
+            ),
+            (None, true) => None,
+            (_, false) => source_columns.clone(),
+        };
         self.column_scopes.push(ColumnScope {
-            columns: source_columns.clone(),
+            columns: scope_columns,
             frame,
             bracket,
             subset_data: Ty::new(db, TyKind::Frame(None)),
@@ -5865,6 +5974,18 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let groups = match by.and_then(|argument| argument.value) {
+            // The groups are the compared columns, in the order of their conditions.
+            Some(value) if each_i => {
+                self.infer(value);
+                layout.as_ref().map(|layout| {
+                    let mut compared: Vec<&JoinedColumn<'db>> = layout
+                        .iter()
+                        .filter(|column| column.condition.is_some())
+                        .collect();
+                    compared.sort_by_key(|column| column.condition);
+                    compared.into_iter().map(|column| column.field.clone()).collect()
+                })
+            }
             Some(value) => self.query_groups(value),
             None => Some(Vec::new()),
         };
@@ -5929,15 +6050,18 @@ impl<'db> Checker<'db, '_> {
         result
     }
 
-    /// The joined source: the queried frame's columns (each key typed by the joined
-    /// frame's key, whose values it takes), then the joined frame's other columns, with
-    /// `i.` prefixed to a name both frames use, as data.table names them.
+    /// The joined source in data.table's layout: the queried frame's columns, each compared
+    /// column typed by the joined column of its first condition, whose values it takes; then a
+    /// column `t.1`, `t.2`, ... for each further condition on the same column `t`; then the
+    /// joined frame's columns no condition uses, `i.`-prefixed where the queried frame has the
+    /// name. A name that still repeats takes the first free numeric suffix, as `make.unique`
+    /// gives it. Each condition's two columns are checked for a type the join can compare.
     fn join_columns(
         &mut self,
         keys: &[JoinKey],
         (x_name, x_columns): (Option<Symbol>, Option<&[RecordField<'db>]>),
         (y_name, y_columns): (Option<Symbol>, Option<&[RecordField<'db>]>),
-    ) -> Option<Vec<RecordField<'db>>> {
+    ) -> Option<Vec<JoinedColumn<'db>>> {
         let db = self.db;
         let mut complete = true;
         for key in keys {
@@ -5969,19 +6093,74 @@ impl<'db> Checker<'db, '_> {
                 .find(|column| column.name.text(db) == name)
                 .map(|column| column.ty)
         };
-        let mut columns: Vec<RecordField<'db>> = x_columns
-            .iter()
-            .map(|column| {
-                let joined_key = keys
-                    .iter()
-                    .find(|key| key.x == column.name.text(db))
-                    .and_then(|key| column_of(y_columns, &key.y));
-                RecordField {
-                    ty: joined_key.unwrap_or(column.ty),
+        for key in keys {
+            let (Some(x_ty), Some(y_ty)) = (column_of(x_columns, &key.x), column_of(y_columns, &key.y))
+            else {
+                continue;
+            };
+            let (x_class, y_class) = (join_class(db, x_ty), join_class(db, y_ty));
+            let text_side = [(x_class, &key.x, key.x_range, x_ty), (y_class, &key.y, key.y_range, y_ty)]
+                .into_iter()
+                .find(|(class, ..)| *class == Some(JoinClass::Text));
+            if key.operator != JoinOperator::Equal
+                && let Some((_, column, range, found)) = text_side
+            {
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::OrderedJoinOnText {
+                        condition: key.text(),
+                        column: column.clone(),
+                        found,
+                    },
+                });
+            } else if let (Some(x_class), Some(y_class)) = (x_class, y_class)
+                && x_class != y_class
+            {
+                self.errors.push(TypeError {
+                    range: key.x_range.cover(key.y_range),
+                    kind: TypeErrorKind::IncompatibleJoinColumns {
+                        condition: key.text(),
+                        x: x_ty,
+                        i: y_ty,
+                    },
+                });
+            }
+        }
+        let mut layout: Vec<JoinedColumn<'db>> = Vec::with_capacity(x_columns.len() + y_columns.len());
+        for column in x_columns {
+            let condition = keys.iter().position(|key| key.x == column.name.text(db));
+            let joined = condition
+                .and_then(|index| keys.get(index))
+                .and_then(|key| column_of(y_columns, &key.y));
+            layout.push(JoinedColumn {
+                field: RecordField {
+                    ty: joined.unwrap_or(column.ty),
                     ..column.clone()
-                }
-            })
-            .collect();
+                },
+                from_i: condition.is_some(),
+                condition,
+            });
+        }
+        for (index, key) in keys.iter().enumerate() {
+            let earlier = keys
+                .iter()
+                .take(index)
+                .filter(|earlier| earlier.x == key.x)
+                .count();
+            if earlier > 0
+                && let Some(ty) = column_of(y_columns, &key.y)
+            {
+                layout.push(JoinedColumn {
+                    field: RecordField {
+                        name: Name::new(db, format!("{}.{earlier}", key.x)),
+                        ty,
+                        optional: false,
+                    },
+                    from_i: true,
+                    condition: Some(index),
+                });
+            }
+        }
         for column in y_columns {
             let name = column.name.text(db);
             if keys.iter().any(|key| key.y == name) {
@@ -5992,12 +6171,35 @@ impl<'db> Checker<'db, '_> {
             } else {
                 column.name
             };
-            columns.push(RecordField {
-                name,
-                ..column.clone()
+            layout.push(JoinedColumn {
+                field: RecordField {
+                    name,
+                    ..column.clone()
+                },
+                from_i: true,
+                condition: None,
             });
         }
-        Some(columns)
+        let mut taken: FxHashSet<String> = layout
+            .iter()
+            .map(|column| column.field.name.text(db).to_owned())
+            .collect();
+        let mut seen = FxHashSet::default();
+        for column in &mut layout {
+            let name = column.field.name.text(db).to_owned();
+            if seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(unique) = (1..)
+                .map(|suffix| format!("{name}.{suffix}"))
+                .find(|candidate| !taken.contains(candidate))
+            {
+                taken.insert(unique.clone());
+                seen.insert(unique.clone());
+                column.field.name = Name::new(db, unique);
+            }
+        }
+        Some(layout)
     }
 
     /// The group columns `by` names, in order. `None` when they are not all known: a
@@ -6113,10 +6315,10 @@ impl<'db> Checker<'db, '_> {
                     continue;
                 };
                 let ty = self.infer(value);
-                // data.table names an unnamed computed item by its position.
+                // data.table names an unnamed computed item by its position, and `.N` as `N`.
                 let name = argument
                     .name
-                    .or_else(|| variable_name(module, value))
+                    .or_else(|| variable_name(module, value).map(count_column_name))
                     .unwrap_or_else(|| Symbol::from(format!("V{}", position + 1)));
                 let field = self.column_field(&name, ty);
                 if let Some(columns) = columns.as_mut() {
@@ -6156,8 +6358,10 @@ impl<'db> Checker<'db, '_> {
         let Some(mut columns) = groups else {
             return frame_of(None);
         };
+        let count = matches!(&module.expression(j).kind, ExpressionKind::NameRef(name) if name == ".N");
         match (bare_column, resolved.kind(db)) {
             (Some(name), _) => columns.push(self.column_field(&name, resolved)),
+            (None, _) if count => columns.push(self.column_field("N", resolved)),
             (None, TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_)) => {
                 columns.push(self.column_field("V1", resolved));
             }
@@ -6188,7 +6392,7 @@ impl<'db> Checker<'db, '_> {
     ) -> Option<Vec<RecordField<'db>>> {
         let module = self.module;
         let db = self.db;
-        let mut updates: Option<Vec<(String, Ty<'db>, bool)>> = Some(Vec::new());
+        let mut updates: Option<Vec<(String, Ty<'db>, Option<ExprId>)>> = Some(Vec::new());
         match arguments {
             [left, right] if left.name.is_none() && right.name.is_none() => {
                 // The left side names columns; it is never read.
@@ -6235,13 +6439,17 @@ impl<'db> Checker<'db, '_> {
                             Some(value) => self.infer(value),
                             None => unknown(db),
                         };
-                        let single = right.value.is_some_and(|value| is_literal(module, value));
-                        Some(names.into_iter().map(|name| (name, ty, single)).collect())
+                        Some(
+                            names
+                                .into_iter()
+                                .map(|name| (name, ty, right.value))
+                                .collect(),
+                        )
                     }
                     (Some(names), Some(items)) if names.len() == items.len() => {
                         let mut paired = Vec::with_capacity(names.len());
                         for (name, item) in names.into_iter().zip(items) {
-                            paired.push((name, self.infer(item), is_literal(module, item)));
+                            paired.push((name, self.infer(item), Some(item)));
                         }
                         Some(paired)
                     }
@@ -6261,7 +6469,7 @@ impl<'db> Checker<'db, '_> {
                     let ty = self.infer(value);
                     match (argument.name, updates.as_mut()) {
                         (Some(name), Some(updates)) => {
-                            updates.push((name.to_string(), ty, is_literal(module, value)));
+                            updates.push((name.to_string(), ty, Some(value)));
                         }
                         _ => updates = None,
                     }
@@ -6269,8 +6477,9 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let mut columns = base?;
-        for (name, ty, single) in updates? {
+        for (name, ty, value) in updates? {
             let resolved = self.table.resolve(db, ty);
+            let single = value.is_some_and(|value| is_literal(module, value));
             let position = columns
                 .iter()
                 .position(|column| column.name.text(db) == name);
@@ -6279,7 +6488,20 @@ impl<'db> Checker<'db, '_> {
                     columns.remove(position);
                 }
                 (TyKind::Null, None) => {}
-                (_, Some(_)) if partial || single => {}
+                (_, Some(position)) if partial || single => {
+                    if let (Some(value), Some(column)) = (value, columns.get(position))
+                        && lossy_write(db, module, column.ty, resolved, value)
+                    {
+                        self.errors.push(TypeError {
+                            range: self.blame_range(value),
+                            kind: TypeErrorKind::LossyColumnWrite {
+                                column: name.clone(),
+                                column_ty: column.ty,
+                                found: resolved,
+                            },
+                        });
+                    }
+                }
                 (_, Some(position)) => {
                     if let Some(column) = columns.get_mut(position) {
                         column.ty = column_type(db, resolved);
@@ -6978,6 +7200,52 @@ fn column_does_not_exist<'db>(
     }
 }
 
+/// Whether writing `value` into a column of type `column` keeps the column's type but loses
+/// information, as data.table converts it: strings into a logical or numeric column are parsed,
+/// and a fractional number written into an integer column is truncated. Only a literal number is
+/// known to be fractional.
+fn lossy_write<'db>(
+    db: &'db dyn Db,
+    module: &Module,
+    column: Ty<'db>,
+    value_ty: Ty<'db>,
+    value: ExprId,
+) -> bool {
+    let atomic = |ty: Ty<'db>| match column_element(db, ty).kind(db) {
+        TyKind::Scalar(atomic) => Some(*atomic),
+        _ => None,
+    };
+    match (atomic(column), atomic(value_ty)) {
+        (Some(Atomic::Logical | Atomic::Integer | Atomic::Double), Some(Atomic::Character)) => true,
+        (Some(Atomic::Integer), Some(Atomic::Double)) => {
+            let mut literal = value;
+            while let ExpressionKind::Unary {
+                operator: UnaryOperator::Minus,
+                operand,
+            } = &module.expression(literal).kind
+            {
+                literal = *operand;
+            }
+            matches!(
+                &module.expression(literal).kind,
+                ExpressionKind::Literal(LiteralKind::Double(text))
+                    if text.parse::<f64>().is_ok_and(|number| number.fract() != 0.0)
+            )
+        }
+        _ => false,
+    }
+}
+
+/// The column name data.table gives an unnamed item of `j` that is a bare name: the name
+/// itself, except `.N`, which becomes `N`.
+fn count_column_name(name: Symbol) -> Symbol {
+    if name == ".N" {
+        Symbol::from("N".to_owned())
+    } else {
+        name
+    }
+}
+
 fn variable_name(module: &Module, id: ExprId) -> Option<Symbol> {
     match &module.expression(id).kind {
         ExpressionKind::NameRef(name) => Some(*name),
@@ -7061,9 +7329,10 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     }
 }
 
-/// The `on =` forms data.table documents for an equi-join: `"id"`, `"a==b"`, `"a,b"`,
-/// `c("id")`, `c(a = "b")`, `.(id)`, and `.(a = b)`. `None` for anything else, such as
-/// a non-equi join or a variable holding the keys.
+/// The `on =` forms data.table documents: a string of comma-separated conditions (`"id"`,
+/// `"a==b"`, `"t>=lo,t<hi"`), `c()` of such strings or of `x = "y"` pairs, and `.()` or
+/// `list()` of names, `x = y` pairs and comparisons (`t >= lo`). `None` for anything else,
+/// such as a variable holding the keys.
 fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
     let expression = module.expression(on);
     match &expression.kind {
@@ -7084,6 +7353,7 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                             Some(x) => keys.push(JoinKey {
                                 x: x.to_string(),
                                 y: text.trim().to_owned(),
+                                operator: JoinOperator::Equal,
                                 x_range,
                                 y_range: value_range,
                             }),
@@ -7095,9 +7365,35 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                             .name
                             .map_or_else(|| y.to_string(), |name| name.to_string()),
                         y: y.to_string(),
+                        operator: JoinOperator::Equal,
                         x_range,
                         y_range: value_range,
                     }),
+                    (
+                        "." | "list",
+                        ExpressionKind::Binary {
+                            operator,
+                            lhs,
+                            rhs,
+                            ..
+                        },
+                    ) if argument.name.is_none() => {
+                        let operator = match operator {
+                            BinaryOperator::Equal => JoinOperator::Equal,
+                            BinaryOperator::Less => JoinOperator::Less,
+                            BinaryOperator::LessEq => JoinOperator::LessEqual,
+                            BinaryOperator::Greater => JoinOperator::Greater,
+                            BinaryOperator::GreaterEq => JoinOperator::GreaterEqual,
+                            _ => return None,
+                        };
+                        keys.push(JoinKey {
+                            x: variable_name(module, *lhs)?.to_string(),
+                            y: variable_name(module, *rhs)?.to_string(),
+                            operator,
+                            x_range: module.expression(*lhs).range,
+                            y_range: module.expression(*rhs).range,
+                        });
+                    }
                     _ => return None,
                 }
             }
@@ -7107,25 +7403,89 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
     }
 }
 
+/// The conditions of one `on` string. When the literal's source is its text between two quotes
+/// (no escapes), each column gets its own range inside the literal; otherwise both take the
+/// literal's range.
 fn split_join_keys(text: &str, range: TextRange) -> Option<Vec<JoinKey>> {
-    text.split(',')
-        .map(|part| {
-            let (x, y) = part.split_once("==").unwrap_or((part, part));
-            let (x, y) = (x.trim(), y.trim());
-            (!x.is_empty() && is_join_operator_free(x) && is_join_operator_free(y)).then(|| {
-                JoinKey {
-                    x: x.to_owned(),
-                    y: y.to_owned(),
-                    x_range: range,
-                    y_range: range,
-                }
-            })
-        })
-        .collect()
+    let verbatim = usize::from(range.len()) == text.len() + 2;
+    let range_of = |start: usize, part: &str| {
+        let offset = u32::try_from(start).ok().filter(|_| verbatim && !part.is_empty());
+        let length = u32::try_from(part.len()).ok();
+        match (offset, length) {
+            (Some(offset), Some(length)) => {
+                TextRange::at(range.start() + TextSize::from(1 + offset), TextSize::from(length))
+            }
+            _ => range,
+        }
+    };
+    let mut keys = Vec::new();
+    let mut part_start = 0;
+    for part in text.split(',') {
+        let operator_at = part.find(['<', '>', '=', '!']);
+        let (x_part, operator, y_part, y_start) = match operator_at {
+            None => (part, JoinOperator::Equal, part, 0),
+            Some(at) => {
+                let rest = part.get(at..)?;
+                let (operator, width) = [
+                    ("==", JoinOperator::Equal),
+                    ("<=", JoinOperator::LessEqual),
+                    (">=", JoinOperator::GreaterEqual),
+                    ("<", JoinOperator::Less),
+                    (">", JoinOperator::Greater),
+                ]
+                .into_iter()
+                .find(|(symbol, _)| rest.starts_with(symbol))
+                .map(|(symbol, operator)| (operator, symbol.len()))?;
+                (part.get(..at)?, operator, part.get(at + width..)?, at + width)
+            }
+        };
+        let (x, y) = (x_part.trim(), y_part.trim());
+        if x.is_empty() || y.is_empty() || !is_join_operator_free(x) || !is_join_operator_free(y)
+        {
+            return None;
+        }
+        let x_start = part_start + (x_part.len() - x_part.trim_start().len());
+        let y_start = part_start + y_start + (y_part.len() - y_part.trim_start().len());
+        keys.push(JoinKey {
+            x: x.to_owned(),
+            y: y.to_owned(),
+            operator,
+            x_range: range_of(x_start, x),
+            y_range: range_of(y_start, y),
+        });
+        part_start += part.len() + 1;
+    }
+    Some(keys)
 }
 
 fn is_join_operator_free(text: &str) -> bool {
     !text.contains(['<', '>', '=', '!'])
+}
+
+/// The scalar a column holds per row: the element of a vector type.
+pub(crate) fn column_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+    match ty.kind(db) {
+        TyKind::Vector(element) | TyKind::NamedVector(element) => *element,
+        _ => ty,
+    }
+}
+
+/// What a join compares a column's values as. Columns of different classes cannot be joined,
+/// as data.table and the engine refuse them; a factor is typed `Any`, so it has no class.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinClass {
+    Logical,
+    Number,
+    Text,
+}
+
+fn join_class<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<JoinClass> {
+    match column_element(db, ty).kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(JoinClass::Logical),
+        TyKind::Scalar(Atomic::Integer | Atomic::Double) => Some(JoinClass::Number),
+        TyKind::Scalar(Atomic::Character) => Some(JoinClass::Text),
+        _ => None,
+    }
 }
 
 /// Decided purely by syntax: the class survives when `j` (second positional or
@@ -7263,6 +7623,21 @@ fn literal_overlaps<'db>(
     };
     let numeric = |atomic: Atomic| matches!(atomic, Atomic::Integer | Atomic::Double);
     *literal_atomic == atomic || (numeric(*literal_atomic) && numeric(atomic))
+}
+
+/// The kind of ry value `ty` is, when every value it describes is one.
+fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
+    match ty.kind(db) {
+        TyKind::NativeRecord(_) => Some(NativeValueKind::Record),
+        TyKind::NativeTuple(_) => Some(NativeValueKind::Tuple),
+        TyKind::Tag(..) | TyKind::OtherTags => Some(NativeValueKind::Tag),
+        TyKind::Union(members) => {
+            let mut kinds = members.iter().map(|&member| native_value_kind(db, member));
+            let first = kinds.next()??;
+            kinds.all(|kind| kind == Some(first)).then_some(first)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -7978,20 +8353,5 @@ mod tests {
         );
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
-    }
-}
-
-/// The kind of ry value `ty` is, when every value it describes is one.
-fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
-    match ty.kind(db) {
-        TyKind::NativeRecord(_) => Some(NativeValueKind::Record),
-        TyKind::NativeTuple(_) => Some(NativeValueKind::Tuple),
-        TyKind::Tag(..) | TyKind::OtherTags => Some(NativeValueKind::Tag),
-        TyKind::Union(members) => {
-            let mut kinds = members.iter().map(|&member| native_value_kind(db, member));
-            let first = kinds.next()??;
-            kinds.all(|kind| kind == Some(first)).then_some(first)
-        }
-        _ => None,
     }
 }

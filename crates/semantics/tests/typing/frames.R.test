@@ -281,6 +281,15 @@ sales: frame{team: character[], amount: double[]}
 per_team: Unknown
 104..110 error[type-mismatch] the frame `sales` has no column `taem`. Did you mean `team`?
 
+#---- a_bare_count_is_named_n
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+counts <- sales[, .N, by = team]
+listed <- sales[, .(.N, top = max(amount)), by = team]
+#++++
+sales: frame{team: character[], amount: double[]}
+counts: frame{team: character[], N: integer[]}
+listed: frame{team: character[], N: integer[], top: double[]}
+
 #==== frame_update
 #---- walrus_adds_a_column_for_later_uses
 prices <- frame(id = 1:3, price = c(1, 2, 3))
@@ -415,7 +424,7 @@ kept: double[]
 
 #---- a_grouped_walrus_keeps_the_existing_column_type
 prices <- frame(id = 1:3, price = c(1, 2, 3))
-prices[, id := 1.5, by = price]
+prices[, id := 2, by = price]
 kept <- prices$id
 #++++
 prices: frame{id: integer[], price: double[]}
@@ -438,6 +447,57 @@ prices[, tax := pirce * 0.2]
 prices: frame{id: integer[], price: double[]}
 frame{id: integer[], price: double[], tax: Unknown}
 62..67 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
+
+#---- a_string_written_into_part_of_a_number_column_is_reported
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[id > 1L, price := "free"]
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[]}
+71..77 error[type-mismatch] column `price` holds `double[]`, so this `character` value is parsed as a number, and a string that is not one becomes `NA`
+
+#---- a_string_recycled_into_a_logical_column_is_reported
+flags <- frame(id = 1:3, ok = c(TRUE, FALSE, TRUE))
+flags[, ok := "yes"]
+#++++
+flags: frame{id: integer[], ok: logical[]}
+frame{id: integer[], ok: logical[]}
+66..71 error[type-mismatch] column `ok` holds `logical[]`, so this `character` value is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`
+
+#---- a_fractional_literal_written_into_an_integer_column_is_reported
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[price > 1, `:=`(id = -2.5, price = 0)]
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[]}
+74..78 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
+
+#---- a_whole_number_double_written_into_an_integer_column_is_accepted
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[price > 1, id := 2]
+kept <- prices$id
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[]}
+kept: integer[]
+
+#---- a_number_written_into_a_string_column_is_accepted
+labels <- frame(id = 1:3, label = c("a", "b", "c"))
+labels[id > 1L, label := 0L]
+kept <- labels$label
+#++++
+labels: frame{id: integer[], label: character[]}
+frame{id: integer[], label: character[]}
+kept: character[]
+
+#---- a_string_column_replacing_a_number_column_changes_its_type
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[, price := as.character(id)]
+replaced <- prices$price
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: character[]}
+replaced: character[]
 
 #---- dollar_assignment_adds_and_removes_columns
 prices <- frame(id = 1:3, price = c(1, 2, 3))
@@ -504,7 +564,7 @@ joined <- prices[labels, on = "key"]
 prices: frame{id: integer[], price: double[]}
 labels: frame{key: integer[], label: character[]}
 joined: Unknown
-129..134 error[type-mismatch] the frame `prices` has no column `key`. Its columns are `id`, `price`
+130..133 error[type-mismatch] the frame `prices` has no column `key`. Its columns are `id`, `price`
 
 #---- a_key_missing_from_the_joined_frame
 prices <- frame(id = 1:3, price = c(1, 2, 3))
@@ -557,6 +617,157 @@ picked <- prices[, .(a = i.price, b = x.price)]
 #++++
 prices: frame{id: integer[], price: double[]}
 picked: frame{a: Unknown, b: Unknown}
+
+#---- a_non_equi_join_takes_the_values_of_i
+events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2, 5))
+joined <- events[windows, on = .(id, t >= lo)]
+#++++
+events: frame{id: integer[], t: double[], v: character[]}
+windows: frame{id: integer[], lo: double[], hi: double[]}
+joined: frame{id: integer[], t: double[], v: character[], hi: double[]}
+
+#---- a_non_equi_join_in_string_form
+events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2, 5))
+joined <- events[windows, on = c("id", "t>=lo")]
+spaced <- events[windows, on = "id==id, t > lo"]
+#++++
+events: frame{id: integer[], t: double[], v: character[]}
+windows: frame{id: integer[], lo: double[], hi: double[]}
+joined: frame{id: integer[], t: double[], v: character[], hi: double[]}
+spaced: frame{id: integer[], t: double[], v: character[], hi: double[]}
+
+#---- a_second_condition_on_a_column_adds_a_numbered_column
+events <- frame(t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- frame(lo = c(0, 1), hi = c(2L, 5L))
+joined <- events[windows, on = .(t >= lo, t < hi)]
+#++++
+events: frame{t: double[], v: character[]}
+windows: frame{lo: double[], hi: integer[]}
+joined: frame{t: double[], v: character[], t.1: integer[]}
+
+#---- a_generated_name_stays_unique
+events <- frame(t = c(1, 2, 3), t.1 = c("a", "b", "c"))
+windows <- frame(lo = c(0, 1), hi = c(2, 5))
+joined <- events[windows, on = .(t >= lo, t <= hi)]
+#++++
+events: frame{t: double[], t.1: character[]}
+windows: frame{lo: double[], hi: double[]}
+joined: frame{t: double[], t.1: character[], t.1.1: double[]}
+
+#---- a_missing_column_in_a_condition_string_is_reported_on_its_name
+events <- frame(id = 1:3, t = c(1, 2, 3))
+windows <- frame(id = 1:2, lo = c(0, 1))
+joined <- events[windows, on = "id, t >= low"]
+#++++
+events: frame{id: integer[], t: double[]}
+windows: frame{id: integer[], lo: double[]}
+joined: Unknown
+124..127 error[type-mismatch] the frame `windows` has no column `low`. Its columns are `id`, `lo`
+
+#---- integer_and_double_columns_join
+events <- frame(id = 1:3, t = c(1, 2, 3))
+windows <- frame(id = c(1, 2), lo = c(0L, 1L))
+joined <- events[windows, on = .(id, t > lo)]
+#++++
+events: frame{id: integer[], t: double[]}
+windows: frame{id: double[], lo: integer[]}
+joined: frame{id: double[], t: integer[]}
+
+#---- a_join_of_numbers_to_strings_is_reported
+events <- frame(id = 1:3, t = c(1, 2, 3))
+labels <- frame(key = c("1", "2"), label = c("a", "b"))
+joined <- events[labels, on = .(id = key)]
+compared <- events[labels, on = "id == key"]
+#++++
+events: frame{id: integer[], t: double[]}
+labels: frame{key: character[], label: character[]}
+joined: Unknown
+compared: Unknown
+130..138 error[type-mismatch] the join condition `id == key` compares `integer[]` with `character[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+174..183 error[type-mismatch] the join condition `id == key` compares `integer[]` with `character[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+
+#---- a_join_of_logicals_to_numbers_is_reported
+events <- frame(id = 1:3, ok = c(TRUE, FALSE, TRUE))
+picks <- frame(ok = c(1L, 0L))
+joined <- events[picks, on = "ok"]
+#++++
+events: frame{id: integer[], ok: logical[]}
+picks: frame{ok: integer[]}
+joined: Unknown
+114..116 error[type-mismatch] the join condition `ok == ok` compares `logical[]` with `integer[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+
+#---- an_ordering_condition_on_strings_is_reported
+events <- frame(id = 1:3, name = c("a", "b", "c"))
+bounds <- frame(lo = c("a", "b"))
+joined <- events[bounds, on = .(name > lo)]
+#++++
+events: frame{id: integer[], name: character[]}
+bounds: frame{lo: character[]}
+joined: Unknown
+117..121 error[type-mismatch] the join condition `name > lo` compares numbers, but `name` is `character[]`. Only `==` joins strings.
+
+#---- a_rolling_non_equi_join_is_reported
+events <- frame(id = 1:3, t = c(1, 2, 3))
+windows <- frame(id = 1:2, lo = c(0, 1))
+joined <- events[windows, on = .(id, t >= lo), roll = TRUE]
+plain <- events[windows, on = .(id, t >= lo), roll = FALSE]
+#++++
+events: frame{id: integer[], t: double[]}
+windows: frame{id: integer[], lo: double[]}
+joined: Unknown
+plain: frame{id: integer[], t: double[]}
+130..141 error[type-mismatch] a rolling join needs every join condition to be `==`
+
+#---- each_i_groups_by_the_compared_columns
+events <- frame(id = 1:3, t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- frame(lo = c(0, 1), hi = c(2L, 5L), label = c("p", "q"))
+totals <- events[windows, on = .(t >= lo, t < hi), .(n = .N, total = sum(v), label), by = .EACHI]
+counted <- events[windows, on = .(t >= lo), .N, by = .EACHI]
+#++++
+events: frame{id: integer[], t: double[], v: integer[]}
+windows: frame{lo: double[], hi: integer[], label: character[]}
+totals: frame{t: double[], t.1: integer[], n: integer[], total: integer[], label: character[]}
+counted: frame{t: double[], N: integer[]}
+
+#---- each_i_reads_a_column_of_i_as_one_value
+events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- frame(lo = c(0, 1), hi = c(2, 5))
+sized <- events[windows, on = .(t >= lo), .(size = if (hi > 2) "wide" else "narrow"), by = .EACHI]
+#++++
+events: frame{t: double[], v: integer[]}
+windows: frame{lo: double[], hi: double[]}
+sized: frame{t: double[], size: character[]}
+
+#---- each_i_reads_a_column_of_x_as_a_vector
+events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- frame(lo = c(0, 1), hi = c(2, 5))
+sized <- events[windows, on = .(t >= lo), .(big = if (v > 2L) "yes" else "no"), by = .EACHI]
+#++++
+events: frame{t: double[], v: integer[]}
+windows: frame{lo: double[], hi: double[]}
+sized: Unknown
+153..159 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- each_i_reads_prefixed_columns
+events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- frame(lo = c(0, 1), t = c("a", "b"))
+picked <- events[windows, on = .(t >= lo), .(first = x.t, label = i.t), by = .EACHI]
+#++++
+events: frame{t: double[], v: integer[]}
+windows: frame{lo: double[], t: character[]}
+picked: frame{t: double[], first: double[], label: character[]}
+
+#---- each_i_reports_a_missing_column
+events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- frame(lo = c(0, 1), hi = c(2, 5))
+totals <- events[windows, on = .(t >= lo), .(total = sum(vv)), by = .EACHI]
+#++++
+events: frame{t: double[], v: integer[]}
+windows: frame{lo: double[], hi: double[]}
+totals: frame{t: double[], total: Unknown}
+156..158 warning[unresolved] the frame `events` has no column `vv`, and nothing else defines that name.
 
 #==== frame_columns
 #---- dollar_reads_a_column
