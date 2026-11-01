@@ -323,6 +323,10 @@ pub trait GlobalEnv<'db> {
     fn type_definitions(&self) -> &'db FxHashMap<Name<'db>, NamedDefinition<'db>>;
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
+
+    /// The shipped declaration alone, which a call reaches when R's function lookup skips a
+    /// project binding whose value is not a function.
+    fn stub_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
 }
 
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
@@ -873,6 +877,12 @@ struct CallArgument<'db> {
     forwards_dots: bool,
 }
 
+enum CalleeLookup<'db> {
+    Binding,
+    Skipped(TypeScheme<'db>),
+    Undetermined,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperandShape {
     Scalar,
@@ -1404,10 +1414,7 @@ impl<'db> Checker<'db, '_> {
                 let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
-                // `missing(name)` in the body makes a formal optional (R's optional-without-default
-                // idiom).
-                let mut missing_tested = FxHashSet::default();
-                self.collect_missing_tested(*body, &mut missing_tested);
+                let omissible = self.omissible_formals(&parameters, *body);
                 let mut named = Vec::new();
                 let mut variadic = None;
                 for parameter in &parameters {
@@ -1424,7 +1431,7 @@ impl<'db> Checker<'db, '_> {
                         name: Name::new(self.db, parameter.name.as_str()),
                         ty: parameter_ty,
                         optional: parameter.default.is_some()
-                            || missing_tested.contains(&parameter.name),
+                            || omissible.contains(&parameter.name),
                         default: None,
                     });
                     let no_default = parameter.default.is_none();
@@ -3143,6 +3150,43 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// The formals without a default that a call may still omit, because R evaluates
+    /// arguments lazily: the body tests them with `missing(name)` (R's
+    /// optional-without-default idiom), or it dispatches with `UseMethod()`, which forces only
+    /// the first formal and hands the rest to a method unevaluated.
+    fn omissible_formals(&self, parameters: &[Formal], body: ExprId) -> FxHashSet<Symbol> {
+        let mut omissible = FxHashSet::default();
+        self.collect_missing_tested(body, &mut omissible);
+        if self.dispatches(body) {
+            omissible.extend(
+                parameters
+                    .iter()
+                    .filter(|parameter| parameter.name != "...")
+                    .skip(1)
+                    .map(|parameter| parameter.name),
+            );
+        }
+        omissible
+    }
+
+    /// A body that dispatches hands its formals to a method unevaluated.
+    fn dispatches(&self, id: ExprId) -> bool {
+        let kind = &self.module.expression(id).kind;
+        if matches!(kind, ExpressionKind::Function { .. }) {
+            return false;
+        }
+        if let ExpressionKind::Call { callee, .. } = kind
+            && matches!(
+                &self.module.expression(*callee).kind,
+                ExpressionKind::NameRef(name)
+                    if matches!(name.as_str(), "UseMethod" | "standardGeneric" | "NextMethod")
+            )
+        {
+            return true;
+        }
+        kind.child_ids().into_iter().any(|child| self.dispatches(child))
+    }
+
     /// One arbitrary instantiation of the in-scope rigid binders, to ask whether a value
     /// inhabits the declared type at *some* choice of its parameters.
     fn instantiate_rigids(&mut self, ty: Ty<'db>) -> Ty<'db> {
@@ -4154,11 +4198,9 @@ impl<'db> Checker<'db, '_> {
         };
         let range = expression.range;
 
-        let mut missing_tested = FxHashSet::default();
-        self.collect_missing_tested(*body, &mut missing_tested);
-        let is_optional = |parameter: &Formal| {
-            parameter.default.is_some() || missing_tested.contains(&parameter.name)
-        };
+        let omissible = self.omissible_formals(parameters, *body);
+        let is_optional =
+            |parameter: &Formal| parameter.default.is_some() || omissible.contains(&parameter.name);
 
         self.table.level += 1;
         let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
@@ -4520,6 +4562,14 @@ impl<'db> Checker<'db, '_> {
         }
         let callee_range = self.blame_range(callee);
         let callee_ty = self.infer(callee);
+        let callee_ty = match self.callee_lookup(callee, callee_ty) {
+            CalleeLookup::Binding => callee_ty,
+            CalleeLookup::Skipped(scheme) => self.instantiate(&scheme),
+            CalleeLookup::Undetermined => {
+                self.infer_call_arguments(range, arguments);
+                return unknown(self.db);
+            }
+        };
         // A literal-`Any` callee is the escape hatch for stubs with no expressible
         // signature: the call is uncheckable, so findings inside its arguments are discarded.
         let resolved_callee = self.table.shallow_resolve(self.db, callee_ty);
@@ -5496,6 +5546,80 @@ impl<'db> Checker<'db, '_> {
     /// Declaration order is only the tiebreak: a candidate that fits without narrowing
     /// the caller's open variables outranks an earlier one that pins one down. The
     /// literal-as-integer courtesy runs only in a second round so a literal never steers selection.
+    /// R's function lookup skips every binding whose value is not a function, so in
+    /// `function(x, log = FALSE) if (log) log(x) else x` the call reaches base `log`, and a
+    /// package's `trimws <- NULL` placeholder does not hide base `trimws`. A binding the call
+    /// would skip reads as the next declaration out; a binding that may or may not be a
+    /// function, such as an unconstrained parameter that shares its name with one, cannot be
+    /// decided statically.
+    fn callee_lookup(&mut self, callee: ExprId, callee_ty: Ty<'db>) -> CalleeLookup<'db> {
+        let ExpressionKind::NameRef(name) = &self.module.expression(callee).kind else {
+            return CalleeLookup::Binding;
+        };
+        let local = self.naming.resolutions.contains_key(&callee);
+        let resolved = self.table.resolve(self.db, callee_ty);
+        let callable = match resolved.kind(self.db) {
+            TyKind::Var(_) if local => None,
+            TyKind::Union(members) => {
+                if members
+                    .iter()
+                    .any(|member| !matches!(member.kind(self.db), TyKind::Null))
+                {
+                    return CalleeLookup::Binding;
+                }
+                Some(false)
+            }
+            TyKind::Null => Some(false),
+            TyKind::Scalar(_)
+            | TyKind::Vector(_)
+            | TyKind::NamedVector(_)
+            | TyKind::List(_)
+            | TyKind::NamedList(_)
+            | TyKind::Tuple(_)
+            | TyKind::Record(_)
+            | TyKind::NativeTuple(_)
+            | TyKind::NativeRecord(_)
+            | TyKind::Tag(..)
+            | TyKind::Frame(_) => Some(false),
+            _ => return CalleeLookup::Binding,
+        };
+        let Some(globals) = self.globals else {
+            return CalleeLookup::Binding;
+        };
+        let outer = if local {
+            globals.scheme(name, true)
+        } else {
+            globals.stub_scheme(name)
+        };
+        let outer = outer.filter(|scheme| {
+            matches!(
+                scheme.body.kind(self.db),
+                TyKind::Function(_) | TyKind::Any | TyKind::Unknown
+            )
+        });
+        match (callable, outer) {
+            (None, Some(_)) => CalleeLookup::Undetermined,
+            (None, None) => CalleeLookup::Binding,
+            (Some(_), Some(scheme)) => CalleeLookup::Skipped(scheme),
+            // A non-local `NULL` with nothing behind it is the placeholder a package fills in
+            // from `.onLoad` (`f <- NULL`, then `f <<- function(...)`), so the call is unchecked.
+            (Some(_), None) if !local && matches!(resolved.kind(self.db), TyKind::Null) => {
+                CalleeLookup::Undetermined
+            }
+            (Some(_), None) => CalleeLookup::Binding,
+        }
+    }
+
+    /// The type a call's local callee holds right now, read without recording anything.
+    fn local_callee_type(&mut self, callee: ExprId) -> Option<Ty<'db>> {
+        let slot = *self.naming.resolutions.get(&callee)?;
+        match self.environment.get(slot)? {
+            EnvEntry::Mono(ty) => Some(ty),
+            EnvEntry::Scheme(index) => Some(self.scheme_arena[index as usize].body),
+            EnvEntry::MissingFormal(_) => None,
+        }
+    }
+
     fn try_overloaded_call(
         &mut self,
         id: ExprId,
@@ -5506,7 +5630,13 @@ impl<'db> Checker<'db, '_> {
         let name = match &self.module.expression(callee).kind {
             ExpressionKind::NameRef(name) => {
                 if self.naming.resolutions.contains_key(&callee) {
-                    return None;
+                    let callee_ty = self.local_callee_type(callee)?;
+                    if !matches!(
+                        self.callee_lookup(callee, callee_ty),
+                        CalleeLookup::Skipped(_)
+                    ) {
+                        return None;
+                    }
                 }
                 name.to_string()
             }
@@ -6217,6 +6347,25 @@ impl<'db> Checker<'db, '_> {
             Some(rest) => rest.preceding_named.min(function.named.len()),
             None => function.named.len(),
         };
+        // R then matches a name by unique prefix against the formals before `...`, so
+        // `rep(x, len = 3)` fills `length.out`.
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument.forwards_dots || targets[index].is_some() {
+                continue;
+            }
+            let Some(name) = &argument.name else { continue };
+            let mut candidates = function.named[..pre_rest]
+                .iter()
+                .enumerate()
+                .filter(|(formal, field)| {
+                    !claimed[*formal] && field.name.text(self.db).starts_with(name.as_str())
+                })
+                .map(|(formal, _)| formal);
+            if let (Some(formal), None) = (candidates.next(), candidates.next()) {
+                claimed[formal] = true;
+                targets[index] = Some(ArgumentTarget::Named(formal));
+            }
+        }
         let mut next_positional = 0usize;
         let mut next_named = 0usize;
         for (index, argument) in arguments.iter().enumerate() {
@@ -6413,6 +6562,14 @@ impl<'db> Checker<'db, '_> {
         }
         // Report the numeric constraint rather than render a bare inference variable as expected.
         let resolved_expected = self.table.resolve(self.db, expected);
+        // A function parameter of base R goes through `match.fun`, which also takes the
+        // function's name, so `lapply(xs, "[[", "id")` and `apply(m, 1, "mean")` are
+        // idiomatic. The name is not resolved, so the call is accepted unchecked.
+        if matches!(resolved_expected.kind(self.db), TyKind::Function(_))
+            && is_character(self.db, resolved_found)
+        {
+            return Ok(());
+        }
         if let TyKind::Var(var) = resolved_expected.kind(self.db)
             && let Entry::Unbound {
                 constraint: Constraint::Numeric,
@@ -8531,6 +8688,16 @@ impl<'db> Checker<'db, '_> {
             substitution.insert(*name, fresh);
         }
         substitute_rigid(self.db, scheme.body, &substitution)
+    }
+}
+
+fn is_character<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Character) => true,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => {
+            matches!(element.kind(db), TyKind::Scalar(Atomic::Character))
+        }
+        _ => false,
     }
 }
 

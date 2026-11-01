@@ -140,8 +140,8 @@ seq_len : fn(length.out: Any) -> integer[]
 seq_along : fn(along.with: Any) -> integer[]
 seq : Any
 seq.int : Any
-rep : <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
-rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any) -> Any
+rep : <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> T[]
+rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> Any
 rep_len : fn(x: Any, length.out: Any) -> Any
 
 # Type predicates: a single logical, computed from the whole value.
@@ -179,13 +179,13 @@ is.nan : fn(x: Any) -> logical
 anyNA : fn(x: Any, [recursive]: logical) -> logical
 
 # Coercions: the target atomic type is fixed by the function; elementwise, scalar-claim.
-as.integer : fn(x: Any) -> integer
-as.numeric : fn(x: Any) -> double
-as.double : fn(x: Any) -> double
-as.character : fn(x: Any) -> character
-as.logical : fn(x: Any) -> logical
+as.integer : fn(x: Any, ...: Any) -> integer
+as.numeric : fn(x: Any, ...: Any) -> double
+as.double : fn(x: Any, ...: Any) -> double
+as.character : fn(x: Any, ...: Any) -> character
+as.logical : fn(x: Any, ...: Any) -> logical
 as.vector : fn(x: Any, [mode]: character) -> Any
-as.list : fn(x: Any) -> list[Any]
+as.list : fn(x: Any, ...: Any) -> list[Any]
 # `unlist` flattens nesting and coerces to one atomic vector, so its element type depends on the
 # whole (possibly nested, possibly mixed) contents — `Any`, like the other shape-erasing coercions.
 unlist : fn(x: Any, [recursive]: logical, [use.names]: logical) -> Any
@@ -216,7 +216,7 @@ endsWith : fn(x: Any, suffix: Any) -> logical
 trimws : fn(x: Any, [which]: character, [whitespace]: character) -> character
 strrep : fn(x: Any, times: Any) -> character
 chartr : fn(old: character, new: character, x: Any) -> character
-toString : fn(x: Any, [sep]: character) -> character
+toString : fn(x: Any, [sep]: character, ...: Any) -> character
 sQuote : fn(x: Any, [q]: Any) -> character
 dQuote : fn(x: Any, [q]: Any) -> character
 shQuote : fn(string: Any, [type]: character) -> character
@@ -241,7 +241,7 @@ paste0 : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]
 sprintf : fn(fmt: character, ...: Any) -> character
 gettextf : fn(fmt: character, ...: Any, [domain]: Any) -> character
 format : fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
-formatC : fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
+formatC : fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any, [big.interval]: Any, [small.interval]: Any, [replace.zero]: Any, [drop0trailing]: Any) -> character
 prettyNum : fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
@@ -372,15 +372,15 @@ round : fn(x: Any, [digits]: Any) -> double
 signif : fn(x: Any, [digits]: Any) -> double
 floor : fn(x: Any) -> double
 ceiling : fn(x: Any) -> double
-trunc : fn(x: Any) -> double
+trunc : fn(x: Any, ...: Any) -> double
 
 # Sorting, ordering, sets: element-preserving, so the vector forms carry a generic `T[]` element
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for
 # the shapes the candidates cannot express. `order`/`which` genuinely produce integer index vectors.
 # `rank`'s result type depends on `ties.method` (double for averages, integer otherwise).
 sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
-sort : <T> fn(x: T[], [decreasing]: logical, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
-sort : fn(x: Any, [decreasing]: logical, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
+sort : <T> fn(x: T[], [decreasing]: logical, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any, ...: Any) -> T[]
+sort : fn(x: Any, [decreasing]: logical, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any, ...: Any) -> Any
 order : fn(...: Any, [na.last]: Any, [decreasing]: logical, [method]: character) -> integer[]
 rank : fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
 # Selecting or reordering a list keeps its names, so the named candidate comes
@@ -392,15 +392,15 @@ rev : <T> fn(x: list[named: T]) -> list[named: T]
 rev : <T> fn(x: list[T]) -> list[T]
 rev : fn(x: Any) -> Any
 unique : fn(x: factor, [incomparables]: Any, ...: Any) -> factor
-unique : <T> fn(x: T[], [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> T[]
-unique : <T> fn(x: list[named: T], [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> list[named: T]
-unique : <T> fn(x: list[T], [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> list[T]
+unique : <T> fn(x: T[], [incomparables]: Any, [fromLast]: logical, [nmax]: Any, ...: Any) -> T[]
+unique : <T> fn(x: list[named: T], [incomparables]: Any, [fromLast]: logical, [nmax]: Any, ...: Any) -> list[named: T]
+unique : <T> fn(x: list[T], [incomparables]: Any, [fromLast]: logical, [nmax]: Any, ...: Any) -> list[T]
 # The fallback candidate is variadic because `unique` is a generic and its
 # methods take arguments base's signature does not name — `unique(DT, by = "id")`
 # is `unique.data.table`. The typed candidates above stay exact.
-unique : fn(x: Any, ...: Any, [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> Any
-duplicated : fn(x: Any, [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> logical
-anyDuplicated : fn(x: Any, [incomparables]: Any, [fromLast]: logical) -> integer
+unique : fn(x: Any, [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> Any
+duplicated : fn(x: Any, [incomparables]: Any, [fromLast]: logical, [nmax]: Any, ...: Any) -> logical
+anyDuplicated : fn(x: Any, [incomparables]: Any, [fromLast]: logical, ...: Any) -> integer
 union : <T> fn(x: T[], y: T[]) -> T[]
 union : fn(x: Any, y: Any) -> Any
 intersect : <T> fn(x: T[], y: T[]) -> T[]
@@ -474,8 +474,8 @@ t : Any
 diag : Any
 solve : Any
 outer : Any
-cut : fn(x: Any, breaks: Any, [labels]: Any, [include.lowest]: logical, [right]: logical, [dig.lab]: Any, [ordered_result]: logical) -> Any
-split : fn(x: Any, f: Any, [drop]: logical, [sep]: character, [lex.order]: logical) -> list[Any]
+cut : fn(x: Any, breaks: Any, [labels]: Any, [include.lowest]: logical, [right]: logical, [dig.lab]: Any, [ordered_result]: logical, ...: Any) -> Any
+split : fn(x: Any, f: Any, [drop]: logical, [sep]: character, [lex.order]: logical, ...: Any) -> list[Any]
 merge : Any
 scale : Any
 tabulate : fn(bin: Any, [nbins]: Any) -> integer[]
@@ -494,20 +494,20 @@ colMeans : fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 # `apply`'s result shape is value-dependent (a vector or a list, by what FUN returns per slice), so
 # the return stays `Any`; the callback position still checks, and forwarded arguments complete
 # callbacks with more formals.
-apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
+apply : fn(X: Any, MARGIN: Any, FUN: Any, ...: Any, [simplify]: logical) -> Any
 # `lapply` keeps its input's names, so a named list in is a named list out. The
 # named candidate comes first because it is the narrower one: a plain list or a
 # vector does not fit it at all and takes the general form below.
-lapply : <T, U> fn(x: list[named: T], f: fn(T) -> U, ...: Any) -> list[named: U]
-lapply : <T, U> fn(x: list[T] | T[], f: fn(T) -> U, ...: Any) -> list[U]
+lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
+lapply : <T, U> fn(X: list[T] | T[], FUN: fn(T) -> U, ...: Any) -> list[U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
 Filter : <T> fn(f: fn(T) -> logical, x: T[]) -> T[]
 Filter : <T> fn(f: fn(T) -> logical, x: list[named: T]) -> list[named: T]
 Filter : <T> fn(f: fn(T) -> logical, x: list[T]) -> list[T]
-Find : <T> fn(f: fn(T) -> logical, x: list[T] | T[]) -> T | NULL
-Position : <T> fn(f: fn(T) -> logical, x: list[T] | T[]) -> integer | NULL
+Find : <T> fn(f: fn(T) -> logical, x: list[T] | T[], [right]: Any, [nomatch]: Any) -> T | NULL
+Position : <T> fn(f: fn(T) -> logical, x: list[T] | T[], [right]: Any, [nomatch]: Any) -> integer | NULL
 Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical) -> U
 # `identity : <T> fn(x: T) -> T` and `apply : Any` are deliberately NOT declared yet: many existing
 # fixtures bind those names as local helpers, and a stub declaration makes each such binding fire the
@@ -610,10 +610,10 @@ within : Any
 
 # Attach and load. `library` returns the attached-package list or a logical depending on
 # `logical.return` (value-dependent); `require`'s logical is genuine (`if (require(pkg))`).
-library : fn([package]: Any, [help]: Any, [pos]: Any, [lib.loc]: Any, [character.only]: logical, [logical.return]: logical, [warn.conflicts]: logical, [quietly]: logical, [verbose]: logical) -> Any
-require : fn([package]: Any, [lib.loc]: Any, [quietly]: logical, [warn.conflicts]: logical, [character.only]: logical) -> logical
-requireNamespace : fn(package: Any, [quietly]: logical) -> logical
-source : fn(file: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [verbose]: logical, [chdir]: logical, [encoding]: Any) -> Any
+library : fn([package]: Any, [help]: Any, [pos]: Any, [lib.loc]: Any, [character.only]: logical, [logical.return]: logical, [warn.conflicts]: logical, [quietly]: logical, [verbose]: logical, [mask.ok]: Any, [exclude]: Any, [include.only]: Any, [attach.required]: Any) -> Any
+require : fn([package]: Any, [lib.loc]: Any, [quietly]: logical, [warn.conflicts]: logical, [character.only]: logical, [mask.ok]: Any, [exclude]: Any, [include.only]: Any, [attach.required]: Any) -> logical
+requireNamespace : fn(package: Any, [quietly]: logical, ...: Any) -> logical
+source : fn(file: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [verbose]: logical, [chdir]: logical, [encoding]: Any, [exprs]: Any, [spaced]: Any, [prompt.echo]: Any, [max.deparse.length]: Any, [width.cutoff]: Any, [deparseCtrl]: Any, [continue.echo]: Any, [skip.echo]: Any, [keep.source]: Any) -> Any
 getOption : fn(x: character, [default]: Any) -> Any
 # `options(warn = 1, digits = 7)`: arbitrary option names as named arguments.
 options : Any
@@ -636,8 +636,8 @@ basename : fn(path: Any) -> character
 dirname : fn(path: Any) -> character
 normalizePath : fn(path: Any, [winslash]: character, [mustWork]: logical) -> character
 path.expand : fn(path: Any) -> character
-list.files : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical) -> character[]
-dir : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical) -> character[]
+list.files : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: Any) -> character[]
+dir : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: Any) -> character[]
 list.dirs : fn([path]: Any, [full.names]: logical, [recursive]: logical) -> character[]
 tempfile : fn([pattern]: character, [tmpdir]: character, [fileext]: character) -> character
 tempdir : fn([check]: logical) -> character
@@ -657,20 +657,20 @@ file : fn([description]: character, [open]: character, [blocking]: logical, [enc
 url : fn(description: character, [open]: character, [blocking]: logical, [encoding]: character, [method]: character, [headers]: Any) -> connection
 gzfile : fn(description: character, [open]: character, [encoding]: character, [compression]: Any) -> connection
 textConnection : fn(object: Any, [open]: character, [local]: logical, [name]: character, [encoding]: character) -> connection
-close : fn(con: Any, [type]: character) -> Any
+close : fn(con: Any, [type]: character, ...: Any) -> Any
 readline : fn([prompt]: character) -> character
 
 # Date and time construction. `difftime` and `as.difftime` produce the class the
 # `Arith.difftime` / `Compare.difftime` methods above give arithmetic to;
 # `format`/`strftime` render a date back to text.
 difftime : fn(time1: Any, time2: Any, [tz]: character, [units]: character) -> difftime
-as.difftime : fn(tim: Any, [format]: character, [units]: character) -> difftime
+as.difftime : fn(tim: Any, [format]: character, [units]: character, [tz]: Any) -> difftime
 strftime : fn(x: Any, [format]: character, [tz]: character, [usetz]: logical, ...: Any) -> character
 strptime : fn(x: Any, format: character, [tz]: character) -> POSIXct
 weekdays : fn(x: Any, [abbreviate]: logical) -> character
 # lubridate adds months.numeric, which builds a period (`months(1)`).
-months : fn(x: double | integer) -> Any
-months : fn(x: Any, [abbreviate]: logical) -> character
+months : fn(x: double | integer, [abbreviate]: Any) -> Any
+months : fn(x: Any, [abbreviate]: logical, [abbreviate]: Any) -> character
 julian : Any
 
 # System and session.
@@ -685,14 +685,14 @@ Sys.getpid : fn() -> integer
 Sys.info : fn() -> character[]
 Sys.which : fn(names: Any) -> character
 date : fn() -> character
-system : fn(command: Any, [intern]: logical, [ignore.stdout]: logical, [ignore.stderr]: logical, [wait]: logical, [input]: Any, [timeout]: Any) -> Any
-system2 : fn(command: Any, [args]: Any, [stdout]: Any, [stderr]: Any, [stdin]: Any, [input]: Any, [env]: Any, [wait]: logical, [timeout]: Any) -> Any
+system : fn(command: Any, [intern]: logical, [ignore.stdout]: logical, [ignore.stderr]: logical, [wait]: logical, [input]: Any, [timeout]: Any, [show.output.on.console]: Any, [minimized]: Any, [invisible]: Any) -> Any
+system2 : fn(command: Any, [args]: Any, [stdout]: Any, [stderr]: Any, [stdin]: Any, [input]: Any, [env]: Any, [wait]: logical, [timeout]: Any, [minimized]: Any, [invisible]: Any) -> Any
 system.time : fn(expr: Any, [gcFirst]: logical) -> Any
 quit : fn([save]: character, [status]: Any, [runLast]: logical) -> Any
 q : fn([save]: character, [status]: Any, [runLast]: logical) -> Any
 # `summary` is an S3 generic whose result shape is class-dependent; `diff` is type-preserving.
 summary : Any
-diff : fn(x: Any, [lag]: Any, [differences]: Any) -> Any
+diff : fn(x: Any, [lag]: Any, [differences]: Any, ...: Any) -> Any
 
 # Interactive debugging. All side-effecting; `debug`/`trace` take the function object itself
 # (Any-param: any callable value is legal), and the returns follow R (`NULL` invisibly, except

@@ -1,0 +1,92 @@
+#==== correct_r
+#---- a_call_skips_a_parameter_that_shadows_a_function
+density <- function(x, log = FALSE) {
+  y <- log(x)
+  if (log) y else exp(y)
+}
+#++++
+density: <T> fn(x: T, [log]: logical) -> Unknown
+
+#---- a_call_skips_a_local_number
+f <- function(x) {
+  mean <- 3
+  mean(x)
+}
+#++++
+f: <T> fn(x: T) -> double
+
+#---- a_call_on_a_local_number_with_nothing_behind_it_is_reported
+f <- function() {
+  k <- 3
+  k(1)
+}
+#++++
+f: Unknown
+29..30 error[type-mismatch] this has type `double`, which is not a function, so it cannot be called
+
+#---- a_null_placeholder_filled_on_load_is_unchecked
+reject <- NULL
+f <- function() reject(1)
+#++++
+reject: NULL
+f: fn() -> Unknown
+
+#---- a_null_placeholder_does_not_hide_a_base_function
+trimws <- NULL
+f <- function(text) trimws(text)
+#++++
+trimws: NULL
+f: <T> fn(text: T) -> character
+
+#---- a_function_named_by_a_string
+f <- function(calls) lapply(calls, "[[", "call")
+g <- function(m) apply(m, 1, "mean")
+h <- function(xs) vapply(xs, "[[", character(1), "name")
+k <- function(xs) Reduce("+", xs)
+#++++
+f: fn(calls: Unknown) -> Unknown
+g: <T> fn(m: T) -> Any
+h: <T> fn(xs: list[T] | T[]) -> character[]
+k: <T, U> fn(xs: list[T] | T[]) -> U
+
+#---- the_apply_family_takes_r_s_own_argument_names
+f <- function(xs) lapply(X = xs, FUN = function(v) v)
+#++++
+f: fn(xs: Unknown) -> Unknown
+
+#---- a_name_matches_a_parameter_by_unique_prefix
+f <- function(x) rep(x, len = 3)
+g <- function(path) list.files(path, full = TRUE)
+#++++
+f: <T> fn(x: T) -> Any
+g: <T> fn(path: T) -> character[]
+
+#---- an_ambiguous_prefix_is_still_reported
+f <- function(left, length) left
+g <- function() f(1, le = 2)
+#++++
+f: <T, U> fn(left: T, length: U) -> T
+g: Unknown
+54..56 error[type-mismatch] this function has no parameter `le`. Its named parameters are `left`, `length`
+
+#---- a_generic_does_not_require_the_formals_it_passes_on
+persistence <- function(object, pars, distribution = "norm") UseMethod("persistence")
+f <- function(fit) persistence(fit)
+#++++
+persistence: <T, U, V> fn(object: T, [pars]: U, [distribution]: V) -> Any
+f: <T> fn(fit: T) -> Any
+
+#---- a_generic_still_requires_the_formal_it_dispatches_on
+describe <- function(x, ...) UseMethod("describe")
+f <- function() describe()
+#++++
+describe: <T> fn(x: T, ...: Any) -> Any
+f: Unknown
+67..75 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
+
+#---- a_base_generic_takes_extra_named_arguments
+f <- function(x) unique(x, foo = TRUE)
+g <- function(x) head(x, n = 2, keepnums = FALSE)
+#++++
+f: <T> fn(x: T) -> Any
+g: <T> fn(x: T) -> Any

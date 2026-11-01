@@ -1452,6 +1452,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         visible_arithmetic_classes(self.db, self.file)
     }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+    }
 }
 
 #[salsa::tracked(returns(clone))]
@@ -1534,6 +1538,10 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
     /// collapse the whole scheme to `Unknown`.
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         self.base.arithmetic_classes()
+    }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        self.base.stub_scheme(name)
     }
 }
 
