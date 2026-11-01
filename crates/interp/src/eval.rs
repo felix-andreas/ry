@@ -9,6 +9,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         bytecode, conditions, deparse, dispatch, interp, scope,
         unwind::{Jump, R, Unwind, error, error_in, jump},
+        utils::{PROFILE_TICK, record_profile_sample},
         values::{
             self, alloc, cons_tagged, length, missing_arg, new_env, nil, symbol_name, symbols,
             triple, unbound,
@@ -16,7 +17,15 @@ use {
     },
     heap::object::{Sexp, SexpType, gp},
     smallvec::{SmallVec, smallvec},
+    std::sync::atomic::Ordering,
 };
+
+/// A call's arguments as values or promises. Inline for the common few, so a closure call
+/// allocates no vector for them.
+pub type Args = SmallVec<[Arg; 10]>;
+
+/// What [`match_args`] returns: one value per formal.
+pub type Matched = SmallVec<[Sexp; 8]>;
 
 /// The promise bit set while its code runs, to report recursive default references.
 const PROMISE_SEEN: u16 = 1 << 0;
@@ -126,8 +135,11 @@ unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
 /// The binding cell for `symbol` from `env` outward.
 pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
     let heap = crate::heap();
-    let empty = heap.known().empty_env;
-    while env != empty {
+    let known = heap.known();
+    while env != known.empty_env {
+        if env == known.global_env {
+            return heap.global_cell(symbol).map(|(cell, _)| cell);
+        }
         if let Some(cell) = heap.frame_cell(env, symbol) {
             return Some(cell);
         }
@@ -187,9 +199,27 @@ pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
 /// in GNU R.
 pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp> {
     let heap = crate::heap();
-    let empty = heap.known().empty_env;
-    while env != empty {
-        if let Some(cell) = heap.frame_cell(env, symbol) {
+    let known = heap.known();
+    while env != known.empty_env {
+        let cell = if env == known.global_env {
+            // The first binding on the search path usually is the function; only when it is not
+            // does the walk go on frame by frame, to skip it as GNU R does.
+            if let Some((cell, _)) = heap.global_cell(symbol)
+                && !cell.has_gp(gp::ACTIVE_BINDING)
+            {
+                let mut value = cell.cdr();
+                if value.kind() == SexpType::Promise && value.car() != unbound() {
+                    value = value.car();
+                }
+                if values::is_function(value) {
+                    return Ok(value);
+                }
+            }
+            heap.frame_cell(env, symbol)
+        } else {
+            heap.frame_cell(env, symbol)
+        };
+        if let Some(cell) = cell {
             let mut value = cell_value(cell)?;
             if value.kind() == SexpType::Promise {
                 value = force_promise(value)?;
@@ -320,17 +350,21 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         SexpType::Special => {
             let definition = builtin_def(function)?;
             if definition.is_dispatch_or_eval() {
-                return match dispatch::dispatch_or_eval(definition, call, function, arguments, env)?
-                {
-                    Ok(value) => Ok(value),
-                    Err(args) => call_builtin(definition, call, function, &args, env),
+                let mut args = Args::new();
+                return match dispatch::dispatch_or_eval(
+                    definition, call, function, arguments, env, &mut args,
+                )? {
+                    Some(value) => Ok(value),
+                    None => call_builtin(definition, call, function, &args, env),
                 };
             }
-            let args: Vec<Arg> = values::pairlist_items(arguments)
-                .into_iter()
-                .map(|(tag, value)| Arg { tag, value })
-                .collect();
-            call_builtin(definition, call, function, &args, env)
+            call_builtin(
+                definition,
+                call,
+                function,
+                &unevaluated_args(arguments),
+                env,
+            )
         }
         SexpType::Builtin => {
             let definition = builtin_def(function)?;
@@ -344,11 +378,28 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             call_builtin(definition, call, function, &args, env)
         }
         SexpType::Closure => {
-            let args = promise_args(arguments, env)?;
+            let mut args = Args::new();
+            promise_args_into(arguments, env, &mut args)?;
             apply_closure(call, function, &args, env, None)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
+}
+
+/// A pairlist's items as arguments, unevaluated, as a special receives them.
+pub unsafe fn unevaluated_args(mut list: Sexp) -> Args {
+    let mut args = Args::new();
+    while matches!(
+        list.kind(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    ) {
+        args.push(Arg {
+            tag: list.tag(),
+            value: list.car(),
+        });
+        list = list.cdr();
+    }
+    args
 }
 
 pub unsafe fn builtin_def(function: Sexp) -> R<&'static BuiltinDef> {
@@ -396,6 +447,9 @@ unsafe fn call_builtin_reusing(
         && args.iter().any(|arg| arg.tag != nil())
     {
         check_argument_names(definition, call, args)?;
+    }
+    if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(Some(definition.name))?;
     }
     let function = definition.function;
     let visibility = definition.visibility;
@@ -541,18 +595,29 @@ unsafe fn recorded_formals(name: &str) -> R<Option<Option<Box<[String]>>>> {
 }
 
 /// Evaluates a builtin's arguments, expanding `...`.
-pub unsafe fn evaluate_args(
+pub unsafe fn evaluate_args(arguments: Sexp, env: Sexp, keep_missing: bool, call: Sexp) -> R<Args> {
+    let mut args = Args::new();
+    evaluate_args_into(arguments, env, keep_missing, call, &mut args)?;
+    Ok(args)
+}
+
+/// [`evaluate_args`], appending to `args`. The values already there count as referenced while
+/// the rest evaluate, like the arguments evaluated before them.
+pub unsafe fn evaluate_args_into(
     arguments: Sexp,
     env: Sexp,
     keep_missing: bool,
     call: Sexp,
-) -> R<Vec<Arg>> {
-    let mut args = Vec::new();
-    let result = collect_evaluated_args(arguments, env, keep_missing, call, &mut args);
-    for arg in &args {
+    args: &mut Args,
+) -> R<()> {
+    for arg in args.iter() {
+        arg.value.increment_refcount();
+    }
+    let result = collect_evaluated_args(arguments, env, keep_missing, call, args);
+    for arg in args.iter() {
         arg.value.decrement_refcount();
     }
-    result.map(|()| args)
+    result
 }
 
 /// Evaluates arguments into `args`, counting each value as referenced until the caller is done:
@@ -563,7 +628,7 @@ unsafe fn collect_evaluated_args(
     env: Sexp,
     keep_missing: bool,
     call: Sexp,
-    args: &mut Vec<Arg>,
+    args: &mut Args,
 ) -> R<()> {
     let dots = symbols().dots;
     let missing = missing_arg();
@@ -634,9 +699,16 @@ unsafe fn counted_push(args: &[Arg]) {
 }
 
 /// Wraps a closure's arguments in promises, expanding `...` into the promises it holds.
-pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
+pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
+    let mut args = Args::new();
+    promise_args_into(arguments, env, &mut args)?;
+    Ok(args)
+}
+
+/// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
+/// moving a returned argument vector through every frame.
+pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
     let dots = symbols().dots;
-    let mut args = Vec::with_capacity(length(arguments));
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
         if expression == dots {
@@ -668,7 +740,7 @@ pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
         }
         arguments = arguments.cdr();
     }
-    Ok(args)
+    Ok(())
 }
 
 /// Calls any function with arguments that are values or promises, as `do.call` and the apply
@@ -811,14 +883,20 @@ unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
     let heap = crate::heap();
     let missing = missing_arg();
     let symbol = formal.tag();
+    // The environment is fresh and formals are distinct, so each binding is new.
     if actual == missing && formal.car() != missing {
-        let promise = make_promise(formal.car(), env)?;
-        heap.define(env, symbol, promise)?;
-        if let Some(cell) = heap.frame_cell(env, symbol) {
-            cell.set_gp_bits(gp::BINDING_MISSING, true);
-        }
+        // A literal default evaluates to itself, so it is bound as is: the promise would cost
+        // an allocation and a force on every call that omits it, for the same value.
+        let default = formal.car();
+        let value = if default.kind().is_atomic() || default == nil() {
+            default
+        } else {
+            make_promise(default, env)?
+        };
+        let cell = heap.define_fresh(env, symbol, value)?;
+        cell.set_gp_bits(gp::BINDING_MISSING, true);
     } else {
-        heap.define(env, symbol, actual)?;
+        heap.define_fresh(env, symbol, actual)?;
     }
     Ok(())
 }
@@ -827,7 +905,7 @@ unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
 pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
     let mut list = nil();
     for arg in args.iter().rev() {
-        list = triple(SexpType::Pairlist, arg.value, list, arg.tag)?;
+        list = cons_tagged(arg.value, list, arg.tag)?;
     }
     Ok(list)
 }
@@ -863,18 +941,21 @@ pub unsafe fn run_closure(
         restarts: restarts.clone(),
         srcref: state.srcref,
     });
+    if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(None)?;
+    }
     let depth = state.frames.len();
     let caller_srcref = state.srcref;
     state.srcref = values::get_attr(function, symbols().srcref);
     let signature = crate::annotations::enter(call, function, env, depth);
-    let result = signature.and_then(|signature| {
+    let result = signature.map(|signature| {
         let result = scope(|| {
             stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
             })
         });
-        Ok((signature, result))
+        (signature, result)
     });
     let (signature, result) = match result {
         Ok(pair) => pair,
@@ -1020,7 +1101,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
 /// GNU R's argument matching: exact names, then partial names for the formals before `...`, then
 /// positions. Returns one value per formal: the supplied value or promise, `R_MissingArg`, or
 /// for `...` a `DOTSXP` of what it collects.
-pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>> {
+pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
     let missing = missing_arg();
     let dots_symbol = symbols().dots;
     if let Some(matched) = match_positional_args(formals, args, missing, dots_symbol)? {
@@ -1176,7 +1257,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>
             ),
         ));
     }
-    let mut result: Vec<Sexp> = matched
+    let mut result: Matched = matched
         .into_iter()
         .map(|value| value.unwrap_or(missing))
         .collect();
@@ -1202,13 +1283,13 @@ unsafe fn match_positional_args(
     args: &[Arg],
     missing: Sexp,
     dots_symbol: Sexp,
-) -> R<Option<Vec<Sexp>>> {
+) -> R<Option<Matched>> {
     let is_named =
         |arg: &Arg| arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty();
     if args.iter().any(is_named) {
         return Ok(None);
     }
-    let mut result = Vec::with_capacity(args.len().max(4));
+    let mut result = Matched::new();
     let mut remaining = args.iter();
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
@@ -1268,7 +1349,9 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
         None => (symbol, None),
     };
     let Some(cell) = heap.frame_cell(env, symbol) else {
-        return Err(error(format!("'missing' can only be used for arguments")));
+        return Err(error(
+            "'missing' can only be used for arguments".to_string(),
+        ));
     };
     if let Some(index) = index {
         let dots = cell.cdr();
@@ -1339,7 +1422,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("withVisible", 1, do_with_visible),
     internal("Recall", -1, do_recall).keep_visibility(),
     builtin(".Primitive", 1, do_primitive),
-    internal("identity", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("identity", 1, |call| Ok(call.arg(0))),
     special("~", -1, do_tilde),
     internal("delayedAssign", 4, do_delayed_assign).invisible(),
     internal("makeLazy", 5, do_make_lazy).invisible(),
@@ -1368,7 +1451,7 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
     if name.kind() != SexpType::String || length(name) != 1 {
         return Err(call.error("first argument must be a character string"));
     }
-    let function = values::install_bytes(name.element(0).bytes())?;
+    let function = values::install_charsxp(name.element(0))?;
     let mut items = vec![(nil(), function)];
     items.extend(call.args[1..].iter().map(|arg| (arg.tag, arg.value)));
     values::pairlist(&items, SexpType::Language)
@@ -1551,7 +1634,7 @@ pub unsafe fn as_condition(value: Sexp, call: Sexp) -> R<bool> {
                     | SexpType::Complex
                     | SexpType::Raw
             ) {
-                return Err(error_in(call, format!("argument is of length zero")));
+                return Err(error_in(call, "argument is of length zero".to_string()));
             }
             Ok(condition != 0)
         }
@@ -1621,7 +1704,13 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     sequence.increment_refcount();
     let mut cell = sequence;
     let mut outcome = Ok(nil());
+    let heap = crate::heap();
+    heap.root(sequence);
+    // Each element is rooted when it is allocated, and the binding keeps it alive after that, so
+    // releasing per iteration stops a long loop from holding every element it ever made.
+    let mark = heap.handle_mark();
     for index in 0..count {
+        crate::heap().release_handles(mark);
         let element = match sequence.kind() {
             SexpType::List | SexpType::Expression => Ok(sequence.element(index)),
             SexpType::Pairlist | SexpType::Language => {
@@ -1872,7 +1961,7 @@ unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
     call.check_arity(1)?;
     let mut symbol = call.arg(0);
     if symbol.kind() == SexpType::String && length(symbol) == 1 {
-        symbol = values::install_bytes(symbol.element(0).bytes())?;
+        symbol = values::install_charsxp(symbol.element(0))?;
     }
     if symbol.kind() != SexpType::Symbol {
         return Err(call.error("invalid use of 'missing'"));
@@ -1924,10 +2013,7 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     let args = if function.kind() == SexpType::Builtin {
         evaluate_args(inner.cdr(), call.env, definition.keep_missing, inner)?
     } else {
-        values::pairlist_items(inner.cdr())
-            .into_iter()
-            .map(|(tag, value)| Arg { tag, value })
-            .collect()
+        unevaluated_args(inner.cdr())
     };
     if definition.generic != Generic::None
         && let Some(value) =
@@ -2129,7 +2215,7 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
     let name = values::require_string(call.arg(0), "name")?;
     crate::builtins::primitive(&name)
-        .ok_or_else(|| call.error(format!("no such primitive function")))
+        .ok_or_else(|| call.error("no such primitive function".to_string()))
 }
 
 /// A formula: the call itself, with class `formula` and the environment it was made in.
@@ -2138,7 +2224,7 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
     if values::get_attr(formula, symbols().class) == nil() {
         let class = values::scalar_string("formula")?;
         values::set_attr(formula, symbols().class, class)?;
-        let environment = values::install(".Environment")?;
+        let environment = symbols().dot_environment;
         values::set_attr(formula, environment, call.env)?;
     }
     Ok(formula)
@@ -2273,7 +2359,7 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     let superassign = call.call.car() == symbols().assign2;
     let mut target = call.arg(0);
     if target.kind() == SexpType::String && length(target) >= 1 {
-        target = values::install_bytes(target.element(0).bytes())?;
+        target = values::install_charsxp(target.element(0))?;
     }
     match target.kind() {
         SexpType::Symbol => {
@@ -2379,7 +2465,7 @@ pub unsafe fn complex_assign(
         inner = inner.cdr().car();
     }
     if inner.kind() == SexpType::String && length(inner) == 1 {
-        inner = values::install_bytes(inner.element(0).bytes())?;
+        inner = values::install_charsxp(inner.element(0))?;
     }
     if inner.kind() != SexpType::Symbol {
         return Err(error_in(
@@ -2486,9 +2572,17 @@ unsafe fn apply_setter(setter_call: Sexp, whole: Sexp, env: Sexp) -> R<Sexp> {
         }
         SexpType::Special if builtin_def(function)?.is_dispatch_or_eval() => {
             let definition = builtin_def(function)?;
-            match dispatch::dispatch_or_eval(definition, setter_call, function, arguments, env)? {
-                Ok(value) => Ok(value),
-                Err(args) => call_builtin(definition, whole, function, &args, env),
+            let mut args = Args::new();
+            match dispatch::dispatch_or_eval(
+                definition,
+                setter_call,
+                function,
+                arguments,
+                env,
+                &mut args,
+            )? {
+                Some(value) => Ok(value),
+                None => call_builtin(definition, whole, function, &args, env),
             }
         }
         _ => apply_call(setter_call, function, arguments, env),

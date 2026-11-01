@@ -351,6 +351,17 @@ pub(crate) struct TripleObject {
     pub third: Cell<Sexp>,
 }
 
+/// A symbol is a triple (print name, base binding, internal) followed by the state of its lookup
+/// caches, which no collection traces: every reader checks the stamp first, and a cell whose
+/// stamp is current is still bound in an environment on the search path.
+#[repr(C)]
+pub(crate) struct SymbolObject {
+    pub triple: TripleObject,
+    pub epoch: Cell<u64>,
+    pub global_cell: Cell<Option<Sexp>>,
+    pub global_stamp: Cell<u64>,
+}
+
 #[repr(C)]
 pub(crate) struct EnvironmentObject {
     pub header: Header,
@@ -495,6 +506,7 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 .checked_add(15)
                 .map(|size| size & !15)
         }
+        Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),
         Shape::Environment => Some(size_of::<EnvironmentObject>()),
         Shape::ExternalPtr => Some(size_of::<ExternalPtrObject>()),
@@ -749,6 +761,10 @@ impl Sexp {
 
     pub(crate) unsafe fn frame_ptr(self) -> *mut Frame {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
+    }
+
+    pub(crate) unsafe fn symbol_payload(self) -> &'static SymbolObject {
+        unsafe { &*self.0.as_ptr().cast::<SymbolObject>() }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {

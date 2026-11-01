@@ -14,17 +14,22 @@
 
 use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 
-/// Frames this small are scanned; larger ones keep a hash index beside the cells.
-const INDEX_THRESHOLD: usize = 8;
+/// Frames this small are scanned; larger ones keep a hash index beside the cells. Scanning a
+/// dozen cells is cheaper than building the index, which a call to a function with many
+/// formals (`identical` has nine) would otherwise pay on every call.
+const INDEX_THRESHOLD: usize = 16;
+
+/// The cells a frame holds without a second allocation.
+const INLINE_CELLS: usize = 12;
 
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
 #[derive(Default)]
 pub struct Frame {
-    /// Inline up to the index threshold, because most frames are a call's few arguments and
-    /// locals, and a closure call should not pay for a second allocation beside the frame's own.
-    cells: SmallVec<[Sexp; INDEX_THRESHOLD]>,
+    /// Inline, because most frames are a call's few arguments and locals, and a closure call
+    /// should not pay for a second allocation beside the frame's own.
+    cells: SmallVec<[Sexp; INLINE_CELLS]>,
     index: Option<FxHashMap<Sexp, u32>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,
@@ -95,8 +100,12 @@ impl Frame {
         // bucket and counts one, and once the count passes 85% of the size the table grows to
         // `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry
         // prepended, after which the count restarts at the number of occupied buckets.
+        // Each bucket is a chain threaded through `next`, so an insert and a rehash allocate
+        // nothing per entry.
+        const EMPTY: usize = usize::MAX;
         let mut size = self.hash_size as usize;
-        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
+        let mut heads = vec![EMPTY; size];
+        let mut next = vec![EMPTY; self.cells.len()];
         let mut count = 0;
         let hashes: Vec<usize> = self
             .cells
@@ -104,40 +113,55 @@ impl Frame {
             .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
             .collect();
         for (position, hash) in hashes.iter().enumerate() {
-            buckets[hash % size].insert(0, position);
+            let bucket = hash % size;
+            next[position] = heads[bucket];
+            heads[bucket] = position;
             count += 1;
             if count as f64 > size as f64 * 0.85 {
                 size = (size as f64 * 1.2) as usize + 1;
-                let mut grown: Vec<Vec<usize>> = vec![Vec::new(); size];
-                for &moved in buckets.iter().flatten() {
-                    grown[hashes[moved] % size].insert(0, moved);
+                let mut grown = vec![EMPTY; size];
+                for &head in &heads {
+                    let mut moved = head;
+                    while moved != EMPTY {
+                        let following = next[moved];
+                        let bucket = hashes[moved] % size;
+                        next[moved] = grown[bucket];
+                        grown[bucket] = moved;
+                        moved = following;
+                    }
                 }
-                count = grown.iter().filter(|bucket| !bucket.is_empty()).count();
-                buckets = grown;
+                count = grown.iter().filter(|head| **head != EMPTY).count();
+                heads = grown;
             }
         }
-        buckets
-            .iter()
-            .flatten()
-            .map(|&position| self.cells[position])
-            .collect()
+        let mut listed = Vec::with_capacity(self.cells.len());
+        for &head in &heads {
+            let mut position = head;
+            while position != EMPTY {
+                listed.push(self.cells[position]);
+                position = next[position];
+            }
+        }
+        listed
     }
 
-    /// Adds a cell whose symbol the frame does not bind yet.
+    /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
+    /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
+    /// first match in GNU R's frame list does.
     pub(crate) unsafe fn insert(&mut self, cell: Sexp) {
         let position = self.cells.len() as u32;
         self.cells.push(cell);
         match &mut self.index {
             Some(index) => {
-                index.insert(unsafe { cell.car() }, position);
+                index.entry(unsafe { cell.car() }).or_insert(position);
             }
             None if self.cells.len() > INDEX_THRESHOLD => {
-                let index = self
-                    .cells
-                    .iter()
-                    .enumerate()
-                    .map(|(position, cell)| (unsafe { cell.car() }, position as u32))
-                    .collect();
+                let mut index = FxHashMap::default();
+                for (position, cell) in self.cells.iter().enumerate() {
+                    index
+                        .entry(unsafe { cell.car() })
+                        .or_insert(position as u32);
+                }
                 self.index = Some(index);
             }
             None => {}

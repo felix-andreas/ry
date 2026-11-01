@@ -2651,7 +2651,7 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
         let largest = half.iter().copied().fold(0.0, f64::max);
         half = [largest; 3];
     }
-    if half.iter().any(|half| *half == 0.0) {
+    if half.contains(&0.0) {
         return Err(error("invalid 'x', 'y' or 'z' limits"));
     }
     let mut perspective = identity();

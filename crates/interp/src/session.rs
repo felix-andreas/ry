@@ -297,6 +297,9 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::graphics::close_all_devices() {
         report_toplevel(unwind);
     }
+    if let Err(unwind) = crate::utils::stop_profiler() {
+        report_toplevel(unwind);
+    }
 }
 
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.

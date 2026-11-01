@@ -68,7 +68,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("row", 1, |call| unsafe { row_col(call, true) }),
     internal("col", 1, |call| unsafe { row_col(call, false) }),
     internal("diag", 3, do_diag),
-    internal("max.col", 2, |call| unsafe {
+    internal("max.col", 2, |call| {
         Err(call.error("max.col is not supported"))
     }),
     internal("shortRowNames", 2, do_short_row_names),
@@ -408,6 +408,38 @@ unsafe fn resolve(
     }
 }
 
+/// The object and zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free
+/// numeric scalar `i` inside the vector's bounds: the common case GNU R's byte code also
+/// answers before resolving subscripts in general.
+unsafe fn scalar_position(call: &Call<'_>) -> Option<(Sexp, usize)> {
+    let [object, index] = call.args else {
+        return None;
+    };
+    if object.tag != nil() || index.tag != nil() {
+        return None;
+    }
+    let (object, index) = (object.value, index.value);
+    let vector =
+        object.kind().is_atomic() || matches!(object.kind(), SexpType::List | SexpType::Expression);
+    if !vector
+        || !matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        || object.is_altrep()
+        || index.is_altrep()
+        || values::has_attributes(index)
+        || length(index) != 1
+    {
+        return None;
+    }
+    let position = match index.kind() {
+        SexpType::Integer => index.slice::<i32>()[0] as f64,
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NaN fails both comparisons, and `x[2.7]` truncates to the second element.
+    (position >= 1.0 && position < length(object) as f64 + 1.0)
+        .then(|| (object, position as usize - 1))
+}
+
 /// Splits a builtin's arguments into the object, the subscripts, and `drop`/`exact`.
 unsafe fn subset_args(call: &Call<'_>) -> (Sexp, Vec<Sexp>, Option<Sexp>, Option<Sexp>) {
     let mut object = nil();
@@ -437,6 +469,12 @@ unsafe fn subset_args(call: &Call<'_>) -> (Sexp, Vec<Sexp>, Option<Sexp>, Option
 // `[`.
 
 unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
+    if let Some((object, position)) = scalar_position(call)
+        && !values::has_attributes(object)
+        && object.kind().is_atomic()
+    {
+        return vector_element(object, position);
+    }
     let (object, indices, drop, _) = subset_args(call);
     let drop = drop.is_none_or(|drop| values::as_logical_scalar(drop) != 0);
     subset(object, &indices, drop, call.call)
@@ -679,6 +717,15 @@ fn flat_offsets(selections: &[Vec<usize>], dims: &[usize]) -> Vec<usize> {
 // `[[`.
 
 unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
+    if let Some((object, position)) = scalar_position(call)
+        && !object.is_object()
+    {
+        match object.kind() {
+            SexpType::List | SexpType::Expression => return Ok(object.element(position)),
+            kind if kind.is_atomic() => return vector_element(object, position),
+            _ => {}
+        }
+    }
     let (object, indices, _, exact) = subset_args(call);
     let exact = match exact {
         Some(exact) => match values::as_logical_scalar(exact) {
@@ -767,7 +814,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
                 "wrong args for environment subassignment",
             ));
         }
-        let symbol = values::install_bytes(index.element(0).bytes())?;
+        let symbol = values::install_charsxp(index.element(0))?;
         let value = eval::find_var_in_frame(symbol, object)?;
         if value == unbound() {
             return Ok(nil());
@@ -910,7 +957,7 @@ unsafe fn single_position(
                 }
                 return Err(crate::unwind::error_in(
                     call,
-                    format!("invalid negative subscript in get1index <real>"),
+                    "invalid negative subscript in get1index <real>".to_string(),
                 ));
             }
             if value == 0.0 || value as usize > extent {
@@ -1026,7 +1073,7 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
     };
     match value.kind() {
         SexpType::Symbol => Ok(value),
-        SexpType::String if length(value) == 1 => values::install_bytes(value.element(0).bytes()),
+        SexpType::String if length(value) == 1 => values::install_charsxp(value.element(0)),
         _ => Err(error("invalid type or length for slot name")),
     }
 }
@@ -1196,11 +1243,11 @@ pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
 /// relies on that: its default `initialize` method calls it as a plain function on an object
 /// it has just copied, and discards the result.
 pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    if symbol == symbols().dot_data {
-        if let Some(function) = interp_methods_function("setDataPart")? {
-            let call = values::call(function, &[object, value])?;
-            return eval::eval(call, values::base_env());
-        }
+    if symbol == symbols().dot_data
+        && let Some(function) = interp_methods_function("setDataPart")?
+    {
+        let call = values::call(function, &[object, value])?;
+        return eval::eval(call, values::base_env());
     }
     let stored = if value == nil() {
         values::install_bytes(b"\x01NULL\x01")?
@@ -1378,7 +1425,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         if value_count == 0 {
             return Err(crate::unwind::error_in(call, "replacement has length zero"));
         }
-        if total % value_count != 0 {
+        if !total.is_multiple_of(value_count) {
             return Err(crate::unwind::error_in(
                 call,
                 "number of items to replace is not a multiple of replacement length",
@@ -1416,7 +1463,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if value_count == 0 {
         return Err(crate::unwind::error_in(call, "replacement has length zero"));
     }
-    if positions.len() % value_count != 0 {
+    if !positions.len().is_multiple_of(value_count) {
         conditions::warning_call(
             call,
             "number of items to replace is not a multiple of replacement length",
@@ -1563,7 +1610,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
                 "wrong args for environment subassignment",
             ));
         }
-        let symbol = values::install_bytes(index.element(0).bytes())?;
+        let symbol = values::install_charsxp(index.element(0))?;
         eval::define(symbol, value, object)?;
         return Ok(object);
     }
@@ -2494,14 +2541,17 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     let total = rows * cols;
     if count > 0
         && total > 0
-        && (total % count != 0 && count % rows.max(1) != 0 || (count > total && count % total != 0))
+        && (total % count != 0 && !count.is_multiple_of(rows.max(1))
+            || (count > total && !count.is_multiple_of(total)))
     {
         if count > total {
             conditions::warning_call(
                 call.call,
                 format!("data length differs from size of matrix: [{count} != {rows} x {cols}]"),
             )?;
-        } else if (rows > 0 && count % rows != 0) || (cols > 0 && count % cols != 0) {
+        } else if (rows > 0 && !count.is_multiple_of(rows))
+            || (cols > 0 && !count.is_multiple_of(cols))
+        {
             conditions::warning_call(
                 call.call,
                 format!(

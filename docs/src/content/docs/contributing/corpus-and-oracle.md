@@ -198,6 +198,6 @@ The two time ratios answer different questions. Suite time adds up the `test_tha
 it measures evaluation. Process wall time also counts what happens between blocks, and at the full
 benchmark size (`--lines 300000 --files 500`) that is dominated by testthat calling `gc()` after
 every test file that registered a teardown. A full collection with the whole package loaded takes
-about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still match GNU R
+about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still beat GNU R
 end to end.
 

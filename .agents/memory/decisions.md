@@ -1903,12 +1903,15 @@ there was no evaluator, so there was no previous source of truth.
   the base primitive, falling back to the AST evaluator for the whole expression, so redefining
   `if` or `+` keeps GNU R's semantics instead of GNU R's compiler's assumption that base is not
   shadowed.
-- **Inline caches are validated by one heap counter, the binding epoch,** which moves when a
-  binding is created or removed outside a function frame, or an enclosure changes. Function frames
-  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a cached
-  lookup never resolves through one and the frame itself is probed directly. A function lookup that
-  skipped a non-function binding is not cached, because that binding could later hold a function
-  without moving the epoch.
+- **Inline caches are validated per symbol** (`Heap::lookup_stamp`): each symbol carries an epoch
+  that moves when a binding of that symbol is created or removed outside a function frame, and the
+  stamp adds a heap-wide enclosure epoch that moves when any enclosure changes. A single heap-wide
+  counter was invalidated by every test body evaluated in a fresh environment. Function frames
+  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a
+  cached lookup never resolves through one and the frame itself is probed directly. A function
+  lookup that skipped a non-function binding is not cached, because that binding could later hold
+  a function without moving the stamp. A lookup that reaches the global environment goes through
+  the symbol's cached search-path cell (`Heap::global_cell`), GNU R's global cache.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
@@ -3448,7 +3451,13 @@ explicit allocators".
   (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
   own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
   TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
-  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+  after the first one exits. v2 stays: under `ry run`, data.table's OpenMP workers and Polars'
+  thread pool run beside it without a crash (both keep their threads alive). The v3 crash needs
+  an allocating thread to exit before another starts allocating, which the libr test binaries do
+  and a package that starts its own short-lived threads could too, so v2 removes the risk. Move to v3 only once a `libmimalloc-sys` release passes the libr test binaries with it.
+  Cargo unifies features across the packages of one build, so `cargo build -p ry-lang -p libr`
+  gives the binary v2 as well; `mi_option_arena_eager_commit` is option 4 in both versions, so
+  `main.rs` is correct either way. Arenas sit on top of the global allocator, not in place of it.
 - **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
   by value, because salsa stores them across revisions and backdates by equality. So an arena
   never leaks into a memoized result: a query does its work in a scratch arena and copies the
@@ -3467,6 +3476,49 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+# Decision record: the interpreter's call path, lookups and allocation
+
+- **Goal.** Per-test time on the three benchmark code bases, without the JIT, at or below GNU R's.
+  The cost was spread over the interpreter core (`step`, frame lookup, argument matching, an
+  allocation per binding and promise), so the fixes are many small cuts rather than one redesign.
+- **A closure call's heap objects are the environment, one cell per formal, and the argument
+  promises with their pairlist; the bookkeeping stays off the Rust heap.** Arguments and matched
+  formals live in inline `SmallVec`s (`eval::Args` holds 10, `eval::Matched` 8, so a call with
+  more spills to one Rust allocation), callers fill a vector they own (`promise_args_into`,
+  `evaluate_args_into`), and the frame lives inside the environment object. A formal whose default
+  is atomic or `NULL` binds that value directly with `BINDING_MISSING` set, because a promise of a
+  constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
+  binding's type. A typed closure turns such a binding back into a promise on entry, because an
+  inline annotation checks a default only when the body uses it.
+- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_fresh`
+  skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
+  cell, as GNU R's frame list does.
+- **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
+  `identical` has nine formals, and building a map per call cost more than scanning.
+- **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
+  compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
+  a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
+  it as a lazy-load promise, so the guard compares against the forced value); and a function
+  expression compiles its body once per site, shared by every closure the site creates.
+- **Scalar `x[i]` and `x[[i]]` on a plain vector skip general subscript resolution**, in the
+  subset builtins (`subset.rs`) rather than the compiler, so both evaluators take it.
+- **A compiled read of a promise-bound variable forces the promise it found** instead of
+  restarting the lookup through `eval_symbol`; only active, missing and unbound cells take the slow
+  path.
+- **A for loop reuses its scalar** when only the loop binding references it, as GNU R's `STEPFOR`
+  does, and the AST loop releases each iteration's handles instead of rooting them until the end.
+- **Minor collections mark only roots added since the last one** (new symbols, newly preserved
+  objects), because older ones are already marked old. The nursery stays at 8 MB: 32 MB was
+  measured slower, because first touches of fresh pages cost more than the collections saved.
+- **Compiled regular expressions are cached by pattern and flags**, and fixed argument names
+  (`PACKAGE`, `NAOK`, `.Environment` and friends) are interned once in `values::symbols()`.
+- **`inherits()` follows `class()`**: an object with no class attribute inherits from the implicit
+  class `class()` reports (`matrix`/`array`, else the basic class), not the dispatch chain, so
+  `inherits(1L, "numeric")` is `FALSE`, as in GNU R. It compares bytes and allocates nothing.
+- **Listing a hashed frame replays GNU R's table through flat head and next arrays**, and callers
+  that only need the set (`length(env)`, sorted `ls()`, `lockEnvironment`) use
+  `Heap::bound_symbols`, which skips the replay.
 
 ## `just ry` builds ry's runtime; ry-lang does not depend on libr
 
