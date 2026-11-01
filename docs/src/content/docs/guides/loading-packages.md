@@ -4,11 +4,11 @@ description: Edit your package, run the next command, and see the change, withou
 ---
 
 When you work on an R package, most of your time goes into one loop: edit a function, run it, look at
-the result, edit again. Start `ry R` anywhere inside the package and that loop needs no extra
+the result, edit again. Start `ry run` anywhere inside the package and that loop needs no extra
 step, because ry reloads what you changed before each command:
 
 ```text
-$ ry R
+$ ry run
 Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
 > count_words("the  quick fox")
 [1] 4
@@ -31,7 +31,7 @@ takes 6.6 s (see [Speed](#speed)).
 ## Running one command or a script
 
 `ry load` loads the package, runs something, and exits, which suits a quick check from the shell or
-a script in CI. Unlike `ry R`, it runs the package on ry's own runtime, which is still incomplete
+a script in CI. Like `ry run`, it runs the package on ry's own runtime, which is still incomplete
 ([Which R runs your package](#which-r-runs-your-package)):
 
 ```text
@@ -70,9 +70,10 @@ package's `inst/`, and datasets in `data/` are not loaded.
 
 ## Which R runs your package
 
-`ry R` and `load_all()` in an R session run your package on GNU R. `ry run` and `ry load` run it on
-ry's own runtime, and `load_all()` loads on whichever runtime calls it. Started inside a package, the
-console of `ry run` loads and reloads it exactly as `ry R` does.
+`ry run` and `ry load` run your package on ry's own runtime. `ry R` and `load_all()` in an R session
+run it on GNU R, and `load_all()` loads on whichever runtime calls it. The consoles of `ry run` and
+`ry R` load and reload a package the same way, so when ry's runtime lacks something your package
+needs, `ry R` gives you the same loop on GNU R.
 
 A package written in plain R, with or without [inline annotations](/type-checking/inline-annotations),
 loads on both. A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads only
