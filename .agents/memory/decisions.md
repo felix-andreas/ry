@@ -2776,8 +2776,9 @@ first lines R had already read, leaving R mid-command.
   `build_index` takes spare room so `reserve` can presize the index. The bytecode compiler hands
   such assignments to the AST evaluator.
 - **Why not a special form or last-use analysis.** A special form would make every library update
-  syntax, and last-use analysis needs the compiler; the reference count is already exact at the
-  call boundary, so reuse is decided where it is cheapest. The remaining copies (a parameter's
+  syntax, and last-use analysis needs the compiler; the reference count is exact at the call
+  boundary for AST frames, so reuse is decided where it is cheapest. It is not exact for a frame a
+  compiled closure owns: bytecode registers hold uncounted references (`backlog.md`). The remaining copies (a parameter's
   first update, `state$seen <- Dict.insert(state$seen, ...)`) are in `backlog.md`.
 - **Impact.** Value semantics are unchanged (any second holder copies). 40,000 inserts: 0.04 s.
   The checker is unaffected.
@@ -2812,9 +2813,14 @@ first lines R had already read, leaving R mid-command.
 - `Result.and_then : <A, B, E, F> ... -> Result<B, E | F>`. Without a rule, a step that never fails
   left `F` an open variable, so the result rendered `:Err(:InvalidNumStr | ?)` and later
   unification could bind it to anything.
-- `Checker::drop_unconstrained_members` removes, from unions in a named callee's result, members
-  that are still one of the scheme's freshly instantiated variables after argument checking. A
-  union of only such members stays. Contract: `type-system.mdx`, "Union normalization".
+- `Checker::callback_outputs` picks the scheme's instantiated variables that occur in parameter
+  types only as a callback's return; `Checker::drop_unconstrained_members` removes those that are
+  still unbound after the call and that no variable older than the call reaches. A broader first
+  version dropped any still-open instantiated variable and wrongly typed `Find` in an unannotated
+  function and every return-only generic (`<T> fn() -> T | NULL`) as `NULL`; the fixtures
+  `standard-library.R.test` "an_open_parameter_filled_by_an_argument_is_kept" and
+  "a_return_only_parameter_is_kept" pin both. A union of only such members stays. Contract:
+  `type-system.mdx`, "Union normalization".
 
 ## The standard library runs only on ry's runtime
 

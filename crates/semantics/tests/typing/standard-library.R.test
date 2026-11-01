@@ -26,6 +26,30 @@ n <- Result.and_then(Str.to_integer("4"), function(x) :Ok(x + 1L))
 #++++
 n: :Ok(integer) | :Err(:InvalidNumStr)
 
+#---- and_then_keeps_an_outer_step_open
+g <- function(r, step) Result.and_then(r, step)
+#++++
+g: <T, U, V, W> fn(r: :Ok(T) | :Err(U), step: fn(T) -> :Ok(V) | :Err(W)) -> :Ok(V) | :Err(U | W)
+
+#---- an_open_parameter_filled_by_an_argument_is_kept
+pick <- function(xs) Find(function(x) TRUE, xs)
+v <- pick(list("a", "b"))
+w <- if (!is.null(v)) Str.trim(v) else ""
+#++++
+pick: <T> fn(xs: list[T] | T[]) -> T | NULL
+v: character | NULL
+w: character
+
+#---- a_return_only_parameter_is_kept
+#: <T> fn(name: character) -> T | NULL
+lookup <- function(name) NULL
+v <- lookup("a")
+w <- if (!is.null(v)) Str.trim(v) else ""
+#++++
+lookup: <T> fn(name: character) -> T | NULL
+v: Unknown
+w: character
+
 #---- and_then_meets_a_widened_annotation
 #: @param text {character}
 #: @return {Result<integer, :InvalidNumStr | :NotPositive>}

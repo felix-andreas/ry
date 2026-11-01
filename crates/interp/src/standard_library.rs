@@ -751,7 +751,12 @@ unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
 unsafe fn list_repeat(call: &Call<'_>) -> R<Sexp> {
     let [value, times] = arguments(call, ["value", "count"])?;
     let times = count(call, "count", times)?;
-    list_vector(&vec![value; times])
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(times)
+        .map_err(|_| error(format!("cannot allocate a list of {times} elements")))?;
+    items.resize(times, value);
+    list_vector(&items)
 }
 
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
@@ -2476,7 +2481,7 @@ unsafe fn insert_in_place(object: Sexp, key: Key, value: Sexp) -> R<()> {
     }
     let entries = count + 1;
     if entries * 2 > length(index) {
-        let rebuilt = build_index(entries, entries, |position| key_at(keys, position));
+        let rebuilt = build_index(entries, entries, |position| key_at(keys, position))?;
         heap.set_record_slot(object, index_at, values::integer_vector(&rebuilt)?);
     } else {
         index.slice_mut::<i32>()[slot] = entries as i32;
@@ -2491,14 +2496,25 @@ unsafe fn build_index(
     count: usize,
     room: usize,
     key_at_position: impl Fn(usize) -> Key,
-) -> Vec<i32> {
-    let mut index = vec![0; (room.max(count) * 2).next_power_of_two().max(8)];
+) -> R<Vec<i32>> {
+    let size = room
+        .max(count)
+        .checked_mul(2)
+        .and_then(usize::checked_next_power_of_two)
+        .filter(|&size| size <= i32::MAX as usize)
+        .ok_or_else(|| error(format!("cannot index a collection with room for {room} keys")))?
+        .max(8);
+    let mut index = Vec::new();
+    index
+        .try_reserve_exact(size)
+        .map_err(|_| error(format!("cannot allocate an index for {room} keys")))?;
+    index.resize(size, 0);
     for position in 0..count {
         if let Err(slot) = probe(&index, key_at_position(position), &key_at_position) {
             index[slot] = position as i32 + 1;
         }
     }
-    index
+    Ok(index)
 }
 
 /// A dictionary or set with room for `spare` more keys without growing: `object` itself when the
@@ -2518,6 +2534,10 @@ unsafe fn reserve_collection(call: &Call<'_>, object: Sexp, spare: usize) -> R<S
     heap.root(object);
     let kind = records::native_kind(object);
     let room = count.saturating_add(spare);
+    if room > i32::MAX as usize / 2 {
+        // Positions in the index are `i32`, and the index holds twice the room.
+        return Err(error(format!("cannot reserve room for {room} keys")));
+    }
     let parts = if kind == NativeKind::Dict { 2 } else { 1 };
     for slot in 0..parts {
         if let Some(part) = object.record_handle(slot)
@@ -2532,7 +2552,7 @@ unsafe fn reserve_collection(call: &Call<'_>, object: Sexp, spare: usize) -> R<S
     if let (Some(keys), Some(index)) = (object.record_handle(0), object.record_handle(index_at))
         && length(index) < wanted
     {
-        let rebuilt = build_index(count, room, |position| key_at(keys, position));
+        let rebuilt = build_index(count, room, |position| key_at(keys, position))?;
         heap.set_record_slot(object, index_at, values::integer_vector(&rebuilt)?);
     }
     Ok(object)
@@ -2733,7 +2753,7 @@ impl Collection {
                 }
                 self.index[slot] = self.keys.len() as i32;
                 if self.keys.len() * 2 > self.index.len() {
-                    self.rebuild_index();
+                    self.rebuild_index()?;
                 }
             }
         }
@@ -2759,14 +2779,14 @@ impl Collection {
         }
         self.keys = keys;
         self.values = values;
-        self.rebuild_index();
-        Ok(())
+        self.rebuild_index()
     }
 
-    unsafe fn rebuild_index(&mut self) {
+    unsafe fn rebuild_index(&mut self) -> R<()> {
         self.index = build_index(self.keys.len(), self.keys.len(), |position| {
             self.keys[position]
-        });
+        })?;
+        Ok(())
     }
 
     unsafe fn write(&self) -> R<Sexp> {

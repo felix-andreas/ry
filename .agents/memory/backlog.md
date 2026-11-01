@@ -309,6 +309,17 @@ protects construction but nothing after it.
 - Reuse misses two shapes: a nested update (`state$seen <- Dict.insert(state$seen, k, v)`, about
   28 s for 20,000 inserts in a debug build, quadratic) and the first update of a parameter inside
   a helper. Both need either a nested-replacement path in `eval::rebind` or last-use analysis.
+- **Bytecode registers are uncounted, so in-place updates can be observed.** In a compiled
+  closure, `r <- list(d, mod())` keeps `d` in a register without a reference; if `mod` runs
+  `d <- Dict.insert(d, ...)` in that frame through `eval.parent`, the count reads 1 and `r[[1]]`
+  sees the insert. `x[[1]] <- 99` through `eval.parent` misbehaves the same way, so the cause is
+  in `crates/interp/src/bytecode.rs` (`may_modify_in_place` is syntactic), not the library. Fix
+  by counting register references or refusing reuse while a compiled frame for the environment
+  is live.
+- `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
+  signalling) for the reuse path, and `bytecode::reuses_first_argument` matches the callee's name
+  against `BUILTINS` as a string for every subexpression. Fold the first into `eval_call` and give
+  the second a name set.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.
