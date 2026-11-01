@@ -354,7 +354,7 @@ unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
         SexpType::Closure => Ok(function.tag()),
         SexpType::Builtin | SexpType::Special => Ok(nil()),
         _ => {
-            let environment = values::install(".Environment")?;
+            let environment = symbols().dot_environment;
             Ok(get_attr(function, environment))
         }
     }
@@ -379,7 +379,7 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
     } else {
         object
     };
-    let environment = values::install(".Environment")?;
+    let environment = symbols().dot_environment;
     values::set_attr(copy, environment, env)?;
     Ok(copy)
 }
@@ -466,7 +466,7 @@ pub unsafe fn is_namespace(env: Sexp) -> bool {
 
 /// Whether `env` is a package environment on the search path (its `name` starts `package:`).
 pub unsafe fn is_package_env(env: Sexp) -> bool {
-    let name = get_attr(env, values::install("name").unwrap_or(nil()));
+    let name = get_attr(env, symbols().name);
     matches!(values::first_string(name), Some(text) if text.starts_with("package:"))
 }
 
@@ -482,7 +482,7 @@ pub unsafe fn namespace_name(env: Sexp) -> Option<String> {
     if info.kind() != SexpType::Environment {
         return None;
     }
-    let spec_symbol = values::install("spec").ok()?;
+    let spec_symbol = symbols().spec;
     let spec = value_of(find_var_in_frame(spec_symbol, info).ok()?).ok()?;
     values::first_string(spec).map(|text| text.into_owned())
 }
@@ -499,14 +499,14 @@ unsafe fn do_environment_name(call: &Call<'_>) -> R<Sexp> {
     } else if env == empty_env() {
         "R_EmptyEnv".to_owned()
     } else if is_package_env(env) {
-        let name_attr = get_attr(env, values::install("name")?);
+        let name_attr = get_attr(env, symbols().name);
         values::first_string(name_attr)
             .map(|text| text.into_owned())
             .unwrap_or_default()
     } else if is_namespace(env) {
         namespace_name(env).unwrap_or_default()
     } else {
-        let name_attr = get_attr(env, values::install("name")?);
+        let name_attr = get_attr(env, symbols().name);
         values::first_string(name_attr)
             .map(|text| text.into_owned())
             .unwrap_or_default()
@@ -523,7 +523,7 @@ unsafe fn name_symbol(value: Sexp, what: &str) -> R<Sexp> {
             if name.bytes().is_empty() {
                 return Err(error("attempt to use zero-length variable name"));
             }
-            values::install_bytes(name.bytes())
+            values::install_charsxp(name)
         }
         _ => Err(error(format!("invalid '{what}' argument"))),
     }
@@ -889,7 +889,7 @@ unsafe fn search_name(env: Sexp) -> R<String> {
     if env == base_env() {
         return Ok("package:base".into());
     }
-    let name = get_attr(env, values::install("name")?);
+    let name = get_attr(env, symbols().name);
     Ok(values::first_string(name)
         .map(|text| text.into_owned())
         .unwrap_or_default())
@@ -978,7 +978,7 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
         }
         env
     };
-    let name_symbol = values::install("name")?;
+    let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
     let mut previous = global_env();
     for _ in 2..position {
@@ -1289,7 +1289,7 @@ pub unsafe fn install_default_options() -> R<()> {
 unsafe fn registry_symbol(name: Sexp) -> R<Sexp> {
     match name.kind() {
         SexpType::Symbol => Ok(name),
-        SexpType::String if length(name) >= 1 => values::install_bytes(name.element(0).bytes()),
+        SexpType::String if length(name) >= 1 => values::install_charsxp(name.element(0)),
         _ => Err(error("bad namespace name")),
     }
 }
@@ -1337,8 +1337,8 @@ unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
     }
     let heap = crate::heap();
     for index in 0..length(target_names) {
-        let target_symbol = values::install_bytes(target_names.element(index).bytes())?;
-        let source_symbol = values::install_bytes(source_names.element(index).bytes())?;
+        let target_symbol = values::install_charsxp(target_names.element(index))?;
+        let source_symbol = values::install_charsxp(source_names.element(index))?;
         let mut env = source;
         let mut cell = None;
         while env != empty_env() {
@@ -1378,7 +1378,7 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("second argument must be a list"));
     }
     let function_expression = match what.kind() {
-        SexpType::String if length(what) == 1 => values::install_bytes(what.element(0).bytes())?,
+        SexpType::String if length(what) == 1 => values::install_charsxp(what.element(0))?,
         SexpType::Closure | SexpType::Builtin | SexpType::Special => what,
         _ => return Err(call.error("'what' must be a function or character string")),
     };
@@ -1721,7 +1721,7 @@ unsafe fn do_body(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {
     let mut function = call.arg(0);
     if function.kind() == SexpType::String && length(function) == 1 {
-        let symbol = values::install_bytes(function.element(0).bytes())?;
+        let symbol = values::install_charsxp(function.element(0))?;
         function = eval::find_fun(symbol, call.env)?;
     }
     match function.kind() {
@@ -1905,7 +1905,7 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
         return value_of(data);
     }
     let package_name = if info.kind() == SexpType::Environment {
-        let spec = find_var_in_frame(values::install("spec")?, info)?;
+        let spec = find_var_in_frame(symbols().spec, info)?;
         values::first_string(spec)
             .map(|text| text.into_owned())
             .unwrap_or_default()

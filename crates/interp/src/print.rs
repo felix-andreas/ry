@@ -284,7 +284,7 @@ pub unsafe fn environment_label(env: Sexp) -> R<String> {
         }
     }
     if crate::envir::is_package_env(env) {
-        let name = get_attr(env, values::install("name")?);
+        let name = get_attr(env, symbols().name);
         if let Some(name) = values::first_string(name) {
             return Ok(format!("<environment: {name}>"));
         }

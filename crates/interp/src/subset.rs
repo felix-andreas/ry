@@ -772,7 +772,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
                 "wrong args for environment subassignment",
             ));
         }
-        let symbol = values::install_bytes(index.element(0).bytes())?;
+        let symbol = values::install_charsxp(index.element(0))?;
         let value = eval::find_var_in_frame(symbol, object)?;
         if value == unbound() {
             return Ok(nil());
@@ -1031,7 +1031,7 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
     };
     match value.kind() {
         SexpType::Symbol => Ok(value),
-        SexpType::String if length(value) == 1 => values::install_bytes(value.element(0).bytes()),
+        SexpType::String if length(value) == 1 => values::install_charsxp(value.element(0)),
         _ => Err(error("invalid type or length for slot name")),
     }
 }
@@ -1532,7 +1532,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
                 "wrong args for environment subassignment",
             ));
         }
-        let symbol = values::install_bytes(index.element(0).bytes())?;
+        let symbol = values::install_charsxp(index.element(0))?;
         eval::define(symbol, value, object)?;
         return Ok(object);
     }

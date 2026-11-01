@@ -1384,7 +1384,7 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
     if name.kind() != SexpType::String || length(name) != 1 {
         return Err(call.error("first argument must be a character string"));
     }
-    let function = values::install_bytes(name.element(0).bytes())?;
+    let function = values::install_charsxp(name.element(0))?;
     let mut items = vec![(nil(), function)];
     items.extend(call.args[1..].iter().map(|arg| (arg.tag, arg.value)));
     values::pairlist(&items, SexpType::Language)
@@ -1894,7 +1894,7 @@ unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
     call.check_arity(1)?;
     let mut symbol = call.arg(0);
     if symbol.kind() == SexpType::String && length(symbol) == 1 {
-        symbol = values::install_bytes(symbol.element(0).bytes())?;
+        symbol = values::install_charsxp(symbol.element(0))?;
     }
     if symbol.kind() != SexpType::Symbol {
         return Err(call.error("invalid use of 'missing'"));
@@ -2136,7 +2136,7 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
     if values::get_attr(formula, symbols().class) == nil() {
         let class = values::scalar_string("formula")?;
         values::set_attr(formula, symbols().class, class)?;
-        let environment = values::install(".Environment")?;
+        let environment = symbols().dot_environment;
         values::set_attr(formula, environment, call.env)?;
     }
     Ok(formula)
@@ -2271,7 +2271,7 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     let superassign = call.call.car() == symbols().assign2;
     let mut target = call.arg(0);
     if target.kind() == SexpType::String && length(target) >= 1 {
-        target = values::install_bytes(target.element(0).bytes())?;
+        target = values::install_charsxp(target.element(0))?;
     }
     match target.kind() {
         SexpType::Symbol => {
@@ -2329,7 +2329,7 @@ pub unsafe fn complex_assign(
         inner = inner.cdr().car();
     }
     if inner.kind() == SexpType::String && length(inner) == 1 {
-        inner = values::install_bytes(inner.element(0).bytes())?;
+        inner = values::install_charsxp(inner.element(0))?;
     }
     if inner.kind() != SexpType::Symbol {
         return Err(error_in(

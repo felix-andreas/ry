@@ -346,7 +346,7 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             let mut function = lower(function, source)?;
             // R's parser turns a string in function position into a symbol: `"f<-"(x)`.
             if function.kind() == SexpType::String && values::length(function) == 1 {
-                function = values::install_bytes(function.element(0).bytes())?;
+                function = values::install_charsxp(function.element(0))?;
             }
             let mut items = vec![(nil(), function)];
             items.extend(argument_list(arguments, source)?);

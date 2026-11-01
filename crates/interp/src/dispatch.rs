@@ -1558,27 +1558,29 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let what = call.arg(1);
     let which = values::as_logical_scalar(call.arg(2)) == 1;
-    let classes = if object.has_gp(gp::S4_OBJECT) {
-        s4_class_with_superclasses(object)?
+    // As in GNU R, an S4 object inherits from every class it extends, and anything else from
+    // what `class()` reports, which is not the implicit class `UseMethod` dispatches on. The
+    // names are byte strings, so an object without a class attribute allocates no R vector.
+    let class = values::class_attr(object);
+    let dim = get_attr(object, symbols().dim);
+    let class_vector;
+    let class_names: Vec<&[u8]> = if object.has_gp(gp::S4_OBJECT) || length(class) > 0 {
+        class_vector = if object.has_gp(gp::S4_OBJECT) {
+            s4_class_with_superclasses(object)?
+        } else {
+            class
+        };
+        (0..length(class_vector))
+            .map(|index| class_vector.element(index).bytes())
+            .collect()
+    } else if dim != nil() {
+        if length(dim) == 2 {
+            vec![b"matrix", b"array"]
+        } else {
+            vec![b"array"]
+        }
     } else {
-        implicit_class(object)?
-    };
-    let classes = if values::class_attr(object) == nil() {
-        class_of(object).and_then(|class| {
-            let mut all: Vec<String> = (0..length(class))
-                .map(|index| char_str(class.element(index)).into_owned())
-                .collect();
-            let implicit = implicit_class(object)?;
-            for index in 0..length(implicit) {
-                let name = char_str(implicit.element(index)).into_owned();
-                if !all.contains(&name) {
-                    all.push(name);
-                }
-            }
-            string_vector(&all)
-        })?
-    } else {
-        classes
+        vec![basic_class(object, false).as_bytes()]
     };
     // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
     let what = if what.kind() == SexpType::String {
@@ -1595,9 +1597,6 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
         }
         name
     };
-    let class_names: Vec<&[u8]> = (0..length(classes))
-        .map(|index| classes.element(index).bytes())
-        .collect();
     if which {
         let result = values::alloc(SexpType::Integer, length(what))?;
         for index in 0..length(what) {

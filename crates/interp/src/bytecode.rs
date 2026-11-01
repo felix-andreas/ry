@@ -1880,15 +1880,20 @@ unsafe fn lookup_variable(
     let heap = crate::heap();
     if let Some(cell) = heap.frame_cell(env, symbol) {
         let value = cell.cdr();
-        let plain = !cell.has_gp(gp::ACTIVE_BINDING)
-            && value.kind() != SexpType::Promise
-            && value != missing_arg()
-            && value != unbound();
-        return if plain {
-            Ok(value)
-        } else {
-            eval::eval_symbol(symbol, env)
-        };
+        if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
+            return eval::eval_symbol(symbol, env);
+        }
+        if value.kind() == SexpType::Promise {
+            // An argument: force it here rather than repeat the frame search `eval_symbol` does.
+            let forced = if value.car() == unbound() {
+                eval::force_promise(value)?
+            } else {
+                value.car()
+            };
+            heap.root(forced);
+            return Ok(forced);
+        }
+        return Ok(value);
     }
     let enclosure = env.enclosure();
     if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
