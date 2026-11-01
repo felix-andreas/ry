@@ -62,9 +62,14 @@ const LEAVES: &[&str] = &[
     "Set.contains",
 ];
 
-/// Whether the library builtin `name` is one of [`LEAVES`].
+/// Whether the library builtin `name` is one of [`LEAVES`], or a `Num`, `Bool` or `Str`
+/// function, all of which compute natively except the two `Str` walks that call back into R.
 pub fn is_leaf(name: &str) -> bool {
     LEAVES.contains(&name)
+        || ["Num.", "Bool.", "Str."]
+            .iter()
+            .any(|module| name.starts_with(module))
+            && !name.starts_with("Str.walk")
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[

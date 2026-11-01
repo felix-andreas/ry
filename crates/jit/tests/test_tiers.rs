@@ -169,6 +169,18 @@ fn seeds_agree_across_tiers() {
             "(n = 4L)",
             false,
         ),
+        // Num and Str functions, which compiled code calls directly as leaves, and an
+        // unchecked division by zero, which is an error.
+        (
+            "s <- 0\nfor (i in 1:n) { s <- Num.add(s, Num.sqrt(i * 1)); if (Str.is_empty(\"\")) s <- Num.add(s, 1) }\nNum.div_trunc(s, 0L)",
+            "(n = 30L)",
+            true,
+        ),
+        (
+            "s <- 0L\nfor (i in 1:n) s <- Num.bitwise_xor(s, Num.shift_left_by(i, 2L))\ns",
+            "(n = 30L)",
+            false,
+        ),
         // Record fields of every slot kind, which reach the field intrinsic.
         (
             "r <- (x = 1.5, y = 2L, z = TRUE, w = \"s\")\ns <- 0\nfor (i in 1:n) { s <- s + r$x * r$y; if (r$z) s <- s + 1 }\nlist(s, r$w)",
