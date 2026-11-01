@@ -67,20 +67,9 @@ pub unsafe extern "C" fn Rf_formatComplex(
     imaginary_exponent: *mut c_int,
     nsmall: c_int,
 ) {
-    let values = elements(x, n);
-    let (real, imaginary) = format_complex_common(values, settings(nsmall));
+    let (real, imaginary) = format_complex_common(elements(x, n), settings(nsmall));
     (*real_width, *real_decimals, *real_exponent) = report(real);
     (*imaginary_width, *imaginary_decimals, *imaginary_exponent) = report(imaginary);
-    // A vector of only NAs still needs room for "NA" across both fields and the sign and "i".
-    if values
-        .iter()
-        .any(|value| is_na_real(value.r) || is_na_real(value.i))
-    {
-        let total = *real_width + *imaginary_width + 2;
-        if total < 2 {
-            *real_width += 2 - total;
-        }
-    }
 }
 
 #[unsafe(no_mangle)]

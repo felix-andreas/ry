@@ -24,10 +24,13 @@ fn main() -> ExitCode {
             }
         };
     }
+    // A Windows front end's home is the one it sits in, as for GNU R's: an inherited `R_HOME`
+    // may name another R entirely, such as the GNU R session that started this process.
     let front_end = windows_front_end();
-    let Some(home) = std::env::var_os("R_HOME")
-        .map(PathBuf::from)
-        .or_else(|| front_end.as_ref().map(|(_, home)| home.clone()))
+    let Some(home) = front_end
+        .as_ref()
+        .map(|(_, home)| home.clone())
+        .or_else(|| std::env::var_os("R_HOME").map(PathBuf::from))
     else {
         eprintln!(
             "ry-rcmd: R_HOME is not set; run it through bin/R of an R home that `rcmd::assemble` created"
@@ -45,6 +48,7 @@ fn main() -> ExitCode {
             Some("CMD" | "RHOME") => arguments,
             _ => [vec!["R".to_owned()], arguments].concat(),
         },
+        Some("Rterm") => [vec!["R".to_owned()], arguments].concat(),
         Some("Rscript") => [vec!["Rscript".to_owned()], arguments].concat(),
         Some("Rcmd") => [vec!["CMD".to_owned()], arguments].concat(),
         _ => arguments,
@@ -70,7 +74,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// On Windows, `bin/R.exe`, `bin/Rscript.exe` and `bin/x64/Rcmd.exe` of an R home are copies of
+/// On Windows, `bin/R.exe`, `bin/Rscript.exe`, `bin/x64/Rcmd.exe` and `bin/x64/Rterm.exe` (what
+/// callr starts) of an R home are copies of
 /// this binary: which front end it is comes from its file name, and the home is the directory
 /// above `bin/` (or `bin/x64/`).
 fn windows_front_end() -> Option<(String, PathBuf)> {
@@ -79,7 +84,7 @@ fn windows_front_end() -> Option<(String, PathBuf)> {
     }
     let executable = std::env::current_exe().ok()?;
     let name = executable.file_stem()?.to_str()?;
-    let name = ["R", "Rscript", "Rcmd"]
+    let name = ["R", "Rterm", "Rscript", "Rcmd"]
         .into_iter()
         .find(|front_end| front_end.eq_ignore_ascii_case(name))?;
     let mut bin = executable.parent()?;

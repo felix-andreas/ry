@@ -882,8 +882,8 @@ pub unsafe extern "C" fn dchdc_(
     let a = Matrix::new(a, *lda);
     let p = *p as isize;
     let pivot = |index: isize| element_int(jpvt, index);
-    // Exchanges rows and columns `first < second` of the upper triangle, leaving the leading
-    // `first - 1` rows to the caller's swap of the two columns above the diagonal.
+    // Exchanges rows and columns `first < second` of the upper triangle, including the leading
+    // `first - 1` rows of the two columns.
     let exchange = |first: isize, second: isize| {
         dswap(first - 1, a.at(1, first), a.at(1, second));
         let temp = a.get(first, first);
@@ -941,7 +941,8 @@ pub unsafe extern "C" fn dchdc_(
                 }
             }
         }
-        if largest <= 0.0 {
+        // Written as LINPACK tests it (`maxdia .gt. 0`), so a NaN pivot also stops here.
+        if largest.is_nan() || largest <= 0.0 {
             *info = (k - 1) as c_int;
             return;
         }

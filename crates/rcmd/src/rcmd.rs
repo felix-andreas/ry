@@ -98,18 +98,19 @@ impl Platform {
 
     /// The platform an R home was assembled for, read back from its `etc/Makeconf`, so the
     /// home stays the one source of truth for how its packages are built.
-    pub fn of_home(home: &Path) -> Platform {
-        let variables = fs::read_to_string(home.join("etc/Makeconf"))
-            .map(|text| make_assignments(&text))
-            .unwrap_or_default();
-        match (
-            variables.get("SHLIB_EXT").map(String::as_str),
-            variables.get("DYLIB_EXT").map(String::as_str),
-        ) {
-            (Some(".dll"), _) => Platform::Windows,
-            (_, Some(".dylib")) => Platform::MacOs,
-            _ => Platform::Linux,
-        }
+    pub fn of_home(home: &Path) -> Result<Platform> {
+        let path = home.join("etc/Makeconf");
+        let variables = make_assignments(&fs::read_to_string(&path).map_err(io_error(&path))?);
+        Ok(
+            match (
+                variables.get("SHLIB_EXT").map(String::as_str),
+                variables.get("DYLIB_EXT").map(String::as_str),
+            ) {
+                (Some(".dll"), _) => Platform::Windows,
+                (_, Some(".dylib")) => Platform::MacOs,
+                _ => Platform::Linux,
+            },
+        )
     }
 
     /// The suffix of a package's shared object. macOS uses `.so` too, as GNU R does there.
@@ -591,6 +592,7 @@ fn assemble_windows_front_ends(root: &Path, sources: &HomeSources<'_>, gnu: &Pat
         "bin/x64/R.exe",
         "bin/x64/Rscript.exe",
         "bin/x64/Rcmd.exe",
+        "bin/x64/Rterm.exe",
     ] {
         let path = root.join(front_end);
         remove_file_if_present(&path)?;
@@ -1361,7 +1363,7 @@ pub fn install(
             })?
             .to_owned();
         if let Some(built) = description.get("Built") {
-            install_binary(&directory, &name, built, library)
+            install_binary(home, &directory, &name, built, library)
         } else {
             install_source(
                 home,
@@ -1465,7 +1467,13 @@ fn run_command(command: &mut Command) -> Result<String> {
 
 /// A binary package was built by an R that presents a version in `Built:`. GNU R refuses only
 /// builds before R 3.0.0, and loads, for example, a 4.5 build under 4.6; ry does the same.
-fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> Result<Installed> {
+fn install_binary(
+    home: &Path,
+    directory: &Path,
+    name: &str,
+    built: &str,
+    library: &Path,
+) -> Result<Installed> {
     let version = built
         .trim_start_matches("R ")
         .split(';')
@@ -1496,7 +1504,7 @@ fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> 
     }
     let target = library.join(name);
     replace_directory(directory, &target)?;
-    let platform = Platform::HOST;
+    let platform = Platform::of_home(home)?;
     let libs = libs_directory(&target, platform);
     let extension = platform.shlib_ext();
     let shared = libs.join(format!("{}{extension}", name.replace('.', "_")));
@@ -1550,9 +1558,9 @@ fn install_source(
     let staged_library = staging.join("installed");
     let target_staging = staged_library.join(name);
     fs::create_dir_all(&target_staging).map_err(io_error(&target_staging))?;
-    let platform = Platform::of_home(home);
+    let platform = Platform::of_home(home)?;
     let paths = library_paths(home, library);
-    let environment = build_environment(home, platform, name, &target_staging, &paths);
+    let environment = build_environment(home, platform, name, &target_staging, &paths)?;
     if let Some(configure) = platform.build_file(&build, "configure") {
         run_command(
             Command::new("sh").arg(&configure).current_dir(&build).envs(
@@ -1698,7 +1706,7 @@ fn run_r(
     arguments: &[String],
     r_libs: &str,
 ) -> Result<String> {
-    let platform = Platform::of_home(home);
+    let platform = Platform::of_home(home)?;
     let front_end = if platform == Platform::Windows {
         home.join("bin").join("R.exe")
     } else {
@@ -1731,13 +1739,29 @@ fn extension_of(platform: Platform) -> Option<&'static std::ffi::OsStr> {
 }
 
 /// `directory` put in front of the `PATH` this process runs with.
-fn path_with(directory: &Path) -> String {
+fn path_with(directory: &Path) -> Result<String> {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     std::env::join_paths(
         std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited)),
     )
     .map(|joined| joined.to_string_lossy().into_owned())
-    .unwrap_or_else(|_| inherited.to_string_lossy().into_owned())
+    .map_err(|error| {
+        Error::Package(format!(
+            "cannot put {} on PATH: {error}",
+            directory.display()
+        ))
+    })
+}
+
+/// A path as make and the shell read it. Both take a backslash for an escape, so Windows paths
+/// use forward slashes, which Windows accepts too.
+fn shell_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
 }
 
 /// The environment `configure` and `make` run in, as GNU R's installer sets it.
@@ -1747,24 +1771,25 @@ fn build_environment(
     name: &str,
     target: &Path,
     paths: &[PathBuf],
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>> {
     let mut environment = BTreeMap::new();
-    environment.insert("PATH".to_owned(), path_with(&home.join("bin")));
-    environment.insert("R_HOME".to_owned(), home.display().to_string());
+    environment.insert("PATH".to_owned(), path_with(&home.join("bin"))?);
+    environment.insert("R_HOME".to_owned(), shell_path(home));
     environment.insert("R_ARCH".to_owned(), platform.arch().to_owned());
     environment.insert("R_PACKAGE_NAME".to_owned(), name.to_owned());
-    environment.insert("R_PACKAGE_DIR".to_owned(), target.display().to_string());
+    environment.insert("R_PACKAGE_DIR".to_owned(), shell_path(target));
     environment.insert(
         "R_INCLUDE_DIR".to_owned(),
-        home.join("include").display().to_string(),
+        shell_path(&home.join("include")),
     );
+    let libraries: Vec<String> = paths.iter().map(|path| shell_path(path)).collect();
+    let libraries = std::env::join_paths(&libraries)
+        .map_err(|error| Error::Package(format!("cannot join library paths: {error}")))?;
     environment.insert(
         "R_LIBS".to_owned(),
-        std::env::join_paths(paths)
-            .map(|joined| joined.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        libraries.to_string_lossy().into_owned(),
     );
-    environment
+    Ok(environment)
 }
 
 /// What the C++ standard in `Makevars` (`CXX_STD = CXX17`) selects, as `CXX` and its flags.
@@ -1789,7 +1814,7 @@ pub fn shlib(
     include_flags: &[String],
     link_flags: &[String],
 ) -> Result<PathBuf> {
-    let platform = Platform::of_home(home);
+    let platform = Platform::of_home(home)?;
     let makevars = platform.build_file(directory, "Makevars");
     let makevars_text = makevars
         .as_ref()
@@ -1892,7 +1917,7 @@ pub fn shlib(
         command.arg(format!("CLINK_CPPFLAGS={}", include_flags.join(" ")));
     }
     command.env("R_HOME", home);
-    command.env("PATH", path_with(&home.join("bin")));
+    command.env("PATH", path_with(&home.join("bin"))?);
     run_command(&mut command)?;
     Ok(directory.join(output))
 }
@@ -2017,10 +2042,13 @@ SHLIB_OPENMP_CFLAGS =
             assert!(text.contains(line), "missing {line:?} in\n{text}");
         }
         write(&root.join("etc/Makeconf"), &text).expect("write Makeconf");
-        assert_eq!(Platform::of_home(&root), Platform::Windows);
+        assert_eq!(
+            Platform::of_home(&root).expect("platform"),
+            Platform::Windows
+        );
         let unix = makeconf(&root, &Toolchain::rtools(), Platform::Linux);
         write(&root.join("etc/Makeconf"), &unix).expect("write Makeconf");
-        assert_eq!(Platform::of_home(&root), Platform::Linux);
+        assert_eq!(Platform::of_home(&root).expect("platform"), Platform::Linux);
         assert_eq!(
             libs_directory(Path::new("pkg"), Platform::Windows),
             Path::new("pkg/libs/x64")
