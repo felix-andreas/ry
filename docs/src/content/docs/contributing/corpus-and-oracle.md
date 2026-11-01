@@ -151,7 +151,7 @@ compared with. That makes `compare` the check for a new R release:
 ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
-Under R 4.6.1, `compare` passes 117 of 124 cases, against 123 of 124 under 4.3.3. Four of the
+Under R 4.6.1, `compare` passes 118 of 125 cases, against 124 of 125 under 4.3.3. Four of the
 remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
 and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
 seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
