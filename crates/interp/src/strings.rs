@@ -9,26 +9,28 @@
 //! because the dialects disagree on bracket expressions, on what `\w` and `[[:alpha:]]` match,
 //! and on which characters are special.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal, require},
-    coerce::coerce_vector,
-    conditions::warning,
-    eval,
-    format::{display_width, scientific_text},
-    unwind::{R, error},
-    values::{
-        self, alloc, get_attr, length, na_string, nil, scalar_integer, scalar_string, set_attr,
-        set_elt, string_at, string_vector, string_vector_na, strings, symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal, require},
+        coerce::coerce_vector,
+        conditions::warning,
+        eval,
+        format::{display_width, scientific_text},
+        unwind::{R, error},
+        values::{
+            self, alloc, get_attr, length, na_string, nil, scalar_integer, scalar_string, set_attr,
+            set_elt, string_at, string_vector, string_vector_na, strings, symbols,
+        },
     },
+    fancy_regex::{Regex, RegexBuilder},
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
+        strings::Encoding,
+    },
+    regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::borrow::Cow,
 };
-use fancy_regex::{Regex, RegexBuilder};
-use regex_automata::{Anchored, Input, MatchKind, meta, util::syntax};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
-    strings::Encoding,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("paste", 4, do_paste),
@@ -87,7 +89,10 @@ pub fn translate_regex(pattern: &str, extended: bool) -> String {
 
 unsafe fn do_paste(call: &Call<'_>) -> R<Sexp> {
     let separator = call.arg(1);
-    if separator.kind() != SexpType::String || length(separator) == 0 || separator.element(0) == na_string() {
+    if separator.kind() != SexpType::String
+        || length(separator) == 0
+        || separator.element(0) == na_string()
+    {
         return Err(error("invalid separator"));
     }
     paste(call, Some(separator.element(0)), call.arg(2), call.arg(3))
@@ -100,14 +105,22 @@ unsafe fn do_paste0(call: &Call<'_>) -> R<Sexp> {
 /// `paste` joins bytes, not text, because a native string may hold bytes that are not UTF-8.
 /// As in GNU R, the result is marked "bytes" when any piece is, UTF-8 when any piece is UTF-8
 /// or latin1 (which is translated), and native otherwise.
-unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycle_zero: Sexp) -> R<Sexp> {
+unsafe fn paste(
+    call: &Call<'_>,
+    separator: Option<Sexp>,
+    collapse: Sexp,
+    recycle_zero: Sexp,
+) -> R<Sexp> {
     let list = call.arg(0);
     if list.kind() != SexpType::List {
         return Err(error("invalid first argument"));
     }
     let collapse = if collapse == nil() {
         None
-    } else if collapse.kind() == SexpType::String && length(collapse) > 0 && collapse.element(0) != na_string() {
+    } else if collapse.kind() == SexpType::String
+        && length(collapse) > 0
+        && collapse.element(0) != na_string()
+    {
         Some(collapse.element(0))
     } else {
         return Err(error("invalid 'collapse' argument"));
@@ -157,7 +170,9 @@ unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycl
     for row in 0..count {
         parts.clear();
         for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
-            if position > 0 && let Some(separator) = separator {
+            if position > 0
+                && let Some(separator) = separator
+            {
                 parts.push(separator);
             }
             if column_length > 0 {
@@ -165,7 +180,11 @@ unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycl
             }
         }
         let encoding = encoding_of(&parts);
-        set_elt(result, row, values::mkchar_bytes(&join(&parts, encoding), encoding)?);
+        set_elt(
+            result,
+            row,
+            values::mkchar_bytes(&join(&parts, encoding), encoding)?,
+        );
     }
     let Some(collapse) = collapse else {
         return Ok(result);
@@ -179,7 +198,11 @@ unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycl
     }
     let encoding = encoding_of(&parts);
     let collapsed = alloc(SexpType::String, 1)?;
-    set_elt(collapsed, 0, values::mkchar_bytes(&join(&parts, encoding), encoding)?);
+    set_elt(
+        collapsed,
+        0,
+        values::mkchar_bytes(&join(&parts, encoding), encoding)?,
+    );
     Ok(collapsed)
 }
 
@@ -220,7 +243,10 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             na_count
         } else if invalid {
             if !allow_na {
-                return Err(error(format!("invalid multibyte string, element {}", index + 1)));
+                return Err(error(format!(
+                    "invalid multibyte string, element {}",
+                    index + 1
+                )));
             }
             NA_INTEGER
         } else {
@@ -1944,7 +1970,9 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
     // the automaton rather than the backtracker.
     let search = |element: &str, position: usize| -> R<Option<Groups>> {
         if groups == 0 {
-            Ok(matcher.find_at(element, position)?.map(|span| vec![Some(span)]))
+            Ok(matcher
+                .find_at(element, position)?
+                .map(|span| vec![Some(span)]))
         } else {
             matcher.captures_at(element, position)
         }
@@ -2006,7 +2034,8 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("invalid 'offset' argument"));
     }
     let flag = |index: usize| values::as_logical_scalar(call.arg(index)) == 1;
-    let (ignore_case, fixed, value, all, mut invert) = (flag(3), flag(4), flag(5), flag(6), flag(7));
+    let (ignore_case, fixed, value, all, mut invert) =
+        (flag(3), flag(4), flag(5), flag(6), flag(7));
     if invert && !value {
         warning("argument 'invert = TRUE' will be ignored")?;
         invert = false;
@@ -2022,8 +2051,12 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
     } else {
         let text = translate_regex(&String::from_utf8_lossy(&needle), true);
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
-        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}"))
-            .map_err(|failure| call.error(format!("invalid regular expression '{}': {failure}", String::from_utf8_lossy(&needle))))?;
+        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
+            call.error(format!(
+                "invalid regular expression '{}': {failure}",
+                String::from_utf8_lossy(&needle)
+            ))
+        })?;
         Some(compiled)
     };
     let find = |from: usize| -> Option<(usize, usize)> {
@@ -2031,7 +2064,9 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
             return None;
         }
         match &regex {
-            Some(regex) => regex.find_at(&haystack, from).map(|found| (found.start(), found.end())),
+            Some(regex) => regex
+                .find_at(&haystack, from)
+                .map(|found| (found.start(), found.end())),
             None if needle.is_empty() => Some((from, from)),
             None => haystack[from..]
                 .windows(needle.len())
@@ -2068,7 +2103,10 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
             None => raw(&haystack),
         },
         (true, false) => {
-            let pieces = matches.iter().map(|&(begin, end)| raw(&haystack[begin..end])).collect::<R<Vec<_>>>()?;
+            let pieces = matches
+                .iter()
+                .map(|&(begin, end)| raw(&haystack[begin..end]))
+                .collect::<R<Vec<_>>>()?;
             values::list_vector(&pieces)
         }
         (true, true) => {
@@ -2379,8 +2417,15 @@ impl Matcher {
         };
         match compiled {
             Ok(regex) if longest => {
-                match (automaton(MatchKind::LeftmostFirst), automaton(MatchKind::All)) {
-                    (Ok(first), Ok(longest)) => Ok(Matcher::Automaton { regex, first, longest }),
+                match (
+                    automaton(MatchKind::LeftmostFirst),
+                    automaton(MatchKind::All),
+                ) {
+                    (Ok(first), Ok(longest)) => Ok(Matcher::Automaton {
+                        regex,
+                        first,
+                        longest,
+                    }),
                     _ => Ok(Matcher::Pattern(regex)),
                 }
             }
@@ -2416,7 +2461,9 @@ impl Matcher {
                 let anchored = Input::new(text)
                     .range(found.start()..)
                     .anchored(Anchored::Yes);
-                let end = longest.search(&anchored).map_or(found.end(), |longest| longest.end());
+                let end = longest
+                    .search(&anchored)
+                    .map_or(found.end(), |longest| longest.end());
                 Ok(Some((found.start(), end)))
             }
         }
@@ -2499,7 +2546,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
     let approximate = syntax == Syntax::Extended
         && (0..chars.len()).any(|index| {
-            (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
+            (index == 0 || chars[index - 1] != '\\')
+                && approximate_settings(&chars, index).is_some()
         });
     // Where each open group starts in `output`, and whether it is a lookaround assertion.
     let mut groups: Vec<(usize, bool)> = Vec::new();
@@ -2530,7 +2578,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                 let (next, opens_group) = translate_group_prefix(&chars, index, &mut output);
                 if opens_group {
                     let lookaround = matches!(chars.get(index + 2), Some('=' | '!'))
-                        || (chars.get(index + 2) == Some(&'<') && matches!(chars.get(index + 3), Some('=' | '!')));
+                        || (chars.get(index + 2) == Some(&'<')
+                            && matches!(chars.get(index + 3), Some('=' | '!')));
                     groups.push((start, lookaround));
                 }
                 atom = None;
@@ -2541,7 +2590,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
             // TRE reads `(?:...)` as a group that does not capture, and `(?i)` or `(?i:...)` as
             // a case-insensitive region, as PCRE does.
             '(' if syntax == Syntax::Extended && chars.get(index + 1) == Some(&'?') => {
-                let flags_end = (index + 2..chars.len()).find(|&position| !matches!(chars[position], 'i' | '-'));
+                let flags_end = (index + 2..chars.len())
+                    .find(|&position| !matches!(chars[position], 'i' | '-'));
                 match flags_end.map(|position| (position, chars[position])) {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
@@ -2851,15 +2901,23 @@ fn escape_class(escaped: char, dialect: Dialect) -> Option<String> {
 fn translate_backreference(chars: &[char], index: usize, output: &mut String) -> usize {
     let cursor = index + 2;
     let reference: String = match chars.get(cursor) {
-        Some('{') => match chars[cursor + 1..].iter().position(|character| *character == '}') {
+        Some('{') => match chars[cursor + 1..]
+            .iter()
+            .position(|character| *character == '}')
+        {
             Some(length) => chars[cursor + 1..cursor + 1 + length].iter().collect(),
             None => return copy_delimited_escape(chars, index, output),
         },
-        Some(character) if chars[index + 1] == 'g' && (character.is_ascii_digit() || *character == '-') => {
+        Some(character)
+            if chars[index + 1] == 'g' && (character.is_ascii_digit() || *character == '-') =>
+        {
             let digits = chars[cursor + 1..]
                 .iter()
                 .take_while(|character| character.is_ascii_digit())
                 .count();
+            if *character == '-' && digits == 0 {
+                return copy_delimited_escape(chars, index, output);
+            }
             chars[cursor..cursor + 1 + digits].iter().collect()
         }
         _ => return copy_delimited_escape(chars, index, output),

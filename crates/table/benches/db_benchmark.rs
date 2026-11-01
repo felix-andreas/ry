@@ -6,25 +6,26 @@
 //! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir>`, where the directory holds the
 //! CSV files `tools/bench/table/datagen.R` writes.
 
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::ExitCode,
-    time::Instant,
-};
-
-use table::{
-    ColumnType, Table,
-    convert::string_to_factor,
-    polars::prelude::{
-        ChunkAgg, Column, CsvReadOptions, DataFrame, DataType, Float64Chunked, IntoColumn,
-        SerReader,
+use {
+    std::{
+        env,
+        path::{Path, PathBuf},
+        process::ExitCode,
+        time::Instant,
     },
-    query::{
-        Aggregate, BinaryOp, Executed, Expr, Join, Mult, On, Output, Query, Roll, Rows, Select,
-        SortKey,
-        build::{aggregate, binary, column},
-        execute,
+    table::{
+        ColumnType, Table,
+        convert::string_to_factor,
+        polars::prelude::{
+            ChunkAgg, Column, CsvReadOptions, DataFrame, DataType, Float64Chunked, IntoColumn,
+            SerReader,
+        },
+        query::{
+            Aggregate, BinaryOp, Executed, Expr, Join, Mult, On, Output, Query, Roll, Rows, Select,
+            SortKey,
+            build::{aggregate, binary, column},
+            execute,
+        },
     },
 };
 

@@ -2,14 +2,17 @@
 //! while still producing the same type.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{ExprId, ExpressionKind, Module, Symbol};
-use semantics::naming::{BindingKind, ItemNaming};
-use semantics::testing::with_fixture_project;
-use semantics::{DocumentKind, item_hir, item_naming, item_tree};
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-use syntax::TextRange;
-use syntax::testing::run_fixture_suite;
+use {
+    semantics::{
+        DocumentKind,
+        hir::{ExprId, ExpressionKind, Module, Symbol},
+        item_hir, item_naming, item_tree,
+        naming::{BindingKind, ItemNaming},
+        testing::with_fixture_project,
+    },
+    std::{collections::BTreeSet, path::PathBuf},
+    syntax::{TextRange, testing::run_fixture_suite},
+};
 
 #[test]
 fn naming_fixtures() {

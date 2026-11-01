@@ -5,8 +5,10 @@
 //! one exactly sized, sorted boxed slice: a lookup is a binary search, iteration is in key
 //! order (the same order a `BTreeMap` gives), and an empty one allocates nothing.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::{iter, slice};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    iter, slice,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SortedMap<K, V>(Box<[(K, V)]>);

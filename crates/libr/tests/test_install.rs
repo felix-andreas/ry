@@ -7,11 +7,13 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 /// ry's R home, assembled once per test binary from this build's libR and headers.
@@ -57,7 +59,10 @@ fn home() -> &'static PathBuf {
 
 /// The GNU R installation whose base packages ry's R home links: `R RHOME`.
 fn gnu_r_home() -> PathBuf {
-    let output = Command::new("R").arg("RHOME").output().expect("GNU R on PATH");
+    let output = Command::new("R")
+        .arg("RHOME")
+        .output()
+        .expect("GNU R on PATH");
     PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
 }
 
@@ -134,7 +139,10 @@ fn a_source_package_installs_and_runs_under_ry() {
         std::fs::read_to_string(installed.directory.join("DESCRIPTION")).expect("DESCRIPTION");
     assert!(description.contains("RyBuilt: "), "{description}");
     assert!(description.contains("Built: R "), "{description}");
-    assert!(description.contains("; x86_64-pc-linux-gnu;"), "{description}");
+    assert!(
+        description.contains("; x86_64-pc-linux-gnu;"),
+        "{description}"
+    );
     assert!(installed.directory.join("NAMESPACE").exists());
     assert!(installed.directory.join("Meta/package.rds").exists());
     assert!(installed.directory.join("Meta/nsInfo.rds").exists());
@@ -159,7 +167,8 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
     )
     .expect("DESCRIPTION");
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("binary-library");
-    let installed = rcmd::install(home(), &source, &library, &no_test_load()).expect("install a binary");
+    let installed =
+        rcmd::install(home(), &source, &library, &no_test_load()).expect("install a binary");
     let description =
         std::fs::read_to_string(installed.directory.join("DESCRIPTION")).expect("DESCRIPTION");
     assert!(
@@ -172,7 +181,8 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
         "Package: ancient\nVersion: 1.0\nBuilt: R 2.15.3; ; 2013-03-01 00:00:00 UTC; unix\n",
     )
     .expect("DESCRIPTION");
-    let error = rcmd::install(home(), &source, &library, &no_test_load()).expect_err("a pre-3.0.0 build");
+    let error =
+        rcmd::install(home(), &source, &library, &no_test_load()).expect_err("a pre-3.0.0 build");
     assert!(
         error.to_string().contains("built before R 3.0.0"),
         "{error}"
@@ -238,8 +248,13 @@ fn rcode_source() -> PathBuf {
 fn the_r_level_half_runs_on_ry() {
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rcode-library");
     drop(std::fs::remove_dir_all(&library));
-    let installed = rcmd::install(home(), &rcode_source(), &library, &rcmd::InstallOptions::default())
-        .expect("install rcode");
+    let installed = rcmd::install(
+        home(),
+        &rcode_source(),
+        &library,
+        &rcmd::InstallOptions::default(),
+    )
+    .expect("install rcode");
     let directory = &installed.directory;
     for file in [
         "Meta/package.rds",
@@ -272,24 +287,59 @@ fn the_r_level_half_runs_on_ry() {
         library.display()
     );
     let output = run_home("Rscript", &["-e", &script], &library);
-    assert_eq!(output, "Hello, ry! 9 30 \n3 installed from inst/ \ngreet.Rd \n");
+    assert_eq!(
+        output,
+        "Hello, ry! 9 30 \n3 installed from inst/ \ngreet.Rd \n"
+    );
 }
 
 #[test]
 fn the_front_ends_run_r_code_on_ry() {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let output = run_home("Rscript", &["-e", "cat(R.home() == Sys.getenv('R_HOME'), commandArgs(TRUE))", "a", "b"], directory);
+    let output = run_home(
+        "Rscript",
+        &[
+            "-e",
+            "cat(R.home() == Sys.getenv('R_HOME'), commandArgs(TRUE))",
+            "a",
+            "b",
+        ],
+        directory,
+    );
     assert_eq!(output, "TRUE a b");
-    let output = run_home("R", &["--vanilla", "--no-echo", "-e", "cat(nzchar(R.home('share')))"], directory);
+    let output = run_home(
+        "R",
+        &[
+            "--vanilla",
+            "--no-echo",
+            "-e",
+            "cat(nzchar(R.home('share')))",
+        ],
+        directory,
+    );
     assert_eq!(output, "TRUE");
     let script = directory.join("front-end.R");
     std::fs::write(&script, "cat(commandArgs(TRUE), sep = ',')\n").expect("a script");
-    let output = run_home("R", &["--no-echo", "-f", &script.display().to_string(), "--args", "x", "y"], directory);
+    let output = run_home(
+        "R",
+        &[
+            "--no-echo",
+            "-f",
+            &script.display().to_string(),
+            "--args",
+            "x",
+            "y",
+        ],
+        directory,
+    );
     assert_eq!(output, "x,y");
     // GNU R's own `R CMD` scripts call back into bin/R, so they run on ry too.
     let page = rcode_source().join("man/greet.Rd").display().to_string();
     let output = run_home("R", &["CMD", "Rdconv", "-t", "txt", &page], directory);
-    let gnu_r = Command::new("R").args(["CMD", "Rdconv", "-t", "txt", &page]).output().expect("GNU R's Rdconv");
+    let gnu_r = Command::new("R")
+        .args(["CMD", "Rdconv", "-t", "txt", &page])
+        .output()
+        .expect("GNU R's Rdconv");
     assert_eq!(output, String::from_utf8_lossy(&gnu_r.stdout));
     assert!(output.contains("Says hello."), "{output}");
 }

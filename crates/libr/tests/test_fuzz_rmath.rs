@@ -4,9 +4,11 @@
 //! and agree with their logs, NA stays NA, random variates stay in their support, and nothing
 //! panics on NaN, infinite, huge or tiny arguments. `FUZZ_ITERS` scales the run.
 
-use R::{arith::Rng, rmath::*};
-use interp::rmath::*;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    R::{arith::Rng, rmath::*},
+    interp::rmath::*,
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 const NA: f64 = f64::from_bits(0x7ff0_0000_0000_07a2);
 

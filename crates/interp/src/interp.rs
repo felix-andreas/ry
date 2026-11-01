@@ -40,8 +40,8 @@ pub mod eval;
 pub mod format;
 pub mod frame;
 pub mod graphics;
-pub mod linalg;
 pub mod graphics_render;
+pub mod linalg;
 pub mod lower;
 pub mod methods;
 pub mod native;
@@ -49,8 +49,8 @@ pub mod parallel;
 pub mod print;
 pub mod random;
 pub mod rd;
-pub mod rmath;
 pub mod records;
+pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
@@ -73,16 +73,17 @@ pub mod unwind;
 pub mod utils;
 pub mod values;
 
-use crate::{
-    builtins::{BuiltinDef, Kind},
-    conditions::{HandlerStack, RestartStack},
-    unwind::{R, Unwind},
-};
-use heap::{Heap, Marker, RootSource, object::Sexp};
-use rustc_hash::FxHashMap;
-use std::{cell::UnsafeCell, rc::Rc};
-
 pub use crate::unwind::{Jump, RError};
+use {
+    crate::{
+        builtins::{BuiltinDef, Kind},
+        conditions::{HandlerStack, RestartStack},
+        unwind::{R, Unwind},
+    },
+    heap::{Heap, Marker, RootSource, object::Sexp},
+    rustc_hash::FxHashMap,
+    std::{cell::UnsafeCell, rc::Rc},
+};
 
 /// One closure call: GNU R's function context.
 pub struct Frame {
@@ -112,6 +113,8 @@ pub struct Hooks {
     pub write_console: unsafe fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    /// An ALTREP vector's length, from its class's `Length` method.
+    pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
@@ -320,6 +323,7 @@ pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {

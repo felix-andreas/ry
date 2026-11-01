@@ -5,10 +5,12 @@
 mod connection_scenarios;
 mod harness;
 
-use connection_scenarios::*;
-use harness::*;
-use std::{ffi::c_int, path::PathBuf, sync::OnceLock};
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    connection_scenarios::*,
+    harness::*,
+    std::{ffi::c_int, path::PathBuf, sync::OnceLock},
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 fn ryconn(r: &R) {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();

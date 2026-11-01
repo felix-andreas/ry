@@ -9,8 +9,10 @@
 
 mod harness;
 
-use harness::*;
-use std::{ffi::CString, path::Path, process::Command};
+use {
+    harness::*,
+    std::{ffi::CString, path::Path, process::Command},
+};
 
 const CHILD_CASE: &str = "RY_CORPUS_CALL_CASE";
 
@@ -109,7 +111,10 @@ fn corpus_routines_return_what_they_return_under_gnu_r() {
         child(index.parse().expect("a case index"));
         return;
     }
-    if scan(&corpus_libraries()).values().all(|package| package.base) {
+    if scan(&corpus_libraries())
+        .values()
+        .all(|package| package.base)
+    {
         eprintln!("no corpus library found; run `just corpus` to install it");
         return;
     }

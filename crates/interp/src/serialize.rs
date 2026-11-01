@@ -2,19 +2,21 @@
 //! databases installed packages keep their R objects in. Byte-compiled closures from GNU R are
 //! read back as their source expressions, which ry compiles itself.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal},
-    eval,
-    unwind::{R, error},
-    values::{self, alloc, length, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal},
+        eval,
+        unwind::{R, error},
+        values::{self, alloc, length, nil, symbols},
+    },
+    flate2::read::ZlibDecoder,
+    heap::{
+        object::{Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    rustc_hash::FxHashMap,
+    std::io::Read,
 };
-use flate2::read::ZlibDecoder;
-use heap::{
-    object::{Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use rustc_hash::FxHashMap;
-use std::io::Read;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("lazyLoadDBfetch", 4, do_lazy_load_fetch),
@@ -239,7 +241,8 @@ impl Reader<'_> {
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function = eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                let function =
+                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
                 // GNU R names the object being read when it knows it, else "<unknown>", which
                 // `..getNamespace` compares as a string when the namespace fails to load.
                 let location = values::scalar_string("<unknown>")?;
@@ -397,8 +400,8 @@ impl Reader<'_> {
                 let data = values::ints_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 4)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *slot = i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                        *slot = i32::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
@@ -413,10 +416,8 @@ impl Reader<'_> {
                 let data = values::reals_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 8)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(8)) {
-                        let mut array = [0u8; 8];
-                        array.copy_from_slice(chunk);
-                        *slot = f64::from_be_bytes(array);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                        *slot = f64::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
@@ -762,8 +763,7 @@ pub fn compress_record(stream: &[u8], kind: i32) -> R<Vec<u8>> {
     }
     let packed = match kind {
         2 => {
-            let mut encoder =
-                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+            let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
             encoder.write_all(stream).map_err(failed)?;
             Some((b'2', encoder.finish().map_err(failed)?))
         }
@@ -908,7 +908,6 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     values::string_vector(&names)
 }
 
-
 /// `getVarsFromFrame(vars, env, force)`: the named list of the bindings in `env`'s own frame.
 unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
@@ -928,7 +927,13 @@ unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
 
 /// The values bound to `names`, as `(symbol, value)` pairs. Each value stays reachable from
 /// `env`, which keeps it alive.
-pub unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
+pub unsafe fn saved_bindings(
+    call: &Call<'_>,
+    names: Sexp,
+    env: Sexp,
+    force: bool,
+    frame_only: bool,
+) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::with_capacity(length(names));
     for index in 0..length(names) {
         let name = values::string_at(names, index).unwrap_or_default();
@@ -956,20 +961,31 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
     let compressed = match values::as_integer_scalar(call.arg(1)) {
         1 => from.to_vec(),
         2 => {
-            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         3 => {
             let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         4 => {
             let options = lzma_rust2::XzOptions::with_preset(9);
-            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options).map_err(|failure| call.error(failure.to_string()))?;
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         _ => return Err(call.error("invalid 'type' argument")),
     };
@@ -998,10 +1014,16 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     let mut output = Vec::new();
     let outcome = match kind {
         1 => return raw_vector(from),
-        2 if gzip_header => flate2::read::MultiGzDecoder::new(from).read_to_end(&mut output).map(drop),
+        2 if gzip_header => flate2::read::MultiGzDecoder::new(from)
+            .read_to_end(&mut output)
+            .map(drop),
         2 => ZlibDecoder::new(from).read_to_end(&mut output).map(drop),
-        3 => bzip2::read::MultiBzDecoder::new(from).read_to_end(&mut output).map(drop),
-        4 => lzma_rust2::XzReader::new(from, true).read_to_end(&mut output).map(drop),
+        3 => bzip2::read::MultiBzDecoder::new(from)
+            .read_to_end(&mut output)
+            .map(drop),
+        4 => lzma_rust2::XzReader::new(from, true)
+            .read_to_end(&mut output)
+            .map(drop),
         _ => return Err(call.error("invalid 'type' argument")),
     };
     outcome.map_err(|_| call.error("internal error in memDecompress"))?;
@@ -1013,7 +1035,6 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
     values::raws_mut(result).copy_from_slice(bytes);
     Ok(result)
 }
-
 
 unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
@@ -1037,7 +1058,9 @@ fn unescape_ascii(word: &[u8]) -> Vec<u8> {
             bytes.push(current);
             continue;
         }
-        let Some(&escaped) = word.get(index) else { break };
+        let Some(&escaped) = word.get(index) else {
+            break;
+        };
         index += 1;
         let decoded = match escaped {
             b'n' => b'\n',

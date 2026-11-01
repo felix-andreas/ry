@@ -8,20 +8,22 @@
 //! of computing anything. A verb on a `DataFrame` runs at once as a one-step [`Plan`]; the same verb
 //! on a `LazyFrame` appends the step, and `LazyFrame.collect` optimizes and runs the whole plan.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin},
-    conditions,
-    frame::{self, is_frame, literal, table_of},
-    unwind::{R, error_in},
-    values::{self, install, is_nil, length, nil, scalar_string, set_attr, symbols},
-};
-use heap::object::{Sexp, SexpType};
-use std::{cell::Cell, ffi::c_void};
-use table::{
-    Error as TableError, Schema,
-    lazy::{self, How, Plan, Source, Step},
-    polars::prelude::PlSmallStr,
-    query::{Aggregate, BinaryOp, Expr, SortKey, UnaryOp, Warning},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin},
+        conditions,
+        frame::{self, is_frame, literal, table_of},
+        unwind::{R, error_in},
+        values::{self, install, is_nil, length, nil, scalar_string, set_attr, symbols},
+    },
+    heap::object::{Sexp, SexpType},
+    std::{cell::Cell, ffi::c_void},
+    table::{
+        Error as TableError, Schema,
+        lazy::{self, How, Plan, Source, Step, Strategy},
+        polars::prelude::PlSmallStr,
+        query::{Aggregate, BinaryOp, Expr, SortKey, UnaryOp, Warning},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -33,6 +35,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_alias", 2, do_alias),
     builtin(".expr_if_else", 3, do_if_else),
     builtin(".expr_cor", 2, do_cor),
+    builtin(".expr_head", 3, do_head_expr),
     builtin(".expr_format", 1, do_format),
     builtin(".df_select", 3, do_select),
     builtin(".df_with_columns", 3, do_with_columns),
@@ -42,7 +45,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".df_sort", 4, do_sort),
     builtin(".df_head", 3, do_head),
     builtin(".df_tail", 3, do_tail),
-    builtin(".df_join", 7, do_join),
+    builtin(".df_join", 8, do_join),
     builtin(".df_lazy", 1, do_lazy),
     builtin(".df_collect", 2, do_collect),
     builtin(".df_explain", 2, do_explain),
@@ -67,6 +70,7 @@ Expr.median <- function(expr) .expr_aggregate(expr, "median")
 Expr.std <- function(expr) .expr_aggregate(expr, "std")
 Expr.var <- function(expr) .expr_aggregate(expr, "var")
 Expr.count <- function(expr) .expr_aggregate(expr, "count")
+Expr.head <- function(expr, n = 10L) .expr_head(expr, n, sys.call())
 Expr.is_null <- function(expr) .expr_operator("is_null", expr, NULL, TRUE)
 Expr.len <- function() .expr_len()
 Expr.if_else <- function(test, yes, no) .expr_if_else(test, yes, no)
@@ -82,7 +86,10 @@ DataFrame.sort <- function(df, ..., descending = FALSE) .df_sort(df, list(...), 
 DataFrame.head <- function(df, n = 5L) .df_head(df, n, sys.call())
 DataFrame.tail <- function(df, n = 5L) .df_tail(df, n, sys.call())
 DataFrame.join <- function(df, other, on = NULL, how = "inner", left_on = on, right_on = on, suffix = "_right") {
-  .df_join(df, other, left_on, right_on, how, suffix, sys.call())
+  .df_join(df, other, left_on, right_on, how, suffix, NULL, sys.call())
+}
+DataFrame.join_asof <- function(df, other, on, by = NULL, strategy = "backward", suffix = "_right") {
+  .df_join(df, other, c(by, on), c(by, on), "asof", suffix, strategy, sys.call())
 }
 DataFrame.lazy <- function(df) .df_lazy(df)
 GroupBy.agg <- function(group, ...) .df_agg(group, list(...), sys.call())
@@ -96,6 +103,7 @@ LazyFrame.sort <- DataFrame.sort
 LazyFrame.head <- DataFrame.head
 LazyFrame.tail <- DataFrame.tail
 LazyFrame.join <- DataFrame.join
+LazyFrame.join_asof <- DataFrame.join_asof
 LazyFrame.collect <- function(lf) .df_collect(lf, sys.call())
 LazyFrame.explain <- function(lf) {
   plan <- .df_explain(lf, sys.call())
@@ -146,7 +154,11 @@ local({
 enum Object {
     Expr(Named),
     Lazy(Plan),
-    Group { plan: Plan, keys: Vec<(PlSmallStr, Expr)>, lazy: bool },
+    Group {
+        plan: Plan,
+        keys: Vec<(PlSmallStr, Expr)>,
+        lazy: bool,
+    },
 }
 
 /// An expression and the output name `Expr.alias` gave it.
@@ -208,7 +220,9 @@ unsafe extern "C" fn finalize(value: Sexp) {
 
 unsafe fn object_of<'a>(value: Sexp) -> Option<&'a Object> {
     let tagged = value.kind() == SexpType::ExternalPtr
-        && TAG.with(Cell::get).is_some_and(|tag| value.external_tag() == tag)
+        && TAG
+            .with(Cell::get)
+            .is_some_and(|tag| value.external_tag() == tag)
         && !value.external_address().is_null();
     tagged.then(|| &*value.external_address().cast::<Object>())
 }
@@ -237,7 +251,10 @@ unsafe fn operand(value: Sexp, call: Sexp) -> R<Expr> {
     literal(value).ok_or_else(|| {
         error_in(
             call,
-            format!("an expression combines with expressions and single values, not {}", describe(value)),
+            format!(
+                "an expression combines with expressions and single values, not {}",
+                describe(value)
+            ),
         )
     })
 }
@@ -245,7 +262,13 @@ unsafe fn operand(value: Sexp, call: Sexp) -> R<Expr> {
 unsafe fn expression(value: Sexp, call: Sexp) -> R<Named> {
     match object_of(value) {
         Some(Object::Expr(named)) => Ok(named.clone()),
-        _ => Err(error_in(call, format!("expected an expression such as `col(\"x\")`, got {}", describe(value)))),
+        _ => Err(error_in(
+            call,
+            format!(
+                "expected an expression such as `col(\"x\")`, got {}",
+                describe(value)
+            ),
+        )),
     }
 }
 
@@ -271,7 +294,12 @@ unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
             "!" => UnaryOp::Not,
             "is_null" => UnaryOp::IsNa,
             "+" => return expr(left),
-            other => return Err(error_in(call.call, format!("`{other}` does not apply to one expression"))),
+            other => {
+                return Err(error_in(
+                    call.call,
+                    format!("`{other}` does not apply to one expression"),
+                ));
+            }
         };
         return expr(Expr::Unary(op, Box::new(left)));
     }
@@ -292,7 +320,12 @@ unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
         ">=" => BinaryOp::GreaterEqual,
         "&" => BinaryOp::And,
         "|" => BinaryOp::Or,
-        other => return Err(error_in(call.call, format!("`{other}` does not apply to expressions"))),
+        other => {
+            return Err(error_in(
+                call.call,
+                format!("`{other}` does not apply to expressions"),
+            ));
+        }
     };
     expr(Expr::Binary(op, Box::new(left), Box::new(right)))
 }
@@ -311,9 +344,17 @@ unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
         "std" => Aggregate::Sd,
         "var" => Aggregate::Var,
         "count" => Aggregate::Length,
-        other => return Err(error_in(call.call, format!("unknown aggregation `{other}`"))),
+        other => {
+            return Err(error_in(
+                call.call,
+                format!("unknown aggregation `{other}`"),
+            ));
+        }
     };
-    let na_rm = !matches!(function, Aggregate::First | Aggregate::Last | Aggregate::Length);
+    let na_rm = !matches!(
+        function,
+        Aggregate::First | Aggregate::Last | Aggregate::Length
+    );
     wrap(Object::Expr(Named {
         alias: arg.alias,
         expr: Expr::Aggregate {
@@ -350,6 +391,15 @@ unsafe fn do_cor(call: &Call<'_>) -> R<Sexp> {
     expr(Expr::Correlation(Box::new(first), Box::new(second)))
 }
 
+unsafe fn do_head_expr(call: &Call<'_>) -> R<Sexp> {
+    let named = expression(call.arg(0), call.arg(2))?;
+    let count = row_count(call.arg(1), call.arg(2))?;
+    wrap(Object::Expr(Named {
+        alias: named.alias,
+        expr: Expr::Head(Box::new(named.expr), count),
+    }))
+}
+
 unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let named = expression(call.arg(0), call.call)?;
     let text = match &named.alias {
@@ -368,7 +418,13 @@ unsafe fn plan_of(value: Sexp, call: Sexp) -> R<(Plan, bool)> {
     }
     match object_of(value) {
         Some(Object::Lazy(plan)) => Ok((plan.clone(), true)),
-        _ => Err(error_in(call, format!("expected a DataFrame or a LazyFrame, got {}", describe(value)))),
+        _ => Err(error_in(
+            call,
+            format!(
+                "expected a DataFrame or a LazyFrame, got {}",
+                describe(value)
+            ),
+        )),
     }
 }
 
@@ -382,7 +438,8 @@ unsafe fn finish(plan: Plan, lazy: bool, call: Sexp) -> R<Sexp> {
 
 unsafe fn collect(plan: Plan, call: Sexp) -> R<Sexp> {
     let schema = plan.valid_schema();
-    let collected = lazy::collect(plan).map_err(|failure| table_error(call, failure, schema.as_ref()))?;
+    let collected =
+        lazy::collect(plan).map_err(|failure| table_error(call, failure, schema.as_ref()))?;
     raise(&collected.warnings, call)?;
     frame::wrap(collected.table)
 }
@@ -396,11 +453,22 @@ unsafe fn raise(warnings: &[Warning], call: Sexp) -> R<()> {
 
 /// An engine error as an R error of the user's call. A missing column also lists the columns
 /// there are, which is usually the fastest way to spot a typo.
-unsafe fn table_error(call: Sexp, failure: TableError, schema: Option<&Schema>) -> crate::unwind::Unwind {
+unsafe fn table_error(
+    call: Sexp,
+    failure: TableError,
+    schema: Option<&Schema>,
+) -> crate::unwind::Unwind {
     let message = match (&failure, schema) {
         (TableError::NoColumn(name), Some(schema)) => {
-            let columns: Vec<String> = schema.names().iter().map(|name| format!("`{name}`")).collect();
-            format!("there is no column `{name}`; the columns are {}", columns.join(", "))
+            let columns: Vec<String> = schema
+                .names()
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect();
+            format!(
+                "there is no column `{name}`; the columns are {}",
+                columns.join(", ")
+            )
         }
         _ => failure.to_string(),
     };
@@ -435,7 +503,10 @@ unsafe fn named_expressions(list: Sexp, verb: &str, call: Sexp) -> R<Vec<(PlSmal
         }
         return Err(error_in(
             call,
-            format!("`{verb}` takes column names and expressions such as `col(\"x\")`, not {}", describe(item)),
+            format!(
+                "`{verb}` takes column names and expressions such as `col(\"x\")`, not {}",
+                describe(item)
+            ),
         ));
     }
     Ok(columns)
@@ -469,7 +540,10 @@ unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
         });
     }
     let Some(predicate) = predicate else {
-        return Err(error_in(caller, "`filter` needs a predicate such as `col(\"x\") > 0`"));
+        return Err(error_in(
+            caller,
+            "`filter` needs a predicate such as `col(\"x\") > 0`",
+        ));
     };
     finish(plan.with(Step::Filter(predicate)), lazy, caller)
 }
@@ -489,7 +563,10 @@ unsafe fn do_agg(call: &Call<'_>) -> R<Sexp> {
     let Some(Object::Group { plan, keys, lazy }) = object_of(call.arg(0)) else {
         return Err(error_in(
             caller,
-            format!("`agg` needs the result of `group_by`, got {}", describe(call.arg(0))),
+            format!(
+                "`agg` needs the result of `group_by`, got {}",
+                describe(call.arg(0))
+            ),
         ));
     };
     let aggregates = named_expressions(call.arg(1), "agg", caller)?;
@@ -505,11 +582,21 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
     let columns = named_expressions(call.arg(1), "sort", caller)?;
     if columns.is_empty() {
-        return Err(error_in(caller, "`sort` needs at least one column to sort by"));
+        return Err(error_in(
+            caller,
+            "`sort` needs at least one column to sort by",
+        ));
     }
-    let descending = values::ints(crate::coerce::coerce_vector(call.arg(2), SexpType::Logical)?).to_vec();
+    let descending = values::ints(crate::coerce::coerce_vector(
+        call.arg(2),
+        SexpType::Logical,
+    )?)
+    .to_vec();
     if descending.is_empty() || (descending.len() != 1 && descending.len() != columns.len()) {
-        return Err(error_in(caller, "`descending` takes one flag, or one per sort column"));
+        return Err(error_in(
+            caller,
+            "`descending` takes one flag, or one per sort column",
+        ));
     }
     let keys = columns
         .into_iter()
@@ -541,9 +628,10 @@ unsafe fn do_tail(call: &Call<'_>) -> R<Sexp> {
     finish(plan.with(Step::Tail(count)), lazy, caller)
 }
 
-/// `.df_join(df, other, left_on, right_on, how, suffix, call)`.
+/// `.df_join(df, other, left_on, right_on, how, suffix, strategy, call)`, where `strategy` is
+/// `NULL` except for an as-of join.
 unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
-    let caller = call.arg(6);
+    let caller = call.arg(7);
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
     let (other, _) = plan_of(call.arg(1), caller)?;
     let keys = |value: Sexp, side: &str| -> R<Vec<PlSmallStr>> {
@@ -553,14 +641,28 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
                 format!("`join` needs the key columns, as `on = \"id\"` or `{side} = \"id\"`"),
             ));
         }
-        Ok(values::strings(value).into_iter().flatten().map(PlSmallStr::from).collect())
+        Ok(values::strings(value)
+            .into_iter()
+            .flatten()
+            .map(PlSmallStr::from)
+            .collect())
     };
     let left_on = keys(call.arg(2), "left_on")?;
     let right_on = keys(call.arg(3), "right_on")?;
     let how = values::require_string(call.arg(4), "how")?;
-    let how = How::parse(&how).ok_or_else(|| {
-        error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\" and \"anti\", not \"{how}\""))
-    })?;
+    let how = if how == "asof" {
+        let strategy = values::require_string(call.arg(6), "strategy")?;
+        How::Asof(Strategy::parse(&strategy).ok_or_else(|| {
+            error_in(
+                caller,
+                format!("`strategy` is one of \"backward\", \"forward\" and \"nearest\", not \"{strategy}\""),
+            )
+        })?)
+    } else {
+        How::parse(&how).ok_or_else(|| {
+            error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\" and \"anti\", not \"{how}\""))
+        })?
+    };
     let suffix = values::require_string(call.arg(5), "suffix")?;
     let step = Step::Join {
         other: Box::new(other),
@@ -580,7 +682,10 @@ unsafe fn do_lazy(call: &Call<'_>) -> R<Sexp> {
 unsafe fn lazy_plan(value: Sexp, call: Sexp) -> R<Plan> {
     match object_of(value) {
         Some(Object::Lazy(plan)) => Ok(plan.clone()),
-        _ => Err(error_in(call, format!("expected a LazyFrame, got {}", describe(value)))),
+        _ => Err(error_in(
+            call,
+            format!("expected a LazyFrame, got {}", describe(value)),
+        )),
     }
 }
 
@@ -593,7 +698,8 @@ unsafe fn do_explain(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
     let plan = lazy_plan(call.arg(0), caller)?;
     let schema = plan.valid_schema();
-    let text = lazy::explain(plan).map_err(|failure| table_error(caller, failure, schema.as_ref()))?;
+    let text =
+        lazy::explain(plan).map_err(|failure| table_error(caller, failure, schema.as_ref()))?;
     scalar_string(&text)
 }
 

@@ -6,13 +6,15 @@
 //! Each module that implements builtins exports a `BUILTINS` table; [`install_all`] registers
 //! them, and the host adds its own with [`crate::register_builtins`].
 
-use crate::{
-    interp,
-    unwind::{R, error, error_in},
-    values::{self, nil},
+use {
+    crate::{
+        interp,
+        unwind::{R, error, error_in},
+        values::{self, nil},
+    },
+    heap::object::{Sexp, SexpType},
+    syntax::native_values::ACCEPTS_NATIVE,
 };
-use heap::object::{Sexp, SexpType};
-use syntax::native_values::ACCEPTS_NATIVE;
 
 /// How a builtin is called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,6 +67,9 @@ pub struct Call<'a> {
     pub op: Sexp,
     pub args: &'a [Arg],
     pub env: Sexp,
+    /// The first argument when the binding this call's result is assigned to holds its only
+    /// reference, as in `d <- Dict.insert(d, k, v)`: the builtin may then update it in place.
+    pub reusable: Option<Sexp>,
 }
 
 pub type BuiltinFn = unsafe fn(&Call<'_>) -> R<Sexp>;
@@ -83,6 +88,10 @@ pub struct BuiltinDef {
     /// argument: set by [`BuiltinDef::accepting_native`], or at registration from
     /// [`ACCEPTS_NATIVE`].
     pub accepts_native: bool,
+    /// Whether the builtin updates its first argument in place when the caller owns it, so
+    /// `x <- f(x, ...)` offers it through [`Call::reusable`]: set by
+    /// [`BuiltinDef::reusing_first_argument`].
+    pub reuses_first_argument: bool,
     pub function: BuiltinFn,
     pub object: Option<Sexp>,
 }
@@ -97,6 +106,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         generic: Generic::None,
         keep_missing: false,
         accepts_native: false,
+        reuses_first_argument: false,
         function,
         object: None,
     }
@@ -177,6 +187,13 @@ impl BuiltinDef {
         }
     }
 
+    pub const fn reusing_first_argument(self) -> BuiltinDef {
+        BuiltinDef {
+            reuses_first_argument: true,
+            ..self
+        }
+    }
+
     fn is_internal(&self) -> bool {
         matches!(self.kind, Kind::Internal | Kind::InternalSpecial)
     }
@@ -190,6 +207,7 @@ impl BuiltinDef {
             generic: self.generic,
             keep_missing: self.keep_missing,
             accepts_native: self.accepts_native,
+            reuses_first_argument: self.reuses_first_argument,
             function: self.function,
             object: self.object,
         }

@@ -8,7 +8,10 @@
 //! Thuente's line search. The model's Hessian is the compact limited memory BFGS matrix
 //! `B = θI - W M W'` with `W = [Y θS]`; the small matrices are formed densely.
 
-use crate::{stats_optimize::Objective, unwind::{R, error}};
+use crate::{
+    stats_optimize::Objective,
+    unwind::{R, error},
+};
 
 pub struct Settings {
     pub memory: usize,
@@ -47,7 +50,13 @@ impl Bound {
     }
 }
 
-pub(crate) unsafe fn minimize(objective: &mut dyn Objective, start: &[f64], lower: &[f64], upper: &[f64], settings: &Settings) -> R<Outcome> {
+pub(crate) unsafe fn minimize(
+    objective: &mut dyn Objective,
+    start: &[f64],
+    lower: &[f64],
+    upper: &[f64],
+    settings: &Settings,
+) -> R<Outcome> {
     let n = start.len();
     let bounds: Vec<Bound> = (0..n)
         .map(|i| match (lower[i].is_finite(), upper[i].is_finite()) {
@@ -90,19 +99,37 @@ pub(crate) unsafe fn minimize(objective: &mut dyn Objective, start: &[f64], lowe
     evaluations += 1;
     let tolerance = settings.factor * f64::EPSILON;
     let mut iteration = 0i32;
-    let finish = |x: Vec<f64>, f: f64, evaluations: usize, fail: i32, message: &str, iteration: i32| {
-        if trace {
-            crate::write_console(format!("final  value {f:.6} \n").as_bytes(), false);
-            if iteration < settings.max_iterations && fail == 0 {
-                crate::write_console(b"converged\n", false);
-            } else {
-                crate::write_console(format!("stopped after {iteration} iterations\n").as_bytes(), false);
+    let finish =
+        |x: Vec<f64>, f: f64, evaluations: usize, fail: i32, message: &str, iteration: i32| {
+            if trace {
+                crate::write_console(format!("final  value {f:.6} \n").as_bytes(), false);
+                if iteration < settings.max_iterations && fail == 0 {
+                    crate::write_console(b"converged\n", false);
+                } else {
+                    crate::write_console(
+                        format!("stopped after {iteration} iterations\n").as_bytes(),
+                        false,
+                    );
+                }
             }
-        }
-        Ok(Outcome { solution: x, value: f, function_count: evaluations, gradient_count: evaluations, fail, message: message.to_owned() })
-    };
+            Ok(Outcome {
+                solution: x,
+                value: f,
+                function_count: evaluations,
+                gradient_count: evaluations,
+                fail,
+                message: message.to_owned(),
+            })
+        };
     if state.projected_gradient_norm(&x, &g) <= settings.projected_tolerance {
-        return finish(x, f, evaluations, 0, "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL", iteration);
+        return finish(
+            x,
+            f,
+            evaluations,
+            0,
+            "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+            iteration,
+        );
     }
     loop {
         // The point the model is minimized at: the Cauchy point, refined over the free
@@ -156,7 +183,11 @@ pub(crate) unsafe fn minimize(objective: &mut dyn Objective, start: &[f64], lowe
                 }
             }
         }
-        let mut step = if iteration == 0 && !boxed { (1.0 / norm).min(max_step) } else { 1.0 };
+        let mut step = if iteration == 0 && !boxed {
+            (1.0 / norm).min(max_step)
+        } else {
+            1.0
+        };
         let (x_old, g_old, f_old) = (x.clone(), g.clone(), f);
         let initial_slope: f64 = g.iter().zip(&direction).map(|(a, b)| a * b).sum();
         let mut search = LineSearch::new();
@@ -165,7 +196,17 @@ pub(crate) unsafe fn minimize(objective: &mut dyn Objective, start: &[f64], lowe
         let mut failed = initial_slope >= 0.0;
         if !failed {
             loop {
-                match search.step(&mut step, f, slope, 1e-3, 0.9, 0.1, 0.0, max_step, trials == 0) {
+                match search.step(
+                    &mut step,
+                    f,
+                    slope,
+                    1e-3,
+                    0.9,
+                    0.1,
+                    0.0,
+                    max_step,
+                    trials == 0,
+                ) {
                     Search::Converged => break,
                     Search::Error => {
                         failed = true;
@@ -178,7 +219,11 @@ pub(crate) unsafe fn minimize(objective: &mut dyn Objective, start: &[f64], lowe
                     break;
                 }
                 trials += 1;
-                x = if step == 1.0 { target.clone() } else { (0..n).map(|i| step * direction[i] + x_old[i]).collect() };
+                x = if step == 1.0 {
+                    target.clone()
+                } else {
+                    (0..n).map(|i| step * direction[i] + x_old[i]).collect()
+                };
                 evaluations += 1;
                 f = objective.value(&x)?;
                 if !f.is_finite() {
@@ -193,24 +238,48 @@ pub(crate) unsafe fn minimize(objective: &mut dyn Objective, start: &[f64], lowe
             g = g_old;
             f = f_old;
             if state.s.is_empty() {
-                return finish(x, f, evaluations, 52, "ABNORMAL_TERMINATION_IN_LNSRCH", iteration + 1);
+                return finish(
+                    x,
+                    f,
+                    evaluations,
+                    52,
+                    "ABNORMAL_TERMINATION_IN_LNSRCH",
+                    iteration + 1,
+                );
             }
             state.reset();
             continue;
         }
         iteration += 1;
         if trace && iteration % settings.report == 0 {
-            crate::write_console(format!("iter {iteration:4} value {f:.6}\n").as_bytes(), false);
+            crate::write_console(
+                format!("iter {iteration:4} value {f:.6}\n").as_bytes(),
+                false,
+            );
         }
         if iteration > settings.max_iterations {
             return finish(x, f, evaluations, 1, "NEW_X", iteration);
         }
         if state.projected_gradient_norm(&x, &g) <= settings.projected_tolerance {
-            return finish(x, f, evaluations, 0, "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL", iteration);
+            return finish(
+                x,
+                f,
+                evaluations,
+                0,
+                "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+                iteration,
+            );
         }
         let scale = f_old.abs().max(f.abs()).max(1.0);
         if f_old - f <= tolerance * scale {
-            return finish(x, f, evaluations, 0, "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH", iteration);
+            return finish(
+                x,
+                f,
+                evaluations,
+                0,
+                "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH",
+                iteration,
+            );
         }
         let y: Vec<f64> = (0..n).map(|i| g[i] - g_old[i]).collect();
         let s: Vec<f64> = (0..n).map(|i| step * direction[i]).collect();
@@ -338,7 +407,11 @@ impl State {
         let k = self.s.len();
         let middle = if k > 0 { self.middle()? } else { Vec::new() };
         let size = 2 * k;
-        let multiply = |v: &[f64]| -> Vec<f64> { (0..size).map(|i| (0..size).map(|j| middle[i * size + j] * v[j]).sum()).collect() };
+        let multiply = |v: &[f64]| -> Vec<f64> {
+            (0..size)
+                .map(|i| (0..size).map(|j| middle[i * size + j] * v[j]).sum())
+                .collect()
+        };
         let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
         let mut breakpoints: Vec<(f64, usize)> = Vec::new();
         let mut direction = vec![0.0; n];
@@ -386,7 +459,11 @@ impl State {
             if minimum_step < interval {
                 break;
             }
-            point[b] = if direction[b] > 0.0 { self.upper[b] } else { self.lower[b] };
+            point[b] = if direction[b] > 0.0 {
+                self.upper[b]
+            } else {
+                self.lower[b]
+            };
             let z = point[b] - x[b];
             for j in 0..size {
                 c[j] += interval * p[j];
@@ -425,16 +502,28 @@ impl State {
 
     fn is_free(&self, i: usize, point: &[f64]) -> bool {
         let bound = self.bounds[i];
-        !((bound.has_lower() && point[i] <= self.lower[i]) || (bound.has_upper() && point[i] >= self.upper[i]))
+        !((bound.has_lower() && point[i] <= self.lower[i])
+            || (bound.has_upper() && point[i] >= self.upper[i]))
     }
 
     /// The direct primal subspace minimization: the minimizer of the quadratic model over the
     /// `free` variables from `point`, then a step back towards `point` to stay within the box.
-    fn subspace_minimum(&self, x: &[f64], g: &[f64], point: &[f64], c: &[f64], free: &[usize]) -> Option<Vec<f64>> {
+    fn subspace_minimum(
+        &self,
+        x: &[f64],
+        g: &[f64],
+        point: &[f64],
+        c: &[f64],
+        free: &[usize],
+    ) -> Option<Vec<f64>> {
         let k = self.s.len();
         let size = 2 * k;
         let middle = self.middle()?;
-        let multiply = |v: &[f64]| -> Vec<f64> { (0..size).map(|i| (0..size).map(|j| middle[i * size + j] * v[j]).sum()).collect() };
+        let multiply = |v: &[f64]| -> Vec<f64> {
+            (0..size)
+                .map(|i| (0..size).map(|j| middle[i * size + j] * v[j]).sum())
+                .collect()
+        };
         let mc = multiply(c);
         let theta = self.theta;
         // The reduced gradient of the model at `point`: Z'(g + θ(xcp - x) - W M c).
@@ -442,7 +531,8 @@ impl State {
             .iter()
             .map(|&i| {
                 let w = self.w_row(i);
-                -(g[i] + theta * (point[i] - x[i]) - w.iter().zip(&mc).map(|(a, b)| a * b).sum::<f64>())
+                -(g[i] + theta * (point[i] - x[i])
+                    - w.iter().zip(&mc).map(|(a, b)| a * b).sum::<f64>())
             })
             .collect();
         // (θI - Z'W M W'Z)^-1 r = r/θ + (1/θ²) Z'W (I - (1/θ) M W'Z Z'W)^-1 M W'Z r.
@@ -460,7 +550,9 @@ impl State {
         let mut inner = vec![0.0; size * size];
         for a in 0..size {
             for b in 0..size {
-                let product: f64 = (0..size).map(|m| middle[a * size + m] * wtw[m * size + b]).sum();
+                let product: f64 = (0..size)
+                    .map(|m| middle[a * size + m] * wtw[m * size + b])
+                    .sum();
                 inner[a * size + b] = if a == b { 1.0 } else { 0.0 } - product / theta;
             }
         }
@@ -471,7 +563,8 @@ impl State {
             .enumerate()
             .map(|(position, &i)| {
                 let w = self.w_row(i);
-                reduced[position] / theta + w.iter().zip(&correction).map(|(a, b)| a * b).sum::<f64>() / (theta * theta)
+                reduced[position] / theta
+                    + w.iter().zip(&correction).map(|(a, b)| a * b).sum::<f64>() / (theta * theta)
             })
             .collect();
         let mut result = point.to_vec();
@@ -504,7 +597,11 @@ impl State {
         if alpha < 1.0 {
             if let Some(position) = limiting {
                 let i = free[position];
-                result[i] = if step[position] > 0.0 { self.upper[i] } else { self.lower[i] };
+                result[i] = if step[position] > 0.0 {
+                    self.upper[i]
+                } else {
+                    self.lower[i]
+                };
                 step[position] = 0.0;
             }
         }
@@ -539,7 +636,11 @@ fn cholesky(matrix: &mut [f64], n: usize) -> Option<()> {
 
 fn solve_dense(matrix: &mut [f64], rhs: &mut [f64], n: usize) -> Option<Vec<f64>> {
     for column in 0..n {
-        let pivot = (column..n).max_by(|&a, &b| matrix[a * n + column].abs().total_cmp(&matrix[b * n + column].abs()))?;
+        let pivot = (column..n).max_by(|&a, &b| {
+            matrix[a * n + column]
+                .abs()
+                .total_cmp(&matrix[b * n + column].abs())
+        })?;
         if matrix[pivot * n + column] == 0.0 {
             return None;
         }
@@ -630,7 +731,18 @@ impl LineSearch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step(&mut self, stp: &mut f64, f: f64, g: f64, ftol: f64, gtol: f64, xtol: f64, stpmin: f64, stpmax: f64, start: bool) -> Search {
+    fn step(
+        &mut self,
+        stp: &mut f64,
+        f: f64,
+        g: f64,
+        ftol: f64,
+        gtol: f64,
+        xtol: f64,
+        stpmin: f64,
+        stpmax: f64,
+        start: bool,
+    ) -> Search {
         if start {
             if *stp < stpmin || *stp > stpmax || g >= 0.0 {
                 return Search::Error;
@@ -682,14 +794,40 @@ impl LineSearch {
             let gm = g - self.g_test;
             let mut gxm = self.gx - self.g_test;
             let mut gym = self.gy - self.g_test;
-            dcstep(&mut self.stx, &mut fxm, &mut gxm, &mut self.sty, &mut fym, &mut gym, stp, &mut fm, gm, &mut self.bracketed, self.stmin, self.stmax);
+            dcstep(
+                &mut self.stx,
+                &mut fxm,
+                &mut gxm,
+                &mut self.sty,
+                &mut fym,
+                &mut gym,
+                stp,
+                &mut fm,
+                gm,
+                &mut self.bracketed,
+                self.stmin,
+                self.stmax,
+            );
             self.fx = fxm + self.stx * self.g_test;
             self.fy = fym + self.sty * self.g_test;
             self.gx = gxm + self.g_test;
             self.gy = gym + self.g_test;
         } else {
             let mut fp = f;
-            dcstep(&mut self.stx, &mut self.fx, &mut self.gx, &mut self.sty, &mut self.fy, &mut self.gy, stp, &mut fp, g, &mut self.bracketed, self.stmin, self.stmax);
+            dcstep(
+                &mut self.stx,
+                &mut self.fx,
+                &mut self.gx,
+                &mut self.sty,
+                &mut self.fy,
+                &mut self.gy,
+                stp,
+                &mut fp,
+                g,
+                &mut self.bracketed,
+                self.stmin,
+                self.stmax,
+            );
         }
         if self.bracketed {
             if (self.sty - self.stx).abs() >= 0.66 * self.width1 {
@@ -706,7 +844,9 @@ impl LineSearch {
             self.stmax = *stp + 4.0 * (*stp - self.stx);
         }
         *stp = stp.max(stpmin).min(stpmax);
-        if (self.bracketed && (*stp <= self.stmin || *stp >= self.stmax)) || (self.bracketed && self.stmax - self.stmin <= xtol * self.stmax) {
+        if (self.bracketed && (*stp <= self.stmin || *stp >= self.stmax))
+            || (self.bracketed && self.stmax - self.stmin <= xtol * self.stmax)
+        {
             *stp = self.stx;
         }
         Search::Evaluate
@@ -716,7 +856,20 @@ impl LineSearch {
 /// MINPACK-2's `dcstep`: a safeguarded cubic or quadratic step for the line search, updating
 /// the interval `[stx, sty]` that contains a step satisfying the conditions.
 #[allow(clippy::too_many_arguments)]
-fn dcstep(stx: &mut f64, fx: &mut f64, dx: &mut f64, sty: &mut f64, fy: &mut f64, dy: &mut f64, stp: &mut f64, fp: &mut f64, dp: f64, bracketed: &mut bool, stpmin: f64, stpmax: f64) {
+fn dcstep(
+    stx: &mut f64,
+    fx: &mut f64,
+    dx: &mut f64,
+    sty: &mut f64,
+    fy: &mut f64,
+    dy: &mut f64,
+    stp: &mut f64,
+    fp: &mut f64,
+    dp: f64,
+    bracketed: &mut bool,
+    stpmin: f64,
+    stpmax: f64,
+) {
     let sign = dp * (*dx / dx.abs());
     let stpf;
     if *fp > *fx {
@@ -731,7 +884,11 @@ fn dcstep(stx: &mut f64, fx: &mut f64, dx: &mut f64, sty: &mut f64, fy: &mut f64
         let r = p / q;
         let stpc = *stx + r * (*stp - *stx);
         let stpq = *stx + ((*dx / ((*fx - *fp) / (*stp - *stx) + *dx)) / 2.0) * (*stp - *stx);
-        stpf = if (stpc - *stx).abs() < (stpq - *stx).abs() { stpc } else { stpc + (stpq - stpc) / 2.0 };
+        stpf = if (stpc - *stx).abs() < (stpq - *stx).abs() {
+            stpc
+        } else {
+            stpc + (stpq - stpc) / 2.0
+        };
         *bracketed = true;
     } else if sign < 0.0 {
         let theta = 3.0 * (*fx - *fp) / (*stp - *stx) + *dx + dp;
@@ -745,12 +902,19 @@ fn dcstep(stx: &mut f64, fx: &mut f64, dx: &mut f64, sty: &mut f64, fy: &mut f64
         let r = p / q;
         let stpc = *stp + r * (*stx - *stp);
         let stpq = *stp + (dp / (dp - *dx)) * (*stx - *stp);
-        stpf = if (stpc - *stp).abs() > (stpq - *stp).abs() { stpc } else { stpq };
+        stpf = if (stpc - *stp).abs() > (stpq - *stp).abs() {
+            stpc
+        } else {
+            stpq
+        };
         *bracketed = true;
     } else if dp.abs() < dx.abs() {
         let theta = 3.0 * (*fx - *fp) / (*stp - *stx) + *dx + dp;
         let s = theta.abs().max(dx.abs()).max(dp.abs());
-        let mut gamma = s * (0.0f64).max((theta / s).powi(2) - (*dx / s) * (dp / s)).sqrt();
+        let mut gamma = s
+            * (0.0f64)
+                .max((theta / s).powi(2) - (*dx / s) * (dp / s))
+                .sqrt();
         if *stp > *stx {
             gamma = -gamma;
         }
@@ -766,7 +930,11 @@ fn dcstep(stx: &mut f64, fx: &mut f64, dx: &mut f64, sty: &mut f64, fy: &mut f64
         };
         let stpq = *stp + (dp / (dp - *dx)) * (*stx - *stp);
         if *bracketed {
-            let mut chosen = if (stpc - *stp).abs() < (stpq - *stp).abs() { stpc } else { stpq };
+            let mut chosen = if (stpc - *stp).abs() < (stpq - *stp).abs() {
+                stpc
+            } else {
+                stpq
+            };
             if *stp > *stx {
                 chosen = chosen.min(*stp + 0.66 * (*sty - *stp));
             } else {
@@ -774,7 +942,11 @@ fn dcstep(stx: &mut f64, fx: &mut f64, dx: &mut f64, sty: &mut f64, fy: &mut f64
             }
             stpf = chosen;
         } else {
-            let chosen = if (stpc - *stp).abs() > (stpq - *stp).abs() { stpc } else { stpq };
+            let chosen = if (stpc - *stp).abs() > (stpq - *stp).abs() {
+                stpc
+            } else {
+                stpq
+            };
             stpf = chosen.min(stpmax).max(stpmin);
         }
     } else if *bracketed {

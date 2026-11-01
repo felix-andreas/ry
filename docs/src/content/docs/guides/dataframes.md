@@ -3,11 +3,17 @@ title: Working with DataFrames
 description: ry's built-in table, queried with a Polars-style API and run on the Polars engine
 ---
 
-A `DataFrame` is ry's built-in table. You query it with the same verbs as
-[Polars](https://pola.rs): `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
-`join` and `head`, with column expressions written as `col("x")`. Each query runs inside the Polars
-engine instead of as R code, and the type checker knows every column's type at every step.
-DataFrames need ry's own runtime, so run scripts that use them with `ry run --runtime ry script.R`.
+A `DataFrame` is ry's built-in table, for code where data.table is too slow or too hard to read.
+Each query runs inside the [Polars](https://pola.rs) engine instead of as R code, which on
+db-benchmark's questions at ten million rows takes about a fifth of the time data.table does
+([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
+column is reported before the query runs. Code you already wrote for data.table keeps working, and
+most of its queries run on the same engine
+([Existing data.table code](#existing-datatable-code)).
+
+You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
+`join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
+so run scripts that use them with `ry run script.R`:
 
 ```r
 sales <- DataFrame(
@@ -27,6 +33,7 @@ sales |>
 ```
 
 ```text
+$ ry run sales.R
    region revenue orders
    <char>   <num>  <int>
 1:     eu    10.5      2
@@ -37,6 +44,48 @@ sales |>
 Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, and takes the value
 it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
 method dispatch: `DataFrame.filter` always means the same function.
+
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run`, and most queries on a
+`data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
+behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
+when it can produce exactly what data.table would, meaning the same values, attributes, printing
+and warnings. Otherwise data.table answers it. These go to data.table:
+
+- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
+- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
+- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
+  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
+- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a query that warns or fails.
+
+Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
+`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
+every query to data.table.
+
+```r
+library(data.table)
+options(ry.datatable.trace = TRUE)
+dt <- data.table(g = c("a", "b", "a"), x = 1:3)
+dt[x > 1L, .(n = .N), by = g]
+setkey(dt, g)
+dt[x > 1L]
+```
+
+```text
+[ry] dt[x > 1L, .(n = .N), by = g]
+        g     n
+   <char> <int>
+1:      b     1
+2:      a     1
+[data.table] dt[x > 1L]
+Key: <g>
+        g     x
+   <char> <int>
+1:      a     3
+2:      b     2
+```
 
 ## Building a DataFrame
 
@@ -95,6 +144,7 @@ expression in parentheses first.
 | `DataFrame.sort(df, ..., descending = FALSE)` | orders the rows |
 | `DataFrame.head(df, n = 5)` and `DataFrame.tail(df, n = 5)` | the first or last rows |
 | `DataFrame.join(df, other, on, how = "inner")` | joins two DataFrames |
+| `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
 
 A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
 is short for `DataFrame.select(df, col("region"))`. Inside `GroupBy.agg`, each expression must
@@ -114,6 +164,33 @@ sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3
 4:   asia   0.6   TRUE
 5:     us   4.8  FALSE
 ```
+
+Inside `GroupBy.agg`, the one exception to one value per group is `Expr.head(n)`, which keeps up
+to `n` values per group. Polars would give a list per group here, but ry has no list columns, so
+the values become rows. After a descending sort, this gives each group's largest values:
+
+```r
+sales |>
+  DataFrame.lazy() |>
+  LazyFrame.sort("units", descending = TRUE) |>
+  LazyFrame.group_by("region") |>
+  LazyGroupBy.agg(top_units = col("units") |> Expr.head(2L)) |>
+  LazyFrame.collect()
+```
+
+```text
+   region top_units
+   <char>     <int>
+1:   asia         7
+2:     us         5
+3:     us         1
+4:     eu         3
+5:     eu         2
+```
+
+The groups come in the order of their first row in the sorted data. Written lazily, with one
+sort column and `Expr.head(n)` as the only item for an `n` of at most 8, the sort and the grouping
+run as one step that keeps only each group's best rows, instead of sorting the whole table first.
 
 ### Joins
 
@@ -135,6 +212,26 @@ DataFrame.join(sales, regions, on = "region", how = "left")
 3:     eu     2   3.0     Ana
 4:   asia     7   0.5    <NA>
 5:     us     1   4.0      Bo
+```
+
+`DataFrame.join_asof` matches each left row to one right row: the `by` columns must be equal, and
+the `on` column takes the nearest value. With the default `strategy = "backward"` that is the last
+right row at or before the left row's value. `"forward"` takes the first one at or after it, and
+`"nearest"` the closest. A left row with no match gets `NA`, and the columns are laid out as for a
+left join.
+
+```r
+trades <- DataFrame(ticker = c("a", "b", "a"), time = c(5L, 3L, 1L), size = c(10, 20, 30))
+quotes <- DataFrame(ticker = c("a", "a", "b"), time = c(2L, 4L, 1L), bid = c(1.5, 1.6, 7))
+DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
+```
+
+```text
+   ticker  time  size   bid
+   <char> <int> <num> <num>
+1:      a     5    10   1.6
+2:      b     3    20   7.0
+3:      a     1    30    NA
 ```
 
 ## Lazy queries
@@ -196,7 +293,8 @@ as.data.frame(sales)
 
 A DataFrame also answers data.table's `df[i, j, by]` queries, including `:=`, joins with `on =`,
 `.N` and `.SD`, so code written for data.table keeps working. This syntax is there for
-compatibility. New code should use the verbs above, which the checker and the editor understand
+compatibility, and the editor completes its query symbols (`.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and
+`.BY`) inside the brackets. New code should use the verbs above, which the checker and the editor understand
 better and which read in the order they run. The
 [typing reference](/reference/type-system/#datatable-queries) lists what the checker understands
 of the bracket syntax.
@@ -205,52 +303,11 @@ Unlike data.table, a DataFrame follows R's copy-on-modify rule, so `df[, y := va
 you took earlier unchanged. When nothing else refers to the DataFrame, the update happens in place
 and costs only the new column.
 
-### Existing data.table code
-
-Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
-`data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
-behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
-when it can produce exactly what data.table would, meaning the same values, attributes, printing
-and warnings. Otherwise data.table answers it. These go to data.table:
-
-- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
-- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
-- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
-  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
-- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
-- a query that warns or fails.
-
-Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
-`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
-every query to data.table.
-
-```r
-library(data.table)
-options(ry.datatable.trace = TRUE)
-dt <- data.table(g = c("a", "b", "a"), x = 1:3)
-dt[x > 1L, .(n = .N), by = g]
-setkey(dt, g)
-dt[x > 1L]
-```
-
-```text
-[ry] dt[x > 1L, .(n = .N), by = g]
-        g     n
-   <char> <int>
-1:      b     1
-2:      a     1
-[data.table] dt[x > 1L]
-Key: <g>
-        g     x
-   <char> <int>
-1:      a     3
-2:      b     2
-```
-
 ## Speed
 
-`tools/bench/table/` times db-benchmark's group-by and join questions, `:=` update loops and a keyed
-rolling join, written once for data.table under GNU R and once for DataFrames under
-`ry run --runtime ry`, and `tools/bench/table/ops.R` times data.table's own functions (`fread`,
-`setkey`, `rbindlist`, `melt` and the rest), which run data.table's C code through ry's C API. The
-[design notes](/contributing/design/r-runtime/#7-the-table-type) have the results.
+db-benchmark's ten group-by and five join questions, three `:=` update loops and a keyed rolling
+join, at ten million rows (db-benchmark's 0.5 GB size) on 4 cores, take 5.2 s on DataFrames and
+26.2 s on data.table using every thread, best of two runs each, with the same checksums, and
+DataFrames are faster on every question. data.table's own functions (`fread`, `setkey`, `rbindlist`,
+`melt` and the rest) run data.table's C code, at the speed they have under GNU R. The
+[design notes](/contributing/design/r-runtime/#7-the-table-type) describe the benchmark.

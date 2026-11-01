@@ -18,21 +18,19 @@
 //! [`MAX_CODES`] values, rolling to the nearest value, and rolling over `NA`s give `None`, and
 //! the join runs as a Polars plan.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::ops::Range;
-
-use polars::prelude::{Column, DataFrame, DataType, GroupsType, PlSmallStr};
-use polars_arrow::bitmap::Bitmap;
-use polars_core::runtime::THREAD_POOL;
-use rayon::prelude::*;
-
-use crate::convert::factor_levels;
-use crate::kernel::{
-    CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column, pack_map,
+use {
+    crate::{
+        Error, Result, Table,
+        convert::factor_levels,
+        kernel::{CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column, pack_map},
+        query::{Comparison, Join, Mult, On, Roll, Side, join_layout},
+    },
+    polars::prelude::{Column, DataFrame, DataType, GroupsType, PlSmallStr},
+    polars_arrow::bitmap::Bitmap,
+    polars_core::runtime::THREAD_POOL,
+    rayon::prelude::*,
+    std::{borrow::Cow, collections::HashMap, ops::Range},
 };
-use crate::query::{Comparison, Join, Mult, On, Roll, Side, join_layout};
-use crate::{Error, Result, Table};
 
 /// The widest code range the kernels index directly: one bucket per code on the built side.
 const MAX_CODES: u64 = 1 << 27;

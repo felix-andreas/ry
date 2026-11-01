@@ -1,17 +1,19 @@
 //! Constructing and reading R values. Every constructor here roots what it allocates in the
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
-use crate::{
-    interp, records, standard_library,
-    unwind::{R, error},
+use {
+    crate::{
+        interp, records, standard_library,
+        unwind::{R, error},
+    },
+    heap::{
+        Heap, Marker,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+        strings::Encoding,
+    },
+    std::borrow::Cow,
 };
-use heap::{
-    Heap, Marker,
-    records::NativeKind,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    strings::Encoding,
-};
-use std::borrow::Cow;
 
 /// Symbols the interpreter compares against, installed once.
 pub struct Symbols {
@@ -307,6 +309,14 @@ pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
     Ok(object)
 }
 
+/// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.
+pub unsafe fn alloc_uninit(kind: SexpType, length: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let object = heap.alloc_vector_uninit(kind, length)?;
+    heap.root(object);
+    Ok(object)
+}
+
 pub unsafe fn cons(car: Sexp, cdr: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let object = heap.cons(car, cdr)?;
@@ -477,7 +487,11 @@ pub unsafe fn named_list(items: &[(&str, Sexp)]) -> R<Sexp> {
 pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
     let mut list = nil();
     for (position, &(tag, value)) in items.iter().enumerate().rev() {
-        let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+        let cell_kind = if position == 0 {
+            kind
+        } else {
+            SexpType::Pairlist
+        };
         list = triple(cell_kind, value, list, tag)?;
     }
     Ok(list)
@@ -529,10 +543,16 @@ pub unsafe fn env_length(env: Sexp) -> usize {
     crate::heap().frame_symbols(env).len()
 }
 
+/// Asks the class's `Length` method, without materializing the elements. `length` cannot
+/// fail, so an error from the method is parked like an element accessor's
+/// ([`crate::unwind::park`]) and the length reads as 0 until it is raised.
 unsafe fn altrep_length(object: Sexp) -> usize {
-    match materialize(object) {
-        Ok(vector) => vector.length() as usize,
-        Err(_) => 0,
+    match (interp().hooks.altrep_length)(object) {
+        Ok(count) => count,
+        Err(unwind) => {
+            crate::unwind::park(unwind);
+            0
+        }
     }
 }
 
@@ -554,9 +574,13 @@ macro_rules! typed_slice {
         #[inline]
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
+                // The accessor cannot fail, so a method's error is parked, as for elements.
                 match materialize(object) {
                     Ok(vector) => vector.slice::<$type>(),
-                    Err(_) => &[],
+                    Err(unwind) => {
+                        crate::unwind::park(unwind);
+                        &[]
+                    }
                 }
             } else {
                 object.slice::<$type>()
@@ -608,6 +632,14 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
     if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
         return false;
     }
+    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
+    // their bytes, which keeps `x == "a"` from decoding every element.
+    if [gp::LATIN1, gp::UTF8]
+        .iter()
+        .all(|&bit| left.has_gp(bit) == right.has_gp(bit))
+    {
+        return false;
+    }
     char_str(left) == char_str(right)
 }
 
@@ -657,10 +689,7 @@ pub unsafe fn is_function(object: Sexp) -> bool {
 }
 
 pub unsafe fn is_numeric_type(kind: SexpType) -> bool {
-    matches!(
-        kind,
-        SexpType::Logical | SexpType::Integer | SexpType::Real
-    )
+    matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
 }
 
 pub fn is_na_int(value: i32) -> bool {
@@ -855,8 +884,18 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
         return None;
     }
     match dim.kind() {
-        SexpType::Integer => Some(ints(dim).iter().map(|&value| value.max(0) as usize).collect()),
-        SexpType::Real => Some(reals(dim).iter().map(|&value| value.max(0.0) as usize).collect()),
+        SexpType::Integer => Some(
+            ints(dim)
+                .iter()
+                .map(|&value| value.max(0) as usize)
+                .collect(),
+        ),
+        SexpType::Real => Some(
+            reals(dim)
+                .iter()
+                .map(|&value| value.max(0.0) as usize)
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -896,17 +935,29 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 cell.kind(),
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
-                let value = if deep { duplicate(cell.car())? } else { cell.car() };
+                let value = if deep {
+                    duplicate(cell.car())?
+                } else {
+                    cell.car()
+                };
                 items.push((cell.tag(), value, cell.attrib()));
                 cell = cell.cdr();
             }
             let mut list = nil();
             for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
-                let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+                let cell_kind = if position == 0 {
+                    kind
+                } else {
+                    SexpType::Pairlist
+                };
                 list = triple(cell_kind, value, list, tag)?;
                 // The head cell's attributes and flags are the object's, copied below.
                 if position != 0 && attributes != nil() {
-                    let attributes = if deep { duplicate(attributes)? } else { attributes };
+                    let attributes = if deep {
+                        duplicate(attributes)?
+                    } else {
+                        attributes
+                    };
                     heap.set_attrib(list, attributes);
                 }
             }

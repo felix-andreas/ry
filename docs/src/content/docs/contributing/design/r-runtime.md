@@ -6,11 +6,11 @@ description: "Design draft: how ry runs R, from the C API up to the JIT, the tab
 This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
 and why. Built so far are the object model and collector in `crates/heap`, the C API as `libR.so`
 in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
-`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run --runtime ry`),
+`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run`),
 a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
 `crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
-code still comes from a GNU R installation), and the table type's use from the interpreter. `ry repl`
-and `ry run` still drive GNU R by default. The C API measurements in section 2 are real and
+code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
+runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
 reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 
@@ -343,8 +343,7 @@ the interpreter and the base library, one for the JIT, and `libr` for the C API.
 shared `libR` and contains a small amount of C, for the reason in "Errors across the boundary" below.
 Because a package built against GNU R records `libR.so` as a needed library, `libR` is the whole
 runtime: the interpreter and the JIT link into it, and the `ry` binary loads it.
-The `repl` crate keeps driving GNU R until ry's runtime can run the console's own code, and then
-gains a backend switch, so `ry repl` and `ry run` keep working throughout.
+The `repl` crate drives both: GNU R behind `ry R`, and ry's runtime behind `ry run`.
 
 ### Objects
 
@@ -514,11 +513,9 @@ that the gain over a good interpreter is real but modest.
 `crates/jit` implements the core of this design for loops; the rest of the list above is still
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
-- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body that contains a
-  loop compiles on its tenth entry, and a running loop compiles after 500 backward jumps and
-  continues in compiled code at the loop header (on-stack replacement). A body without a loop stays
-  in tier 0, because without direct calls the cost of entering compiled code and forcing arguments
-  through helpers is larger than what it saves.
+- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
+  tenth entry, and a running loop compiles after 500 backward jumps and continues in compiled code
+  at the loop header (on-stack replacement).
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -531,7 +528,17 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it. Promises are not elided.
+  after something that could change it.
+- **Calls.** A call to a frame-safe closure whose binding was resolved at compile time is direct:
+  effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
+  position without the general matcher. Evaluating early is invisible only if nothing can assign
+  what an argument reads before the callee forces it, so the callee must be frame-safe: its body
+  and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
+  The call goes through tier 0 instead when a calling handler is established, because a handler
+  could run R code in between. A call of a small closure defined in the same body, which computes a scalar
+  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  against one global binding epoch, which the heap bumps whenever a watched binding changes or a
+  watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
   speculated against the binding epoch. A failed guard boxes the live values, writes back the dirty
   variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
@@ -547,8 +554,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
-- **Not yet built:** direct calls between compiled closures, promise elision, the use of static
-  types as early profiles, and freeing the machine code of invalidated bodies.
+- **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
+  call still enters through tier 0's call path and allocates a frame and forced promises), the use
+  of static types as early profiles, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -598,7 +606,7 @@ The cost there is the install step, which is exactly what the development loop w
 
 ### ry's design
 
-The loader is built, ahead of the runtime, on the GNU R backend that `ry repl` embeds
+The loader is built, ahead of the runtime, on the GNU R backend that `ry R` embeds
 ([loading packages](/guides/loading-packages) is the user page). It splits into three parts, and only the
 last one knows which runtime runs the code:
 
@@ -646,7 +654,7 @@ The rules the implementation settled:
 
 Hooks run where R runs them: `.onLoad` after the eager expressions and S3 registration, `.onAttach`
 on attach. A reload runs `.onLoad` again only when the `.onLoad` definition changed, because it
-usually sets options or registers things once. `ry load` and `ry repl` are the entry points, and
+usually sets options or registers things once. `ry load` and the `ry R` console are the entry points, and
 `load_all()`, attached in `tools:ry`, serves both ry's console and plain R sessions; ry does not
 intercept `devtools::load_all()`.
 
@@ -739,6 +747,39 @@ The claim that the frame outperforms data.table rests on a benchmark of its own
 (`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
 DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
 same machine against data.table with all threads.
+
+At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
+`ry run` beat data.table under GNU R on every question, and all three runs give the
+same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
+driven from Rust, without R.
+
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 0.151 | 0.022 | 0.034 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.192 | 0.020 | 0.044 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.272 | 0.096 | 0.110 |
+| groupby q4: three means by `id4` | 0.357 | 0.158 | 0.175 |
+| groupby q5: three sums by `id6` | 0.291 | 0.089 | 0.157 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.692 | 0.091 | 0.146 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.714 | 0.053 | 0.081 |
+| groupby q8: the two largest `v3` by `id6` | 0.759 | 0.177 | 0.235 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.769 | 0.041 | 0.099 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.733 | 1.033 | 0.896 |
+| `:=` on a whole column, 100 times | 5.349 | 0.291 | 2.081 |
+| `:=` on 1% of rows, 100 times | 3.803 | 1.112 | 0.891 |
+| `:=` adding a column, 100 times | 5.159 | 0.744 | 2.666 |
+| join q1: small, on `id1` | 0.356 | 0.110 | 0.149 |
+| join q2: medium, on `id2` | 0.522 | 0.131 | 0.229 |
+| join q3: medium, left, on `id2` | 0.612 | 0.179 | 0.192 |
+| join q4: medium, on factor `id5` | 0.499 | 0.119 | 0.230 |
+| join q5: big, on `id3` | 3.797 | 0.664 | 1.028 |
+| keyed rolling join, 1e6 trades | 0.130 | 0.094 | 0.100 |
+| total | 26.16 | 5.22 | 9.54 |
+
+The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
+in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
+allocation-heavy questions, because the allocator returns large blocks to the OS between queries
+(`.agents/memory/backlog.md`, "Large allocations page-fault on every query").
 
 `tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers on
 the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums. The
@@ -890,7 +931,7 @@ Each step ends with something real running, and each one is a large, whole chang
    exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
    URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
-   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`.
+   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
    implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
    `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
@@ -945,9 +986,10 @@ JIT fits around them.
   but it costs install time.
 - **How much of base R to reimplement natively versus reuse as R source.** The plan above reuses the
   R sources, which is less work but ties ry to GNU R's base implementation details.
-- **Licensing.** Reusing base R's R sources would bring their GPL-2-or-later license into the
-  runtime crates. The default, recorded in `.agents/memory/decisions.md` ("runtime licensing"), is
-  to load them at runtime from the user's own GNU R installation instead of vendoring them.
+
+Settled: **licensing.** Base R's R sources are GPL-2-or-later, so ry loads them at runtime from the
+user's own GNU R installation instead of vendoring them, and needs GNU R installed. The owner
+confirmed this default; the reasoning is in `.agents/memory/decisions.md` ("runtime licensing").
 
 ## Sources
 

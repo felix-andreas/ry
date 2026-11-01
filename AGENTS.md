@@ -31,6 +31,7 @@ AI agents drive development here, with light human steering. They keep two writt
 - Package development loading in the style of `devtools::load_all` is built in, and it lazy-loads only what a session actually needs. [loadfast](https://github.com/finccam/loadfast) prototypes the idea, and ry does it cleanly.
 - A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
 - The performance bar is a JIT on the level of Bun.
+- (user directive) Performance comes first, so the analysis core, the runtime heap and the JIT use data-oriented design: struct-of-arrays and cache-friendly layouts, dense indices into arenas instead of pointer graphs, and batch processing in hot loops. Allocation is explicit, with an arena or bump allocator per analysis or evaluation phase and pools per object type (`decisions.md`, "Data-oriented design and explicit allocators", says where each applies).
 - Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data. They are a ry feature on top of R, like the built-in table type, not R data structures, so they need not support R or its quirks; plain R code still runs unchanged.
 - ry ships a standard library modeled on Roc's where it fits (`Result`, `List`, `Str`, `Dict` and so on), using plain qualified names such as `Result.map` rather than static dispatch.
 

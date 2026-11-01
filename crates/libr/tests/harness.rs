@@ -9,12 +9,14 @@
 // API's own names so it reads like the C it binds.
 #![allow(dead_code, non_snake_case)]
 
-use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
-use std::{
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{Mutex, MutexGuard, OnceLock},
+use {
+    libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW},
+    std::{
+        ffi::{CStr, CString, c_char, c_int, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{Mutex, MutexGuard, OnceLock},
+    },
 };
 
 pub type Sexp = *mut c_void;
@@ -136,13 +138,20 @@ unsafe extern "C" fn capture_console(
         .extend_from_slice(bytes);
 }
 
-/// `cargo test` writes the crate's fresh shared library next to the test executable, in
-/// `target/<profile>/deps`; the copy one level up is only refreshed by `cargo build`.
+/// `cargo test` writes the crate's fresh shared library next to the test executable (in
+/// `target/<profile>/deps`, or the executable's own directory under cargo's newer build-dir
+/// layout, where the test executable and the library can land in different directories). The
+/// nearest ancestor holding `libR.so` wins; the copy in `target/<profile>` is only refreshed by
+/// `cargo build`.
 fn library_dir() -> PathBuf {
     let executable = std::env::current_exe().expect("the test executable has a path");
-    executable
+    let directory = executable
         .parent()
-        .expect("the test executable lives in a directory")
+        .expect("the test executable lives in a directory");
+    directory
+        .ancestors()
+        .find(|ancestor| ancestor.join("libR.so").exists())
+        .unwrap_or(directory)
         .to_path_buf()
 }
 
@@ -188,7 +197,11 @@ pub fn r() -> R<'static> {
 /// `readLines()`, rather than builtins alone.
 pub fn r_with_base() -> R<'static> {
     let r = r();
-    assert_eq!(unsafe { (r.api().ry_start_session)() }, 0, "base R did not load");
+    assert_eq!(
+        unsafe { (r.api().ry_start_session)() },
+        0,
+        "base R did not load"
+    );
     r
 }
 

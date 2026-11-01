@@ -11,13 +11,8 @@ other. That is the right default for R, where values are plain data, but it cann
 Fahrenheit, or a user ID from an email address.
 
 `alias` names a shape and keeps it structural, while `type` declares a *nominal* type, distinct by
-name. Both work for every kind of type, including ry's own
-[records, tuples and tag unions](/type-checking/records-and-tags/#structural-or-nominal):
-
-| | Records and tuples | Tag unions |
-| --- | --- | --- |
-| **Structural** | `alias Point = Record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
-| **Nominal** | `type Celsius = Record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
+name. Both also work for ry's own records, tuples and tag unions, as
+[Records and tags](/type-checking/records-and-tags/#structural-or-nominal) shows.
 
 ## Nominal types
 
@@ -26,22 +21,6 @@ and `@Money(value)` marks the one place that creates its values. The comment spe
 `#: @type` and `#: @new`:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-type Money = list{amount: double, currency: character}
-
-money <- function(amount: double, currency: character) -> Money {
-  if (amount < 0) stop("negative amount")
-  @Money(structure(list(amount = amount, currency = currency), class = "Money"))
-}
-
-amount_of <- function(m: Money) -> double m$amount
-
-amount_of(list(amount = 1, currency = "EUR"))
-```
-
-</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -61,18 +40,34 @@ amount_of(list(amount = 1, currency = "EUR"))
 ```
 
 </TabItem>
+<TabItem label="Inline">
+
+```r
+type Money = list{amount: double, currency: character}
+
+money <- function(amount: double, currency: character) -> Money {
+  if (amount < 0) stop("negative amount")
+  @Money(structure(list(amount = amount, currency = currency), class = "Money"))
+}
+
+amount_of <- function(m: Money) -> double m$amount
+
+amount_of(list(amount = 1, currency = "EUR"))
+```
+
+</TabItem>
 </Tabs>
 
 ```text
 type-mismatch
 
-  x expected `Money`, found `list{amount: double, currency: character}`
+  x expected `Money`, found `list{amount: double, currency: character}`. The value has the right shape, but `Money` is a nominal type, so only `@Money(...)` or `#: @new Money` creates one
 ```
 
 A list with the right fields is still not a `Money`. Put `@Money(...)` in one constructor and
 nowhere else, and every `Money` in the program has passed its checks: `@Money(...)` checks the
 shape when ry analyzes the code, and `stop()` checks the values when it runs. At run time
-`@Money(x)` is just `(x)`.
+`@Money(x)` is just `x`.
 
 Scalars work the same way. With `type UserId = character` and `type Email = character`, passing an
 `Email` where a `UserId` is expected is an error, although both are strings at run time.
@@ -85,20 +80,20 @@ Arithmetic gives the plain representation back: with `type Celsius = double`, th
 temperature. `Money` is a list, so `+` on it is an error until you declare the operator:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(a: Money, b: Money) -> Money
+`+.Money` <- function(a, b) money(a$amount + b$amount, a$currency)
+```
+
+</TabItem>
 <TabItem label="Inline">
 
 ```r
 `+.Money` <- function(a: Money, b: Money) -> Money {
   money(a$amount + b$amount, a$currency)
 }
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: fn(a: Money, b: Money) -> Money
-`+.Money` <- function(a, b) money(a$amount + b$amount, a$currency)
 ```
 
 </TabItem>
@@ -113,52 +108,7 @@ A type can take parameters: with `type Page<T> = list{items: list[T], total: int
 `items` from a `Page<integer>` gives a `list[integer]`.
 
 `alias` names a type without making it nominal, so `alias Row = list{id: integer}` is a shorter
-way to write the shape. A long union can put each member on its own line, each starting with `|`:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-alias Event =
-  | :Click(x: double, y: double)
-  | :Key(code: integer)
-  | :Quit
-
-handle <- function(e: Event) -> character {
-  match (e) {
-    :Click(x = x, y = y) => "click"
-    :Key(code = code) => "key"
-  }
-}
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: @alias Event {
-#:   | :Click(x: double, y: double)
-#:   | :Key(code: integer)
-#:   | :Quit
-#: }
-
-#: fn(e: Event) -> character
-handle <- function(e) {
-  match (e) {
-    :Click(x = x, y = y) => "click"
-    :Key(code = code) => "key"
-  }
-}
-```
-
-</TabItem>
-</Tabs>
-
-```text
-non-exhaustive-match
-
-  x this `match` does not handle `:Quit`: add an arm for it, or a catch-all `_ => ...` arm
-```
+way to write the shape.
 
 Definitions belong at the top level of a file. In the comment spelling, a `@type` or `@alias` line
 needs its own `#:` block, separated from other annotations by a blank line. If you keep both
@@ -167,20 +117,12 @@ definition and warns when the two disagree.
 
 ## R6 and S4 objects
 
-For shared mutable state, inheritance, or method dispatch, R6 and S4 are still the tools, and their
-objects are `Unknown`. To check who receives one, give it a nominal type over `Any` and wrap its
+Existing R6 and S4 classes keep working, but their objects are [`Unknown`](/type-checking/unknown), and ry warns on each
+class definition (`object-system`) because [records and tags](/type-checking/records-and-tags)
+model data with every field checked. To check who receives one, give it a nominal type over [`Any`](/type-checking/unknown#any) and wrap its
 constructor:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-type Account = Any
-
-new_account <- function() -> Account @Account(AccountClass$new())
-```
-
-</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -191,6 +133,15 @@ new_account <- function() {
   #: @new Account
   AccountClass$new()
 }
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+type Account = Any
+
+new_account <- function() -> Account @Account(AccountClass$new())
 ```
 
 </TabItem>

@@ -7,14 +7,16 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::{c_char, c_int},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::{c_char, c_int},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 struct Case {
     name: String,

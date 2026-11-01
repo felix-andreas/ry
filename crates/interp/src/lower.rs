@@ -9,14 +9,18 @@
 //! references: a `srcref` list on the expression vector and on every `{` call, and a srcref as
 //! the fourth element of every `function` call. Without it, none of that work happens.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    unwind::{R, error},
-    values::{self, alloc, install, missing_arg, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        unwind::{R, error},
+        values::{self, alloc, install, missing_arg, nil, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
+    },
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
-use heap::strings::Encoding;
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("parse", 6, do_parse),
@@ -58,8 +62,13 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         values::set_attr(result, symbols().srcref, srcrefs)?;
         values::set_attr(result, symbols().srcfile, srcfile)?;
         values::set_attr(result, symbols().whole_srcref, whole)?;
-        let data = parse_data(source, &script.root)?;
-        crate::heap().define(srcfile, install("parseData")?, data)?;
+        // Package loaders and installers turn parse data off; building it costs more than
+        // the parse itself on a large file.
+        let keep_data = crate::envir::get_option("keep.parse.data");
+        if keep_data == nil() || values::as_logical_scalar(keep_data) == 1 {
+            let data = parse_data(source, &script.root)?;
+            crate::heap().define(srcfile, install("parseData")?, data)?;
+        }
     }
     Ok(result)
 }
@@ -74,7 +83,9 @@ unsafe fn parse_data(source: &SourceMap, root: &SyntaxNode) -> R<Sexp> {
     for element in root.children_with_tokens() {
         match element {
             SyntaxElement::Token(token) => builder.top_level_token(&token),
-            SyntaxElement::Node(node) if node.kind() == SyntaxKind::ANNOTATION => builder.comment_lines(&node),
+            SyntaxElement::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
+                builder.comment_lines(&node)
+            }
             SyntaxElement::Node(node) if is_skipped(&node) => {}
             SyntaxElement::Node(node) => {
                 builder.expression(&node);
@@ -122,9 +133,19 @@ unsafe fn parse_data(source: &SourceMap, root: &SyntaxNode) -> R<Sexp> {
     let tokens: Vec<&str> = rows.iter().map(|row| row.token).collect();
     let texts: Vec<&str> = rows
         .iter()
-        .map(|row| if row.terminal { &source.text[row.start..row.end] } else { "" })
+        .map(|row| {
+            if row.terminal {
+                &source.text[row.start..row.end]
+            } else {
+                ""
+            }
+        })
         .collect();
-    values::set_attr(matrix, symbols().dim, values::integer_vector(&[8, rows.len() as i32])?)?;
+    values::set_attr(
+        matrix,
+        symbols().dim,
+        values::integer_vector(&[8, rows.len() as i32])?,
+    )?;
     values::set_attr(matrix, install("tokens")?, values::string_vector(&tokens)?)?;
     values::set_attr(matrix, install("text")?, values::string_vector(&texts)?)?;
     values::set_attr(matrix, symbols().class, values::scalar_string("parseData")?)?;
@@ -191,14 +212,36 @@ struct ParseDataBuilder {
 }
 
 impl ParseDataBuilder {
-    fn push(&mut self, start: usize, end: usize, token: &'static str, number: i32, terminal: bool, parent: Parent) -> usize {
-        self.rows.push(ParseRow { start, end, token, number, terminal, parent });
+    fn push(
+        &mut self,
+        start: usize,
+        end: usize,
+        token: &'static str,
+        number: i32,
+        terminal: bool,
+        parent: Parent,
+    ) -> usize {
+        self.rows.push(ParseRow {
+            start,
+            end,
+            token,
+            number,
+            terminal,
+            parent,
+        });
         self.rows.len() - 1
     }
 
     fn token(&mut self, token: &SyntaxToken, (name, number): (&'static str, i32)) -> usize {
         let range = token.text_range();
-        self.push(range.start().into(), range.end().into(), name, number, true, Parent::TopLevel)
+        self.push(
+            range.start().into(),
+            range.end().into(),
+            name,
+            number,
+            true,
+            Parent::TopLevel,
+        )
     }
 
     fn top_level_token(&mut self, token: &SyntaxToken) {
@@ -222,7 +265,14 @@ impl ParseDataBuilder {
         for line in text.split('\n') {
             let trimmed = line.trim_end();
             if let Some(hash) = trimmed.find('#') {
-                let row = self.push(offset + hash, offset + trimmed.len(), "COMMENT", 290, true, Parent::Comment);
+                let row = self.push(
+                    offset + hash,
+                    offset + trimmed.len(),
+                    "COMMENT",
+                    290,
+                    true,
+                    Parent::Comment,
+                );
                 self.rows[row].parent = Parent::Comment;
             }
             offset += line.len() + 1;
@@ -246,17 +296,23 @@ impl ParseDataBuilder {
                 let mut closed = false;
                 for element in node.children_with_tokens() {
                     match (&element, condition.as_mut()) {
-                        (SyntaxElement::Token(token), None) if !closed && token.kind() == SyntaxKind::L_PAREN => {
+                        (SyntaxElement::Token(token), None)
+                            if !closed && token.kind() == SyntaxKind::L_PAREN =>
+                        {
                             condition = Some(vec![self.token(token, parse_token(token.kind()))]);
                         }
-                        (SyntaxElement::Token(token), Some(rows)) if token.kind() == SyntaxKind::R_PAREN => {
+                        (SyntaxElement::Token(token), Some(rows))
+                            if token.kind() == SyntaxKind::R_PAREN =>
+                        {
                             rows.push(self.token(token, parse_token(token.kind())));
                             let rows = std::mem::take(rows);
                             children.push(self.symbol(("forcond", 82), &rows));
                             condition = None;
                             closed = true;
                         }
-                        (SyntaxElement::Node(child), Some(rows)) if rows.len() == 1 && child.kind() == SyntaxKind::NAME => {
+                        (SyntaxElement::Node(child), Some(rows))
+                            if rows.len() == 1 && child.kind() == SyntaxKind::NAME =>
+                        {
                             let row = self.bare(child, Role::LoopVariable);
                             rows.extend(row);
                         }
@@ -267,7 +323,9 @@ impl ParseDataBuilder {
             }
             kind => {
                 if kind == SyntaxKind::BINARY_EXPR
-                    && node.children_with_tokens().any(|element| element.kind() == SyntaxKind::EQ)
+                    && node
+                        .children_with_tokens()
+                        .any(|element| element.kind() == SyntaxKind::EQ)
                 {
                     symbol = ("expr_or_assign_or_help", 77);
                 }
@@ -279,7 +337,9 @@ impl ParseDataBuilder {
                     };
                     let plain = matches!(child.kind(), SyntaxKind::NAME | SyntaxKind::LITERAL);
                     let role = match (kind, nodes_seen) {
-                        (SyntaxKind::CALL_EXPR, 0) if child.kind() == SyntaxKind::NAME => Some(Role::Callee),
+                        (SyntaxKind::CALL_EXPR, 0) if child.kind() == SyntaxKind::NAME => {
+                            Some(Role::Callee)
+                        }
                         (SyntaxKind::DOLLAR_EXPR, 1) if plain => Some(Role::Field),
                         (SyntaxKind::AT_EXPR, 1) if plain => Some(Role::Slot),
                         (SyntaxKind::NAMESPACE_EXPR, 0) if plain => Some(Role::Package),
@@ -292,7 +352,8 @@ impl ParseDataBuilder {
                     match role {
                         // A called name keeps an `expr` of its own.
                         Some(Role::Callee) => {
-                            let rows: Vec<usize> = self.bare(child, Role::Callee).into_iter().collect();
+                            let rows: Vec<usize> =
+                                self.bare(child, Role::Callee).into_iter().collect();
                             children.push(self.symbol(("expr", 79), &rows));
                         }
                         Some(role) => children.extend(self.bare(child, role)),
@@ -305,8 +366,16 @@ impl ParseDataBuilder {
     }
 
     fn symbol(&mut self, symbol: (&'static str, i32), children: &[usize]) -> usize {
-        let start = children.iter().map(|&child| self.rows[child].start).min().unwrap_or(0);
-        let end = children.iter().map(|&child| self.rows[child].end).max().unwrap_or(start);
+        let start = children
+            .iter()
+            .map(|&child| self.rows[child].start)
+            .min()
+            .unwrap_or(0);
+        let end = children
+            .iter()
+            .map(|&child| self.rows[child].end)
+            .max()
+            .unwrap_or(start);
         let row = self.push(start, end, symbol.0, symbol.1, false, Parent::TopLevel);
         for &child in children {
             self.rows[child].parent = Parent::Row(row);
@@ -352,19 +421,39 @@ impl ParseDataBuilder {
                 }
                 SyntaxKind::ARGUMENT | SyntaxKind::PARAMETER => {
                     let formal = node.kind() == SyntaxKind::PARAMETER;
-                    let named = node.children_with_tokens().any(|child| child.kind() == SyntaxKind::EQ);
+                    let named = node
+                        .children_with_tokens()
+                        .any(|child| child.kind() == SyntaxKind::EQ);
                     let mut before_equals = true;
                     for child in node.children_with_tokens() {
                         match &child {
                             SyntaxElement::Token(token) if token.kind() == SyntaxKind::EQ => {
                                 before_equals = false;
-                                let name = if formal { ("EQ_FORMALS", 293) } else { ("EQ_SUB", 294) };
+                                let name = if formal {
+                                    ("EQ_FORMALS", 293)
+                                } else {
+                                    ("EQ_SUB", 294)
+                                };
                                 children.push(self.token(token, name));
                             }
-                            SyntaxElement::Token(token) if formal && matches!(token.kind(), SyntaxKind::IDENT | SyntaxKind::DOTS) => {
+                            SyntaxElement::Token(token)
+                                if formal
+                                    && matches!(
+                                        token.kind(),
+                                        SyntaxKind::IDENT | SyntaxKind::DOTS
+                                    ) =>
+                            {
                                 children.push(self.token(token, ("SYMBOL_FORMALS", 292)));
                             }
-                            SyntaxElement::Node(name) if named && before_equals && !formal && matches!(name.kind(), SyntaxKind::NAME | SyntaxKind::LITERAL) => {
+                            SyntaxElement::Node(name)
+                                if named
+                                    && before_equals
+                                    && !formal
+                                    && matches!(
+                                        name.kind(),
+                                        SyntaxKind::NAME | SyntaxKind::LITERAL
+                                    ) =>
+                            {
                                 children.extend(self.bare(name, Role::Argument));
                             }
                             _ => self.element(&child, children),
@@ -389,8 +478,8 @@ fn parse_token(kind: SyntaxKind) -> (&'static str, i32) {
     use SyntaxKind::*;
     match kind {
         IDENT | DOTS | DOTDOTI => ("SYMBOL", 263),
-        INTEGER | DOUBLE | COMPLEX | TRUE_KW | FALSE_KW | INF_KW | NAN_KW | NA_KW | NA_INTEGER_KW
-        | NA_REAL_KW | NA_COMPLEX_KW | NA_CHARACTER_KW => ("NUM_CONST", 261),
+        INTEGER | DOUBLE | COMPLEX | TRUE_KW | FALSE_KW | INF_KW | NAN_KW | NA_KW
+        | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW | NA_CHARACTER_KW => ("NUM_CONST", 261),
         STRING | RAW_STRING => ("STR_CONST", 260),
         NULL_KW => ("NULL_CONST", 262),
         UNDERSCORE => ("PLACEHOLDER", 300),
@@ -487,19 +576,29 @@ pub fn parse_script<'text>(text: &'text str, source_name: &str) -> R<Script<'tex
         }
         expressions.push(child);
     }
-    Ok(Script { text, root: parse.syntax_node(), expressions })
+    Ok(Script {
+        text,
+        root: parse.syntax_node(),
+        expressions,
+    })
 }
 
 /// Lowers one top-level expression of `script`. With `keep_source`, it keeps source references
 /// against a srcfile of its own that holds the lines it spans, as GNU R's console keeps them for
 /// each input it reads.
-pub unsafe fn lower_script_expression(script: &Script<'_>, node: &SyntaxNode, keep_source: bool) -> R<Sexp> {
+pub unsafe fn lower_script_expression(
+    script: &Script<'_>,
+    node: &SyntaxNode,
+    keep_source: bool,
+) -> R<Sexp> {
     if !keep_source {
         return lower(node, None);
     }
     let text = script.text;
     let range = significant_range(node);
-    let start = text[..usize::from(range.start())].rfind('\n').map_or(0, |newline| newline + 1);
+    let start = text[..usize::from(range.start())]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
     let end = text[usize::from(range.end())..]
         .find('\n')
         .map_or(text.len(), |newline| usize::from(range.end()) + newline);
@@ -508,8 +607,16 @@ pub unsafe fn lower_script_expression(script: &Script<'_>, node: &SyntaxNode, ke
     let heap = crate::heap();
     heap.define(srcfile, install("filename")?, values::scalar_string("")?)?;
     heap.define(srcfile, install("lines")?, values::string_vector(&lines)?)?;
-    heap.define(srcfile, install("fixedNewlines")?, values::scalar_bool(true)?)?;
-    values::set_attr(srcfile, symbols().class, values::string_vector(&["srcfilecopy", "srcfile"])?)?;
+    heap.define(
+        srcfile,
+        install("fixedNewlines")?,
+        values::scalar_bool(true)?,
+    )?;
+    values::set_attr(
+        srcfile,
+        symbols().class,
+        values::string_vector(&["srcfilecopy", "srcfile"])?,
+    )?;
     let first_line = text[..start].matches('\n').count();
     let source = SourceMap::new(text, first_line, srcfile)?;
     lower(node, Some(&source))
@@ -558,7 +665,16 @@ unsafe fn srcref(source: &SourceMap, range: TextRange) -> R<Sexp> {
     let last_byte = last_byte + (end - last).max(1) as i32 - 1;
     srcref_object(
         source,
-        [first_line, first_byte, last_line, last_byte, first_column, last_column, first_line, last_line],
+        [
+            first_line,
+            first_byte,
+            last_line,
+            last_byte,
+            first_column,
+            last_column,
+            first_line,
+            last_line,
+        ],
     )
 }
 
@@ -572,7 +688,10 @@ unsafe fn srcref_object(source: &SourceMap, fields: [i32; 8]) -> R<Sexp> {
 /// The srcfile line, byte and column of the character at byte `offset`. A tab advances the column
 /// to the next multiple of 8, as in GNU R's parser.
 fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
-    let line = source.line_starts.partition_point(|&start| start <= offset).saturating_sub(1);
+    let line = source
+        .line_starts
+        .partition_point(|&start| start <= offset)
+        .saturating_sub(1);
     let line_start = source.line_starts.get(line).copied().unwrap_or(0);
     let through = source.text[offset..]
         .chars()
@@ -580,7 +699,11 @@ fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
         .map_or(offset, |character| offset + character.len_utf8());
     let mut column = 0;
     for character in source.text[line_start..through].chars() {
-        column = if character == '\t' { (column + 8) & !7 } else { column + 1 };
+        column = if character == '\t' {
+            (column + 8) & !7
+        } else {
+            column + 1
+        };
     }
     let line_number = line as i32 - source.first_line as i32 + 1;
     (line_number, (offset - line_start) as i32 + 1, column)
@@ -604,7 +727,9 @@ fn significant_range(node: &SyntaxNode) -> TextRange {
         .take_while(|token| range.contains_range(token.text_range()))
         .find(significant);
     match (first, last) {
-        (Some(first), Some(last)) => TextRange::new(first.text_range().start(), last.text_range().end()),
+        (Some(first), Some(last)) => {
+            TextRange::new(first.text_range().start(), last.text_range().end())
+        }
         _ => range,
     }
 }
@@ -783,7 +908,11 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::RECORD_EXPR | SyntaxKind::TUPLE_EXPR => {
-            let head = if node.kind() == SyntaxKind::RECORD_EXPR { ".ry_record" } else { ".ry_tuple" };
+            let head = if node.kind() == SyntaxKind::RECORD_EXPR {
+                ".ry_record"
+            } else {
+                ".ry_tuple"
+            };
             let mut items = vec![(nil(), install(head)?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
                 items.extend(literal_items(&arguments, source)?);
@@ -791,7 +920,8 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::TAG_EXPR => {
-            let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag needs a name"))?;
+            let name =
+                child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag needs a name"))?;
             let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
                 items.extend(literal_items(&arguments, source)?);
@@ -808,18 +938,30 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
 
 /// Attaches a `{` call's source references: a `srcref` list of the brace itself and then each
 /// statement, the srcfile, and a `wholeSrcref` from the start of the srcfile to the closing brace.
-unsafe fn block_srcrefs(call: Sexp, node: &SyntaxNode, statements: &[SyntaxNode], source: &SourceMap) -> R<()> {
+unsafe fn block_srcrefs(
+    call: Sexp,
+    node: &SyntaxNode,
+    statements: &[SyntaxNode],
+    source: &SourceMap,
+) -> R<()> {
     let range = significant_range(node);
     let srcrefs = alloc(SexpType::List, statements.len() + 1)?;
     let open = TextRange::at(range.start(), 1.into());
     values::set_elt(srcrefs, 0, srcref(source, open)?);
     for (index, statement) in statements.iter().enumerate() {
-        values::set_elt(srcrefs, index + 1, srcref(source, significant_range(statement))?);
+        values::set_elt(
+            srcrefs,
+            index + 1,
+            srcref(source, significant_range(statement))?,
+        );
     }
     let close = srcref(source, range)?;
     let fields = values::ints(close);
     let (last_line, last_byte, last_column) = (fields[2], fields[3], fields[5]);
-    let whole = srcref_object(source, [1, 0, last_line, last_byte, 0, last_column, 1, last_line])?;
+    let whole = srcref_object(
+        source,
+        [1, 0, last_line, last_byte, 0, last_column, 1, last_line],
+    )?;
     values::set_attr(call, symbols().srcref, srcrefs)?;
     values::set_attr(call, symbols().srcfile, source.srcfile)?;
     values::set_attr(call, symbols().whole_srcref, whole)?;
@@ -887,17 +1029,24 @@ fn placeholder_argument(right: &SyntaxNode) -> Option<SyntaxNode> {
     if right.kind() != SyntaxKind::CALL_EXPR {
         return None;
     }
-    let arguments = right.children().find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
-    arguments.children().filter(|child| child.kind() == SyntaxKind::ARGUMENT).find(|argument| {
-        let mut after_equals = false;
-        argument.children_with_tokens().any(|element| match element {
-            SyntaxElement::Token(token) => {
-                after_equals |= token.kind() == SyntaxKind::EQ;
-                false
-            }
-            SyntaxElement::Node(value) => after_equals && is_bare_placeholder(&value),
+    let arguments = right
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
+    arguments
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+        .find(|argument| {
+            let mut after_equals = false;
+            argument
+                .children_with_tokens()
+                .any(|element| match element {
+                    SyntaxElement::Token(token) => {
+                        after_equals |= token.kind() == SyntaxKind::EQ;
+                        false
+                    }
+                    SyntaxElement::Node(value) => after_equals && is_bare_placeholder(&value),
+                })
         })
-    })
 }
 
 unsafe fn placeholder_name(right: &SyntaxNode) -> R<Option<Sexp>> {
@@ -912,7 +1061,9 @@ unsafe fn placeholder_name(right: &SyntaxNode) -> R<Option<Sexp>> {
 
 fn is_bare_placeholder(node: &SyntaxNode) -> bool {
     node.kind() == SyntaxKind::NAME
-        && significant_tokens(node).first().is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE)
+        && significant_tokens(node)
+            .first()
+            .is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE)
 }
 
 /// Whether a `_` in `node` is not the placeholder argument of a pipe, which R rejects.
@@ -922,8 +1073,12 @@ fn has_stray_placeholder(node: &SyntaxNode) -> bool {
         .descendants()
         .filter(|expression| {
             expression.kind() == SyntaxKind::BINARY_EXPR
-                && significant_tokens(expression).iter().any(|token| token.kind() == SyntaxKind::PIPE_GREATER)
-                && expression_children(expression).get(1).is_some_and(|right| placeholder_argument(right).is_some())
+                && significant_tokens(expression)
+                    .iter()
+                    .any(|token| token.kind() == SyntaxKind::PIPE_GREATER)
+                && expression_children(expression)
+                    .get(1)
+                    .is_some_and(|right| placeholder_argument(right).is_some())
         })
         .count();
     placeholders > consumed
@@ -961,22 +1116,34 @@ unsafe fn match_expression(node: &SyntaxNode, source: Option<&SourceMap>) -> R<S
         .ok_or_else(|| error("a `match` needs a value"))?;
     let scrutinee = if scrutinee.kind() == SyntaxKind::PAREN_EXPR {
         let inner = expression_children(scrutinee);
-        lower(inner.first().ok_or_else(|| error("a `match` needs a value"))?, source)?
+        lower(
+            inner
+                .first()
+                .ok_or_else(|| error("a `match` needs a value"))?,
+            source,
+        )?
     } else {
         lower(scrutinee, source)?
     };
     let arrow = install("=>")?;
     let mut items = vec![(nil(), install(".ry_match")?), (nil(), scrutinee)];
-    for arm in arms.iter().filter(|arm| arm.kind() == SyntaxKind::MATCH_ARM) {
+    for arm in arms
+        .iter()
+        .filter(|arm| arm.kind() == SyntaxKind::MATCH_ARM)
+    {
         let parts = expression_children(arm);
         let mut arm_items = vec![(nil(), arrow)];
         let mut parts = parts.iter();
-        let pattern_node = parts.next().ok_or_else(|| error("a `match` arm needs a pattern"))?;
+        let pattern_node = parts
+            .next()
+            .ok_or_else(|| error("a `match` arm needs a pattern"))?;
         arm_items.push((nil(), pattern(pattern_node)?));
         for part in parts {
             if part.kind() == SyntaxKind::MATCH_GUARD {
                 let condition = expression_children(part);
-                let condition = condition.first().ok_or_else(|| error("an arm guard needs a condition"))?;
+                let condition = condition
+                    .first()
+                    .ok_or_else(|| error("an arm guard needs a condition"))?;
                 arm_items.push((nil(), lower(condition, source)?));
             } else {
                 arm_items.push((nil(), lower(part, source)?));
@@ -999,27 +1166,26 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
         SyntaxKind::PATTERN_WILDCARD => install("_"),
         SyntaxKind::PATTERN_REST => install(".."),
         SyntaxKind::PATTERN_BIND => {
-            let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("empty binding pattern"))?;
+            let name = child_of_kind(node, SyntaxKind::NAME)
+                .ok_or_else(|| error("empty binding pattern"))?;
             name_symbol(&name)
         }
         SyntaxKind::PATTERN_LITERAL => {
             let negative = significant_tokens(node)
                 .iter()
                 .any(|token| token.kind() == SyntaxKind::MINUS);
-            let literal_node = child_of_kind(node, SyntaxKind::LITERAL).ok_or_else(|| error("empty literal pattern"))?;
+            let literal_node = child_of_kind(node, SyntaxKind::LITERAL)
+                .ok_or_else(|| error("empty literal pattern"))?;
             let token = significant_tokens(&literal_node)
                 .into_iter()
                 .next()
                 .ok_or_else(|| error("empty literal pattern"))?;
             let value = literal(&token)?;
-            if negative {
-                negate(value)
-            } else {
-                Ok(value)
-            }
+            if negative { negate(value) } else { Ok(value) }
         }
         SyntaxKind::PATTERN_TAG => {
-            let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag pattern needs a name"))?;
+            let name = child_of_kind(node, SyntaxKind::NAME)
+                .ok_or_else(|| error("a tag pattern needs a name"))?;
             let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
             if let Some(list) = child_of_kind(node, SyntaxKind::PATTERN_LIST) {
                 items.extend(pattern_items(&list)?);
@@ -1036,7 +1202,9 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
         }
         SyntaxKind::PATTERN_OR => {
             let mut alternatives = node.children().map(|child| pattern(&child));
-            let mut result = alternatives.next().ok_or_else(|| error("empty alternative pattern"))??;
+            let mut result = alternatives
+                .next()
+                .ok_or_else(|| error("empty alternative pattern"))??;
             let pipe = install("|")?;
             for alternative in alternatives {
                 result = values::call(pipe, &[result, alternative?])?;
@@ -1044,7 +1212,10 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
             Ok(result)
         }
         SyntaxKind::PATTERN_PAREN => {
-            let inner = node.children().next().ok_or_else(|| error("empty pattern group"))?;
+            let inner = node
+                .children()
+                .next()
+                .ok_or_else(|| error("empty pattern group"))?;
             values::call(symbols().paren, &[pattern(&inner)?])
         }
         _ => Err(error(format!("unexpected '{}' in a pattern", node.text()))),
@@ -1055,7 +1226,8 @@ unsafe fn pattern_items(list: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::new();
     for child in list.children() {
         if child.kind() == SyntaxKind::PATTERN_FIELD {
-            let name = child_of_kind(&child, SyntaxKind::NAME).ok_or_else(|| error("a field pattern needs a name"))?;
+            let name = child_of_kind(&child, SyntaxKind::NAME)
+                .ok_or_else(|| error("a field pattern needs a name"))?;
             let value = child
                 .children()
                 .find(|part| part.kind() != SyntaxKind::NAME)
@@ -1074,12 +1246,19 @@ unsafe fn negate(value: Sexp) -> R<Sexp> {
     match value.kind() {
         SexpType::Integer => {
             let number = values::ints(value)[0];
-            values::scalar_integer(if number == NA_INTEGER { number } else { -number })
+            values::scalar_integer(if number == NA_INTEGER {
+                number
+            } else {
+                -number
+            })
         }
         SexpType::Real => values::scalar_real(-values::reals(value)[0]),
         SexpType::Complex => {
             let number = values::complexes(value)[0];
-            values::scalar_complex(Rcomplex { r: -number.r, i: -number.i })
+            values::scalar_complex(Rcomplex {
+                r: -number.r,
+                i: -number.i,
+            })
         }
         _ => Err(error("only a number can be negated in a pattern")),
     }
@@ -1278,7 +1457,11 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         SyntaxKind::STRING => {
             let inner = &text[1..text.len().saturating_sub(1).max(1)];
             let (bytes, high_byte) = unescape_bytes(inner).map_err(error)?;
-            let encoding = if high_byte { Encoding::Native } else { Encoding::Utf8 };
+            let encoding = if high_byte {
+                Encoding::Native
+            } else {
+                Encoding::Utf8
+            };
             let result = alloc(SexpType::String, 1)?;
             values::set_elt(result, 0, values::mkchar_bytes(&bytes, encoding)?);
             Ok(result)
@@ -1327,7 +1510,11 @@ pub fn parse_number(text: &str) -> f64 {
             scale /= 16.0;
         }
         // Zero stays zero under any exponent, where 2^exponent alone would overflow to Inf.
-        return if value == 0.0 { 0.0 } else { value * 2f64.powi(exponent) };
+        return if value == 0.0 {
+            0.0
+        } else {
+            value * 2f64.powi(exponent)
+        };
     }
     text.parse::<f64>().unwrap_or(f64::NAN)
 }
@@ -1517,8 +1704,14 @@ pub unsafe fn truncate_parse(expressions: Sexp, count: i32) -> R<Sexp> {
         }
         for (name, value) in [
             (symbols().srcref, kept),
-            (symbols().srcfile, values::get_attr(expressions, symbols().srcfile)),
-            (symbols().whole_srcref, values::get_attr(expressions, symbols().whole_srcref)),
+            (
+                symbols().srcfile,
+                values::get_attr(expressions, symbols().srcfile),
+            ),
+            (
+                symbols().whole_srcref,
+                values::get_attr(expressions, symbols().whole_srcref),
+            ),
         ] {
             values::set_attr(truncated, name, value)?;
         }
