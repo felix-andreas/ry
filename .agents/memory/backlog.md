@@ -1875,12 +1875,15 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Slower than data.table on two bench questions** (`tools/bench/table`, 1e6 rows): groupby q6
-  (median and sd per group, 0.13 s against 0.08 s) and the keyed rolling join (0.03 s against
-  0.02 s). The Rust engine alone runs q6 in 0.06 s, so most of the gap is the R-side call path.
+- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
+  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
+  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
+  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
+  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
-  `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
-  expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
+  `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
+  `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
+  chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
 - **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and

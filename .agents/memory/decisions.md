@@ -3042,6 +3042,31 @@ first lines R had already read, leaving R mid-command.
   nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
   pin the behavior.
 
+## Per-group top rows and as-of joins reuse the engine's kernels
+
+- **Previous shape.** The Polars-style API had no way to keep each group's best rows or to join on
+  the nearest key, so the table bench answered db-benchmark's top-two question and the keyed
+  rolling join with data.table syntax (`x[order(-v3), head(v3, 2L), by = id6]`,
+  `prices[trades, roll = TRUE]`).
+- **`Expr.head(n)` inside `agg` keeps up to `n` values per group, as rows.** Polars gives a list
+  per group there, but ry has no list columns, so the values are exploded into rows, which is also
+  data.table's layout. The checker tracks an expression's shape (`Shape` in
+  `crates/semantics/src/check.rs`: per row, per group, or up to `n` per group) and accepts `Head`
+  only as a whole `agg` item, because `head(v, 2) + 1` would mix shapes. After a sort, the planner
+  fuses sort and aggregation into one query, which hits the engine's top-k kernel
+  (`group.rs::top_k_shape`) instead of sorting the whole table.
+- **`join_asof` is `How::Asof(Strategy)` in `table::lazy`, lowered to the rolling join.** The left
+  frame is data.table's `i`, so `"backward"` is `roll = TRUE`, `"forward"` is `roll = -Inf` and
+  `"nearest"` is `roll = "nearest"`. The `by` columns become the leading equality keys and `on` the
+  rolled key. One kernel (`join.rs::rolling`, with Polars' asof as the fallback) serves both APIs.
+- **A grouped median holds `(row, slot)` pairs, one list per run of rows.** It used to hold
+  `(slot, value)` pairs and concatenate the threads' lists, 240 MB of fresh memory per 1e7-row
+  query; page-faulting that in made groupby q6 from R two to ten times slower than the same kernel
+  measured from Rust. Reading the value from the input column during the counting sort halves the
+  lists and drops the concatenation.
+- **Impact.** No new kernel or stored state; both verbs are thin plan steps. The typing fixtures in
+  `frames.R.test` and `crates/table/tests/test_lazy.rs` pin the semantics.
+
 ## data.table's helpers run data.table's own C, and the C API is what makes them fast
 
 - **Previous shape.** The plan was to route R calls to `fread`, `fwrite`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`, `fifelse`, `tstrsplit` and friends to the engine's kernels in `table::ops` and `table::io`, which beat data.table when measured from Rust. Under ry's runtime those calls ran data.table's own C through libr, at up to 2.5 times GNU R's time, because every C API call (`TRUELENGTH`, `STRING_ELT`, `LENGTH`, `INTEGER`, the type predicates, `PROTECT`) entered the full error boundary.
