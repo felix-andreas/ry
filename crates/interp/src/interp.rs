@@ -63,6 +63,7 @@ pub mod stats_arima;
 pub mod stats_cluster;
 pub mod stats_deriv;
 pub mod stats_lbfgsb;
+pub mod stats_loess;
 pub mod stats_models;
 pub mod stats_nlm;
 pub mod stats_optimize;
