@@ -6,7 +6,7 @@ ry *args:
 
 # Build ry and walk through checking, typing, formatting, running and package loading in a demo project.
 try:
-    tools/try.sh
+    @tools/try.sh
 
 # Build ry and print how to point an editor's language client at it.
 try-editor:

@@ -20,7 +20,11 @@ note() { printf '%s%s%s\n' "$dim" "$1" "$reset"; }
 # Prints the command as you would type it, then runs it. A nonzero exit is part of the demo
 # (`ry check` exits 1 when it finds something), so it is shown, not fatal.
 show() {
-	printf '\n%s$ %s%s\n' "$cyan" "$*" "$reset"
+	local display="" word
+	for word in "$@"; do
+		if [[ "$word" =~ ^[A-Za-z0-9_./:=+-]+$ ]]; then display+=" $word"; else display+=" '$word'"; fi
+	done
+	printf '\n%s$%s%s\n' "$cyan" "$display" "$reset"
 	local status=0
 	"$@" || status=$?
 	if [ "$status" -ne 0 ]; then
@@ -49,7 +53,7 @@ check_prerequisites() {
 	if [ -z "$r_home" ]; then
 		problems+=("GNU R is not installed (ry's runtime reads base R from it): install it from https://cloud.r-project.org, or with \`apt install r-base-core\`, \`dnf install R-core\`, or \`brew install --cask r\`.")
 	elif [ ! -e "$r_home/lib/libR.so" ] && [ ! -e "$r_home/lib/libR.dylib" ]; then
-		problems+=("The R at $r_home is not built as a shared library (no lib/libR.so): install a CRAN or distribution build of R, which are, or rebuild R with --enable-R-shlib.")
+		problems+=("$r_home has no lib/libR.so: it is not an R installation, or that R was built without --enable-R-shlib. Install a CRAN or distribution build of R (both are shared), or fix R_HOME.")
 	fi
 
 	# A cold release build of ry and its runtime writes about 6 GB into target/.
@@ -75,7 +79,12 @@ check_prerequisites
 
 heading "Building ry and its runtime (fast after the first time)"
 target_dir=${CARGO_TARGET_DIR:-$repository/target}
-show cargo build --release --manifest-path "$repository/Cargo.toml" -p ry-lang -p libr
+note "\$ cargo build --release -p ry-lang -p libr   (the first build takes 10 to 30 minutes)"
+# Warnings from a successful build would bury the demo, so they are shown only on failure.
+if ! build_log=$(cargo build --color always --release --manifest-path "$repository/Cargo.toml" -p ry-lang -p libr 2>&1); then
+	printf '%s\n' "$build_log" >&2
+	exit 1
+fi
 bin_dir="$target_dir/release"
 export PATH="$bin_dir:$PATH"
 ry --version
@@ -125,7 +134,9 @@ show ry check typed
 # --- Formatting ---------------------------------------------------------------------------------
 
 cat >typed/messy.R <<'EOF'
-scale_to<-function(x,lo=0,hi=1){ (x-min(x))/(max(x)-min(x))*(hi-lo)+lo }
+scale_to<-function(x,lo=0,hi=1){
+rng<-range(x,na.rm=TRUE)
+(x-rng[1])/(rng[2]-rng[1])*(hi-lo)+lo}
 EOF
 
 heading "3. ry fmt formats code"
