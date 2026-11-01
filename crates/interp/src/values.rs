@@ -299,6 +299,14 @@ pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
     Ok(object)
 }
 
+/// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.
+pub unsafe fn alloc_uninit(kind: SexpType, length: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let object = heap.alloc_vector_uninit(kind, length)?;
+    heap.root(object);
+    Ok(object)
+}
+
 pub unsafe fn cons(car: Sexp, cdr: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let object = heap.cons(car, cdr)?;

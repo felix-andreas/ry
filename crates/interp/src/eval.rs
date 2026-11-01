@@ -1512,6 +1512,13 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
 /// `count` arguments before its body runs. The apply family calls `FUN` this way, so a closure
 /// that captures its argument sees this iteration's element, not the last one.
 pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
+    force_and_call_with(call, count, env, None)
+}
+
+/// [`force_and_call`] where the caller already knows the first argument's value, so its
+/// promise starts out forced instead of evaluating its expression. The caller must only pass a
+/// value that evaluating the expression would produce without side effects.
+pub unsafe fn force_and_call_with(call: Sexp, count: usize, env: Sexp, first: Option<Sexp>) -> R<Sexp> {
     let head = call.car();
     let function = if head.kind() == SexpType::Symbol { find_fun(head, env)? } else { eval(head, env)? };
     crate::heap().root(function);
@@ -1519,6 +1526,15 @@ pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
         return apply_call(call, function, call.cdr(), env);
     }
     let args = promise_args(call.cdr(), env)?;
+    if let (Some(value), Some(arg)) = (first, args.first())
+        && arg.value.kind() == SexpType::Promise
+        && arg.value.car() == unbound()
+        && !arg.value.has_gp(gp::CHECKED_PROMISE)
+    {
+        let heap = crate::heap();
+        heap.set_car(arg.value, value);
+        heap.set_tag(arg.value, nil());
+    }
     for arg in args.iter().take(count) {
         if arg.value.kind() == SexpType::Promise {
             force_promise(arg.value)?;
