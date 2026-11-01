@@ -53,6 +53,7 @@ const BACK_EDGE_THRESHOLD: i32 = 500;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
+    static STRAIGHT_LINE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Installs the JIT in the current interpreter, in the mode `RY_JIT` asks for.
@@ -72,11 +73,19 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1),
     };
     ENTRY_LIMIT.with(|limit| limit.set(entries));
+    // A body without a loop runs each compiled instruction once per call, so entering compiled
+    // code and forcing the arguments through helpers costs more than tier 0's dispatch saves.
+    // Such bodies pay off only once calls go directly from compiled code to compiled code, so
+    // the default mode leaves them to tier 0 and only `force` compiles them, for coverage.
+    STRAIGHT_LINE.with(|straight_line| straight_line.set(mode == Mode::Force));
     bytecode::set_tier(Some(Tier { enter, back_edge, back_edge_threshold: back_edges }));
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<R<Sexp>> {
     unsafe {
+        if bytecode::loop_count(machine.code) == 0 && !STRAIGHT_LINE.with(Cell::get) {
+            return None;
+        }
         let entries = values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES];
         let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get))?;
         run(machine, compiled, 0)
