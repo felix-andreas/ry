@@ -410,6 +410,7 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptio
 unsafe fn matrix_columns(
     matrix: Sexp,
     rows: usize,
+    shown: usize,
     cols: usize,
     options: &PrintOptions,
 ) -> R<Vec<Vec<String>>> {
@@ -420,7 +421,7 @@ unsafe fn matrix_columns(
     };
     let mut columns = Vec::with_capacity(cols);
     for col in 0..cols {
-        let indices: Vec<usize> = (0..rows).map(|row| row + col * rows).collect();
+        let indices: Vec<usize> = (0..shown).map(|row| row + col * rows).collect();
         let column = crate::subset::select_elements(matrix, &indices)?;
         columns.push(escape_unquoted(
             format::format_vector(column, options.settings, options.quote, na)?,
@@ -447,7 +448,31 @@ pub unsafe fn print_matrix(
     rows: usize,
     cols: usize,
     options: &PrintOptions,
-    _top: bool,
+    top: bool,
+) -> R<()> {
+    // GNU R prints whole rows only, as many as fit within `max` entries.
+    let shown = if top && cols > 0 && options.max / cols < rows {
+        options.max / cols
+    } else {
+        rows
+    };
+    print_matrix_rows(matrix, rows, cols, shown, options)?;
+    if shown < rows {
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted {} rows ]\n",
+            rows - shown
+        ));
+    }
+    Ok(())
+}
+
+/// Prints the first `shown` rows of a matrix. Row labels keep the width of all `rows`.
+unsafe fn print_matrix_rows(
+    matrix: Sexp,
+    rows: usize,
+    cols: usize,
+    shown: usize,
+    options: &PrintOptions,
 ) -> R<()> {
     if rows == 0 && cols == 0 {
         out("<0 x 0 matrix>\n");
@@ -524,7 +549,7 @@ pub unsafe fn print_matrix(
             }
         })
         .collect();
-    let columns = matrix_columns(matrix, rows, cols, options)?;
+    let columns = matrix_columns(matrix, rows, shown, cols, options)?;
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
     let col_labels: Vec<String> = (0..cols)
@@ -554,7 +579,7 @@ pub unsafe fn print_matrix(
         let mut text = String::new();
         text.push_str(&pad(&row_title, row_label_width, false));
         text.push('\n');
-        for label in &row_labels {
+        for label in &row_labels[..shown] {
             text.push_str(label);
             text.push('\n');
         }
@@ -582,7 +607,7 @@ pub unsafe fn print_matrix(
             text.push_str(&pad(&col_labels[col], widths[col], right));
         }
         text.push('\n');
-        for row in 0..rows {
+        for row in 0..shown {
             text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
@@ -607,7 +632,19 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     } else {
         nil()
     };
-    for index in 0..slices {
+    // GNU R prints whole slices up to `max` entries, then the whole rows of a last slice that fit.
+    let (shown_slices, last_rows) = if slice > 0 && cols > 0 && options.max < slice * slices {
+        let shown = options.max.div_ceil(slice);
+        let last_rows = (options.max - slice * (shown - 1)) / cols;
+        if last_rows == 0 {
+            (shown - 1, rows)
+        } else {
+            (shown, last_rows)
+        }
+    } else {
+        (slices, rows)
+    };
+    for index in 0..shown_slices {
         let mut label = String::from(", , ");
         let mut remainder = index;
         let mut parts = Vec::new();
@@ -652,8 +689,20 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
             }
             values::set_attr(matrix, symbols().dimnames, sub)?;
         }
-        print_matrix(matrix, rows, cols, options, false)?;
+        let shown = if index + 1 == shown_slices { last_rows } else { rows };
+        print_matrix_rows(matrix, rows, cols, shown, options)?;
         out("\n");
+    }
+    if shown_slices < slices {
+        let omitted_rows = if last_rows < rows {
+            format!(" {} row(s) and", rows - last_rows)
+        } else {
+            String::new()
+        };
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted{omitted_rows} {} matrix slice(s) ]\n",
+            slices - shown_slices
+        ));
     }
     Ok(())
 }

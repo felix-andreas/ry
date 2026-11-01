@@ -668,9 +668,13 @@ unsafe fn array_subset(
         .collect();
     let dim = values::integer_vector(&dim_values)?;
     values::set_attr(result, symbols().dim, dim)?;
-    if kept
-        .iter()
-        .any(|&dimension| new_dimnames[dimension] != nil())
+    // GNU R keeps dimnames whose components are all NULL unless a dropped dimension forces it
+    // to rebuild them.
+    let undropped = dimnames != nil() && kept.len() == new_dims.len();
+    if undropped
+        || kept
+            .iter()
+            .any(|&dimension| new_dimnames[dimension] != nil())
         || dimnames_names != nil()
     {
         let list: Vec<Sexp> = kept
@@ -2401,7 +2405,6 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         ));
     }
     let result = alloc(SexpType::List, dims.len())?;
-    let mut all_null = true;
     let given = length(dimnames);
     for (dimension, &extent) in dims.iter().enumerate() {
         if dimension >= given {
@@ -2411,7 +2414,6 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         if component == nil() {
             continue;
         }
-        all_null = false;
         let component = if values::inherits(component, "factor") {
             coerce::factor_as_character(component)?
         } else if component.kind() != SexpType::String {
@@ -2447,11 +2449,6 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
             names = padded;
         }
         values::set_attr(result, symbols().names, names)?;
-        all_null = false;
-    }
-    if all_null {
-        values::remove_attr(object, symbols().dimnames);
-        return Ok(());
     }
     values::set_attr(object, symbols().dimnames, result)
 }
