@@ -80,8 +80,10 @@ The crate root is `src/semantics.rs`.
 
 The crate root is `src/ide.rs`, and `src/testing.rs` holds the editor features' fuzz contract,
 which the in-tree harness and the coverage-guided target share. Every editor feature in `ide.rs` is a read of `semantics`
-queries: hover, goto-definition, references, rename, inlay hints, signature help, completion, code
-actions, document and workspace symbols, and navigation to annotation types and S4 definitions.
+queries: hover, goto-definition, references, rename, call hierarchy, inlay hints (including
+parameter names), signature help, completion, code actions with their fixes (`diagnostic_fixes`,
+`fix_all`), the outline, workspace symbols, folding, selection ranges, semantic tokens, and
+navigation to annotation types and S4 definitions.
 Definition, references, and rename share one occurrence engine, and completion uses the shared
 smart-case matcher.
 
@@ -162,6 +164,11 @@ nothing about C.
   (the `PROTECT` stack, the precious multiset, the handle stack, globals and `RootSource`), and the
   collector itself: marking, ephemeron processing for weak references, and the young and full sweeps.
 - **`object.rs`**: `Sexp`, the type codes, the header and payload layouts, and the raw accessors.
+- **`space.rs`**: the small-object space: one reserved address range cut into 64 KiB pages of one
+  size class each, with the mark, allocated and finalize bits in per-page bitmaps outside the
+  objects, and the platform's page reservation (`mmap` or `VirtualAlloc`).
+- **`records.rs`**: the tag-name and layout interners behind records, tuples, tags, dictionaries
+  and sets.
 - **`strings.rs`**: the weak `CHARSXP` intern table and the encodings.
 - **`env.rs`**: environment frames, which map symbols to binding cells.
 - **`arena.rs`**: the `R_alloc` arena and its `vmaxget` watermarks.
@@ -202,6 +209,11 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   **`builtin_libraries.rs`**: the default packages' routine tables, which `dyn.load` hands out
   instead of loading their shared libraries; **`utils.rs`**, **`tools.rs`** and **`graphics.rs`**
   implement them.
+- **`platform.rs`**: every operating-system call the interpreter makes, with a Unix and a Windows
+  implementation of the same functions, so a libc use outside it is a Windows build error.
+  **`gnu_r_home.rs`**: where a GNU R installation lives when `R_HOME` and `R RHOME` name none.
+- **`graphics_engine.rs`**: R's graphics engine, with the device table, the graphics systems
+  registered with every device, and the `DevDesc` layout that device packages fill in.
 - **`session.rs`**: start-up (base R from the GNU R installation, the profiles, the default
   packages) and running a script.
 - **`stats.rs`** and its `stats_*.rs` siblings (`stats_models`, `stats_optimize`, `stats_nlm`,
@@ -259,6 +271,8 @@ runtime state and R's C API. Each exported function that can fail runs its body 
   `.External`, `.C` and `.Fortran`; conditions; and the deparser for messages.
 - **`dynload.rs`**: loading package libraries, routine registration, `NativeSymbolInfo` lookup and
   C callables.
+  **`macho.rs`**: on macOS, rewrites a GNU R package binary's load command for GNU R's `libR` to
+  name ry's runtime.
 - **`extptr.rs`**: external pointers, weak references and finalizers.
 - **`altrep.rs`**: the ALTREP class registry, dispatch for every accessor, and base R's own
   classes (compact sequences, deferred strings, wrappers). **`frame_altrep.rs`**: a table column
@@ -271,7 +285,8 @@ runtime state and R's C API. Each exported function that can fail runs its body 
 - **`hashtab.rs`**: R's hash tables, kept in heap objects.
 - **`legacy.rs`**: names R 4.6 no longer declares that binaries built against older R import
   (`TRUELENGTH`, `SETLENGTH`, `FRAME`, `R_PPStack` and the like).
-- **`graphics.rs`**: the graphics engine's names, so device packages load; drawing is an error.
+- **`graphics.rs`**: the C entry points of R's graphics engine over `interp`'s `graphics_engine.rs`,
+  so grid and device packages such as ragg run unchanged.
 - **`arith.rs`**: NA tests, sorting, and the random number generator, which shares its state with the
   interpreter's through `.Random.seed`.
 - **`rmath.rs`**: `Rmath.h`: the densities, distribution functions, quantiles and random variates
@@ -300,7 +315,7 @@ The crate root is `src/table.rs`. It is ry's built-in typed table, an engine ove
   `explain`). **`group.rs`**, **`join.rs`** and **`kernel.rs`**: kernels that beat Polars' general
   plans for grouped aggregation, joins and row-wise expressions.
 - **`io.rs`**: `fread` and `fwrite`, with the layout read by `sniff`. **`ops.rs`**: the data.table
-  helpers that real code calls beside `[` (`setkey`, `rbindlist`, `melt`, `shift`, `fifelse` and
+  helpers that real code calls beside `[` (`setkey`, `rbindlist`, `melt`, `dcast`, `shift`, `fifelse` and
   the like).
 - **`ffi.rs`**: the zero-copy interchange with the Arrow C data interface. A column reaches R and
   native code as an ALTREP vector, which `libr`'s `frame_altrep.rs` provides.

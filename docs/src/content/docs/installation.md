@@ -17,6 +17,11 @@ your `PATH`.
 On Linux, use extension 0.3.2 or newer. Earlier versions bundle a binary that starts only under
 Nix.
 
+The latest release, 0.3.2-beta, has the checker, formatter and language server, but not ry's own
+runtime. The runtime, and everything on this site that needs it (`ry run` on ry's runtime, records
+and tags at run time, `DataFrame`), is in 0.4.0-beta, which is not released yet. Until it is, build
+from a clone of the repository (`just try`).
+
 Positron and VSCodium install extensions from Open VSX, where ry is not published (an unrelated
 extension there is also called "ry"). Download the `.vsix` for your platform from
 [Releases](https://github.com/felix-andreas/ry/releases) and run **Extensions: Install from VSIX...**
@@ -38,7 +43,8 @@ ry --version
 
 On Linux, use `ry-x86_64-unknown-linux-gnu.tar.gz` the same way. From 0.3.2-beta it runs on any
 x86_64 distribution with glibc 2.17 or newer. The binary in 0.3.1-beta and earlier starts only under
-Nix, and fails elsewhere with `cannot execute: required file not found`.
+Nix, and fails elsewhere with `cannot execute: required file not found`. The Linux archives of the
+next release are built on Ubuntu 22.04 and need glibc 2.35 or newer.
 
 **From source**, with [rustup](https://rustup.rs). ry builds on a nightly Rust toolchain, and
 `cargo install` does not read the toolchain the repository pins, so name a nightly yourself:
@@ -82,10 +88,12 @@ usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it r
 If none holds base R, `ry run` and `ry load` stop with exit status 2 and name the places they
 searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
 
-On Linux and macOS the release archive holds `ry` and ry's runtime (`libR.so` or `libR.dylib`).
-Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. The Windows
-archive does not carry the runtime (`R.dll`) yet, so `ry run` and `ry load` are Linux and macOS
-only there, while `ry R` works everywhere.
+From 0.4.0-beta on, the release archives hold `ry` and ry's runtime (`libR.so`, `libR.dylib` or
+`R.dll`). Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. The
+Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
+`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
+a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
+it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged. Those binaries
 name GNU R's `libR`, so ry loads a copy of each package library, cached under
