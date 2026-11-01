@@ -677,7 +677,7 @@ impl Builder<'_> {
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
-                state.visible = Some(true);
+                state.visible = if load.is_some() { None } else { Some(true) };
                 Action::GetVar { dst: operand(0), slot, load, forcing }
             }
             Op::SetVar => {

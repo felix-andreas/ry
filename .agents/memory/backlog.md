@@ -329,6 +329,11 @@ protects construction but nothing after it.
 - **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
   `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
   so they are tier-0 or base gaps, not JIT ones.
+- **`uniroot(extendInt = "yes")` loops to its iteration limit under `RY_JIT=force`** after another
+  closure with a formal named `f` ran first (`stats__optimize_and_integrate`, the `ry-jit` engine
+  only). The `while` condition `f.lower * f.upper > 0` keeps reading the old `f.upper` after the
+  body reassigns it inside `is.na(f.upper <- f(...))`; both are formals with defaults
+  (`defaulted`). Already on main before the statement-clearing work.
 - **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
   may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
   while the environment still holds the old value; and an allocation failure inside `boxed()`

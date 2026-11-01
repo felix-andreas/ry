@@ -327,6 +327,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.set_visible(&before, true);
             }
             Action::GetVar { dst, slot, load, forcing } => {
+                // A load may force a promise, and then the promise's expression decides whether
+                // the value prints, so the flag is set before the load rather than after it.
+                self.set_visible(&before, true);
                 if let Some(ty) = load {
                     self.load_slot(position, &before, slot, ty, forcing)?;
                 }
@@ -338,7 +341,6 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let value = self.load_slot_cell(slot);
                     self.store_register(dst, value);
                 }
-                self.set_visible(&before, true);
             }
             Action::SetVar { slot, src } => {
                 let ty = match before.registers[src] {
