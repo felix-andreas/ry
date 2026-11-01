@@ -436,7 +436,10 @@ fn check_loads_valid_override_stubs_silently() {
 #[test]
 fn check_keeps_declared_packages_active_beside_override_stubs() {
     let directory = project(&[
-        ("DESCRIPTION", "Package: demo\nVersion: 0.1\nImports: testthat\n"),
+        (
+            "DESCRIPTION",
+            "Package: demo\nVersion: 0.1\nImports: testthat\n",
+        ),
         ("R/f.R", "f <- function() 1\n"),
         (
             "tests/testthat/test-f.R",
