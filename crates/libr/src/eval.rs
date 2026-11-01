@@ -24,15 +24,47 @@ use {
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         native::Interface,
+        unwind::park,
     },
     std::ffi::{c_char, c_int, c_void},
 };
+
+/// An ALTREP string or list element for [`heap::object::Sexp::element`], rooted because a class
+/// may build it fresh on every call (nanoarrow's strings do). The accessor cannot fail, so an
+/// `Elt` error is parked for the evaluator to raise at its next poll, and the read meanwhile
+/// gives `NA` (or `NULL` in a list).
+unsafe fn read_altrep_element(object: Sexp, index: usize) -> Sexp {
+    let runtime = runtime();
+    match crate::altrep::sexp_elt(object, index as crate::R_xlen_t) {
+        Ok(element) => {
+            runtime.heap.root(element);
+            element
+        }
+        Err(unwind) => {
+            park(unwind);
+            if object.kind() == SexpType::String {
+                runtime.heap.known().na_string
+            } else {
+                runtime.heap.known().nil
+            }
+        }
+    }
+}
+
+/// Stores an ALTREP string or list element through the class's `Set_elt` method; an error is
+/// parked, as for [`read_altrep_element`].
+unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
+    if let Err(unwind) = crate::altrep::set_sexp_elt(object, index as crate::R_xlen_t, value) {
+        park(unwind);
+    }
+}
 
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
         write_console: |text, is_error| crate::boundary::write_console(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
+        altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_task_callbacks: |expression, value, succeeded, visible| unsafe {
             run_task_callbacks(expression, value, succeeded, visible)
@@ -43,6 +75,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
     };
     interp::install(&mut runtime.heap, hooks);
+    heap::object::install_altrep_elements(heap::object::AltrepElements {
+        read: read_altrep_element,
+        write: write_altrep_element,
+    });
     jit::install();
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);

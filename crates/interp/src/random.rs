@@ -672,7 +672,10 @@ unsafe fn set_kinds(kind: Sexp, normal_kind: Sexp, sample_kind: Sexp) -> R<()> {
         };
         if !matches!(
             normal_kind,
-            NormalKind::Inversion | NormalKind::BoxMuller | NormalKind::KindermanRamage
+            NormalKind::Inversion
+                | NormalKind::BoxMuller
+                | NormalKind::KindermanRamage
+                | NormalKind::BuggyKindermanRamage
         ) {
             return Err(error(format!(
                 "normal.kind \"{}\" is not supported by ry",
@@ -680,6 +683,15 @@ unsafe fn set_kinds(kind: Sexp, normal_kind: Sexp, sample_kind: Sexp) -> R<()> {
             )));
         }
         get_rng_state()?;
+        if matches!(
+            normal_kind,
+            NormalKind::KindermanRamage | NormalKind::BuggyKindermanRamage
+        ) && rng().state.kind() == Kind::MarsagliaMulticarry
+        {
+            warning(
+                "RNGkind: severe deviations from normality for Kinderman-Ramage + Marsaglia-Multicarry",
+            )?;
+        }
         let rng = rng();
         if normal_kind == NormalKind::BoxMuller {
             rng.box_muller_saved = 0.0;
@@ -1008,7 +1020,8 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
             rng.box_muller_saved = radius * theta.sin();
             Ok(radius * theta.cos())
         }
-        NormalKind::KindermanRamage => Ok(kinderman_ramage(&mut rng.state)),
+        NormalKind::KindermanRamage => Ok(kinderman_ramage(&mut rng.state, false)),
+        NormalKind::BuggyKindermanRamage => Ok(kinderman_ramage(&mut rng.state, true)),
         other => Err(error(format!(
             "normal.kind \"{}\" is not supported by ry",
             other.name()
@@ -1017,16 +1030,23 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
 }
 
 /// Kinderman and Ramage's (1976) normal generator with Josef Leydold's correction, as GNU R's
-/// `norm_rand` runs it.
+/// `norm_rand` runs it. `buggy` keeps the uncorrected version R used before 1.7.0, which
+/// `RNGversion` still selects: a mistyped constant in the main region and a first region that
+/// accepts a candidate without the density test whenever max(u2, u3) <= 0.8056.
 #[allow(clippy::excessive_precision)]
-fn kinderman_ramage(state: &mut State) -> f64 {
+fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
     const A: f64 = 2.216035867166471;
     let g = |x: f64| 0.398942280401433 * (-x * x / 2.0).exp() - 0.180025191068563 * (A - x);
     let signed = |u2: f64, u3: f64, value: f64| if u2 < u3 { value } else { -value };
     let u1 = next_uniform(state);
     if u1 < 0.884070402298758 {
         let u2 = next_uniform(state);
-        return A * (1.131131635444180 * u1 + u2 - 1.0);
+        let slope = if buggy {
+            1.13113163544180
+        } else {
+            1.131131635444180
+        };
+        return A * (slope * u1 + u2 - 1.0);
     }
     if u1 >= 0.973310954173898 {
         loop {
@@ -1066,6 +1086,12 @@ fn kinderman_ramage(state: &mut State) -> f64 {
         let u2 = next_uniform(state);
         let u3 = next_uniform(state);
         let value = 0.479727404222441 - 0.595507138015940 * u2.min(u3);
+        if buggy {
+            if u2.max(u3) <= 0.805577924423817 {
+                return signed(u2, u3, value);
+            }
+            continue;
+        }
         if value < 0.0 {
             continue;
         }

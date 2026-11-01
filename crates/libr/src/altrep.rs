@@ -907,6 +907,9 @@ pub unsafe fn new_altrep(class: AltrepClass, data1: Sexp, data2: Sexp) -> ApiRes
     let object = runtime()
         .heap
         .alloc_altrep(kind, class.pointer, data1, data2)?;
+    // The interpreter then copies an instance (into ordinary storage) before it modifies one,
+    // instead of storing through a `Set_elt` method that most classes do not provide.
+    object.mark_not_mutable();
     runtime().heap.root(object);
     Ok(object)
 }

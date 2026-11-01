@@ -340,13 +340,18 @@ pub enum Op {
     /// argument already evaluated to the object in `subject`, so it dispatches on that object
     /// with the other arguments as promises.
     DispatchSubject,
+    /// `dst start end`: ends a statement of a `{`. It clears `dst` and the statement's
+    /// temporaries `start..end` and releases the activation's handles, because the register
+    /// file and the handle stack are roots and would otherwise keep what the statement dropped
+    /// alive until the closure returns, so a `gc()` in the next statement could not finalize it.
+    EndStatement,
     /// `dst function call target`: [`Op::CallGeneric`] for the right-hand side of
     /// `target <- f(target, ...)`, which may update the value of `target` in place
     /// (`eval::rebind_call`).
     CallRebinding,
 }
 
-pub const OPS: [Op; 27] = [
+pub const OPS: [Op; 28] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -373,6 +378,7 @@ pub const OPS: [Op; 27] = [
     Op::BranchUnlessPrimitive,
     Op::BranchIfObject,
     Op::DispatchSubject,
+    Op::EndStatement,
     Op::CallRebinding,
 ];
 
@@ -1032,18 +1038,28 @@ impl Compiler {
                     self.emit(Op::Visible, &[]);
                 }
                 let srcrefs = values::get_attr(call, symbols().srcref);
-                if srcrefs == nil() {
-                    for (_, statement) in args {
-                        self.expression(*statement, dst)?;
-                    }
-                    return Ok(());
-                }
                 let outer = self.srcref;
+                let start = self.next_register;
+                let mut used = start;
                 for (index, (_, statement)) in args.iter().enumerate() {
-                    self.srcref = eval::statement_srcref(srcrefs, index + 1);
-                    let srcref = self.constant(self.srcref);
-                    self.emit(Op::SetSrcref, &[srcref]);
+                    // Registers are allocated in stack order, so the statement's temporaries
+                    // are exactly `start..used`.
+                    if index > 0 {
+                        self.emit(Op::EndStatement, &[dst, start, used]);
+                    }
+                    let peak = self.registers;
+                    self.registers = start;
+                    if srcrefs != nil() {
+                        self.srcref = eval::statement_srcref(srcrefs, index + 1);
+                        let srcref = self.constant(self.srcref);
+                        self.emit(Op::SetSrcref, &[srcref]);
+                    }
                     self.expression(*statement, dst)?;
+                    used = self.registers;
+                    self.registers = peak.max(used);
+                }
+                if srcrefs == nil() {
+                    return Ok(());
                 }
                 self.srcref = outer;
                 let srcref = self.constant(outer);
@@ -1455,6 +1471,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::Closure => 4,
         Op::SubAssign => 6,
         Op::SetSrcref => 1,
+        Op::EndStatement => 3,
         Op::BranchUnlessPrimitive => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
@@ -1880,6 +1897,13 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
         Op::SetSrcref => interp().srcref = constants.element(operand(0)),
+        Op::EndStatement => {
+            set(operand(0), nil());
+            for register in operand(1)..operand(2) {
+                set(register, nil());
+            }
+            crate::heap().release_handles(machine.mark);
+        }
         Op::LogicLeft => {
             let call = constants.element(operand(2));
             let is_and = operand(3) == 1;
