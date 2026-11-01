@@ -5,6 +5,8 @@ edition = "2024"
 version.workspace = true
 license.workspace = true
 publish = false
+# `benches/allocator.rs` is a module the benchmarks share, not a benchmark.
+autobenches = false
 
 [lib]
 path = "src/table.rs"
@@ -44,6 +46,9 @@ hashbrown.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The benchmarks run on the allocator and options `libR` gives the engine.
+mimalloc = { version = "0.1", features = ["local_dynamic_tls", "v2"] }
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
 

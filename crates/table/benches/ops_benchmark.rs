@@ -6,6 +6,8 @@
 //! Usage: `cargo bench -p table --bench ops_benchmark -- <data-dir>`, where the directory holds
 //! `groupby.csv` from `tools/bench/table/datagen.R`.
 
+mod allocator;
+
 use {
     std::{
         env,

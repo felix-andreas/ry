@@ -3386,6 +3386,48 @@ fn files_read_and_write_through_the_file_system() {
 }
 
 #[test]
+fn a_factor_read_parses_codes_and_matches_reading_text_then_converting() {
+    let mut text = String::from("plain,missing,quoted,n\n");
+    for row in 0..5000 {
+        let missing = match row % 7 {
+            0 => "",
+            1 => "NA",
+            other => ["x", "y", "z", "w", "v"][other - 2],
+        };
+        text.push_str(&format!(
+            "id{:03},{missing},\"a,{}\",{row}\n",
+            (row * 37) % 997,
+            row % 3
+        ));
+    }
+    let path = std::env::temp_dir().join(format!("ry-table-factors-{}.csv", std::process::id()));
+    std::fs::write(&path, &text).unwrap_or_else(|error| panic!("cannot write: {error}"));
+    let options = io::ReadOptions {
+        factors: true,
+        ..io::ReadOptions::default()
+    };
+    let mut direct =
+        io::read_csv_with(&path, &options).unwrap_or_else(|error| panic!("cannot read: {error}"));
+    let mut converted = io::read_csv(&path).unwrap_or_else(|error| panic!("cannot read: {error}"));
+    std::fs::remove_file(&path).unwrap_or_else(|error| panic!("cannot remove: {error}"));
+    io::strings_as_factors(&mut converted).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        direct.schema().to_string(),
+        "DataFrame{plain: factor, missing: factor, quoted: factor, n: integer[]}"
+    );
+    for name in ["plain", "missing", "quoted", "n"] {
+        assert_eq!(get(&mut direct, name), get(&mut converted, name), "{name}");
+    }
+    // The empty field is the level `""`, and only `NA` is missing, as `fread` reads them.
+    let RVector::Factor { codes, levels } = get(&mut direct, "missing") else {
+        panic!("`missing` is not a factor");
+    };
+    assert_eq!(levels.first().map(String::as_str), Some(""));
+    assert_eq!(codes[0], 1);
+    assert_eq!(codes[1], NA_INTEGER);
+}
+
+#[test]
 fn a_string_column_becomes_a_factor_with_sorted_levels() {
     let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
     let factor =

@@ -544,11 +544,12 @@ unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
     let fail = |failure: &dyn std::fmt::Display| {
         error_in(call.call, format!("cannot read `{path}`: {failure}"))
     };
-    let mut table =
-        table::io::read_csv(std::path::Path::new(&path)).map_err(|failure| fail(&failure))?;
-    if factors {
-        table::io::strings_as_factors(&mut table).map_err(|failure| fail(&failure))?;
-    }
+    let options = table::io::ReadOptions {
+        factors,
+        ..table::io::ReadOptions::default()
+    };
+    let table = table::io::read_csv_with(std::path::Path::new(&path), &options)
+        .map_err(|failure| fail(&failure))?;
     wrap(table)
 }
 
