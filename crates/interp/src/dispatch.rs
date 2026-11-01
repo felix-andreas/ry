@@ -1522,27 +1522,15 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let what = call.arg(1);
     let which = values::as_logical_scalar(call.arg(2)) == 1;
+    // An object without a class attribute inherits only from what `class()`
+    // reports, not from the implicit dispatch classes such as "integer" for a
+    // matrix or "double" for a real vector.
     let classes = if object.has_gp(gp::S4_OBJECT) {
         s4_class_with_superclasses(object)?
+    } else if values::class_attr(object) == nil() {
+        class_of(object)?
     } else {
         implicit_class(object)?
-    };
-    let classes = if values::class_attr(object) == nil() {
-        class_of(object).and_then(|class| {
-            let mut all: Vec<String> = (0..length(class))
-                .map(|index| char_str(class.element(index)).into_owned())
-                .collect();
-            let implicit = implicit_class(object)?;
-            for index in 0..length(implicit) {
-                let name = char_str(implicit.element(index)).into_owned();
-                if !all.contains(&name) {
-                    all.push(name);
-                }
-            }
-            string_vector(&all)
-        })?
-    } else {
-        classes
     };
     // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
     let what = if what.kind() == SexpType::String {

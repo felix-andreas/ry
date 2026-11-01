@@ -1412,7 +1412,13 @@ unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
         Format::Ascii
     };
     let bytes = serialize(call.arg(0), format, serialization_version(call.arg(3))?)?;
-    crate::connections::write_binary(call.arg(1), &bytes)?;
+    // ASCII serialization prints to a text-mode connection, as GNU R's does, which is how
+    // `saveRDS(x, textConnection(...), ascii = TRUE)` works.
+    if format == Format::Ascii && crate::connections::is_text_mode(call.arg(1))? {
+        crate::connections::print(call.arg(1), &bytes)?;
+    } else {
+        crate::connections::write_binary(call.arg(1), &bytes)?;
+    }
     Ok(nil())
 }
 

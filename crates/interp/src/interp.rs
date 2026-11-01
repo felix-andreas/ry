@@ -161,6 +161,9 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// `returnValue()` for the `on.exit` code running innermost: the value its function
+    /// returns, or `None` when the function is being left by an error or a jump past it.
+    pub returned_values: Vec<Option<Sexp>>,
     /// The innermost complex assignment running: its replacement call, the whole assignment,
     /// and the frame depth it runs at. GNU R evaluates the replacement inside a context for the
     /// assignment, so a builtin replacement function reports its errors and warnings against
@@ -277,6 +280,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         primitive_formals: FxHashMap::default(),
         symbols,
         visible: true,
+        returned_values: Vec::new(),
         assignment_call: None,
         warnings: Vec::new(),
         error_message: String::new(),

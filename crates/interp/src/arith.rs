@@ -452,7 +452,9 @@ pub fn pretty(
             } else {
                 1.5 / (1.0 + five_bias)
             };
-        range < scale * bias * count.max(1) as f64 * f64::EPSILON * 3.0
+        // The tolerance is formed before it scales the range, so a huge range cannot overflow.
+        let tolerance = bias * count.max(1) as f64 * f64::EPSILON;
+        range < scale * tolerance * 3.0
     };
     let mut cell;
     if small {

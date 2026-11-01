@@ -153,7 +153,11 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             let element = vector.element(index);
             if element.kind() == SexpType::String && length(element) == 1 {
                 Ok(element.element(0))
-            } else if element.kind().is_atomic() && length(element) == 1 {
+            } else if element.kind().is_atomic()
+                && length(element) == 1
+                && values::names(element) == nil()
+            {
+                // A named scalar other than a string deparses with its name, as in GNU R.
                 element_as_charsxp(element, 0)
             } else if element.kind() == SexpType::Symbol {
                 Ok(element.car())
@@ -892,9 +896,11 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         SexpType::Symbol | SexpType::Language | SexpType::Pairlist if kind == SexpType::String => {
             coerce_vector(object, kind)?
         }
-        SexpType::List | SexpType::Pairlist | SexpType::Language | SexpType::Nil => {
-            coerce_vector(object, kind)?
-        }
+        SexpType::List
+        | SexpType::Expression
+        | SexpType::Pairlist
+        | SexpType::Language
+        | SexpType::Nil => coerce_vector(object, kind)?,
         kind_of if kind_of.is_atomic() => {
             let converted = coerce_vector(object, kind)?;
             if converted == object {

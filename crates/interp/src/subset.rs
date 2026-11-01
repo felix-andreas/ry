@@ -1205,7 +1205,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             Ok(result)
         };
     }
-    if object == nil() && value == nil() {
+    if object == nil() && (value == nil() || (value.kind().is_vector() && length(value) == 0)) {
         return Ok(nil());
     }
     let object = if object == nil() {
@@ -1255,6 +1255,17 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else {
         value.kind()
     };
+    // An empty vector takes an empty replacement of its own type, or an empty
+    // list, unchanged whatever the index selects: an empty list must not turn
+    // an atomic vector into a list.
+    if length(object) == 0
+        && value != nil()
+        && length(value) == 0
+        && (value_kind == object.kind()
+            || matches!(value_kind, SexpType::List | SexpType::Expression))
+    {
+        return Ok(object);
+    }
     let target_kind = if !value_kind.is_vector() {
         SexpType::List
     } else {

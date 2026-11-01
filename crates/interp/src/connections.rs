@@ -482,6 +482,12 @@ pub unsafe fn write_binary(file: Sexp, bytes: &[u8]) -> R<()> {
     })
 }
 
+/// Whether a connection object is a text-mode one.
+pub unsafe fn is_text_mode(file: Sexp) -> R<bool> {
+    let con = resolve_con(file)?.1;
+    Ok((*con).text != 0)
+}
+
 /// Writes text to a connection the way `cat` and `write.table` do.
 pub unsafe fn print(file: Sexp, text: &[u8]) -> R<()> {
     let con = resolve_con(file)?.1;
@@ -719,7 +725,8 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             }
             Device::TextInput(TextInput { data, position: 0 })
         }
-        "w" | "a" => {
+        // GNU R appends for every write mode but a plain "w", including "wb".
+        "w" | "a" | "wb" | "ab" => {
             let target = if object == nil() {
                 None
             } else {
@@ -731,13 +738,17 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             };
             let mut lines = Vec::new();
             if let Some(target) = target
-                && open == "a"
+                && open != "w"
             {
                 let existing = crate::eval::find_var(target.symbol, target.env)?;
                 if existing.kind() == SexpType::String {
                     for line in values::strings(existing) {
                         lines.push(line.unwrap_or_else(|| "NA".into()).into_bytes());
                     }
+                } else {
+                    crate::conditions::warning(
+                        "text connection: appending to a non-existent char vector",
+                    )?;
                 }
             }
             let output = TextOutput {
@@ -2951,7 +2962,9 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
     (*con).isopen = 1;
     (*con).canread = mode.read as Rboolean;
     (*con).canwrite = mode.write as Rboolean;
-    (*con).text = (!mode.binary) as Rboolean;
+    // A text connection is text even when opened "wb".
+    (*con).text = (!mode.binary || matches!(device, Device::TextInput(_) | Device::TextOutput(_)))
+        as Rboolean;
     (*con).save = NO_SAVE;
     Ok(true)
 }
