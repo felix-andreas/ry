@@ -19,10 +19,11 @@
 
 use {
     crate::{
-        arith::CompensatedSum,
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
-        eval, records, scope,
+        eval,
+        long_double::LongDouble,
+        records, scope,
         sort::{IdenticalFlags, identical},
         unwind::{R, error},
         values::{
@@ -1616,14 +1617,16 @@ unsafe fn fold_numbers(
     number_value(Number::Integer(total))
 }
 
-// R's `sum()` accumulates doubles in extended precision, and `CompensatedSum` tracks that, so
-// `List.sum(xs)` and `sum(xs)` agree to the last bit on ordinary input.
+// R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
+// with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     fold_numbers(call, 0, i32::checked_add, |start, items| {
-        let mut sum = CompensatedSum::default();
-        sum.add(start);
-        sum.add_all(items);
-        sum.total()
+        let mut total = LongDouble::ZERO;
+        total += start;
+        for &item in items {
+            total += item;
+        }
+        total.to_f64()
     })
 }
 
