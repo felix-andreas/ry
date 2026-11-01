@@ -635,19 +635,8 @@ impl<'db> InferenceTable<'db> {
                 if actual_rank > bound_rank
                     || (actual_rank == bound_rank && !bound_vector && actual_vector) =>
             {
-                // A scalar meeting a vector widens to the vector: R recycles it.
-                let element = scalar(
-                    db,
-                    match actual_rank.max(bound_rank) {
-                        2 => Atomic::Double,
-                        1 => Atomic::Integer,
-                        _ => Atomic::Logical,
-                    },
-                );
-                let widened = if bound_vector || actual_vector {
-                    Ty::new(db, TyKind::Vector(element))
-                } else {
-                    element
+                let Some(widened) = numeric_join(db, [bound, actual]) else {
+                    return false;
                 };
                 self.set(
                     representative,
@@ -1828,6 +1817,34 @@ fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
 /// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
 /// whether it is a vector. A union of numeric types ranks as its widest member, since every
 /// member coerces to that one (`double | integer` widens a binding to `double`).
+/// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
+/// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
+/// it). `None` when a type is not numeric.
+pub(crate) fn numeric_join<'db>(
+    db: &'db dyn Db,
+    types: impl IntoIterator<Item = Ty<'db>>,
+) -> Option<Ty<'db>> {
+    let (vector, rank) = types
+        .into_iter()
+        .try_fold((false, 0), |(vector, rank), ty| {
+            let (ty_vector, ty_rank) = numeric_rank(db, ty)?;
+            Some((vector || ty_vector, rank.max(ty_rank)))
+        })?;
+    let element = scalar(
+        db,
+        match rank {
+            2 => Atomic::Double,
+            1 => Atomic::Integer,
+            _ => Atomic::Logical,
+        },
+    );
+    Some(if vector {
+        Ty::new(db, TyKind::Vector(element))
+    } else {
+        element
+    })
+}
+
 fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
     let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
         TyKind::Scalar(Atomic::Logical) => Some(0),

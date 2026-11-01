@@ -15,6 +15,7 @@ use {
         },
         infer::{
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
+            numeric_join,
         },
         metadata::{imported_by_name, imports_every_name, is_own_package},
         naming::{
@@ -10426,6 +10427,7 @@ impl<'db> Checker<'db, '_> {
         let total = function.positional.len() + function.named.len();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let targets = argument_targets(self.db, function, &argument_shapes(arguments));
+        self.join_shared_parameters(function, arguments, &targets);
 
         // A function-typed argument may be checked against arguments forwarded to it later
         // (`lapply(x, gsub, pattern = "a")`), so the rest intake must be known up front.
@@ -10608,6 +10610,115 @@ impl<'db> Checker<'db, '_> {
             }];
         }
         findings
+    }
+
+    /// Binds a type variable that two or more parameters share (`<T> fn(first: T, second: T)`,
+    /// or `list[T]` and `Array<T>` items) to the join of what the arguments pass, before any
+    /// argument is checked. Checking argument by argument would bind `T` to the first argument
+    /// and reject a wider second one, so `Bool.is_eq(:Red, light)` with `light: :Red | :Green`
+    /// would fail where the reversed call passes. Joining first is order-independent and stays
+    /// sound: every argument fits the join, and a parameter that uses the variable
+    /// contravariantly (`f: fn(T) -> U`) is still checked against the joined type.
+    ///
+    /// Tags join to their union and numbers to the type R's arithmetic promotes them to. Any
+    /// other pair is left to the argument checks, because two unrelated types such as `integer`
+    /// and `character` passed to one variable are a real mistake.
+    fn join_shared_parameters(
+        &mut self,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+        targets: &[Option<ArgumentTarget>],
+    ) {
+        let mut shared: Vec<(InferenceVar, Vec<Ty<'db>>)> = Vec::new();
+        for (argument, target) in arguments.iter().zip(targets) {
+            let expected = match target {
+                Some(ArgumentTarget::Positional(slot)) => function.positional.get(*slot).copied(),
+                Some(ArgumentTarget::Named(formal)) => {
+                    function.named.get(*formal).map(|field| field.ty)
+                }
+                _ => None,
+            };
+            let (Some(expected), Some(found)) = (expected, argument.ty) else {
+                continue;
+            };
+            let Some((var, found)) = self.shared_occurrence(expected, found) else {
+                continue;
+            };
+            match shared.iter_mut().find(|(existing, _)| *existing == var) {
+                Some((_, found_types)) => found_types.push(found),
+                None => shared.push((var, vec![found])),
+            }
+        }
+        for (var, found_types) in shared {
+            if found_types.len() < 2
+                || found_types.iter().all(|&found| found == found_types[0])
+                || found_types
+                    .iter()
+                    .any(|&found| contains_inference_var(self.db, found))
+            {
+                continue;
+            }
+            let joined = if found_types.iter().all(|&found| is_tag_type(self.db, found)) {
+                union_of(self.db, found_types)
+            } else {
+                match numeric_join(self.db, found_types) {
+                    Some(joined) => joined,
+                    None => continue,
+                }
+            };
+            let snapshot = self.table.snapshot();
+            let variable = Ty::new(self.db, TyKind::Var(var));
+            if self.table.unify(self.db, variable, joined).is_err() {
+                // A constraint the join breaks: the argument checks report it one by one.
+                self.table.rollback(snapshot);
+            }
+        }
+    }
+
+    /// The unbound variable a parameter type is, or holds as its items, paired with the type
+    /// the argument supplies in that place.
+    fn shared_occurrence(
+        &self,
+        expected: Ty<'db>,
+        found: Ty<'db>,
+    ) -> Option<(InferenceVar, Ty<'db>)> {
+        let db = self.db;
+        let expected = self.table.shallow_resolve(db, expected);
+        let found = self.table.resolve(db, found);
+        let (var, found) = match expected.kind(db) {
+            TyKind::Var(var) => (*var, found),
+            TyKind::List(item) => {
+                let found = match found.kind(db) {
+                    TyKind::List(found_item) => *found_item,
+                    TyKind::Tuple(items) if !items.is_empty() => {
+                        union_of(db, items.iter().copied())
+                    }
+                    _ => return None,
+                };
+                (self.item_variable(*item)?, found)
+            }
+            TyKind::Named(name, items) if name.text(db) == "Array" => {
+                let (TyKind::Named(found_name, found_items), [item]) =
+                    (found.kind(db), items.as_slice())
+                else {
+                    return None;
+                };
+                let (true, [found_item]) = (found_name == name, found_items.as_slice()) else {
+                    return None;
+                };
+                (self.item_variable(*item)?, *found_item)
+            }
+            _ => return None,
+        };
+        let var = self.table.find(var);
+        matches!(self.table.entry(var), Entry::Unbound { .. }).then_some((var, found))
+    }
+
+    fn item_variable(&self, item: Ty<'db>) -> Option<InferenceVar> {
+        match self.table.shallow_resolve(self.db, item).kind(self.db) {
+            TyKind::Var(var) => Some(*var),
+            _ => None,
+        }
     }
 
     /// A function name given as a string stands for the function only where a function is

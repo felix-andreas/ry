@@ -2069,6 +2069,15 @@ Arguments are checked for compatibility, not exact equality:
   array-like `T[]`, and `T` or `NULL` into `T | NULL`.
 - The promotion order from [vector coercions](#vector-coercions) applies, so `mean(1L)`,
   `sd(c(1L, 2L))`, and `sum(x > threshold)` are not errors.
+- A type parameter that several parameters share, directly as `T` or as the items of `list[T]` or
+  `Array<T>`, takes the join of what the arguments pass, whatever their order. Tags join to their
+  union, so with `light: :Red | :Green`, `Bool.is_eq(:Red, light)` checks just as
+  `Bool.is_eq(light, :Red)` does, and `pick(:Red, :Green)` on `<T> fn(a: T, b: T) -> T` is
+  `:Red | :Green`. Numbers join in R's promotion order, so `Num.add(1L, 2.5)` and
+  `List.concat(list(1L), list(2.5))` are `double` and `list[double]`. Any other mix is a type
+  error, as in `Bool.is_eq(1L, "one")`, and every argument, a callback's parameters included, is
+  then checked against the joined type, so `fn(f: fn(T) -> logical, a: T, b: T)` rejects a
+  callback that accepts only `:Red` when `a` and `b` are `:Red` and `:Green`.
 - A whole-number `double` literal counts as `integer` at a parameter, as it does at the endpoints of
   `:`, so for `fn(n: integer)`, `f(10)` is as valid as `f(10L)`. A fractional literal such as `2.5`
   is still rejected, and so is a `double` variable that happens to hold a whole number. `-3` is unary
