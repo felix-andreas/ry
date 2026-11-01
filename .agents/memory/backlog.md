@@ -2020,11 +2020,10 @@ The end-to-end guard rests on the corpus suites.
 - **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
   10 ms, once the thread owning it runs again (the engine's workers are made to run by
   `release_worker_memory`, `decisions.md`), so a kernel's scratch memory at 1e7 rows is faulted
-  in afresh each time. With lazy arena
-  commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
-  questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
-  The delay is process-wide and trades resident memory in every R program, so it stays at
-  mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
+  in afresh each time. With lazy arena commit and the one-pass factor conversion, the whole
+  db-benchmark script (load plus all questions) runs 97 s at 6.7 GB peak by default and 91 s at
+  8.1 GB with `MIMALLOC_PURGE_DELAY=-1`. The delay is process-wide and trades resident memory in
+  every R program, so it stays at mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
   targeted fixes.
 - **A factor build is bound by Polars' Enum interning.** `string_to_factor`
   (`crates/table/src/convert.rs`) hashes, deduplicates and sorts the levels itself in parallel

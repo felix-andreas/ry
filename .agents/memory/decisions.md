@@ -3798,7 +3798,7 @@ explicit allocators".
   interning"), but the Enum is the factor type in every kernel (`Codes::of`), the joins, group-by,
   the lazy planner and the readers. That change is a factor type of its own, worth doing only once
   a real workload reads multi-million-level factors; at db-benchmark's sizes the conversion
-  already beats `fread` by 2.5x to 5x.
+  already beats `fread` by 3x to 6x.
 
 ## mimalloc's purge delay stays at its default
 

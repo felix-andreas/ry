@@ -10,7 +10,7 @@ does).
 
 Usage: tools/bench/table/report.py <data-dir> [--rows 1e7] [--groupby-only] [--write]
 """
-import argparse, json, os, pathlib, re, subprocess, sys
+import argparse, json, math, os, pathlib, re, subprocess, sys
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -51,8 +51,7 @@ def main():
     env = dict(os.environ, RY_BENCH_RLIB=rlib)
     only = ["groupby"] if args.groupby_only else []
 
-    if not (data / "groupby.csv").exists():
-        subprocess.run(["Rscript", str(here / "datagen.R"), str(data), args.rows, *only], env=env, check=True)
+    prepare(data, args.rows, only, env)
     engines = [
         ("data.table", ["Rscript", str(here / "datatable.R"), str(data), *only]),
         ("ry, from R", [str(root / "target/release/ry"), "run", str(here / "ry.R"), str(data), *only]),
@@ -78,7 +77,8 @@ def main():
             seconds, checksum = answers[question]
             totals[name] += seconds
             cells.append(f"{seconds:.3f}")
-            if abs(checksum - reference) > 1e-6 * max(abs(reference), 1.0):
+            agree = math.isclose(checksum, reference, rel_tol=1e-6, abs_tol=1e-6)
+            if not (agree or math.isnan(checksum) and math.isnan(reference)):
                 mismatches.append(f"{question}: {name} gives {checksum:.6e}, data.table {reference:.6e}")
         lines.append(f"| {LABELS.get(question, question)} | " + " | ".join(cells) + " |")
     lines.append("| total | " + " | ".join(f"{total:.2f}" for total in totals.values()) + " |")
@@ -88,6 +88,24 @@ def main():
         sys.exit("checksums differ:\n" + "\n".join(mismatches))
     if args.write:
         write(args.rows, table)
+
+
+def prepare(data, rows, only, env):
+    """Generates whatever data the run needs, and refuses a directory generated at another size,
+    whose numbers would land under the wrong heading."""
+    needed = ["groupby.csv"]
+    if not only:
+        needed += [f"join_{name}.csv" for name in ("x", "small", "medium", "big")]
+        needed += ["rolljoin_prices.csv", "rolljoin_trades.csv"]
+    stamp = data / "rows"
+    if (data / "groupby.csv").exists() and not stamp.exists():
+        with open(data / "groupby.csv", "rb") as file:
+            stamp.write_text(f"{sum(1 for _ in file) - 1}\n")
+    if stamp.exists() and int(stamp.read_text()) != int(float(rows)):
+        sys.exit(f"{data} holds {stamp.read_text().strip()} rows, not {rows}")
+    if not all((data / name).exists() for name in needed):
+        subprocess.run(["Rscript", str(here / "datagen.R"), str(data), rows, *only], env=env, check=True)
+        stamp.write_text(f"{int(float(rows))}\n")
 
 
 def rust_driver():
