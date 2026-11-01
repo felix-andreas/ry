@@ -38,6 +38,8 @@ pub struct Activation {
     pub compiled: *const Compiled,
     pub pending: Option<Unwind>,
     pub panic: Option<Box<dyn Any + Send>>,
+    /// Where tier 0 continues after a deoptimization.
+    pub resume_pc: usize,
 }
 
 pub mod offset {
@@ -51,6 +53,10 @@ pub mod offset {
 /// tier 0 left in a register is not of the type the compiled loop expects.
 pub const DECLINED: usize = 1;
 
+/// What compiled code returns after deoptimizing: the interpreter continues at the activation's
+/// `resume_pc`, with its `pending` unwind.
+pub const DEOPTIMIZED: usize = 2;
+
 /// Deoptimization reasons.
 pub mod reason {
     /// A speculation failed: the code is discarded and the body recompiled later.
@@ -59,6 +65,8 @@ pub mod reason {
     pub const PENDING: i32 = 1;
     /// A user interrupt is pending; the interpreter raises it.
     pub const INTERRUPT: i32 = 2;
+    /// An inline fast path does not apply, so the interpreter runs the instruction.
+    pub const HANDOFF: i32 = 3;
 }
 
 /// Results of [`jit_step`] and the load helpers.
@@ -305,14 +313,8 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
                     *state = LoopState::vector(index_value.max(0) as usize, count.max(0) as usize);
                 }
             }
-            let pending = activation.pending.take();
-            match bytecode::resume(machine, pc as usize, pending) {
-                Ok(value) => value.as_ptr(),
-                Err(unwind) => {
-                    park(activation, unwind);
-                    std::ptr::null_mut()
-                }
-            }
+            activation.resume_pc = pc as usize;
+            DEOPTIMIZED as *mut Header
         })
     }
 }
@@ -405,6 +407,11 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
 
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
+}
+
+/// Whether a calling handler is established, so a warning would run R code.
+pub extern "C" fn jit_handlers_present() -> i32 {
+    interp::interp().handlers.is_some() as i32
 }
 
 /// `^` on doubles, as tier 0 computes it.

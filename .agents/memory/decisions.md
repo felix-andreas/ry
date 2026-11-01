@@ -2211,7 +2211,7 @@ first lines R had already read, leaving R mid-command.
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
 - **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
-  (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `resume`,
+  (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
   `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
   installs it after the interpreter. Tier 0 changes from other work land without touching the JIT
   as long as these stay stable.
@@ -2221,7 +2221,20 @@ first lines R had already read, leaving R mid-command.
   elimination and inlining will need it.
 - **Compiled code shares tier 0's register window.** Boxed values live in the window or in slot
   root cells after it, so the collector sees them without stack maps, and deoptimization at any
-  instruction is a matter of boxing the unboxed live values in place and calling `resume`.
+  instruction is a matter of boxing the unboxed live values in place and returning
+  `TierExit::Resume` with the pc.
+- **Deoptimization returns to tier 0's loop instead of calling into it.** An earlier shape ran
+  the rest of the body in tier 0 from inside the compiled frame, so a loop that deoptimized and
+  re-entered through on-stack replacement on every iteration nested native frames until the stack
+  overflowed. Returning the resume pc and any pending unwind keeps the native stack flat.
+- **Rare slow paths hand off to tier 0.** Integer overflow, an out-of-range element read and
+  `sqrt` or `log` of a negative number deoptimize to the instruction (reason `HANDOFF`, which does
+  not invalidate) instead of calling a helper, because they warn, and a calling handler may read
+  or rebind any variable the loop keeps in a register. Tier 0 runs them with the frame written
+  back, and the next backward jump re-enters compiled code.
+- **Plain arithmetic and pure builtins check for calling handlers.** They can warn, so when a
+  handler is established they write back and forget the frame like a generic call. Without a
+  handler a warning is only deferred, so the common case pays one helper call.
 - **Variables live in slots with a runtime status** (unloaded, local, enclosing, dirty). The
   environment stays the truth for everything outside the body, so it is written back before any
   operation that can observe it and forgotten after any that can change it. This keeps reflection

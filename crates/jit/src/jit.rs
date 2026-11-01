@@ -19,7 +19,7 @@ mod runtime;
 use analysis::Refusal;
 use heap::object::{Header, Sexp, SexpType};
 use interp::{
-    bytecode::{self, Machine, PROFILE, TIER1, Tier, profile},
+    bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
     heap, interp,
     unwind::{R, error},
     values,
@@ -81,7 +81,7 @@ pub fn install_mode(mode: Mode) {
     bytecode::set_tier(Some(Tier { enter, back_edge, back_edge_threshold: back_edges }));
 }
 
-unsafe fn enter(machine: &mut Machine<'_>) -> Option<R<Sexp>> {
+unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
         if bytecode::loop_count(machine.code) == 0 && !STRAIGHT_LINE.with(Cell::get) {
             return None;
@@ -92,7 +92,7 @@ unsafe fn enter(machine: &mut Machine<'_>) -> Option<R<Sexp>> {
     }
 }
 
-unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<R<Sexp>> {
+unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit> {
     unsafe {
         let compiled = compiled_for(machine, true)?;
         if !compiled.osr.contains(&target) {
@@ -193,7 +193,7 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
 
 /// Runs compiled code for the activation from `entry_pc`. `None` hands the activation to the
 /// interpreter unchanged.
-unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -> Option<R<Sexp>> {
+unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -> Option<TierExit> {
     unsafe {
         if !runtime::valid(compiled) {
             runtime::invalidate(machine.code);
@@ -220,17 +220,20 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             compiled,
             pending: None,
             panic: None,
+            resume_pc: 0,
         };
         let result: *mut Header = (compiled.entry)(&mut activation);
         if let Some(payload) = activation.panic.take() {
             resume_unwind(payload);
         }
-        if result as usize == runtime::DECLINED {
-            return None;
+        match result as usize {
+            runtime::DECLINED => return None,
+            runtime::DEOPTIMIZED => return Some(TierExit::Resume { pc: activation.resume_pc, pending: activation.pending.take() }),
+            _ => {}
         }
-        match Sexp::from_raw(result) {
-            Some(value) => Some(Ok(value)),
-            None => Some(Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error")))),
-        }
+        Some(TierExit::Finished(match Sexp::from_raw(result) {
+            Some(value) => Ok(value),
+            None => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
+        }))
     }
 }

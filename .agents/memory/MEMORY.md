@@ -56,7 +56,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **ry's parse errors inside a `#:` comment are not R syntax errors** (`ParseError::in_annotation`). The runtime's parser and the console's completeness test skip them, or a malformed comment stops a script GNU R would run.
 - **`missing()` counts a defaulted formal as missing only in its own function**: following an argument back to a caller (`h(where)` with `where` defaulted) yields `FALSE`, as GNU R's `R_isMissing` does (`eval::is_missing`). The methods package's `registerNames` depends on it.
 
-- **Compiled code must write variables back before anything that can read the environment** and forget them after anything that can write it, including the first read of a formal whose default is an expression (`crates/jit/src/analysis.rs`, `defaulted`). The `ry-jit` oracle engine (`RY_JIT=force`) and `crates/jit/tests/test_tiers.rs` are what catch a missed case; run both after changing the JIT or tier 0's instruction set.
+- **Compiled code must write variables back before anything that can read the environment** and forget them after anything that can write it, including the first read of a formal whose default is an expression (`crates/jit/src/analysis.rs`, `defaulted`) and any warning, which can run a calling handler (the `HANDOFF` slow paths and `Effect::PureUnlessObserved`). The `ry-jit` oracle engine (`RY_JIT=force`) and `crates/jit/tests/test_tiers.rs` are what catch a missed case; run both after changing the JIT or tier 0's instruction set.
 
 ### Performance traps
 

@@ -302,7 +302,10 @@ up: it runs random loop, branch and vector programs as closure bodies under tier
 forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
 backward jump), and every call must give the same value or error. Most generated programs must run
 to a value, so a generator that drifts into erroring early fails the test instead of passing
-without comparing anything. `crates/interp/tests/test_linalg.rs` pins base R's linear
+without comparing anything. The test interpreter has no base R closures (`numeric`, `as.list`,
+`withCallingHandlers`), so programs use builtins, and each hand-written seed states whether it is
+meant to fail. Behavior that needs base R, such as a warning handler watching a compiled loop,
+goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, and `test_altrep.rs` there checks the columns as ALTREP
 vectors (feature `runtime`). `crates/heap/tests/test_gc.rs` builds random

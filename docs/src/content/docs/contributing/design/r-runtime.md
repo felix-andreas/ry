@@ -537,6 +537,13 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
   then invalidated and may recompile, up to four times per body. An R error, `break` or `next`
   raised inside a helper leaves compiled code the same way, so tier 0 handles every non-local exit.
+  Compiled code returns to tier 0's loop to deoptimize rather than calling into it, so repeated
+  deoptimization never deepens the native stack.
+- **Warnings.** A warning can run a calling handler, which may read or assign the frame's
+  variables. The fast paths that can warn (integer overflow, an out-of-range read, `sqrt` or `log`
+  of a negative number) leave for tier 0 at that instruction without invalidating the code, and
+  plain arithmetic or a pure builtin writes the frame back and reloads it afterwards whenever a
+  calling handler is established.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.

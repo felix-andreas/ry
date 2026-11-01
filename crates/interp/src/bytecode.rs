@@ -27,7 +27,7 @@
 //! The optimizing tier plugs in through [`Tier`]. It works on the same register file: a register
 //! window is a fixed slice of one preallocated buffer that never moves, so compiled code keeps a
 //! pointer to its window, stores its boxed values there (which roots them), and on
-//! deoptimization hands the window back to [`resume`], which continues interpreting at any
+//! deoptimization returns [`TierExit::Resume`], and the interpreter continues at any
 //! instruction.
 
 use crate::{
@@ -80,17 +80,27 @@ const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 #[derive(Clone, Copy)]
 pub struct Tier {
     /// Called whenever compiled bytecode starts running, with a fresh register window. Returns
-    /// `None` to let the interpreter run it.
-    pub enter: unsafe fn(&mut Machine<'_>) -> Option<R<Sexp>>,
+    /// `None` to let the interpreter run it from the start.
+    pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
-    /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting; otherwise the
-    /// optimizing tier has finished running the body from `target` on.
-    pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<R<Sexp>>,
+    /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
+    pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
 }
 
-/// One activation of compiled bytecode as the interpreter sees it: what [`Tier`] receives and
-/// what [`resume`] continues.
+/// How the optimizing tier hands an activation back to the interpreter.
+pub enum TierExit {
+    /// The body ran to the end with this result.
+    Finished(R<Sexp>),
+    /// The optimizing tier gave the activation up at `pc`, with the registers and loop states as
+    /// tier 0 expects them there. Interpretation continues at `pc`, handling `pending` as if the
+    /// instruction at `pc` had raised it. The optimizing tier returns this instead of
+    /// interpreting from inside its own frame, so a loop that leaves compiled code and enters it
+    /// again does not nest native frames.
+    Resume { pc: usize, pending: Option<Unwind> },
+}
+
+/// One activation of compiled bytecode as the interpreter sees it: what [`Tier`] receives.
 pub struct Machine<'a> {
     /// The closure whose body `code` is.
     pub function: Sexp,
@@ -1039,7 +1049,11 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         None => None,
     };
     let result = match entered {
-        Some(result) => result,
+        Some(TierExit::Finished(result)) => result,
+        Some(TierExit::Resume { pc, pending }) => match pending {
+            Some(unwind) => continue_after(&mut machine, pc, unwind).and_then(|pc| execute_code(&mut machine, pc)),
+            None => execute_code(&mut machine, pc),
+        },
         None => execute_code(&mut machine, 0),
     };
     interp().bytecode.registers.truncate(base);
@@ -1047,16 +1061,6 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         other => other,
     }
-}
-
-/// Continues interpreting an activation at `pc`, after the optimizing tier gave it up. A
-/// `pending` unwind is handled as if the instruction at `pc` had raised it.
-pub unsafe fn resume(machine: &mut Machine<'_>, pc: usize, pending: Option<Unwind>) -> R<Sexp> {
-    let pc = match pending {
-        Some(unwind) => continue_after(machine, pc, unwind)?,
-        None => pc,
-    };
-    execute_code(machine, pc)
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
@@ -1072,8 +1076,11 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                     profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
                     if profile[profile::BACK_EDGES] >= tier.back_edge_threshold {
                         profile[profile::BACK_EDGES] = 0;
-                        if let Some(result) = (tier.back_edge)(machine, pc) {
-                            return result;
+                        match (tier.back_edge)(machine, pc) {
+                            Some(TierExit::Finished(result)) => return result,
+                            Some(TierExit::Resume { pc: at, pending: Some(unwind) }) => pc = continue_after(machine, at, unwind)?,
+                            Some(TierExit::Resume { pc: at, pending: None }) => pc = at,
+                            None => {}
                         }
                     }
                 }

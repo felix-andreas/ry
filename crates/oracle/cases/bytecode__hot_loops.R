@@ -14,3 +14,16 @@ na_logic <- function(a) { if (is.na(a) || a) "na or true" else "false" }
 na_logic(NA); na_logic(FALSE); na_logic(TRUE)
 nested <- function() { total <- 0; for (i in 1:3) for (j in 1:3) { if (j == 2) next; total <- total + i * j }; total }
 nested(); nested()
+grow <- function(n) { x <- numeric(0); for (i in 1:n) x[i] <- i * 2; x }
+for (k in 1:3) print(grow(5))
+skip <- function(n) { s <- 0; for (i in 1:n) { s <- s + 1; if (i %% 2 == 0) switch("a", a = next) }; s }
+skip(10); skip(10); skip(3000)
+watched <- function(n) {
+  x <- 0L; seen <- integer(0)
+  h <- function(w) { seen <<- c(seen, x); x <<- x + 1000L; invokeRestart("muffleWarning") }
+  for (i in 1:n) withCallingHandlers({ x <- i * 10L; y <- 2147483647L + i }, warning = h)
+  list(x, seen)
+}
+for (k in 1:3) print(watched(3))
+roots <- function(n) { x <- 1; for (i in 1:n) { x <- x + 1; y <- sqrt(-x) }; x }
+for (k in 1:3) withCallingHandlers(print(roots(2)), warning = function(w) invokeRestart("muffleWarning"))

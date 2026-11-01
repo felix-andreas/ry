@@ -200,10 +200,11 @@ pub struct Inst {
 /// How an instruction the JIT does not specialize affects the compiled activation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effect {
-    /// Reads and writes only its registers.
+    /// Reads and writes only its registers, and never signals a condition.
     Pure,
-    /// Runs no R code when these registers hold no objects; otherwise it is opaque.
-    PureUnlessObjects,
+    /// Runs no R code unless one of these registers holds an object or a calling handler is
+    /// established, since a warning runs the handler; in either case it is opaque.
+    PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
 }
@@ -832,8 +833,9 @@ impl Builder<'_> {
     fn opaque_step(&mut self, state: &mut State, dst: Option<(usize, Ty)>, objects: Vec<usize>, effect: Effect) -> Action {
         match effect {
             Effect::Pure => {}
-            // Only a call that dispatches writes the variables back and forgets them.
-            Effect::PureUnlessObjects => {
+            // Only a call that dispatches or warns into a handler writes the variables back and
+            // forgets them.
+            Effect::PureUnlessObserved => {
                 for slot in &mut state.slots {
                     slot.status |= status::NOT_LOADED;
                 }
@@ -874,7 +876,7 @@ impl Builder<'_> {
             state.registers[dst] = if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl };
             return Action::Arithmetic { arith, numeric, dst, left, right };
         }
-        let effect = if a.is_plain() && b.is_plain() { Effect::Pure } else { Effect::Opaque };
+        let effect = if a.is_plain() && b.is_plain() { Effect::PureUnlessObserved } else { Effect::Opaque };
         let ty = self.feedback_at(inst.pc);
         let action = self.opaque_step(state, Some((dst, ty)), Vec::new(), effect);
         state.visible = Some(true);
@@ -902,8 +904,7 @@ impl Builder<'_> {
         }
         if PURE_BUILTINS.contains(&name) {
             let objects: Vec<usize> = args.iter().copied().filter(|&register| !state.registers[register].is_plain()).collect();
-            let effect = if objects.is_empty() { Effect::Pure } else { Effect::PureUnlessObjects };
-            return Ok(self.opaque_step(state, Some((dst, feedback)), objects, effect));
+            return Ok(self.opaque_step(state, Some((dst, feedback)), objects, Effect::PureUnlessObserved));
         }
         Ok(self.opaque_step(state, Some((dst, feedback)), Vec::new(), Effect::Opaque))
     }

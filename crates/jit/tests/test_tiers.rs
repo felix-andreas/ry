@@ -67,24 +67,31 @@ fn fuzz_jit_agrees_with_tier_zero() {
 
 #[test]
 fn seeds_agree_across_tiers() {
+    // Each seed says whether tier 0 fails on it, since a seed that fails by accident (a base R
+    // closure the test interpreter lacks, say) compares nothing.
     let seeds = [
         // A default that reads a variable the loop made dirty.
-        ("total <- 0L\nfor (i in 1:n) total <- total + i\nk", "(n = 10L)"),
+        ("total <- 0L\nfor (i in 1:n) total <- total + i\nk", "(n = 10L)", false),
         // A default that assigns a variable the body caches.
-        ("s <- 1\nfor (i in 1:3) s <- s + 1\nd\ns", "(n = 1L)"),
+        ("s <- 1\nfor (i in 1:3) s <- s + 1\nd\ns", "(n = 1L)", false),
         // Integer overflow becomes NA, in the loop and after it.
-        ("x <- 2147483600L\nfor (i in 1:n) x <- x + 10L\nx", "(n = 10L)"),
+        ("x <- 2147483600L\nfor (i in 1:n) x <- x + 10L\nx", "(n = 10L)", false),
         // A vector that turns from double to list mid-loop, which fails a speculation.
-        ("out <- numeric(n)\nfor (i in 1:n) { if (i == 4L) out <- as.list(out); out[[i]] <- i * 2 }\nout", "(n = 6L)"),
+        ("out <- rep(0, n)\nfor (i in 1:n) { if (i == 4L) out <- c(list(), out); out[[i]] <- i * 2 }\nout", "(n = 6L)", false),
         // Nested loops with break and next.
-        ("s <- 0\nfor (i in 1:n) { for (j in 1:i) { if (j == 3L) next; if (s > 40) break; s <- s + j } }\ns", "(n = 9L)"),
+        ("s <- 0\nfor (i in 1:n) { for (j in 1:i) { if (j == 3L) next; if (s > 40) break; s <- s + j } }\ns", "(n = 9L)", false),
         // A loop condition that becomes NA, which is an error.
-        ("x <- 1\nwhile (x < 10) { x <- x * 2; if (x > 6) x <- NA }\nx", "(n = 1L)"),
+        ("x <- 1\nwhile (x < 10) { x <- x * 2; if (x > 6) x <- NA }\nx", "(n = 1L)", true),
+        // Growing a vector past its end, which tier 0 does with the frame written back.
+        ("x <- c()\nfor (i in 1:n) x[i] <- i * 2\nx", "(n = 5L)", false),
+        // A `next` inside `switch`, which leaves compiled code from a nested evaluation.
+        ("s <- 0\nfor (i in 1:n) { s <- s + 1; if (i %% 2 == 0) switch(\"a\", a = next) }\ns", "(n = 3000L)", false),
     ];
     with_interpreter(|| {
-        for (case, (body, call)) in seeds.iter().enumerate() {
+        for (case, (body, call, fails)) in seeds.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled) = unsafe { outcomes(1_000_000 + case, body, call) };
+            assert_eq!(reference == "error", *fails, "seed {case} gave {reference}");
             for (run, outcome) in compiled.iter().enumerate() {
                 assert_eq!(&reference, outcome, "seed {case}, call {}: f{call} with body\n{body}", run + 1);
             }
@@ -154,7 +161,7 @@ fn program(rng: &mut SplitMix64) -> String {
             1 => format!("t <- 0L\nwhile (t < {}L) {{ t <- t + 1L; s <- {} }}", rng.below(5), expression(rng, 2)),
             2 => "for (x in v) s <- s + x".to_owned(),
             3 => format!("for (i in seq_along(v)) v[i] <- v[i] * {}", leaf(rng)),
-            4 => format!("w <- numeric(n)\nfor (i in 1:n) w[i] <- i + {}\ns <- s + w[n]", leaf(rng)),
+            4 => format!("w <- rep(0, n)\nfor (i in 1:n) w[i] <- i + {}\ns <- s + w[n]", leaf(rng)),
             5 => format!(
                 "for (i in 1:n) total <- total + {}\ns <- {}",
                 ["i", "1L", "2147483000L"][rng.below(3)],

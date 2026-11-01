@@ -540,8 +540,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.flush_all(before, failed);
                 self.builder.ins().iconst(I32, 1)
             }
-            Effect::PureUnlessObjects => {
-                let mut any = self.builder.ins().iconst(I32, 0);
+            Effect::PureUnlessObserved => {
+                let mut any = self
+                    .call(runtime::jit_handlers_present as *const () as usize, &[], Some(I32), &[])
+                    .ok_or(Refusal("a helper without a result"))?;
                 for &register in objects {
                     let value = self.load_register(register);
                     let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
@@ -578,7 +580,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         match effect {
             Effect::Pure => {}
             Effect::Opaque => self.forget_slots(),
-            Effect::PureUnlessObjects => {
+            Effect::PureUnlessObserved => {
                 let zero = self.builder.ins().iconst(I32, 0);
                 for slot in 0..self.plan.slots.len() {
                     let status = self.builder.use_var(self.statuses[slot]);
@@ -621,27 +623,13 @@ impl<'p, 'b> Translator<'p, 'b> {
         }
     }
 
-    /// Runs the instruction in tier 0 as the slow path of an inline fast path, then reads its
-    /// result as `result`. Only for instructions that run no R code on plain operands.
-    unsafe fn slow_step(&mut self, position: usize, before: &State, dst: usize, result: Ty) -> Result<Option<Value>, Refusal> {
+    /// Leaves for tier 0 at the instruction, the slow path of an inline fast path. Tier 0 then
+    /// runs it with the frame written back, so a warning handler sees every variable, and
+    /// re-enters compiled code at the next loop back edge.
+    fn hand_off(&mut self, position: usize, before: &State) {
         let pc = self.plan.insts[position].pc;
-        self.box_reads(position, before);
-        let failed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::PENDING);
-        let zero = self.builder.ins().iconst(I32, 0);
-        let status = self.call_step(pc, zero)?;
-        let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, status, outcome::OK as i64);
-        self.guard(ok, failed);
-        let value = self.load_register(dst);
-        if matches!(result, Ty::Boxed | Ty::Bottom) {
-            return Ok(None);
-        }
-        let fits = self.check(value, result);
-        let next = self.next_pc(position)?;
-        let after = self.after_with_boxed(position, Some(dst))?;
-        let live = self.plan.live.get(position + 1).cloned().unwrap_or_default();
-        let mismatch = self.deopt(next, after, live, reason::SPECULATION);
-        self.guard(fits, mismatch);
-        Ok(result.is_unboxed().then(|| self.unbox(value, result)))
+        let handoff = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::HANDOFF);
+        self.builder.ins().jump(handoff, &[]);
     }
 
     // Arithmetic.
@@ -675,10 +663,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.ins().brif(slow, slow_block, &[], join, &[]);
                 self.builder.switch_to_block(slow_block);
                 self.builder.set_cold_block(slow_block);
-                if let Some(value) = self.slow_step(position, before, dst, Ty::Int)? {
-                    self.builder.def_var(self.integers[dst], value);
-                }
-                self.builder.ins().jump(join, &[]);
+                self.hand_off(position, before);
                 self.builder.switch_to_block(join);
             }
             Numeric::Dbl => {
@@ -793,10 +778,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.ins().jump(join, &[]);
                 self.builder.switch_to_block(slow);
                 self.builder.set_cold_block(slow);
-                if let Some(value) = self.slow_step(position, before, dst, result)? {
-                    self.def_register(dst, result, value);
-                }
-                self.builder.ins().jump(join, &[]);
+                self.hand_off(position, before);
                 self.builder.switch_to_block(join);
             }
             Intrinsic::Length => {
@@ -875,10 +857,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.ins().jump(join, &[]);
                 self.builder.switch_to_block(slow);
                 self.builder.set_cold_block(slow);
-                if let Some(value) = self.slow_step(position, before, dst, Ty::Dbl)? {
-                    self.builder.def_var(self.doubles[dst], value);
-                }
-                self.builder.ins().jump(join, &[]);
+                self.hand_off(position, before);
                 self.builder.switch_to_block(join);
             }
             Intrinsic::Exp | Intrinsic::Floor | Intrinsic::Ceiling => {
@@ -1104,10 +1083,11 @@ impl<'p, 'b> Translator<'p, 'b> {
         }
         self.builder.ins().jump(join, &[]);
 
-        // Out of range: write the variable back, let tier 0 grow or reject it, and forget it.
+        // Out of range: write the frame back, since tier 0 may read any variable while it grows
+        // or rejects the vector, and forget the variable it rebinds.
         self.builder.switch_to_block(slow);
         self.builder.set_cold_block(slow);
-        self.flush_slot(before, slot, failed);
+        self.flush_all(before, failed);
         self.box_reads(position, before);
         let zero = self.builder.ins().iconst(I32, 0);
         let result = self.call_step(pc, zero)?;
