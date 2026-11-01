@@ -217,9 +217,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
     internal("system", 3, do_system),
-    internal("Cstack_info", 0, |_| unsafe {
-        values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
-    }),
+    internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
@@ -1545,6 +1543,20 @@ unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
         padded
     };
     values::set_attr(result, symbols().names, padded)
+}
+
+/// `Cstack_info()`: the size GNU R reports for an 8 MiB stack, the bytes in use (estimated from
+/// what is left of the current stack segment, which is the main stack until recursion grows
+/// past it), a stack that grows downwards, and the closure call depth.
+unsafe fn cstack_info() -> R<Sexp> {
+    const MAIN_STACK: usize = 8 * 1024 * 1024;
+    let current = stacker::remaining_stack()
+        .map_or(NA_INTEGER, |remaining| MAIN_STACK.saturating_sub(remaining) as i32);
+    let depth = crate::interp().frames.len() as i32;
+    let result = values::integer_vector(&[7969177, current, 1, depth])?;
+    let names = ["size", "current", "direction", "eval_depth"];
+    values::set_attr(result, symbols().names, values::string_vector(&names)?)?;
+    Ok(result)
 }
 
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
