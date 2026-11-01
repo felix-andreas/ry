@@ -878,7 +878,7 @@ struct CallArgument<'db> {
 }
 
 /// The packages R attaches in every session, whose exports a call can reach without `library()`.
-const DEFAULT_SEARCH_PATH: &[&str] = &[
+pub const DEFAULT_SEARCH_PATH: &[&str] = &[
     "base",
     "methods",
     "datasets",
