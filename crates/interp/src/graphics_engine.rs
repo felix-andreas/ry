@@ -14,10 +14,10 @@
 
 use {
     crate::{
-        builtins::{Arg, Call},
+        builtins::{BuiltinDef, Call, internal},
         eval, interp,
         unwind::{R, Unwind, error},
-        values::{self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string},
+        values::{self, length, nil, scalar_integer, scalar_string},
     },
     heap::{
         Marker,
@@ -26,10 +26,14 @@ use {
     std::{
         borrow::Cow,
         cell::RefCell,
-        ffi::{CStr, CString, c_char, c_int, c_uint, c_void},
+        ffi::{CString, c_char, c_int, c_uint, c_void},
         ptr::{self, null_mut},
     },
 };
+
+pub const BUILTINS: &[BuiltinDef] = &[internal("recordGraphics", 3, |call| unsafe {
+    record_graphics(call)
+})];
 
 /// `R_GE_version`: the graphics engine version ry presents, R 4.6's.
 pub const ENGINE_VERSION: c_int = 17;
@@ -47,8 +51,8 @@ pub const MAX_SYSTEMS: usize = 24;
 /// that introduced patterns, device clipping, groups and paths, and glyphs.
 const VERSION_DEFINITIONS: c_int = 13;
 const VERSION_DEVICE_CLIP: c_int = 14;
-const VERSION_GROUP: c_int = 15;
-const VERSION_GLYPHS: c_int = 16;
+pub const VERSION_GROUP: c_int = 15;
+pub const VERSION_GLYPHS: c_int = 16;
 
 pub const NULL_DEVICE_NAME: &str = "null device";
 
@@ -304,7 +308,7 @@ thread_local! {
         })
     };
     /// A failure a device written in Rust reported from inside a callback.
-    static FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static FAILURE: RefCell<Option<Unwind>> = const { RefCell::new(None) };
 }
 
 fn with_engine<T>(action: impl FnOnce(&mut Engine) -> T) -> T {
@@ -314,14 +318,18 @@ fn with_engine<T>(action: impl FnOnce(&mut Engine) -> T) -> T {
 /// Reports an error from a device callback written in Rust. The engine raises it once the
 /// callback returns.
 pub fn fail(message: impl Into<String>) {
-    let message = message.into();
+    fail_with(error(message));
+}
+
+/// Like [`fail`], for a callback that has an R error to pass on.
+pub fn fail_with(unwind: Unwind) {
     FAILURE.with(|failure| {
-        failure.borrow_mut().get_or_insert(message);
+        failure.borrow_mut().get_or_insert(unwind);
     });
 }
 
 /// Runs a call into a device or a system under the host's native boundary.
-unsafe fn guarded<T>(body: impl FnOnce() -> T) -> R<T> {
+pub(crate) unsafe fn guarded<T>(body: impl FnOnce() -> T) -> R<T> {
     let mut body = Some(body);
     let mut result = None;
     (interp().hooks.guard_native)(&mut || {
@@ -329,15 +337,15 @@ unsafe fn guarded<T>(body: impl FnOnce() -> T) -> R<T> {
             result = Some(body());
         }
     })?;
-    if let Some(message) = FAILURE.with(|failure| failure.borrow_mut().take()) {
-        return Err(error(message));
+    if let Some(unwind) = FAILURE.with(|failure| failure.borrow_mut().take()) {
+        return Err(unwind);
     }
     result.ok_or_else(|| error("a graphics device callback did not run"))
 }
 
 /// Like [`guarded`] for a callback that returns an R object, which is rooted at once because
 /// the native boundary releases the handles that kept it alive.
-unsafe fn guarded_sexp(body: impl FnOnce() -> Option<Sexp>) -> R<Sexp> {
+pub(crate) unsafe fn guarded_sexp(body: impl FnOnce() -> Option<Sexp>) -> R<Sexp> {
     let value = guarded(body)?.unwrap_or_else(nil);
     crate::heap().root(value);
     Ok(value)
@@ -364,15 +372,6 @@ pub unsafe fn trace(marker: &mut Marker<'_>) {
 }
 
 // The device table.
-
-/// Registers base graphics and binds `.Device` and `.Devices` for a session whose only device
-/// is the null device.
-pub unsafe fn initialise(base: SystemCallback) -> R<()> {
-    if with_engine(|engine| engine.systems.iter().all(Option::is_none)) {
-        register_system(base)?;
-    }
-    publish_devices()
-}
 
 /// `GEcurrentDevice`: the current device, opening `getOption("device")` when only the null
 /// device exists.
@@ -2831,11 +2830,22 @@ pub unsafe fn graphics_call(call: &Call<'_>, body: impl FnOnce() -> R<Sexp>) -> 
         if !check_state(dd)? {
             return Err(crate::unwind::error_in(call.call, "invalid graphics state"));
         }
-        let items: Vec<(Sexp, Sexp)> = call.args.iter().map(|arg| (arg.tag, arg.value)).collect();
-        let args = values::pairlist(&items, SexpType::Pairlist)?;
-        record_operation(call.op, args, dd);
+        record_call(call, dd)?;
     }
     Ok(value)
+}
+
+/// Records `call` on `dd`'s display list, as a routine does that records itself rather than
+/// through `.External.graphics`, unless recording is off or the call is being replayed.
+pub unsafe fn record_call(call: &Call<'_>, dd: *mut GEDevDesc) -> R<()> {
+    if call.call == nil() || (*dd).record_graphics == 0 {
+        return Ok(());
+    }
+    let items: Vec<(Sexp, Sexp)> = call.args.iter().map(|arg| (arg.tag, arg.value)).collect();
+    let args = values::pairlist(&items, SexpType::Pairlist)?;
+    crate::heap().root(args);
+    record_operation(call.op, args, dd);
+    Ok(())
 }
 
 /// `.Internal(recordGraphics(expr, list, env))`: evaluates `expr` with the elements of `list`
@@ -2878,9 +2888,7 @@ pub unsafe fn record_graphics(call: &Call<'_>) -> R<Sexp> {
         if !check_state(dd)? {
             return Err(error("invalid graphics state"));
         }
-        let items: Vec<(Sexp, Sexp)> = call.args.iter().map(|arg| (arg.tag, arg.value)).collect();
-        let args = values::pairlist(&items, SexpType::Pairlist)?;
-        record_operation(call.op, args, dd);
+        record_call(call, dd)?;
     }
     Ok(value)
 }

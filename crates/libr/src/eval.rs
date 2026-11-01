@@ -23,6 +23,7 @@ use {
     interp::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
+        graphics_engine,
         native::Interface,
     },
     std::ffi::{c_char, c_int, c_void},
@@ -30,7 +31,7 @@ use {
 
 /// Runs a graphics callback inside a C context, so that an R error raised from C code in it
 /// unwinds to here instead of past Rust frames.
-unsafe fn guard_native(body: &mut dyn FnMut()) -> interp::R<()> {
+unsafe fn guard_native(body: &mut dyn FnMut()) -> ApiResult<()> {
     unsafe extern "C" fn trampoline(data: *mut c_void) {
         // SAFETY: `data` is the `&mut &mut dyn FnMut()` passed below, alive for the call.
         let body = unsafe { &mut *(data as *mut &mut dyn FnMut()) };
@@ -538,10 +539,10 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     }),
     builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
     builtin(".Call.graphics", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
+        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
+        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
     }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
     builtin(".Fortran", -1, |call| unsafe {
@@ -567,7 +568,7 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     {
         return Ok(result);
     }
-    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+    if let Some(value) = builtin_libraries::try_call(call)? {
         return Ok(value);
     }
     native_call(call, kind, false)
@@ -576,7 +577,7 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
 /// `.External2`, whose routines also receive the call, the primitive and the calling
 /// environment.
 unsafe fn dot_external2(call: &Call<'_>) -> ApiResult<Sexp> {
-    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+    if let Some(value) = builtin_libraries::try_call(call)? {
         return Ok(value);
     }
     native_call(call, RoutineKind::External, true)
@@ -592,7 +593,7 @@ unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if let Some(result) = interp::native::call_base_routine(call, interface)? {
         return Ok(result);
     }
-    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+    if let Some(value) = builtin_libraries::try_call(call)? {
         return Ok(value);
     }
     native_call(call, kind, false)

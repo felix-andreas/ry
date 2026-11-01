@@ -10,7 +10,7 @@
 
 use {
     crate::{
-        builtins::Arg,
+        builtins::{Arg, Call},
         interp,
         unwind::{R, error_in},
         values::{self, length, nil, symbols},
@@ -24,10 +24,14 @@ use {
 pub type NativeFn = unsafe fn(&NativeCall<'_>) -> R<Sexp>;
 
 pub struct NativeCall<'a> {
-    /// The `.Call` (or `.External`, ...) call, for error messages.
+    /// The `.Call` (or `.External`, ...) call, for error messages. It is `NULL` while a
+    /// graphics device replays its display list.
     pub call: Sexp,
     pub args: &'a [Arg],
     pub env: Sexp,
+    /// The foreign call itself, whose primitive and arguments a graphics routine records on
+    /// the display list.
+    pub foreign: &'a Call<'a>,
 }
 
 impl NativeCall<'_> {
@@ -151,7 +155,8 @@ pub unsafe fn symbol_info(name: &str, package: Option<&str>) -> R<Option<Sexp>> 
 
 /// Runs a foreign call whose `.NAME` is a routine of a builtin library. `None` means `.NAME`
 /// is something else, which the caller resolves as native code.
-pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
+    let (call, args, env) = (foreign.call, foreign.args, foreign.env);
     let Some((first, rest)) = args.split_first() else {
         return Ok(None);
     };
@@ -204,6 +209,7 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
         call,
         args: &routine_args,
         env,
+        foreign,
     };
     if routine.3 >= 0
         && matches!(routine.1, RoutineKind::Call)

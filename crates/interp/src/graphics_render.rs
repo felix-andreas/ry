@@ -4,8 +4,20 @@
 //! as rasterized pixels.
 
 use {
-    crate::graphics::{Colour, text_width_ems},
-    std::{collections::BTreeMap, io::Write, sync::OnceLock},
+    crate::{
+        graphics::{Colour, text_width_ems},
+        graphics_engine::{
+            DevDesc, GEContext, TRANSPARENT_WHITE, add_device_named, check_device_available,
+            create_device, fail,
+        },
+        unwind::{R, error},
+    },
+    std::{
+        collections::BTreeMap,
+        ffi::{CStr, c_char, c_int},
+        io::Write,
+        sync::OnceLock,
+    },
 };
 
 /// One page of a device: its background and the shapes drawn on it, in drawing order.
@@ -76,11 +88,13 @@ pub enum Format {
     Png,
     Bmp,
     Tiff,
+    Jpeg,
+    Postscript,
 }
 
 /// Renders `pages` of a device `size` inches across into one file for PDF, or into one file
 /// per page for the others, naming page `n` by filling `file`'s `%d` conversion with `n`.
-/// Raster formats use `resolution` pixels per inch.
+/// Raster formats use `resolution` pixels per inch, and JPEG compresses at `quality`.
 pub fn write_pages(
     format: Format,
     file: &str,
@@ -88,14 +102,24 @@ pub fn write_pages(
     size: [f64; 2],
     resolution: f64,
     title: &str,
+    quality: u8,
 ) -> std::io::Result<()> {
-    if format == Format::Pdf {
-        return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
+    match format {
+        Format::Pdf => {
+            return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
+        }
+        Format::Postscript => {
+            return std::fs::write(
+                file_for_page(file, 1),
+                postscript_document(pages, size, title),
+            );
+        }
+        _ => {}
     }
     for (index, page) in pages.iter().enumerate() {
         let bytes = match format {
             Format::Svg => svg_document(page, size).into_bytes(),
-            Format::Png | Format::Bmp | Format::Tiff => {
+            Format::Png | Format::Bmp | Format::Tiff | Format::Jpeg => {
                 let pixels = rasterize(page, size, resolution)
                     .ok_or_else(|| std::io::Error::other("the page is too large to rasterize"))?;
                 match format {
@@ -103,10 +127,11 @@ pub fn write_pages(
                         .encode_png()
                         .map_err(|failure| std::io::Error::other(failure.to_string()))?,
                     Format::Bmp => bmp(&pixels),
+                    Format::Jpeg => jpeg(&pixels, resolution, quality)?,
                     _ => tiff(&pixels, resolution),
                 }
             }
-            Format::Pdf => Vec::new(),
+            Format::Pdf | Format::Postscript => Vec::new(),
         };
         std::fs::write(file_for_page(file, index + 1), bytes)?;
     }
@@ -1113,3 +1138,696 @@ fn tiff(pixmap: &tiny_skia::Pixmap, resolution: f64) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes());
     out
 }
+
+/// A baseline JPEG at `quality`, transparent pixels composited on white.
+fn jpeg(pixmap: &tiny_skia::Pixmap, resolution: f64, quality: u8) -> std::io::Result<Vec<u8>> {
+    let (Ok(width), Ok(height)) = (
+        u16::try_from(pixmap.width()),
+        u16::try_from(pixmap.height()),
+    ) else {
+        return Err(std::io::Error::other("the page is too large for JPEG"));
+    };
+    let image: Vec<u8> = rgba_rows(pixmap)
+        .iter()
+        .flat_map(|pixel| on_white(*pixel))
+        .collect();
+    let mut out = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100));
+    let density = resolution.round().clamp(1.0, f64::from(u16::MAX)) as u16;
+    encoder.set_density(jpeg_encoder::PixelDensity::dpi(density));
+    encoder
+        .encode(&image, width, height, jpeg_encoder::ColorType::Rgb)
+        .map_err(|failure| std::io::Error::other(failure.to_string()))?;
+    Ok(out)
+}
+
+// PostScript.
+
+/// A PostScript document of `pages`, each `size` inches, in points with y growing upwards as
+/// in PDF. PostScript has no transparency, so anything not fully opaque is left out, as GNU R's
+/// `postscript` device does.
+fn postscript_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
+    let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
+    let mut out = String::new();
+    out.push_str("%!PS-Adobe-3.0\n");
+    out.push_str(&format!(
+        "%%BoundingBox: 0 0 {} {}\n",
+        width.ceil(),
+        height.ceil()
+    ));
+    out.push_str(&format!("%%Title: {}\n", title.replace(['\n', '\r'], " ")));
+    out.push_str("%%Creator: R\n%%Producer: ry\n");
+    out.push_str(&format!("%%Pages: {}\n%%EndComments\n", pages.len()));
+    out.push_str("%%BeginProlog\n");
+    for (index, name) in PDF_FONTS.iter().enumerate() {
+        if index < 4 {
+            out.push_str(&format!(
+                "/{name} findfont dup length dict begin {{1 index /FID ne {{def}} {{pop pop}} \
+                 ifelse}} forall /Encoding ISOLatin1Encoding def currentdict end \
+                 /F{} exch definefont pop\n",
+                index + 1
+            ));
+        } else {
+            out.push_str(&format!(
+                "/F{} /{name} findfont definefont pop\n",
+                index + 1
+            ));
+        }
+    }
+    out.push_str("%%EndProlog\n");
+    for (index, page) in pages.iter().enumerate() {
+        out.push_str(&format!("%%Page: {0} {0}\n", index + 1));
+        postscript_page(&mut out, page);
+        out.push_str("showpage\n");
+    }
+    out.push_str("%%EOF\n");
+    out.into_bytes()
+}
+
+fn postscript_page(out: &mut String, page: &Page) {
+    let pt = |value: f64| value * POINTS_PER_INCH;
+    let opaque = |colour: Colour| alpha(colour) == 255;
+    let rgb = |colour: Colour| {
+        let [red, green, blue, _] = channels(colour);
+        format!("{} setrgbcolor", pdf_rgb(red, green, blue))
+    };
+    if opaque(page.background) {
+        out.push_str(&format!(
+            "{} 0 0 10000 10000 rectfill\n",
+            rgb(page.background)
+        ));
+    }
+    let mut current_clip: Option<Rect> = None;
+    for item in &page.items {
+        if current_clip != Some(item.clip) {
+            if current_clip.is_some() {
+                out.push_str("grestore\n");
+            }
+            let clip = item.clip;
+            out.push_str(&format!(
+                "gsave {:.2} {:.2} {:.2} {:.2} rectclip\n",
+                pt(clip.x0),
+                pt(clip.y0),
+                pt(clip.x1 - clip.x0),
+                pt(clip.y1 - clip.y0)
+            ));
+            current_clip = Some(clip);
+        }
+        let paint = |out: &mut String, fill: Option<Colour>, stroke: Option<&Stroke>| {
+            if let Some(fill) = fill {
+                out.push_str(&format!("gsave {} fill grestore\n", rgb(fill)));
+            }
+            if let Some(stroke) = stroke {
+                let dash: Vec<String> = dashes(stroke)
+                    .iter()
+                    .map(|length| format!("{:.2}", length * POINTS_PER_INCH))
+                    .collect();
+                out.push_str(&format!(
+                    "{} {:.2} setlinewidth {} setlinecap {} setlinejoin {:.2} setmiterlimit \
+                     [{}] 0 setdash stroke\n",
+                    rgb(stroke.colour),
+                    stroke.lwd * 0.75,
+                    pdf_cap(stroke.lend),
+                    pdf_join(stroke.ljoin),
+                    stroke.lmitre.max(1.0),
+                    dash.join(" ")
+                ));
+            } else {
+                out.push_str("newpath\n");
+            }
+        };
+        match &item.shape {
+            Shape::Path {
+                points,
+                closed,
+                fill,
+                stroke,
+            } => {
+                let fill = (*closed && opaque(*fill)).then_some(*fill);
+                let stroke = visible(stroke).filter(|stroke| opaque(stroke.colour));
+                if (fill.is_none() && stroke.is_none()) || points.is_empty() {
+                    continue;
+                }
+                out.push_str("newpath\n");
+                for (index, [x, y]) in points.iter().enumerate() {
+                    let operator = if index == 0 { "moveto" } else { "lineto" };
+                    out.push_str(&format!("{:.2} {:.2} {operator}\n", pt(*x), pt(*y)));
+                }
+                if *closed {
+                    out.push_str("closepath\n");
+                }
+                paint(out, fill, stroke);
+            }
+            Shape::Circle {
+                centre,
+                radius,
+                fill,
+                stroke,
+            } => {
+                let fill = opaque(*fill).then_some(*fill);
+                let stroke = visible(stroke).filter(|stroke| opaque(stroke.colour));
+                if fill.is_none() && stroke.is_none() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "newpath {:.2} {:.2} {:.2} 0 360 arc closepath\n",
+                    pt(centre[0]),
+                    pt(centre[1]),
+                    pt(*radius)
+                ));
+                paint(out, fill, stroke);
+            }
+            Shape::Text {
+                origin,
+                text,
+                points,
+                font,
+                rotation,
+                hadj,
+                colour,
+            } => {
+                if !opaque(*colour) || text.is_empty() {
+                    continue;
+                }
+                let face = if (1..=5).contains(font) { *font } else { 1 };
+                let width = text_width_ems(text, face) * points;
+                out.push_str(&format!(
+                    "gsave {} /F{face} findfont {points:.2} scalefont setfont {:.2} {:.2} \
+                     translate {rotation:.2} rotate {:.2} 0 moveto ({}) show grestore\n",
+                    rgb(*colour),
+                    pt(origin[0]),
+                    pt(origin[1]),
+                    -hadj * width,
+                    pdf_string(text)
+                ));
+            }
+        }
+    }
+    if current_clip.is_some() {
+        out.push_str("grestore\n");
+    }
+}
+
+// The built-in devices.
+
+/// What a built-in device is opened with.
+pub struct DeviceSpec {
+    pub name: &'static str,
+    pub file: Option<String>,
+    /// What closing the device writes; a device with none (`xfig`, `pictex`) writes nothing.
+    pub format: Option<Format>,
+    /// Width and height in inches.
+    pub size: [f64; 2],
+    /// The size of a device unit in inches: a big point for vector devices, a pixel for
+    /// bitmap ones.
+    pub unit_inches: f64,
+    /// Whether device y coordinates grow downwards, as in a bitmap.
+    pub y_down: bool,
+    pub pointsize: f64,
+    pub bg: Colour,
+    pub fg: Colour,
+    pub title: String,
+    pub quality: u8,
+}
+
+/// A built-in device's own state, which its `DevDesc` points to: the pages drawn so far,
+/// which closing the device renders, in inches from the bottom-left corner.
+struct RenderDevice {
+    format: Option<Format>,
+    file: Option<String>,
+    size: [f64; 2],
+    unit_inches: f64,
+    y_down: bool,
+    pages: Vec<Page>,
+    clip: Rect,
+    title: String,
+    quality: u8,
+}
+
+/// Opens a built-in device as an engine device and makes it current. A vector device creates
+/// its file at once; a bitmap device writes one file per page and so none until it draws.
+pub unsafe fn open_device(spec: DeviceSpec) -> R<()> {
+    if !(spec.size[0] > 0.0 && spec.size[1] > 0.0)
+        || !spec.pointsize.is_finite()
+        || spec.pointsize <= 0.0
+    {
+        return Err(error(format!("unable to start {} device", spec.name)));
+    }
+    check_device_available()?;
+    let bitmap = matches!(
+        spec.format,
+        Some(Format::Png | Format::Bmp | Format::Tiff | Format::Jpeg)
+    ) || spec.y_down;
+    if !bitmap
+        && let Some(path) = spec
+            .file
+            .as_deref()
+            .filter(|file| !file.starts_with('|'))
+            .map(|file| file_for_page(file, 1))
+    {
+        std::fs::File::create(&path).map_err(|_| error(format!("cannot open file '{path}'")))?;
+    }
+    let dev = libc::calloc(1, std::mem::size_of::<DevDesc>()).cast::<DevDesc>();
+    if dev.is_null() {
+        return Err(error(format!("unable to start {} device", spec.name)));
+    }
+    let unit = spec.unit_inches;
+    let [width, height] = spec.size.map(|inches| inches / unit);
+    let (bottom, top) = if spec.y_down {
+        (height, 0.0)
+    } else {
+        (0.0, height)
+    };
+    let d = &mut *dev;
+    d.left = 0.0;
+    d.right = width;
+    d.bottom = bottom;
+    d.top = top;
+    d.clip_left = 0.0;
+    d.clip_right = width;
+    d.clip_bottom = bottom;
+    d.clip_top = top;
+    d.x_char_offset = 0.4900;
+    d.y_char_offset = 0.3333;
+    d.y_line_bias = 0.2;
+    d.ipr = [unit, unit];
+    d.cra = [
+        0.9 * spec.pointsize / 72.0 / unit,
+        1.2 * spec.pointsize / 72.0 / unit,
+    ];
+    d.gamma = 1.0;
+    d.can_clip = 1;
+    d.can_change_gamma = 0;
+    d.can_hadj = 2;
+    d.startps = spec.pointsize;
+    d.startcol = spec.fg as c_int;
+    d.startfill = spec.bg as c_int;
+    d.startlty = 0;
+    d.startfont = 1;
+    d.startgamma = 1.0;
+    d.display_list_on = 0;
+    d.circle = Some(device_circle);
+    d.clip = Some(device_clip);
+    d.close = Some(device_close);
+    d.line = Some(device_line);
+    d.metric_info = Some(device_metric_info);
+    d.new_page = Some(device_new_page);
+    d.polygon = Some(device_polygon);
+    d.polyline = Some(device_polyline);
+    d.rect = Some(device_rect);
+    d.path = Some(device_path);
+    d.size = Some(device_size);
+    d.str_width = Some(device_str_width);
+    d.text = Some(device_text);
+    d.has_text_utf8 = 0;
+    d.want_symbol_utf8 = 0;
+    d.use_rotated_text_in_contour = 0;
+    d.have_transparency = if spec.format == Some(Format::Postscript) {
+        1
+    } else {
+        2
+    };
+    d.have_transparent_bg = if bitmap && spec.format != Some(Format::Png) {
+        1
+    } else {
+        2
+    };
+    d.have_raster = 1;
+    d.have_capture = 1;
+    d.have_locator = 1;
+    d.device_version = 0;
+    d.device_clip = 0;
+    d.device_specific = Box::into_raw(Box::new(RenderDevice {
+        format: spec.format,
+        file: spec.file.clone(),
+        size: spec.size,
+        unit_inches: unit,
+        y_down: spec.y_down,
+        pages: Vec::new(),
+        clip: Rect {
+            x0: 0.0,
+            x1: spec.size[0],
+            y0: 0.0,
+            y1: spec.size[1],
+        },
+        title: spec.title,
+        quality: spec.quality,
+    }))
+    .cast();
+    let dd = create_device(dev)?;
+    add_device_named(dd, spec.name, spec.file.as_deref())
+}
+
+unsafe fn render_device<'a>(dd: *mut DevDesc) -> &'a mut RenderDevice {
+    &mut *(*dd).device_specific.cast::<RenderDevice>()
+}
+
+impl RenderDevice {
+    fn point(&self, x: f64, y: f64) -> [f64; 2] {
+        let y = y * self.unit_inches;
+        [
+            x * self.unit_inches,
+            if self.y_down { self.size[1] - y } else { y },
+        ]
+    }
+
+    fn push(&mut self, shape: Shape) {
+        if self.pages.is_empty() {
+            self.pages.push(Page {
+                background: TRANSPARENT_WHITE as Colour,
+                items: Vec::new(),
+            });
+        }
+        let clip = self.clip;
+        if let Some(page) = self.pages.last_mut() {
+            page.items.push(Item { clip, shape });
+        }
+    }
+}
+
+/// The stroke a context describes, converting the engine's line end and join codes, which
+/// count from 1, to `par`'s, which count from 0.
+fn stroke(gc: &GEContext) -> Option<Stroke> {
+    Some(Stroke {
+        colour: gc.col as Colour,
+        lwd: gc.lwd,
+        lty: gc.lty as u32,
+        lend: gc.lend - 1,
+        ljoin: gc.ljoin - 1,
+        lmitre: gc.lmitre,
+    })
+}
+
+/// The text size a context asks for, in points.
+fn text_points(gc: &GEContext) -> f64 {
+    gc.ps * gc.cex
+}
+
+unsafe extern "C" fn device_circle(x: f64, y: f64, r: f64, gc: *const GEContext, dd: *mut DevDesc) {
+    let device = render_device(dd);
+    let gc = &*gc;
+    let centre = device.point(x, y);
+    let radius = r * device.unit_inches;
+    device.push(Shape::Circle {
+        centre,
+        radius,
+        fill: gc.fill as Colour,
+        stroke: stroke(gc),
+    });
+}
+
+unsafe extern "C" fn device_clip(x0: f64, x1: f64, y0: f64, y1: f64, dd: *mut DevDesc) {
+    let device = render_device(dd);
+    let [a0, b0] = device.point(x0, y0);
+    let [a1, b1] = device.point(x1, y1);
+    device.clip = Rect {
+        x0: a0.min(a1),
+        x1: a0.max(a1),
+        y0: b0.min(b1),
+        y1: b0.max(b1),
+    };
+}
+
+/// Renders the pages into the device's file and frees the device's own state; the engine
+/// frees the `DevDesc`.
+unsafe extern "C" fn device_close(dd: *mut DevDesc) {
+    let device = Box::from_raw((*dd).device_specific.cast::<RenderDevice>());
+    (*dd).device_specific = std::ptr::null_mut();
+    let (Some(format), Some(file)) = (device.format, device.file.as_deref()) else {
+        return;
+    };
+    if file.starts_with('|') {
+        return;
+    }
+    if let Err(failure) = write_pages(
+        format,
+        file,
+        &device.pages,
+        device.size,
+        1.0 / device.unit_inches,
+        &device.title,
+        device.quality,
+    ) {
+        fail(format!(
+            "cannot write file '{}': {failure}",
+            file_for_page(file, 1)
+        ));
+    }
+}
+
+unsafe extern "C" fn device_line(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let device = render_device(dd);
+    let points = vec![device.point(x1, y1), device.point(x2, y2)];
+    device.push(Shape::Path {
+        points,
+        closed: false,
+        fill: TRANSPARENT_WHITE as Colour,
+        stroke: stroke(&*gc),
+    });
+}
+
+/// The ascent, descent and width of character `c` (or of the font when `c` is 0) from the
+/// Helvetica metrics; a negative `c` is a Unicode code point.
+unsafe extern "C" fn device_metric_info(
+    c: c_int,
+    gc: *const GEContext,
+    ascent: *mut f64,
+    descent: *mut f64,
+    width: *mut f64,
+    dd: *mut DevDesc,
+) {
+    let device = render_device(dd);
+    let gc = &*gc;
+    let bold = gc.fontface == 2 || gc.fontface == 4;
+    let scale = text_points(gc) / 72.0 / device.unit_inches / 1000.0;
+    let code = c.unsigned_abs();
+    let (up, down, across) = if code == 0 {
+        if bold {
+            (962.0, 228.0, 0.0)
+        } else {
+            (931.0, 225.0, 0.0)
+        }
+    } else if (32..=126).contains(&code) {
+        let index = (code - 32) as usize;
+        let (ascents, descents) = if bold {
+            (&HELVETICA_BOLD_ASCENTS, &HELVETICA_BOLD_DESCENTS)
+        } else {
+            (&HELVETICA_ASCENTS, &HELVETICA_DESCENTS)
+        };
+        let character = char::from_u32(code).map_or_else(String::new, String::from);
+        (
+            f64::from(ascents[index]),
+            f64::from(descents[index]),
+            text_width_ems(&character, gc.fontface) * 1000.0,
+        )
+    } else {
+        let character = char::from_u32(code).map_or_else(String::new, String::from);
+        (718.0, 0.0, text_width_ems(&character, gc.fontface) * 1000.0)
+    };
+    *ascent = up * scale;
+    *descent = down * scale;
+    *width = across * scale;
+}
+
+/// Starts a page filled with the context's fill, or with the device's background when the
+/// fill is transparent.
+unsafe extern "C" fn device_new_page(gc: *const GEContext, dd: *mut DevDesc) {
+    let background = if alpha((*gc).fill as Colour) > 0 {
+        (*gc).fill
+    } else {
+        (*dd).startfill
+    };
+    let device = render_device(dd);
+    device.pages.push(Page {
+        background: background as Colour,
+        items: Vec::new(),
+    });
+    device.clip = Rect {
+        x0: 0.0,
+        x1: device.size[0],
+        y0: 0.0,
+        y1: device.size[1],
+    };
+}
+
+unsafe fn device_points(
+    device: &RenderDevice,
+    n: c_int,
+    x: *mut f64,
+    y: *mut f64,
+) -> Vec<[f64; 2]> {
+    let count = usize::try_from(n).unwrap_or(0);
+    if count == 0 || x.is_null() || y.is_null() {
+        return Vec::new();
+    }
+    let x = std::slice::from_raw_parts(x, count);
+    let y = std::slice::from_raw_parts(y, count);
+    x.iter().zip(y).map(|(x, y)| device.point(*x, *y)).collect()
+}
+
+unsafe extern "C" fn device_polygon(
+    n: c_int,
+    x: *mut f64,
+    y: *mut f64,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let device = render_device(dd);
+    let points = device_points(device, n, x, y);
+    device.push(Shape::Path {
+        points,
+        closed: true,
+        fill: (*gc).fill as Colour,
+        stroke: stroke(&*gc),
+    });
+}
+
+unsafe extern "C" fn device_polyline(
+    n: c_int,
+    x: *mut f64,
+    y: *mut f64,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let device = render_device(dd);
+    let points = device_points(device, n, x, y);
+    device.push(Shape::Path {
+        points,
+        closed: false,
+        fill: TRANSPARENT_WHITE as Colour,
+        stroke: stroke(&*gc),
+    });
+}
+
+unsafe extern "C" fn device_rect(
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let device = render_device(dd);
+    let points = vec![
+        device.point(x0, y0),
+        device.point(x1, y0),
+        device.point(x1, y1),
+        device.point(x0, y1),
+    ];
+    device.push(Shape::Path {
+        points,
+        closed: true,
+        fill: (*gc).fill as Colour,
+        stroke: stroke(&*gc),
+    });
+}
+
+/// Draws each subpath as its own polygon. The renderer has no compound paths, so a subpath
+/// that should cut a hole in another is filled instead.
+unsafe extern "C" fn device_path(
+    x: *mut f64,
+    y: *mut f64,
+    npoly: c_int,
+    nper: *mut c_int,
+    _winding: c_int,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let count = usize::try_from(npoly).unwrap_or(0);
+    if count == 0 || nper.is_null() {
+        return;
+    }
+    let mut offset = 0usize;
+    for &points in std::slice::from_raw_parts(nper, count) {
+        device_polygon(points, x.add(offset), y.add(offset), gc, dd);
+        offset += usize::try_from(points).unwrap_or(0);
+    }
+}
+
+unsafe extern "C" fn device_size(
+    left: *mut f64,
+    right: *mut f64,
+    bottom: *mut f64,
+    top: *mut f64,
+    dd: *mut DevDesc,
+) {
+    *left = (*dd).left;
+    *right = (*dd).right;
+    *bottom = (*dd).bottom;
+    *top = (*dd).top;
+}
+
+unsafe extern "C" fn device_str_width(
+    text: *const c_char,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) -> f64 {
+    let device = render_device(dd);
+    let text = CStr::from_ptr(text).to_string_lossy();
+    text_width_ems(&text, (*gc).fontface) * text_points(&*gc) / 72.0 / device.unit_inches
+}
+
+unsafe extern "C" fn device_text(
+    x: f64,
+    y: f64,
+    text: *const c_char,
+    rot: f64,
+    hadj: f64,
+    gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let device = render_device(dd);
+    let origin = device.point(x, y);
+    let text = CStr::from_ptr(text).to_string_lossy().into_owned();
+    let gc = &*gc;
+    device.push(Shape::Text {
+        origin,
+        text,
+        points: text_points(gc),
+        font: gc.fontface,
+        rotation: rot,
+        hadj,
+        colour: gc.col as Colour,
+    });
+}
+
+/// The top of each character from space to `~` in Helvetica, in thousandths of an em above the
+/// baseline (the AFM bounding box's top).
+const HELVETICA_ASCENTS: [i16; 95] = [
+    0, 718, 718, 688, 775, 703, 718, 718, 733, 733, 718, 505, 106, 322, 106, 737, 703, 703, 703,
+    703, 703, 688, 703, 688, 703, 703, 516, 516, 495, 390, 495, 727, 737, 718, 718, 737, 718, 718,
+    718, 737, 718, 718, 718, 718, 718, 718, 718, 737, 718, 737, 718, 737, 718, 718, 718, 718, 718,
+    718, 718, 722, 737, 722, 688, -75, 725, 538, 718, 538, 718, 538, 728, 538, 718, 718, 718, 718,
+    718, 538, 538, 538, 538, 538, 538, 538, 669, 523, 523, 523, 523, 523, 523, 722, 775, 722, 326,
+];
+
+/// How far each character reaches below the baseline in Helvetica, in thousandths of an em
+/// (the AFM bounding box's bottom, negated).
+const HELVETICA_DESCENTS: [i16; 95] = [
+    0, 0, -463, 0, 115, 19, 15, -463, 207, 207, -431, 0, 147, -232, 0, 19, 19, 0, 0, 19, 0, 19, 19,
+    0, 19, 19, 0, 147, -11, -115, -11, 0, 19, 0, 0, 19, 0, 0, 0, 19, 0, 0, 19, 0, 0, 0, 0, 19, 0,
+    56, 0, 19, 0, 19, 0, 0, 0, 0, 0, 196, 19, 196, -264, 125, -470, 15, 15, 15, 15, 15, 0, 220, 0,
+    0, 210, 0, 0, 0, 0, 14, 207, 207, 0, 15, 7, 15, 0, 0, 0, 214, 0, 196, 225, 196, -180,
+];
+
+const HELVETICA_BOLD_ASCENTS: [i16; 95] = [
+    0, 718, 718, 698, 775, 710, 718, 718, 734, 734, 718, 506, 146, 345, 146, 737, 710, 710, 710,
+    710, 710, 698, 710, 698, 710, 710, 512, 512, 514, 419, 514, 727, 737, 718, 718, 737, 718, 718,
+    718, 737, 718, 718, 718, 718, 718, 718, 718, 737, 718, 737, 718, 737, 718, 718, 718, 718, 718,
+    718, 718, 722, 737, 722, 698, -75, 727, 546, 718, 546, 718, 546, 727, 546, 718, 725, 725, 718,
+    718, 546, 546, 546, 546, 546, 546, 546, 676, 532, 532, 532, 532, 532, 532, 722, 775, 722, 343,
+];
+
+const HELVETICA_BOLD_DESCENTS: [i16; 95] = [
+    0, 0, -447, 0, 115, 19, 19, -445, 208, 208, -387, 0, 168, -215, 0, 19, 19, 0, 0, 19, 0, 19, 19,
+    0, 19, 19, 0, 168, 8, -87, 8, 0, 19, 0, 0, 19, 0, 0, 0, 19, 0, 0, 18, 0, 0, 0, 0, 19, 0, 52, 0,
+    19, 0, 19, 0, 0, 0, 0, 0, 196, 19, 196, -323, 125, -454, 14, 14, 14, 14, 14, 0, 217, 0, 0, 214,
+    0, 0, 0, 0, 14, 207, 207, 0, 14, 6, 14, 0, 0, 0, 214, 0, 196, 225, 196, -163,
+];

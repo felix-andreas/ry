@@ -245,6 +245,7 @@ pub(crate) unsafe fn install_all() {
         crate::utils::BUILTINS,
         crate::records::BUILTINS,
         crate::arrays::BUILTINS,
+        crate::graphics_engine::BUILTINS,
         library,
     ] {
         // `register` lets a later definition replace an earlier one, which the host relies on;
