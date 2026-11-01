@@ -62,9 +62,9 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), object sizes and hash tables. `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+device list, text metrics), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
 
-The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()`; `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
+The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
 The second engine is anything that implements the `Engine` trait. `ProcessEngine` covers a
 command line: it is invoked as `<command…> <script> <report>`, must print the script's output
@@ -105,6 +105,25 @@ first if you rebuild while a long run is going.
 
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
 measures the container, not ry. `MEMORY.md` records the current rate.
+
+## Running against another GNU R
+
+The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,
+which is how to compare against a newer R installed beside the system one, for example with
+[rig](https://github.com/r-lib/rig) (`rig add 4.6` installs under `/opt/R/<version>`):
+
+```sh
+ORACLE_R=/opt/R/4.6.2/bin/R just oracle verify            # the single-file cases
+ORACLE_RSCRIPT=/opt/R/4.6.2/bin/Rscript just oracle packages   # the package corpus
+```
+
+`ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
+The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs: `verify` under
+4.6.2 passes 90 of 105 cases against 102 of 105 under 4.3.3, mostly in `stats`, `s4` and printing.
+Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing rig puts its
+`R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in `/usr/local/bin` to keep
+the system R as the default. Whether ry's own runtime can load the newer R's base library through
+`R_HOME` is untested.
 
 ## The benchmark generator
 

@@ -1,6 +1,6 @@
 //! The tools package's native routines: checksums, the text scanners behind package checks,
-//! format strings, file permissions and processes. Rd and LaTeX parsing and the help server
-//! are not available yet and fail with a clear error.
+//! format strings, file permissions and processes. Rd parsing lives in `rd`; LaTeX parsing and
+//! the help server are not available yet and fail with a clear error.
 
 use crate::{
     builtin_libraries::{NativeCall, NativeFn},
@@ -28,12 +28,8 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     // The help server cannot start, so `startDynamicHelp` warns and carries on without it.
     ("startHTTPD", |_| unsafe { scalar_integer(-1) }),
     ("stopHTTPD", |_| Ok(nil())),
-    ("parseRd", |_| {
-        Err(error("parsing Rd files is not supported in ry yet"))
-    }),
-    ("deparseRd", |_| {
-        Err(error("deparsing Rd is not supported in ry yet"))
-    }),
+    ("parseRd", crate::rd::parse_rd),
+    ("deparseRd", crate::rd::deparse_rd),
     ("parseLatex", |_| {
         Err(error("parsing LaTeX is not supported in ry yet"))
     }),

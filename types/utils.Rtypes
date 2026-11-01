@@ -6,10 +6,12 @@
 # Prefix/suffix of the argument: type-preserving returns, but the arity and `n =` formal are real.
 # Taking a slice of a list keeps its names, so the named candidate comes ahead of
 # the plain list one.
+head : fn(x: factor, [n]: integer) -> factor
 head : <T> fn(x: T[], [n]: integer) -> T[]
 head : <T> fn(x: list[named: T], [n]: integer) -> list[named: T]
 head : <T> fn(x: list[T], [n]: integer) -> list[T]
 head : fn(x: Any, [n]: Any) -> Any
+tail : fn(x: factor, [n]: integer) -> factor
 tail : <T> fn(x: T[], [n]: integer) -> T[]
 tail : <T> fn(x: list[named: T], [n]: integer) -> list[named: T]
 tail : <T> fn(x: list[T], [n]: integer) -> list[T]

@@ -383,9 +383,15 @@ fn dense(
         (first_rows, states)
     };
     let threads = THREAD_POOL.current_num_threads().max(1);
+    // A sum of doubles must add a group's values in row order, as data.table does, and merging
+    // the partial sums of several runs would round differently and depend on the thread count.
+    let ordered = aggregations.iter().any(|aggregation| {
+        matches!(aggregation.function, Function::Sum | Function::Mean)
+            && matches!(aggregation.input, Input::Double { .. })
+    });
     // Each thread holds states for every code and they merge serially, which pays off only
     // when the rows outnumber the threads' states.
-    if height < PARALLEL_ROWS || threads == 1 || radix.saturating_mul(threads) > height {
+    if ordered || height < PARALLEL_ROWS || threads == 1 || radix.saturating_mul(threads) > height {
         let (first_rows, states) = run(0, height);
         return Grouping {
             first_rows,

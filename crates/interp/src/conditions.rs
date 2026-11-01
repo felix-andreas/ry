@@ -125,6 +125,29 @@ unsafe fn call_simple_error_handler(handler: Sexp, message: &str, call: Sexp) ->
     Ok(())
 }
 
+/// Runs `body` as `tryCatch(body, condition = function(c) NULL)` would, but without signalling
+/// past it: an error, warning or other condition raised inside ends `body` and gives `None`,
+/// and no handler established outside ever sees it.
+pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
+    let target = values::new_env(nil())?;
+    let saved = interp().handlers.clone();
+    interp().handlers = Some(Rc::new(Handler {
+        class: values::mkchar("condition")?,
+        handler: nil(),
+        calling: false,
+        parent_env: nil(),
+        target,
+        next: saved.clone(),
+    }));
+    let result = body();
+    interp().handlers = saved;
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Unwind::Jump(caught)) if matches!(*caught, Jump::Return { env, .. } if env == target) => Ok(None),
+        Err(unwind) => Err(unwind),
+    }
+}
+
 unsafe fn exiting_result(condition: Sexp, call: Sexp, handler: Sexp) -> R<Sexp> {
     list_vector(&[condition, call, handler])
 }
@@ -154,7 +177,10 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     if show {
         write_console(text.as_bytes(), true);
         let calls_option = crate::envir::get_option("showErrorCalls");
-        if values::as_logical_scalar(calls_option) == 1 || std::env::var_os("RY_TRACEBACK").is_some() {
+        // GNU R prints no traceback for an error without a call, such as a variable missing in
+        // top-level code that a callee forced.
+        let traceback_wanted = values::as_logical_scalar(calls_option) == 1 && call != nil();
+        if traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some() {
             if let Some(traceback) = concise_traceback(call) {
                 write_console(format!("Calls: {traceback}\n").as_bytes(), true);
             }

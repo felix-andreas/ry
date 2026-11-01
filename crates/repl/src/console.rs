@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_uchar};
-use std::io::{Write, stderr, stdout};
+use std::io::{BufRead, IsTerminal, Write, stderr, stdin, stdout};
 use std::panic::catch_unwind;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -170,6 +170,7 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
             filter,
             held: false,
             ry_runtime,
+            piped: !stdin().is_terminal(),
         });
     });
     Ok(())
@@ -209,6 +210,10 @@ struct Console {
     held: bool,
     /// Driving ry's own runtime, whose console reads only at the top-level prompt.
     ry_runtime: bool,
+    /// Standard input is not a terminal, so lines are read from it as they come, without the
+    /// editor (which needs a terminal that answers cursor queries) and without a prompt, as
+    /// `R --no-echo` reads a pipe.
+    piped: bool,
 }
 
 /// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
@@ -264,7 +269,12 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             };
             // Input for `readline()`, `menu()` or the browser must reach them untouched.
             let at_top_level = console.ry_runtime || libr::at_top_level();
-            match console.editor.read_line(&RPrompt { text: prompt_text }) {
+            let signal = if console.piped {
+                Ok(read_piped_line())
+            } else {
+                console.editor.read_line(&RPrompt { text: prompt_text })
+            };
+            match signal {
                 Ok(Signal::Success(line)) => {
                     let line = normalize_line_endings(&line);
                     let line = match console.filter.as_mut() {
@@ -312,6 +322,15 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         unsafe { *buffer.add(written) = 0 };
         1
     })
+}
+
+/// One line of piped input, or end-of-input when the pipe closes or cannot be read.
+fn read_piped_line() -> Signal {
+    let mut line = String::new();
+    match stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => Signal::CtrlD,
+        Ok(_) => Signal::Success(line.trim_end_matches(['\n', '\r']).to_owned()),
+    }
 }
 
 /// The `R_WriteConsoleEx` hook: `output_type` 0 is regular output, anything else

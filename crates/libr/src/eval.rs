@@ -1155,6 +1155,7 @@ pub unsafe extern "C" fn ry_run(
             }
         };
     }
+    interp::session::finish();
     crate::boundary::run_pending_finalizers();
     crate::extptr::R_RunExitFinalizers();
     use std::io::Write;
@@ -1169,12 +1170,16 @@ pub unsafe extern "C" fn ry_run(
 /// boundaries. Off when the project turns inline annotations off.
 pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
 
+/// Set when S4, R6 and Reference Class definitions in user code are allowed.
+pub const RUN_FLAG_OBJECT_SYSTEMS: c_int = 1 << 1;
+
 /// Every flag `ry_run` and `ry_repl` understand.
-pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS;
+pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
+    interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
 }
 
 /// Reads one chunk of console input after showing `prompt`: writes at most `length - 1` bytes
@@ -1230,6 +1235,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
             prompt = std::ffi::CString::default();
         }
     });
+    interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
 }

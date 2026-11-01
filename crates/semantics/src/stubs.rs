@@ -545,9 +545,11 @@ fn collect_unknown_nominals<'db>(
 /// The declared name of an `@alias` line or a generic `@type NAME<T, ...>` line. A plain
 /// `@type NAME` is the older opaque form, handled on its own.
 fn definition_line_name(content: &str) -> Option<&str> {
-    let rest = content
-        .strip_prefix("@alias")
-        .or_else(|| content.strip_prefix("@type").filter(|rest| rest.contains('<')))?;
+    let rest = content.strip_prefix("@alias").or_else(|| {
+        content
+            .strip_prefix("@type")
+            .filter(|rest| rest.contains('<'))
+    })?;
     let rest = rest.trim_start();
     let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
     let name = &rest[..end];
@@ -600,10 +602,15 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
-/// Depth-zero only, so `list[a: b]` keeps its interior colon.
+/// Depth-zero only, so `list[a: b]` keeps its interior colon. The brackets of a subset method's
+/// name (`[.factor`) are part of the name, not a nesting level.
 fn top_level_colon(content: &str) -> Option<usize> {
+    let name_brackets = SUBSET_METHOD_PREFIXES
+        .iter()
+        .find(|prefix| content.starts_with(&format!("{prefix}.")))
+        .map_or(0, |prefix| prefix.len());
     let mut depth: usize = 0;
-    for (byte_index, character) in content.char_indices() {
+    for (byte_index, character) in content.char_indices().skip(name_brackets) {
         match character {
             '(' | '[' | '{' | '<' => depth += 1,
             ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
@@ -628,6 +635,7 @@ fn is_stub_name(name: &str) -> bool {
     }
     OPERATOR_METHOD_PREFIXES
         .iter()
+        .chain(&SUBSET_METHOD_PREFIXES)
         .filter_map(|operator| name.strip_prefix(operator))
         .any(|suffix| suffix.strip_prefix('.').is_some_and(is_nominal_name))
 }
@@ -647,6 +655,9 @@ fn is_nominal_name(name: &str) -> bool {
 const OPERATOR_METHOD_PREFIXES: [&str; 13] = [
     "%/%", "%%", "<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "<", ">",
 ];
+
+/// `[.factor` and `[[.factor` say which class a subset of the nominal keeps. Longest first.
+const SUBSET_METHOD_PREFIXES: [&str; 2] = ["[[", "["];
 
 pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
     StubSources::new(db, shipped_stub_sources(), shipped_export_manifests())
@@ -678,7 +689,7 @@ mod tests {
         assert!(library.nominals.contains("data.frame"));
         assert_eq!(
             library.schemes["sum"].len(),
-            3,
+            5,
             "sum keeps its ordered overload candidates"
         );
         assert_eq!(library.schemes["length"].len(), 1);
@@ -693,7 +704,12 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let library = stubs(&db).expect("the shipped stubs are installed");
         assert!(library.schemes.contains_key("Result.map"));
-        assert!(library.type_definitions.keys().any(|name| name.text(&db) == "Result"));
+        assert!(
+            library
+                .type_definitions
+                .keys()
+                .any(|name| name.text(&db) == "Result")
+        );
         assert_eq!(declaring_namespace(&db, "Dict"), Some(STANDARD_LIBRARY));
     }
 
@@ -717,12 +733,13 @@ mod tests {
 
     /// A dispatch target for operator lookup (`+.Date`, `Compare.Date`), not an exported name.
     fn is_operator_method_name(name: &str) -> bool {
-        const GROUP_GENERICS: [&str; 3] = ["Arith.", "Compare.", "Ops."];
+        const GROUP_GENERICS: [&str; 4] = ["Arith.", "Compare.", "Ops.", "Summary."];
         GROUP_GENERICS
             .iter()
             .any(|group| name.starts_with(group) && name.len() > group.len())
             || OPERATOR_METHOD_PREFIXES
                 .iter()
+                .chain(&SUBSET_METHOD_PREFIXES)
                 .filter_map(|operator| name.strip_prefix(operator))
                 .any(|suffix| suffix.starts_with('.') && suffix.len() > 1)
     }
@@ -1070,18 +1087,17 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_argument_falls_back_to_the_general_candidate() {
+    fn an_open_argument_the_candidates_narrow_differently_stays_unchecked() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         let check = first_item_check(&db, "f <- function(x) sum(x)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = check.scheme.clone().expect("scheme");
-        assert_eq!(
-            scheme.binders.len(),
-            1,
-            "the parameter must stay generic: {scheme:?}"
-        );
-        assert!(matches!(scheme_return(&db, &check).kind(&db), TyKind::Any));
+        assert!(scheme.binders.is_empty(), "{scheme:?}");
+        assert!(matches!(
+            scheme_return(&db, &check).kind(&db),
+            TyKind::Unknown
+        ));
     }
 
     #[test]

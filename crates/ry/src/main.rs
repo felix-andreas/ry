@@ -234,10 +234,12 @@ fn main() -> ExitCode {
 }
 
 /// With inline annotations turned off they are erased and nothing checks them, at run time
-/// as in analysis.
+/// as in analysis. With object systems turned off, user code cannot define S4, R6 or Reference
+/// Classes.
 fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     repl::RuntimeFlags {
         annotation_checks: config.check.inline_annotations,
+        object_systems: config.check.object_systems,
     }
 }
 

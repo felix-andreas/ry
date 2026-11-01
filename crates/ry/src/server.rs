@@ -1,7 +1,10 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
-use crate::cli::{project_order, project_stub_paths, shares_a_namespace};
+use crate::cli::{
+    data_file_key, project_order, project_stub_paths, scan_data_files, shares_a_namespace,
+    sniff_data_file,
+};
 use crate::config::{
     CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
     INLINE_ANNOTATIONS_OFF, suggested_table,
@@ -21,7 +24,7 @@ use ide::{
     CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
     HoverDefinition, NavigationTarget, SignatureData, StubTarget,
 };
-use salsa::Setter;
+use salsa::{Durability, Setter};
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::metadata::{
     PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
@@ -31,7 +34,9 @@ use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
     shipped_stub_sources, stub_source_problems,
 };
-use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{
+    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{ControlFlow, Range};
@@ -394,6 +399,7 @@ impl Worker {
             Default::default(),
             metadata.package,
         );
+        DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
         worker.load_workspace_sources();
 
         let result = initialize_result(encoding, worker.experimental_features);
@@ -538,7 +544,12 @@ impl Worker {
             for path in paths {
                 let text = fs::read_to_string(&path)
                     .expect("reading a workspace source file must succeed");
-                let file = SourceFile::new(&self.db, text, DocumentKind::Package);
+                // Files change at MEDIUM durability until the user edits them, so an edit to
+                // one open file revalidates every memo that reads only the others in O(1)
+                // instead of walking its dependencies.
+                let file = SourceFile::builder(text, DocumentKind::Package)
+                    .durability(Durability::MEDIUM)
+                    .new(&self.db);
                 self.files.insert(path.clone(), file);
                 self.prime_queue.push_back(path);
             }
@@ -554,10 +565,16 @@ impl Worker {
         let files: Vec<SourceFile> = ordered.into_iter().map(|(_, file)| *file).collect();
         match ProjectFiles::try_get(&self.db) {
             Some(project) => {
-                project.set_files(&mut self.db).to(files);
+                project
+                    .set_files(&mut self.db)
+                    .with_durability(Durability::MEDIUM)
+                    .to(files);
             }
             None => {
-                ProjectFiles::new(&self.db, files);
+                // A singleton: queries reach it through `ProjectFiles::get`.
+                let _project = ProjectFiles::builder(files)
+                    .durability(Durability::MEDIUM)
+                    .new(&self.db);
             }
         }
     }
@@ -880,7 +897,9 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let updated = self.apply_content_changes(text, &params.content_changes);
-        file.set_text(&mut self.db).to(updated);
+        file.set_text(&mut self.db)
+            .with_durability(Durability::LOW)
+            .to(updated);
         self.refresh_attached(&path);
         if !self.supports_pull_diagnostics {
             self.publish_first_wave(&path, version);
@@ -962,7 +981,9 @@ impl Worker {
             match fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
-                        file.set_text(&mut self.db).to(text);
+                        file.set_text(&mut self.db)
+                            .with_durability(Durability::MEDIUM)
+                            .to(text);
                     }
                     self.refresh_attached(&path);
                     return;
@@ -983,10 +1004,24 @@ impl Worker {
         let mut config_changed = false;
         let mut metadata_changed = false;
         let mut reloaded_documents: Vec<PathBuf> = Vec::new();
+        let mut data_changed = false;
         for change in &params.changes {
             let Ok(path) = change.uri.to_file_path() else {
                 continue;
             };
+            if let Some(key) = data_file_key(&self.workspace_root, &path) {
+                let data_files = DataFiles::get(&self.db);
+                let mut layouts = data_files.layouts(&self.db).clone();
+                let changed = match sniff_data_file(&path) {
+                    Some(layout) => layouts.insert(key, layout.clone()) != Some(layout),
+                    None => layouts.remove(&key).is_some(),
+                };
+                if changed {
+                    data_files.set_layouts(&mut self.db).to(layouts);
+                    data_changed = true;
+                }
+                continue;
+            }
             // Matched by file name, not full path: tolerates symlinked roots
             // and case-normalizing clients.
             if path
@@ -1031,11 +1066,15 @@ impl Worker {
                 match fs::read_to_string(&path) {
                     Ok(text) => match self.files.get(&path) {
                         Some(&file) => {
-                            file.set_text(&mut self.db).to(text);
+                            file.set_text(&mut self.db)
+                                .with_durability(Durability::MEDIUM)
+                                .to(text);
                             reloaded_documents.push(path.clone());
                         }
                         None => {
-                            let file = SourceFile::new(&self.db, text, DocumentKind::Package);
+                            let file = SourceFile::builder(text, DocumentKind::Package)
+                                .durability(Durability::MEDIUM)
+                                .new(&self.db);
                             self.files.insert(path.clone(), file);
                             self.rebuild_project_files();
                             reloaded_documents.push(path.clone());
@@ -1056,7 +1095,7 @@ impl Worker {
         if metadata_changed {
             self.refresh_metadata();
         }
-        if config_changed {
+        if config_changed || data_changed {
             self.refresh_all_diagnostics();
         }
     }
@@ -1095,6 +1134,13 @@ impl Worker {
                 glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
                     base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
                     pattern: "{NAMESPACE,DESCRIPTION}".to_owned(),
+                }),
+                kind: None,
+            },
+            lsp_types::FileSystemWatcher {
+                glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
+                    base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
+                    pattern: "**/*.{csv,tsv,CSV,TSV}".to_owned(),
                 }),
                 kind: None,
             },

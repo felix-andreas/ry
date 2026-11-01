@@ -14,8 +14,9 @@ use crate::{ColumnType, Error, Result, Schema, Table};
 use crate::{group, join};
 use polars::prelude::{
     AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
-    Expr as PolarsExpr, IntoLazy, JoinType, LazyFrame, MaintainOrderJoin, NULL, NamedFrom,
-    PlSmallStr, Scalar, Series, SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
+    Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
+    LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series, SortMultipleOptions,
+    by_name, col, len, lit, pearson_corr, when,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -303,6 +304,10 @@ pub enum Warning {
     /// were parsed as R's `as.logical`, `as.integer` or `as.double` would. data.table warns on
     /// every such write, whatever the strings hold.
     Parsed { column: PlSmallStr, to: ColumnType },
+    /// `melt`'s measure columns had different types, so the value column holds the widest.
+    MeltCoerced { to: ColumnType },
+    /// `dcast` had no aggregate, but some cell got several values, so it counts them instead.
+    CastCounted,
 }
 
 impl fmt::Display for Warning {
@@ -326,6 +331,15 @@ impl fmt::Display for Warning {
                 formatter,
                 "column `{column}` holds {holds}, so the assigned strings were converted to {holds}",
                 holds = holds(*to)
+            ),
+            Warning::MeltCoerced { to } => write!(
+                formatter,
+                "the measure columns have different types, so the value column holds {}",
+                holds(*to)
+            ),
+            Warning::CastCounted => formatter.write_str(
+                "some cells get several values and no aggregate was given, so each cell counts \
+                 its values; pass `fun.aggregate` to choose another",
             ),
         }
     }
@@ -790,6 +804,11 @@ fn per_row_of_i(
             arg: Box::new(expr.clone()),
             na_rm: false,
         },
+        // `.N` is one value per row of `i` too, but it is computed from the matches, so the
+        // aggregate applies to the rewritten count rather than to the group's raw first row.
+        Expr::Aggregate { function, arg, .. } if !reads_x(arg) && reads_count(arg) => {
+            one_value(*function, per_row_of_i(arg, x_columns, i_columns, true))
+        }
         Expr::Aggregate {
             function,
             arg,
@@ -824,6 +843,45 @@ fn per_row_of_i(
     }
 }
 
+/// Whether `expr` reads `.N`.
+fn reads_count(expr: &Expr) -> bool {
+    match expr {
+        Expr::Count => true,
+        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => reads_count(arg),
+        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+            reads_count(left) || reads_count(right)
+        }
+        Expr::IfElse(test, yes, no) => reads_count(test) || reads_count(yes) || reads_count(no),
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_)
+        | Expr::Column(_) => false,
+    }
+}
+
+/// `function` applied to `value`, an expression that already has one value per group, with R's
+/// result type: a `sum` is at least an integer, a `mean` a double, and the spread of one value
+/// is `NA`.
+fn one_value(function: Aggregate, value: Expr) -> Expr {
+    match function {
+        Aggregate::Length => Expr::Integer(1),
+        Aggregate::Sd | Aggregate::Var => Expr::Na(ColumnType::Double),
+        Aggregate::Sum => Expr::Binary(BinaryOp::Add, Box::new(value), Box::new(Expr::Integer(0))),
+        Aggregate::Mean => Expr::Binary(
+            BinaryOp::Multiply,
+            Box::new(value),
+            Box::new(Expr::Double(1.0)),
+        ),
+        Aggregate::Min
+        | Aggregate::Max
+        | Aggregate::First
+        | Aggregate::Last
+        | Aggregate::Median => value,
+    }
+}
+
 /// An aggregate over one value, the row of `i`'s, computed over a group that repeats it once per
 /// match. With `na.rm` the aggregate keeps only the group's first row, so an `NA` is removed as R
 /// removes it. Without, the group's first value stands in for the aggregate, with R's result type:
@@ -835,8 +893,7 @@ fn single_value(function: Aggregate, arg: &Expr, na_rm: bool) -> Expr {
         na_rm: false,
     };
     match function {
-        Aggregate::Length => Expr::Integer(1),
-        Aggregate::Sd | Aggregate::Var => Expr::Na(ColumnType::Double),
+        Aggregate::Length | Aggregate::Sd | Aggregate::Var => one_value(function, first()),
         _ if na_rm => Expr::Aggregate {
             function,
             arg: Box::new(Expr::IfElse(
@@ -846,19 +903,7 @@ fn single_value(function: Aggregate, arg: &Expr, na_rm: bool) -> Expr {
             )),
             na_rm: true,
         },
-        Aggregate::Sum => {
-            Expr::Binary(BinaryOp::Add, Box::new(first()), Box::new(Expr::Integer(0)))
-        }
-        Aggregate::Mean => Expr::Binary(
-            BinaryOp::Multiply,
-            Box::new(first()),
-            Box::new(Expr::Double(1.0)),
-        ),
-        Aggregate::Min
-        | Aggregate::Max
-        | Aggregate::First
-        | Aggregate::Last
-        | Aggregate::Median => first(),
+        _ => one_value(function, first()),
     }
 }
 
@@ -2246,10 +2291,9 @@ fn parses(natural: ColumnType, kind: ColumnType) -> bool {
 }
 
 /// Strings parsed as R parses them into `kind`: `as.logical` knows only the spellings of `TRUE`
-/// and `FALSE`, and `as.integer` truncates the number it reads, so `"3.7"` is 3. Anything else is
-/// `NA`.
+/// and `FALSE`, `as.numeric` reads what [`parse_number`] reads, and `as.integer` truncates that
+/// number toward zero, so `"3.7"` is 3. Anything else is `NA`.
 fn parse_strings(value: PolarsExpr, kind: ColumnType) -> PolarsExpr {
-    let number = value.clone().cast(DataType::Float64);
     match kind {
         ColumnType::Logical => {
             let spelled = |spellings: [&str; 4]| {
@@ -2265,9 +2309,97 @@ fn parse_strings(value: PolarsExpr, kind: ColumnType) -> PolarsExpr {
                 .then(lit(false))
                 .otherwise(lit(NULL).cast(DataType::Boolean))
         }
-        ColumnType::Integer => number.cast(DataType::Int32),
-        _ => number,
+        ColumnType::Integer => value.map(
+            |column| {
+                // Under an `i`, the rows left alone arrive here already numbers.
+                if column.dtype() != &DataType::String {
+                    return column.cast(&DataType::Int32);
+                }
+                let name = column.name().clone();
+                let strings = column.as_materialized_series().str()?;
+                let parsed: Int32Chunked = strings
+                    .iter()
+                    .map(|text| {
+                        let number = parse_number(text?)?;
+                        // `i32::MIN` is R's `NA_integer_`, so it is out of range too.
+                        (number.is_finite()
+                            && number > f64::from(i32::MIN)
+                            && number < f64::from(i32::MAX) + 1.0)
+                            .then(|| number.trunc() as i32)
+                    })
+                    .collect();
+                Ok(parsed.with_name(name).into_column())
+            },
+            |_, field| Ok(Field::new(field.name().clone(), DataType::Int32)),
+        ),
+        _ => value.map(
+            |column| {
+                if column.dtype() != &DataType::String {
+                    return column.cast(&DataType::Float64);
+                }
+                let name = column.name().clone();
+                let strings = column.as_materialized_series().str()?;
+                let parsed: Float64Chunked =
+                    strings.iter().map(|text| parse_number(text?)).collect();
+                Ok(parsed.with_name(name).into_column())
+            },
+            |_, field| Ok(Field::new(field.name().clone(), DataType::Float64)),
+        ),
     }
+}
+
+/// A string read as R's `as.numeric` reads it: surrounding whitespace is ignored, `Inf`,
+/// `infinity` and `NaN` are accepted in any case, a `0x` prefix reads hexadecimal with an optional
+/// binary exponent (`0x1p3` is 8), and a trailing exponent marker without digits is ignored
+/// (`"1e"` is 1). `None` is R's `NA`.
+pub fn parse_number(text: &str) -> Option<f64> {
+    let trimmed = text.trim_matches(|character: char| {
+        matches!(character, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+    });
+    if trimmed == "NA" {
+        return None;
+    }
+    let (negative, unsigned) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let magnitude = if let Some(digits) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        let (mantissa, exponent) = match digits.find(['p', 'P']) {
+            Some(position) => (&digits[..position], Some(&digits[position + 1..])),
+            None => (digits, None),
+        };
+        if mantissa.is_empty() {
+            return None;
+        }
+        let mut value = 0.0_f64;
+        for digit in mantissa.chars() {
+            value = value * 16.0 + f64::from(digit.to_digit(16)?);
+        }
+        match exponent {
+            Some(exponent) => value * 2f64.powi(exponent.parse::<i32>().ok()?),
+            None => value,
+        }
+    } else {
+        let lowered = unsigned.to_ascii_lowercase();
+        match lowered.as_str() {
+            "inf" | "infinity" => f64::INFINITY,
+            "nan" => f64::NAN,
+            // Rust's parser also reads these spellings and signs that R refuses.
+            _ if lowered.starts_with(['i', 'n', '+', '-']) => return None,
+            _ => match lowered.parse::<f64>() {
+                Ok(value) => value,
+                Err(_) => lowered
+                    .strip_suffix(['e'])
+                    .filter(|mantissa| !mantissa.is_empty())
+                    .and_then(|mantissa| mantissa.parse::<f64>().ok())?,
+            },
+        }
+    };
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 /// Whether writing a `natural` value into a `kind` column can change it: a double into an integer
@@ -2727,14 +2859,20 @@ impl Lowering<'_> {
                     Aggregate::Sum if kind != ColumnType::Double => {
                         value.cast(DataType::Int64).sum()
                     }
-                    Aggregate::Sum => value.sum(),
+                    // data.table's grouped sum of doubles adds each group's values in row order,
+                    // and a cumulative sum is the Polars reduction that keeps that order, where
+                    // `sum` adds pairwise and rounds differently.
+                    Aggregate::Sum => value.cum_sum(false).last().fill_null(lit(0.0)),
                     // With `na.rm = TRUE` a group with no values left has the mean `0 / 0`, which
                     // is `NaN` in R, where Polars gives null.
                     Aggregate::Mean if *na_rm => {
                         let value = value.cast(DataType::Float64);
                         value.clone().sum() / value.count().cast(DataType::Float64)
                     }
-                    Aggregate::Mean => value.cast(DataType::Float64).mean(),
+                    Aggregate::Mean => {
+                        let value = value.cast(DataType::Float64);
+                        value.clone().cum_sum(false).last() / len().cast(DataType::Float64)
+                    }
                     // R's `min` and `max` are `NaN` when an input is, where Polars skips it.
                     Aggregate::Min if kind == ColumnType::Double => value.nan_min(),
                     Aggregate::Max if kind == ColumnType::Double => value.nan_max(),

@@ -851,17 +851,17 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 101 of the 103 oracle cases match GNU R (`oracle compare --engine ry`); the
-   other two, `stats__lbfgsb` and `stats__arima_and_kalman`, agree only to about seven digits
-   because ry's L-BFGS-B takes a slightly different path to the same optimum. Of GNU R 4.3.3's own
-   `tests/*.R`, 41 of 66 end with GNU R's exit status and 13 print exactly GNU R's output. The rest
-   stop at a routine or internal ry lacks (`nlm`, `parse_Rd`, `file.copy`, `env.profile`, URL
-   connections), at numerical precision in the distributions, `polyroot` and complex BLAS, or at
-   time zones, which ry computes as UTC only. All six corpus packages that run R code while loading
-   (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`. Parsed
-   code keeps source references when `keep.source` asks for them. Connections are a single
-   implementation shared by the interpreter and `libR`, and graphics devices open, keep their
-   parameters and record empty plots, but draw nothing.
+   The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
+   other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 47 of 66 end with GNU R's
+   exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
+   URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
+   `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
+   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`.
+   Parsed code keeps source references when `keep.source` asks for them. Connections are a single
+   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
+   `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
+   but write no image.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all

@@ -3,7 +3,7 @@
 total <- function(x) sum(x, na.rm = TRUE)
 size <- function(x) length(x)
 #++++
-total: <T> fn(x: T) -> Any
+total: fn(x: Unknown) -> Unknown
 size: <T> fn(x: T) -> integer
 
 #---- debugging_family_resolves
@@ -523,10 +523,53 @@ bad: Unknown
 ok: integer
 117..121 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
-#---- undetermined_argument_uses_the_general_candidate
+#---- a_wrapper_over_an_overload_set_leaves_its_parameter_unknown
 wrap <- function(x) sum(x)
 #++++
-wrap: <T> fn(x: T) -> Any
+wrap: fn(x: Unknown) -> Unknown
+
+#---- a_summary_method_on_the_first_argument_takes_over_the_generic
+#: @type money {list{cents: integer}}
+
+#: fn(cents: integer) -> money
+money <- function(cents) {
+  #: @new money
+  structure(list(cents = cents), class = "money")
+}
+#: fn(..., [na.rm]: logical) -> money
+Summary.money <- function(..., na.rm = FALSE) money(1L)
+m <- money(1L)
+a <- sum(m)
+b <- max(m, m)
+d <- sum(1L, m)
+#++++
+money: fn(cents: integer) -> money
+Summary.money: fn(...: Any, [na.rm]: logical) -> money
+m: money
+a: money
+b: money
+d: Unknown
+306..316 error[type-mismatch] no overload of `sum` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `integer[] | logical[]`, found `money`
+
+#---- an_overloaded_callback_is_called_on_each_element_type
+r <- lapply(list(units = c(1L, 2L)), sum)
+s <- sapply(list(a = 1L, b = 2L), sum)
+t <- vapply(list(1L, 2L), sum, integer(1))
+u <- Reduce(sum, list(1L, 2L))
+v <- Reduce(sum, list(1L, 2L), 0.5)
+w <- lapply(list("a"), sum)
+x <- sapply(1:3, range)
+y <- lapply(list(1.5), round, digits = 1L)
+#++++
+r: list[named: integer]
+s: integer[named]
+t: integer[]
+u: integer
+v: double
+w: Unknown
+x: Unknown
+y: list[double]
+196..218 error[type-mismatch] no overload of `sum` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `integer[] | logical[]`, found `character`
 
 #---- corpus_overload_sets_end_in_a_general_candidate
 f <- function() cumsum("word")

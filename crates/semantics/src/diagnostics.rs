@@ -10,6 +10,7 @@ use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
 use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
+use crate::lints::LintConfig;
 use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
@@ -61,6 +62,27 @@ pub struct RelatedLocation {
     pub file: SourceFile,
     pub range: TextRange,
     pub message: &'static str,
+}
+
+/// Derives every fact a later pass reads from the file's tree, while the tree is resident.
+/// A cold pass that evicts trees between batches calls this first, so checking a file never
+/// re-parses another one: past this point only the file's own diagnostics read its tree.
+pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
+    let _ = crate::metadata::file_attached_namespaces(db, file);
+    let _ = file_error_ranges(db, file);
+    let _ = file_annotation_references(db, file);
+    let _ = agreement_candidates(db, file);
+    let _ = definition_agreement_candidates(db, file);
+    let _ = crate::lints::file_syntax_lints(db, file, *lints);
+    let _ = crate::file_typing_mode(db, file);
+    let _ = crate::file_type_definitions(db, file);
+    let _ = type_declaration_names(db, file);
+    let _ = parse_stage_diagnostics(db, file);
+    for &item in item_tree(db, file) {
+        let _ = crate::item_hir(db, item);
+        let _ = crate::item_annotations(db, item);
+        let _ = item_name_range(db, item);
+    }
 }
 
 /// Pure functions of the parse, served by a host's fast publication wave.
@@ -305,18 +327,25 @@ fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> FxHashMap<Symbol, usiz
     positions
 }
 
+/// The ranges of the file's R syntax errors. Annotation-grammar errors leave their
+/// statement intact, so they are not here.
+#[salsa::tracked(returns(ref))]
+fn file_error_ranges(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
+    parse(db, file)
+        .errors()
+        .iter()
+        .filter(|error| !error.in_annotation)
+        .map(|error| error.range)
+        .collect()
+}
+
 #[salsa::tracked(returns(clone))]
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = parse_stage_diagnostics(db, file);
 
     // A statement with an R syntax error reports nothing else: its names and types
     // are suspect. Annotation-grammar errors leave the statement intact.
-    let broken_ranges: Vec<TextRange> = parse(db, file)
-        .errors()
-        .iter()
-        .filter(|error| !error.in_annotation)
-        .map(|error| error.range)
-        .collect();
+    let broken_ranges = file_error_ranges(db, file);
     let is_broken = |range: TextRange| {
         broken_ranges
             .iter()
@@ -500,7 +529,6 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics.extend(unknown_type_diagnostics(db, file));
     diagnostics.extend(annotation_rule_diagnostics(db, file));
     diagnostics.extend(annotation_agreement_diagnostics(db, file));
-    diagnostics.extend(definition_agreement_diagnostics(db, file));
 
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     diagnostics
@@ -577,9 +605,9 @@ fn classify_non_local_read(
 
 /// Without this, a misspelled type name would silently become an opaque nominal.
 fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let references: Vec<(String, TextRange)> = file_annotations(db, file)
-        .into_iter()
-        .flat_map(|annotation| annotation.nominal_references)
+    let references: Vec<&(String, TextRange)> = file_annotation_references(db, file)
+        .iter()
+        .flat_map(|annotation| &annotation.nominal_references)
         .collect();
     if references.is_empty() {
         return Vec::new();
@@ -601,9 +629,9 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     references
         .into_iter()
         .filter(|(name, _)| !known.contains(name))
-        .map(|(name, range)| {
+        .map(|&(ref name, range)| {
             let suggestion = nearest_name(
-                &name,
+                name,
                 known
                     .iter()
                     .map(String::as_str)
@@ -646,7 +674,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
         .map(|library| library.nominals.iter().cloned().collect())
         .unwrap_or_default();
 
-    for annotation in file_annotations(db, file) {
+    for annotation in file_annotation_references(db, file) {
         for (message, range) in &annotation.typing_errors {
             diagnostics.push(Diagnostic::new(
                 *range,
@@ -704,7 +732,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             {
                 continue;
             }
-            if let Some((_, _, new_range)) = &annotation.new_nominal
+            if let Some((_, new_range)) = &annotation.new_nominal
                 && new_range.contains_range(*range)
             {
                 continue;
@@ -724,7 +752,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 ));
             }
         }
-        if let Some((name, _, range)) = &annotation.new_nominal
+        if let Some((name, range)) = &annotation.new_nominal
             && !ambiguous.contains(name.text(db))
             && definitions
                 .get(name.text(db))
@@ -744,9 +772,28 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     diagnostics
 }
 
-/// Every annotation in the file lowered with file ranges: the `#:` blocks, and the inline
-/// sites unless inline annotations are turned off.
-fn file_annotations<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Annotation<'db>> {
+/// What the vocabulary checks need from one annotation of the file.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct AnnotationReferences<'db> {
+    typing_errors: Vec<(String, TextRange)>,
+    // Sound: `TextRange` is plain offsets, so only the `'db` handles need retaining.
+    #[salsa_value(unsafe(prove_safe_to_retain_manually))]
+    vector_elements: Vec<(Ty<'db>, TextRange)>,
+    applied_references: Vec<(String, usize, TextRange)>,
+    nominal_references: Vec<(String, TextRange)>,
+    #[salsa_value(unsafe(prove_safe_to_retain_manually))]
+    new_nominal: Option<(Name<'db>, TextRange)>,
+}
+
+/// Every annotation in the file lowered with file ranges (the `#:` blocks, and the inline
+/// sites unless inline annotations are turned off), keeping only those that reference a
+/// type or report a typing error. Memoized because it reads the tree, which a cold check
+/// evicts after its first pass.
+#[salsa::tracked(returns(ref))]
+fn file_annotation_references<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+) -> Vec<AnnotationReferences<'db>> {
     let root = parse(db, file).syntax_node();
     let mut annotations: Vec<Annotation<'db>> = root
         .descendants()
@@ -758,6 +805,22 @@ fn file_annotations<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Annotation<'d
         annotations.extend(sites.iter().map(|site| lower_inline_annotation(db, site)));
     }
     annotations
+        .into_iter()
+        .map(|annotation| AnnotationReferences {
+            typing_errors: annotation.typing_errors,
+            vector_elements: annotation.vector_elements,
+            applied_references: annotation.applied_references,
+            nominal_references: annotation.nominal_references,
+            new_nominal: annotation.new_nominal.map(|(name, _, range)| (name, range)),
+        })
+        .filter(|references| {
+            !references.typing_errors.is_empty()
+                || !references.vector_elements.is_empty()
+                || !references.applied_references.is_empty()
+                || !references.nominal_references.is_empty()
+                || references.new_nominal.is_some()
+        })
+        .collect()
 }
 
 /// The stubs' and the project's declarations, with a script's own declarations shadowing them.
@@ -786,12 +849,139 @@ fn visible_type_definitions<'db>(
 /// one at a time (the value, each parameter, the rest parameter, the return), as types:
 /// an alias and its expansion agree, and so do two orders of one union.
 fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let root = parse(db, file).syntax_node();
-    if !root.descendants().any(|node| is_inline_site(&node)) || !inline_annotations_enabled(db) {
+    let statements = agreement_candidates(db, file);
+    let definitions_both_ways = definition_agreement_candidates(db, file);
+    if statements.is_empty() && definitions_both_ways.is_empty() {
         return Vec::new();
     }
     let definitions = visible_type_definitions(db, file);
     let mut diagnostics = Vec::new();
+    for candidate in statements.iter().chain(definitions_both_ways) {
+        let pair = match candidate {
+            AgreementCandidate::Finding(diagnostic) => {
+                diagnostics.push(diagnostic.clone());
+                continue;
+            }
+            AgreementCandidate::Definition(pair) => {
+                if !same_type(
+                    db,
+                    pair.inline_compared,
+                    pair.comment_compared,
+                    &definitions,
+                ) {
+                    diagnostics.push(Diagnostic {
+                        range: pair.range,
+                        severity: Severity::Warning,
+                        code: "annotation-mismatch",
+                        message: format!(
+                            "the inline definition of `{}` says `{}`, but the `#:` comment says `{}`. ry uses the inline definition; make the two agree, or delete one",
+                            pair.name.text(db),
+                            TypeRenderer::default().render(db, pair.inline),
+                            TypeRenderer::default().render(db, pair.comment)
+                        ),
+                        related: vec![RelatedLocation {
+                            file,
+                            range: pair.comment_range,
+                            message: "the `#:` comment's type is here",
+                        }],
+                    });
+                }
+                continue;
+            }
+            AgreementCandidate::Slot(pair) => pair,
+        };
+        if same_type(
+            db,
+            pair.inline_compared,
+            pair.comment_compared,
+            &definitions,
+        ) {
+            continue;
+        }
+        // Each side renders on its own, so its type parameters keep their written names.
+        let inline_type = TypeRenderer::default().render(db, pair.inline);
+        let comment_type = TypeRenderer::default().render(db, pair.comment);
+        let disagreement = match &pair.slot {
+            Slot::Value => format!(
+                "this binding's inline annotation says `{inline_type}`, but its `#:` comment says `{comment_type}`"
+            ),
+            Slot::Parameter(name) => format!(
+                "the inline annotation gives parameter `{}` the type `{inline_type}`, but the `#:` comment gives it `{comment_type}`",
+                display_name(name)
+            ),
+            Slot::Rest => format!(
+                "the inline annotation gives `...` the type `{inline_type}`, but the `#:` comment gives it `{comment_type}`"
+            ),
+            Slot::Return => format!(
+                "the inline annotation says this function returns `{inline_type}`, but the `#:` comment says it returns `{comment_type}`"
+            ),
+        };
+        let winner = match pair.governing {
+            Some((side, directive)) => format!("ry applies the {side} `{directive}`"),
+            None => "ry uses the inline type".to_owned(),
+        };
+        diagnostics.push(Diagnostic {
+            range: pair.range,
+            severity: Severity::Warning,
+            code: "annotation-mismatch",
+            message: format!("{disagreement}. {winner}; make the two agree, or delete one"),
+            related: vec![RelatedLocation {
+                file,
+                range: pair.comment_range,
+                message: "the `#:` comment's type is here",
+            }],
+        });
+    }
+    diagnostics
+}
+
+/// A disagreement between a statement's inline annotation and its `#:` comment, found from
+/// syntax alone. Memoized because it reads the tree, which a cold check evicts after its
+/// first pass.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+enum AgreementCandidate<'db> {
+    /// Compared as written (a type-parameter constraint, a definition's kind or arity), so
+    /// this one is already a finding.
+    Finding(Diagnostic),
+    /// Slot types compare as types, which needs the project's declarations.
+    Slot(SlotPair<'db>),
+    /// So do the bodies of a type defined both ways.
+    Definition(DefinitionPair<'db>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct DefinitionPair<'db> {
+    name: Name<'db>,
+    inline: Ty<'db>,
+    comment: Ty<'db>,
+    /// Both bodies with their type parameters renamed by position.
+    inline_compared: Ty<'db>,
+    comment_compared: Ty<'db>,
+    range: TextRange,
+    comment_range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct SlotPair<'db> {
+    slot: Slot,
+    inline: Ty<'db>,
+    comment: Ty<'db>,
+    /// Both types with their type parameters renamed by position.
+    inline_compared: Ty<'db>,
+    comment_compared: Ty<'db>,
+    /// The coercion directive that decides the type, and which annotation wrote it.
+    governing: Option<(&'static str, &'static str)>,
+    range: TextRange,
+    comment_range: TextRange,
+}
+
+#[salsa::tracked(returns(ref))]
+fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<AgreementCandidate<'db>> {
+    let root = parse(db, file).syntax_node();
+    if !root.descendants().any(|node| is_inline_site(&node)) || !inline_annotations_enabled(db) {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
     for node in root
         .descendants()
@@ -857,7 +1047,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                 Some(spelling) => format!("`{spelling}`"),
                 None => "no constraint".to_owned(),
             };
-            diagnostics.push(Diagnostic {
+            candidates.push(AgreementCandidate::Finding(Diagnostic {
                 range: inline_range,
                 severity: Severity::Warning,
                 code: "annotation-mismatch",
@@ -871,7 +1061,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                     range: comment_range,
                     message: "the `#:` comment's type parameter is here",
                 }],
-            });
+            }));
         }
         // A coercion governs wherever it is written, the inline one first.
         let coercion = |annotation: &Annotation| {
@@ -893,56 +1083,35 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             let Some(written) = comment_slots.iter().find(|slot| slot.slot == inline.slot) else {
                 continue;
             };
-            if same_type(
-                db,
-                substitute_rigid(db, inline.ty, &inline_names),
-                substitute_rigid(db, written.ty, &comment_names),
-                &definitions,
-            ) {
+            let inline_compared = substitute_rigid(db, inline.ty, &inline_names);
+            let comment_compared = substitute_rigid(db, written.ty, &comment_names);
+            if inline_compared == comment_compared {
                 continue;
             }
-            // Each side renders on its own, so its type parameters keep their written names.
-            let inline_type = TypeRenderer::default().render(db, inline.ty);
-            let comment_type = TypeRenderer::default().render(db, written.ty);
-            let disagreement = match &inline.slot {
-                Slot::Value => format!(
-                    "this binding's inline annotation says `{inline_type}`, but its `#:` comment says `{comment_type}`"
-                ),
-                Slot::Parameter(name) => format!(
-                    "the inline annotation gives parameter `{}` the type `{inline_type}`, but the `#:` comment gives it `{comment_type}`",
-                    display_name(name)
-                ),
-                Slot::Rest => format!(
-                    "the inline annotation gives `...` the type `{inline_type}`, but the `#:` comment gives it `{comment_type}`"
-                ),
-                Slot::Return => format!(
-                    "the inline annotation says this function returns `{inline_type}`, but the `#:` comment says it returns `{comment_type}`"
-                ),
-            };
-            let winner = match governing {
-                Some((side, directive)) => format!("ry applies the {side} `{directive}`"),
-                None => "ry uses the inline type".to_owned(),
-            };
-            diagnostics.push(Diagnostic {
+            candidates.push(AgreementCandidate::Slot(SlotPair {
+                slot: inline.slot,
+                inline: inline.ty,
+                comment: written.ty,
+                inline_compared,
+                comment_compared,
+                governing,
                 range: inline.range,
-                severity: Severity::Warning,
-                code: "annotation-mismatch",
-                message: format!("{disagreement}. {winner}; make the two agree, or delete one"),
-                related: vec![RelatedLocation {
-                    file,
-                    range: written.range,
-                    message: "the `#:` comment's type is here",
-                }],
-            });
+                comment_range: written.range,
+            }));
         }
     }
-    diagnostics
+    candidates
 }
 
 /// A type defined both ways (a `#:` block directly above an inline definition of the same
 /// name) must be the same definition both ways: the same kind, the same type parameters
 /// with the same constraints, and the same body once type parameters pair by position.
-fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+/// Memoized for the same reason as [`agreement_candidates`].
+#[salsa::tracked(returns(ref))]
+fn definition_agreement_candidates<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+) -> Vec<AgreementCandidate<'db>> {
     let root = parse(db, file).syntax_node();
     let pairs: Vec<(SyntaxNode, SyntaxNode)> = root
         .children()
@@ -952,8 +1121,7 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
     if pairs.is_empty() || !inline_annotations_enabled(db) {
         return Vec::new();
     }
-    let definitions = visible_type_definitions(db, file);
-    let mut diagnostics = Vec::new();
+    let mut candidates = Vec::new();
     for (inline_node, comment) in pairs {
         let inline = lower_inline_annotation(db, &inline_node);
         let lowered_comment = lower_annotation(db, &comment);
@@ -990,7 +1158,7 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                         disagreement: String,
                         related_range: TextRange,
                         related: &'static str| {
-            diagnostics.push(Diagnostic {
+            candidates.push(AgreementCandidate::Finding(Diagnostic {
                 range,
                 severity: Severity::Warning,
                 code: "annotation-mismatch",
@@ -1002,7 +1170,7 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                     range: related_range,
                     message: related,
                 }],
-            });
+            }));
         };
         let name_range = child_of(&inline_node, SyntaxKind::NAME)
             .map_or(inline_node.text_range(), |node| node.text_range());
@@ -1094,23 +1262,22 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                     .collect();
                 substitute_rigid(db, definition.body, &positional_binders(db, &binders))
             });
-        if !same_type(db, inline_body, comment_body, &definitions)
+        if inline_body != comment_body
             && let (Some(inline_type), Some(comment_type)) =
                 (body_of(&inline_node), body_of(&directive))
         {
-            push(
-                inline_type.text_range(),
-                format!(
-                    "the inline definition of `{name}` says `{}`, but the `#:` comment says `{}`",
-                    TypeRenderer::default().render(db, inline_definition.body),
-                    TypeRenderer::default().render(db, comment_definition.body)
-                ),
-                comment_type.text_range(),
-                "the `#:` comment's type is here",
-            );
+            candidates.push(AgreementCandidate::Definition(DefinitionPair {
+                name: inline_definition.name,
+                inline: inline_definition.body,
+                comment: comment_definition.body,
+                inline_compared: inline_body,
+                comment_compared: comment_body,
+                range: inline_type.text_range(),
+                comment_range: comment_type.text_range(),
+            }));
         }
     }
-    diagnostics
+    candidates
 }
 
 /// Renames type parameters by position, so two signatures that differ only in what
@@ -1669,6 +1836,22 @@ pub(crate) fn nearest_name<'a>(
     if name_characters.len() < 4 {
         return None;
     }
+    // A standard-library name such as `Str.split` is usually the start of a longer one
+    // (`Str.split_on`), which is farther away by edit distance than an unrelated base function.
+    let candidates: Vec<&str> = candidates.collect();
+    if ["List.", "Str.", "Num.", "Result.", "Dict.", "Set."]
+        .iter()
+        .any(|module| name.starts_with(module))
+    {
+        let completion = candidates
+            .iter()
+            .filter(|candidate| candidate.len() > name.len() && candidate.starts_with(name))
+            .min_by_key(|candidate| (candidate.len(), **candidate));
+        if let Some(candidate) = completion {
+            return Some((*candidate).to_owned());
+        }
+    }
+    let candidates = candidates.into_iter();
     let budget = if name_characters.len() >= 8 { 2 } else { 1 };
     let mut candidate_characters: Vec<char> = Vec::new();
     let mut previous: Vec<usize> = Vec::new();
@@ -1752,12 +1935,7 @@ fn edit_distance_within(
 /// A script's top level is one frame run in order, so the unused check spans
 /// items. A read inside a nested function keeps every write to the name live.
 fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let error_ranges: Vec<TextRange> = parse(db, file)
-        .errors()
-        .iter()
-        .filter(|error| !error.in_annotation)
-        .map(|error| error.range)
-        .collect();
+    let error_ranges = file_error_ranges(db, file);
     struct Definer {
         item_index: usize,
         name: Symbol,
@@ -1895,12 +2073,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
-    let broken_ranges: Vec<TextRange> = parse(db, file)
-        .errors()
-        .iter()
-        .filter(|error| !error.in_annotation)
-        .map(|error| error.range)
-        .collect();
+    let broken_ranges = file_error_ranges(db, file);
     for (item_index, span) in item_spans(db, file).iter().enumerate() {
         if broken_ranges
             .iter()
@@ -2228,6 +2401,22 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             format!("{subject} has no column `{column}`{hint}")
         }
+        TypeErrorKind::BranchTypesDiffer {
+            function,
+            first,
+            first_ty,
+            second,
+            second_ty,
+        } => format!(
+            "`{function}` needs `{first}` and `{second}` of one type, but `{first}` is `{}` and `{second}` is `{}`",
+            renderer.render(db, *first_ty),
+            renderer.render(db, *second_ty)
+        ),
+        TypeErrorKind::ColumnNameCount { names, columns } => format!(
+            "this frame has {columns} {}, but {names} {} given",
+            if *columns == 1 { "column" } else { "columns" },
+            if *names == 1 { "name is" } else { "names are" }
+        ),
         TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
             "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.",
             renderer.render(db, *x),
@@ -2264,6 +2453,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 column_element(db, *column_ty).kind(db),
                 column_element(db, *found).kind(db),
             ) {
+                (TyKind::Named(..), _) => {
+                    "is read as a level's position rather than a label, and a number that is not one becomes `NA`"
+                }
                 (TyKind::Scalar(Atomic::Logical), TyKind::Scalar(Atomic::Character)) => {
                     "is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`"
                 }
@@ -2342,10 +2534,16 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *variable),
             renderer.render(db, *container)
         ),
-        TypeErrorKind::PatternNeverMatches { found } => format!(
-            "this pattern can never match: the value is `{}`",
-            renderer.render(db, *found)
-        ),
+        TypeErrorKind::PatternNeverMatches { found, hint } => {
+            let mut message = format!(
+                "this pattern can never match: the value is `{}`",
+                renderer.render(db, *found)
+            );
+            if let Some(hint) = hint {
+                message.push_str(&format!(". {hint}"));
+            }
+            message
+        }
         TypeErrorKind::NativeValueToR { function, kind } => {
             let kind = match kind {
                 NativeValueKind::Record => "record",

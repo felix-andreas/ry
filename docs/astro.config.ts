@@ -83,6 +83,7 @@ export default defineConfig({
 						{ slug: 'type-checking/functions' },
 						{ slug: 'type-checking/custom-types' },
 						{ slug: 'type-checking/records-and-tags' },
+						{ slug: 'type-checking/frames' },
 						{ slug: 'type-checking/unknown' },
 						{ slug: 'type-checking/strict-mode' },
 						{ slug: 'type-checking/stubs' },
