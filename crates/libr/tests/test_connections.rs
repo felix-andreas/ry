@@ -40,7 +40,7 @@ fn logical(r: &R, value: bool) -> Sexp {
 
 #[test]
 fn scenarios_print_what_gnu_r_prints() {
-    let r = r();
+    let r = r_with_base();
     ryconn(&r);
     let expected = std::fs::read_to_string(expectation_path()).expect("the recorded GNU R output");
     let actual = run_in_ry(&r, "ry");
@@ -56,7 +56,7 @@ fn scenarios_print_what_gnu_r_prints() {
 /// connection code allocates while holding another one unrooted.
 #[test]
 fn scenarios_survive_collection_stress() {
-    let r = r();
+    let r = r_with_base();
     ryconn(&r);
     let expected = std::fs::read_to_string(expectation_path()).expect("the recorded GNU R output");
     r.stress(true);
@@ -123,7 +123,7 @@ fn the_header_lays_out_rconn_like_gnu_r() {
 
 #[test]
 fn closing_destroys_a_custom_connection_once() {
-    let r = r();
+    let r = r_with_base();
     ryconn(&r);
     let destroyed =
         |r: &R| r.integers(r.call("ryconn_destroyed", &[]).expect("ryconn_destroyed"))[0];
@@ -152,7 +152,7 @@ fn closing_destroys_a_custom_connection_once() {
 
 #[test]
 fn an_unreachable_connection_is_closed_with_a_warning() {
-    let r = r();
+    let r = r_with_base();
     let path = temporary_file("unreachable.txt");
     let path_value = r.string(&path.to_string_lossy());
     let mark = r.protected.get();
@@ -179,7 +179,7 @@ fn an_unreachable_connection_is_closed_with_a_warning() {
 
 #[test]
 fn standard_output_goes_to_the_console() {
-    let r = r();
+    let r = r_with_base();
     let stdout = r.eval("stdout", &[]).expect("stdout");
     r.eval(
         "writeLines",
@@ -204,7 +204,7 @@ fn standard_output_goes_to_the_console() {
 
 #[test]
 fn a_pipe_writes_to_a_command() {
-    let r = r();
+    let r = r_with_base();
     let path = temporary_file("pipe-output.txt");
     let command = r.string(&format!("cat > '{}'", path.display()));
     let con = r
@@ -225,7 +225,7 @@ fn a_pipe_writes_to_a_command() {
 
 #[test]
 fn large_files_round_trip_through_lines_and_bytes() {
-    let r = r();
+    let r = r_with_base();
     ryconn(&r);
     let path = temporary_file("large.txt");
     let lines: Vec<String> = (0..20_000)
@@ -322,7 +322,7 @@ impl Model {
 /// end, so the table must be back to the three standard slots.
 #[test]
 fn random_reads_and_pushback_follow_a_byte_model() {
-    let r = r();
+    let r = r_with_base();
     ryconn(&r);
     let mut rng = SplitMix64(0x5eed_c0de);
     for iteration in 0..fuzz_iterations(60) {

@@ -2,17 +2,17 @@
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
 use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal},
+    builtins::{BuiltinDef, Call, builtin, internal, special},
     interp,
     unwind::{R, error},
     values::{
-        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_real, scalar_string,
+        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, scalar_string,
         string_vector, symbols,
     },
 };
 use heap::{
     GcStress,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType},
+    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
 };
 use std::path::{Path, PathBuf};
 
@@ -142,7 +142,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
-    internal("traceback", 1, |_| unsafe { Ok(nil()) }),
+    internal("traceback", 1, |call| unsafe {
+        crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
+    }),
     internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
@@ -159,11 +161,30 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
     internal("balancePOSIXlt", 3, |call| unsafe {
-        let fill_only = values::as_logical_scalar(call.arg(1)) == 1;
-        let classed = values::as_logical_scalar(call.arg(2)) != 0;
-        balance_posixlt(call, call.arg(0), fill_only, classed)
+        balance_posixlt(call.arg(0), values::is_true(call.arg(1)), values::is_true(call.arg(2)))
     }),
-    builtin("unCfillPOSIXlt", 1, |call| unsafe { balance_posixlt(call, call.arg(0), true, false) }),
+    builtin("unCfillPOSIXlt", 1, |call| unsafe {
+        let balanced = get_attr(call.arg(0), values::install("balanced")?);
+        // The result is unclassed, which lets `lapply` iterate over the fields.
+        if balanced != nil() && values::as_logical_scalar(balanced) == 1 {
+            require_posixlt(call.arg(0))?;
+            let result = values::shallow_duplicate(call.arg(0))?;
+            values::remove_attr(result, symbols().class);
+            Ok(result)
+        } else {
+            balance_posixlt(call.arg(0), true, false)
+        }
+    }),
+    // ry has no interactive debugger, so `browser()` continues as it does in a
+    // non-interactive GNU R session.
+    special("browser", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    builtin("tracemem", 1, |call| unsafe {
+        scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
+    }),
+    builtin("untracemem", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    builtin("retracemem", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
+    builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
     internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
     internal("tzone_name", 0, |_| unsafe { scalar_string("UTC") }),
     internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
@@ -348,12 +369,18 @@ unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_proc_time(_call: &Call<'_>) -> R<Sexp> {
-    let elapsed = interp().started.elapsed().as_secs_f64();
-    let mut usage: libc::rusage = std::mem::zeroed();
-    libc::getrusage(libc::RUSAGE_SELF, &mut usage);
-    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
-    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
-    let result = values::real_vector(&[user, system, elapsed, 0.0, 0.0])?;
+    // GNU R reports whole milliseconds, which is what keeps printed timings short.
+    let milliseconds = |seconds: f64| (seconds * 1000.0).round() / 1000.0;
+    let times = |who: libc::c_int| {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(who, &mut usage);
+        let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+        (milliseconds(seconds(usage.ru_utime)), milliseconds(seconds(usage.ru_stime)))
+    };
+    let (user, system) = times(libc::RUSAGE_SELF);
+    let (child_user, child_system) = times(libc::RUSAGE_CHILDREN);
+    let elapsed = milliseconds(interp().started.elapsed().as_secs_f64());
+    let result = values::real_vector(&[user, system, elapsed, child_user, child_system])?;
     let names = string_vector(&["user.self", "sys.self", "elapsed", "user.child", "sys.child"])?;
     values::set_attr(result, symbols().names, names)?;
     let class = scalar_string("proc_time")?;
@@ -523,9 +550,8 @@ const POSIXLT_NAMES: [&str; 11] = [
     "sec", "min", "hour", "mday", "mon", "year", "wday", "yday", "isdst", "zone", "gmtoff",
 ];
 
-/// A POSIXlt list for `seconds` since the epoch. `names` go on the `year` component, where GNU R
-/// keeps a date-time's names.
-unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str, names: Sexp) -> R<Sexp> {
+/// A POSIXlt list for `seconds` since the epoch.
+unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     let count = seconds.len();
     let fields: Vec<Sexp> = (0..11)
         .map(|field| match field {
@@ -534,15 +560,17 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str, names: Sexp) -> R<Sexp
             _ => alloc(SexpType::Integer, count),
         })
         .collect::<R<_>>()?;
+    let abbreviation = if tz == "GMT" { "GMT" } else { "UTC" };
     for (index, &value) in seconds.iter().enumerate() {
-        if value.is_nan() {
-            values::reals_mut(fields[0])[index] = NA_REAL;
-            for field in 1..9 {
+        if !value.is_finite() {
+            // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
+            values::reals_mut(fields[0])[index] = value;
+            for field in 1..8 {
                 values::ints_mut(fields[field])[index] = NA_INTEGER;
             }
             values::ints_mut(fields[8])[index] = -1;
-            values::set_elt(fields[9], index, values::mkchar("")?);
-            values::ints_mut(fields[10])[index] = NA_INTEGER;
+            values::set_elt(fields[9], index, values::mkchar("UTC")?);
+            values::ints_mut(fields[10])[index] = 0;
             continue;
         }
         let time = broken_down(value);
@@ -555,20 +583,19 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str, names: Sexp) -> R<Sexp
         values::ints_mut(fields[6])[index] = time.weekday as i32;
         values::ints_mut(fields[7])[index] = time.yearday as i32;
         values::ints_mut(fields[8])[index] = 0;
-        values::set_elt(fields[9], index, values::mkchar("UTC")?);
+        values::set_elt(fields[9], index, values::mkchar(abbreviation)?);
         values::ints_mut(fields[10])[index] = 0;
-    }
-    if names != nil() {
-        values::set_attr(fields[5], symbols().names, names)?;
     }
     let list = values::list_vector(&fields)?;
     let field_names = string_vector(&POSIXLT_NAMES)?;
     values::set_attr(list, symbols().names, field_names)?;
     let class = string_vector(&["POSIXlt", "POSIXt"])?;
     values::set_attr(list, symbols().class, class)?;
+    // Every zone is computed as UTC, but the names stay as given: a GMT time stays GMT, and the
+    // session zone is the empty name followed by its standard and daylight-saving abbreviations.
     let tzone = values::install("tzone")?;
-    let zone = if tz.is_empty() || tz == "UTC" || tz == "GMT" { "UTC" } else { tz };
-    values::set_attr(list, tzone, scalar_string(zone)?)?;
+    let names = if tz.is_empty() { string_vector(&["", "UTC", "UTC"])? } else { scalar_string(tz)? };
+    values::set_attr(list, tzone, names)?;
     let balanced = values::install("balanced")?;
     values::set_attr(list, balanced, scalar_bool(true)?)?;
     Ok(list)
@@ -578,10 +605,20 @@ unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
     let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
     let seconds: Vec<f64> = values::reals(times).to_vec();
-    posixlt_from_seconds(&seconds, &tz, values::get_attr(call.arg(0), symbols().names))
+    let result = posixlt_from_seconds(&seconds, &tz)?;
+    set_year_names(result, values::names(call.arg(0)))?;
+    Ok(result)
+}
+
+unsafe fn require_posixlt(list: Sexp) -> R<()> {
+    if list.kind() != SexpType::List || length(list) < 9 {
+        return Err(error("a valid \"POSIXlt\" object is a list of at least 9 elements"));
+    }
+    Ok(())
 }
 
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
+    require_posixlt(list)?;
     let field = |index: usize| -> Sexp { if length(list) > index { list.element(index) } else { nil() } };
     let count = (0..6).map(|index| length(field(index))).max().unwrap_or(0);
     let at = |index: usize, position: usize| -> f64 {
@@ -600,7 +637,11 @@ unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
         let day = at(3, position);
         let month = at(4, position);
         let year = at(5, position);
-        if [second, minute, hour, day, month, year].iter().any(|value| value.is_nan()) {
+        if !second.is_finite() {
+            seconds.push(second);
+            continue;
+        }
+        if [minute, hour, day, month, year].iter().any(|value| value.is_nan()) {
             seconds.push(NA_REAL);
             continue;
         }
@@ -613,9 +654,77 @@ unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
     Ok(seconds)
 }
 
+/// Normalizes out-of-range POSIXlt fields, or with `fill_only` recycles every field to the
+/// longest one and marks the result `balanced = NA`, as GNU R's `balancePOSIXlt` does.
+unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
+    require_posixlt(list)?;
+    let balanced_symbol = values::install("balanced")?;
+    let mark = get_attr(list, balanced_symbol);
+    // `balanced = TRUE` covers both requests, and `NA` (filled only) satisfies a fill.
+    let already = mark.kind() == SexpType::Logical
+        && length(mark) == 1
+        && match values::ints(mark)[0] {
+            NA_LOGICAL => fill_only,
+            0 => false,
+            _ => true,
+        };
+    let result = if already {
+        let result = values::shallow_duplicate(list)?;
+        crate::heap().root(result);
+        result
+    } else if fill_only {
+        let count = (0..length(list)).map(|index| length(list.element(index))).max().unwrap_or(0);
+        let result = values::shallow_duplicate(list)?;
+        crate::heap().root(result);
+        for index in 0..length(list) {
+            let field = list.element(index);
+            let size = length(field);
+            if size == count || size == 0 {
+                continue;
+            }
+            let filled = alloc(field.kind(), count)?;
+            for position in 0..count {
+                crate::subset::copy_element(field, position % size, filled, position)?;
+            }
+            values::set_elt(result, index, filled);
+        }
+        values::set_attr(result, balanced_symbol, values::scalar_logical(NA_LOGICAL)?)?;
+        result
+    } else {
+        let tzone = get_attr(list, values::install("tzone")?);
+        let tz = values::first_string(tzone).map(|text| text.into_owned()).unwrap_or_default();
+        let seconds = posixlt_seconds(list)?;
+        let result = posixlt_from_seconds(&seconds, &tz)?;
+        set_year_names(result, values::names(list.element(5)))?;
+        result
+    };
+    if !classed {
+        values::remove_attr(result, symbols().class);
+    }
+    Ok(result)
+}
+
 unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
     let seconds = posixlt_seconds(call.arg(0))?;
-    values::real_vector(&seconds)
+    let result = values::real_vector(&seconds)?;
+    set_names_from_year(call.arg(0), result)?;
+    Ok(result)
+}
+
+/// A POSIXlt keeps its element names on the `year` field.
+unsafe fn set_year_names(list: Sexp, names: Sexp) -> R<()> {
+    if names != nil() && length(list) > 5 && length(list.element(5)) == length(names) {
+        values::set_attr(list.element(5), symbols().names, names)?;
+    }
+    Ok(())
+}
+
+unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
+    let names = values::names(list.element(5));
+    if names != nil() && length(names) == length(result) {
+        values::set_attr(result, symbols().names, names)?;
+    }
+    Ok(())
 }
 
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
@@ -626,8 +735,13 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let count = seconds.len();
     let result = alloc(SexpType::String, count)?;
     for (index, &value) in seconds.iter().enumerate() {
-        if value.is_nan() {
+        if is_na_real(value) {
             values::set_elt(result, index, values::na_string());
+            continue;
+        }
+        if !value.is_finite() {
+            let text = if value.is_nan() { "NaN" } else if value > 0.0 { "Inf" } else { "-Inf" };
+            values::set_elt(result, index, values::mkchar(text)?);
             continue;
         }
         let format = values::string_at(formats, index % length(formats).max(1))
@@ -654,6 +768,7 @@ fn parse_time(text: &str, format: &str) -> Option<f64> {
     let mut hour = 0i64;
     let mut minute = 0i64;
     let mut second = 0f64;
+    let mut yearday = None;
     let mut input = text.trim_start();
     let mut format_characters = format.chars();
     let number = |input: &mut &str, max_digits: usize| -> Option<i64> {
@@ -697,11 +812,7 @@ fn parse_time(text: &str, format: &str) -> Option<f64> {
                     input = &trimmed[length..];
                 }
             }
-            'j' => {
-                let yearday = number(&mut input, 3)?;
-                month = 1;
-                day = yearday;
-            }
+            'j' => yearday = Some(number(&mut input, 3)?),
             'B' | 'b' | 'h' => {
                 let lower = input.to_lowercase();
                 let found = MONTHS.iter().position(|name| lower.starts_with(&name.to_lowercase()))
@@ -727,6 +838,13 @@ fn parse_time(text: &str, format: &str) -> Option<f64> {
             '%' => input = input.strip_prefix('%')?,
             _ => {}
         }
+    }
+    if let Some(yearday) = yearday {
+        if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
+            return None;
+        }
+        month = 1;
+        day = yearday;
     }
     if !(1..=12).contains(&month) {
         return None;
@@ -754,58 +872,19 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             .unwrap_or(NA_REAL);
         seconds.push(value);
     }
-    posixlt_from_seconds(&seconds, &tz, values::get_attr(texts, symbols().names))
+    let result = posixlt_from_seconds(&seconds, &tz)?;
+    set_year_names(result, values::names(texts))?;
+    Ok(result)
 }
 
 unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
     let dates = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
     let seconds: Vec<f64> = values::reals(dates)
         .iter()
-        .map(|&days| if days.is_nan() { NA_REAL } else { days.floor() * 86400.0 })
+        .map(|&days| if days.is_finite() { days.floor() * 86400.0 } else { days })
         .collect();
-    posixlt_from_seconds(&seconds, "UTC", values::get_attr(call.arg(0), symbols().names))
-}
-
-/// GNU R's `balancePOSIXlt`: every component recycled to the longest one's length, the
-/// attribute `balanced` set to `TRUE` (or `NA` when only filled), and the class dropped unless
-/// `classed`. Out-of-range fields such as `mon = 13` are not normalized: the components ry's own
-/// conversions build are always in range.
-unsafe fn balance_posixlt(call: &Call<'_>, x: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
-    if x.kind() != SexpType::List || length(x) < 9 {
-        return Err(call.error("invalid 'x' argument"));
-    }
-    let balanced = values::install("balanced")?;
-    let mark = values::get_attr(x, balanced);
-    let already = mark.kind() == SexpType::Logical
-        && length(mark) == 1
-        && match values::ints(mark)[0] {
-            NA_INTEGER => fill_only,
-            0 => false,
-            _ => true,
-        };
-    let result = values::shallow_duplicate(x)?;
-    if already {
-        if !classed {
-            values::set_attr(result, values::install("class")?, nil())?;
-        }
-        return Ok(result);
-    }
-    let count = length(x);
-    let longest = (0..count).map(|index| length(x.element(index))).max().unwrap_or(0);
-    for index in 0..count {
-        let component = x.element(index);
-        let current = length(component);
-        if current != longest && current > 0 {
-            let positions: Vec<usize> = (0..longest).map(|position| position % current).collect();
-            let filled = crate::subset::select_elements(component, &positions)?;
-            crate::heap().set_element(result, index, filled);
-        }
-    }
-    if !classed {
-        values::set_attr(result, values::install("class")?, nil())?;
-    }
-    let mark = if fill_only { NA_INTEGER } else { 1 };
-    values::set_attr(result, balanced, values::scalar_logical(mark)?)?;
+    let result = posixlt_from_seconds(&seconds, "UTC")?;
+    set_year_names(result, values::names(call.arg(0)))?;
     Ok(result)
 }
 
@@ -813,9 +892,10 @@ unsafe fn do_posixlt_to_date(call: &Call<'_>) -> R<Sexp> {
     let seconds = posixlt_seconds(call.arg(0))?;
     let days: Vec<f64> = seconds
         .iter()
-        .map(|&value| if value.is_nan() { NA_REAL } else { (value / 86400.0).floor() })
+        .map(|&value| if value.is_finite() { (value / 86400.0).floor() } else { value })
         .collect();
     let result = values::real_vector(&days)?;
+    set_names_from_year(call.arg(0), result)?;
     let class = scalar_string("Date")?;
     values::set_attr(result, symbols().class, class)?;
     Ok(result)
@@ -1170,7 +1250,7 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
         "jpeg", "png", "tiff", "tcltk", "X11", "aqua", "http/ftp", "sockets", "libxml", "fifo",
         "cledit", "iconv", "NLS", "Rprof", "profmem", "cairo", "ICU", "long.double", "libcurl",
     ];
-    let flags = [0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0];
+    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0];
     let result = values::logical_vector(&flags)?;
     let names = string_vector(&names)?;
     values::set_attr(result, symbols().names, names)?;

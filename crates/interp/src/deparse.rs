@@ -5,11 +5,14 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    format, records,
+    format, records, standard_library,
     unwind::R,
     values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real};
+use heap::{
+    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
+    records::NativeKind,
+};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("deparse", 5, do_deparse),
@@ -108,7 +111,8 @@ fn operator_info(name: &[u8]) -> Option<OperatorInfo> {
     use precedence::*;
     let (kind, precedence, right_associative) = match name {
         b"+" | b"-" => (Kind::Binary, SUM, false),
-        b"*" | b"/" => (Kind::Binary, PRODUCT, false),
+        b"*" => (Kind::Binary, PRODUCT, false),
+        b"/" => (Kind::Binary2, PRODUCT, false),
         b"^" => (Kind::Binary2, POWER, true),
         b"%%" | b"%/%" => (Kind::Binary2, PERCENT, false),
         b"%*%" => (Kind::Binary, PERCENT, false),
@@ -256,7 +260,17 @@ impl Deparser {
             self.depth -= 1;
             return;
         }
-        let attributes = self.opts & options::SHOW_ATTRIBUTES != 0 && has_shown_attributes(object);
+        if object.has_gp(gp::S4_OBJECT)
+            && let Some(parts) = s4_parts(object)
+        {
+            self.s4(parts);
+            self.depth -= 1;
+            return;
+        }
+        // An expression vector written from its source text shows none of its attributes.
+        let attributes = self.opts & options::SHOW_ATTRIBUTES != 0
+            && has_shown_attributes(object)
+            && self.expression_srcrefs(object).is_none();
         if attributes {
             self.print("structure(");
         }
@@ -279,8 +293,11 @@ impl Deparser {
                     self.print(")");
                 } else if name.is_empty() {
                     // The empty symbol, `R_MissingArg`.
-                } else {
+                } else if self.backtick {
                     self.print(&quote_name(&name));
+                } else {
+                    // `backtick = FALSE`, the default for a symbol, prints a non-syntactic name bare.
+                    self.print(&name);
                 }
             }
             SexpType::Closure => self.closure(object),
@@ -303,7 +320,16 @@ impl Deparser {
                 self.print(")");
             }
             SexpType::List => self.list(object, "list("),
-            SexpType::Expression => self.list(object, "expression("),
+            SexpType::Expression => match self.expression_srcrefs(object) {
+                Some(srcrefs) => self.expression_from_source(object, srcrefs),
+                None => {
+                    // The elements of `expression()` are code, which its call does not evaluate.
+                    let saved = self.opts;
+                    self.opts &= !options::QUOTE_EXPRESSIONS;
+                    self.list(object, "expression(");
+                    self.opts = saved;
+                }
+            },
             SexpType::Object => self.print("<S4 object of class structure>"),
             SexpType::Record => self.native(object),
             kind if kind.is_atomic() => self.vector(object),
@@ -311,7 +337,65 @@ impl Deparser {
         }
     }
 
+    /// An S4 object as the `new()` call that recreates it: its slots by name, then the data
+    /// part of a class that extends a basic type without a `.Data` slot.
+    unsafe fn s4(&mut self, parts: S4Parts) {
+        self.print("new(");
+        self.print(&format::encode_string(&parts.class, Some('"')));
+        for (name, value) in parts.slots {
+            self.print(", ");
+            self.print(&quote_name(&name));
+            self.print(" = ");
+            self.deparse(value);
+        }
+        if let Some(data) = parts.data {
+            self.print(", ");
+            self.deparse(data);
+        }
+        self.print(")");
+    }
+
+    /// The `srcref` list an expression vector is written from under `useSource`: one srcref per
+    /// element.
+    unsafe fn expression_srcrefs(&self, object: Sexp) -> Option<Sexp> {
+        if self.opts & options::USE_SOURCE == 0 || object.kind() != SexpType::Expression {
+            return None;
+        }
+        let srcrefs = get_attr(object, symbols().srcref);
+        (srcrefs.kind() == SexpType::List && length(srcrefs) == length(object)).then_some(srcrefs)
+    }
+
+    unsafe fn expression_from_source(&mut self, object: Sexp, srcrefs: Sexp) {
+        self.print("expression(");
+        for index in 0..length(object) {
+            if index > 0 {
+                self.print(", ");
+            }
+            match source_lines(srcrefs.element(index)) {
+                Some(lines) => self.source(&lines),
+                None => self.deparse(object.element(index)),
+            }
+        }
+        self.print(")");
+    }
+
+    /// Writes source text as it is, line by line.
+    fn source(&mut self, lines: &[String]) {
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                self.write_line();
+            }
+            self.print(line);
+        }
+    }
+
     unsafe fn closure(&mut self, function: Sexp) {
+        if self.opts & options::USE_SOURCE != 0 {
+            if let Some(lines) = source_lines(get_attr(function, symbols().srcref)) {
+                self.source(&lines);
+                return;
+            }
+        }
         let saved = self.opts;
         self.opts &= !options::QUOTE_EXPRESSIONS;
         self.print("function (");
@@ -382,6 +466,21 @@ impl Deparser {
     }
 
     unsafe fn language(&mut self, call: Sexp) {
+        // `quote()` wraps the outermost call once, and a formula evaluates to itself, so it needs
+        // no wrapping at all.
+        if self.opts & options::QUOTE_EXPRESSIONS != 0 {
+            self.opts &= !options::QUOTE_EXPRESSIONS;
+            let formula = call.car() == symbols().tilde;
+            if !formula {
+                self.print("quote(");
+            }
+            self.language(call);
+            if !formula {
+                self.print(")");
+            }
+            self.opts |= options::QUOTE_EXPRESSIONS;
+            return;
+        }
         let head = call.car();
         let arguments = call.cdr();
         let argument_count = values::pairlist_length(arguments);
@@ -576,14 +675,6 @@ impl Deparser {
                 }
                 return;
             }
-            if self.opts & options::QUOTE_EXPRESSIONS != 0 {
-                self.print("quote(");
-                self.opts &= !options::QUOTE_EXPRESSIONS;
-                self.plain_call(&quote_name(&name_text), arguments);
-                self.opts |= options::QUOTE_EXPRESSIONS;
-                self.print(")");
-                return;
-            }
             self.plain_call(&quote_name(&name_text), arguments);
             return;
         }
@@ -609,6 +700,10 @@ impl Deparser {
     /// `()`, `:None` or `:Circle(radius = 2)`.
     unsafe fn native(&mut self, object: Sexp) {
         let layout = records::layout(object);
+        if matches!(layout.kind(), NativeKind::Dict | NativeKind::Set) {
+            self.collection(object, layout.kind() == NativeKind::Dict);
+            return;
+        }
         let count = layout.slot_count();
         if let Some(tag) = layout.tag {
             self.print(":");
@@ -644,6 +739,49 @@ impl Deparser {
             self.print(",");
         }
         self.print(")");
+    }
+
+    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
+    /// `Set.empty()`.
+    unsafe fn collection(&mut self, object: Sexp, dict: bool) {
+        let module = if dict { "Dict" } else { "Set" };
+        // The deparser cannot fail, and reading entries fails only on a malformed collection or
+        // an exhausted heap, so printing a placeholder would hide a corrupted value.
+        let entries = match standard_library::entries(object) {
+            Ok(entries) => entries,
+            Err(failure) => panic!("a {module} value could not be read for deparsing: {failure:?}"),
+        };
+        if entries.is_empty() {
+            self.print(module);
+            self.print(".empty()");
+            return;
+        }
+        self.print(module);
+        self.print(".from_list(list(");
+        self.in_list += 1;
+        let mut broken = false;
+        let count = entries.len();
+        for (index, (key, value)) in entries.into_iter().enumerate() {
+            match value {
+                Some(value) => {
+                    self.print("(");
+                    self.deparse(key);
+                    self.print(", ");
+                    self.deparse(value);
+                    self.print(")");
+                }
+                None => self.deparse(key),
+            }
+            if index + 1 < count {
+                self.print(", ");
+                self.line_break(&mut broken);
+            }
+        }
+        if broken {
+            self.indent -= 1;
+        }
+        self.in_list -= 1;
+        self.print("))");
     }
 
     /// The calls ry's own syntax lowers to, printed back in that syntax.
@@ -937,20 +1075,13 @@ impl Deparser {
             return;
         }
         let names = get_attr(vector, symbols().names);
-        let nice = self.opts & options::NICE_NAMES != 0 && names != nil();
+        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector);
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
-        // A run of consecutive integers, increasing or decreasing, deparses as `from:to`.
-        if kind == SexpType::Integer && count > 1 && !nice {
+        if is_integer_run(vector) {
             let data = values::ints(vector);
-            let step = data[1] as i64 - data[0] as i64;
-            let is_run = data[0] != NA_INTEGER
-                && (step == 1 || step == -1)
-                && data.windows(2).all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step);
-            if is_run {
-                self.print(&format!("{}:{}", data[0], data[count - 1]));
-                return;
-            }
+            self.print(&format!("{}:{}", data[0], data[count - 1]));
+            return;
         }
         if kind == SexpType::Raw {
             self.print("as.raw(c(");
@@ -1022,8 +1153,14 @@ impl Deparser {
                 }
                 SexpType::Complex => {
                     let value = values::complexes(vector)[index];
-                    if is_na_real(value.r) || is_na_real(value.i) {
+                    if is_na_real(value.r) && is_na_real(value.i) {
                         if keep_na && all_na { "NA_complex_".to_owned() } else { "NA".to_owned() }
+                    } else if !value.r.is_finite() || !value.i.is_finite() {
+                        // `Inf+Infi` would not parse back, so a non-finite part needs the call.
+                        let part = |part: f64| {
+                            if is_na_real(part) { "NA".to_owned() } else { format::format_real_alone(part, 15) }
+                        };
+                        format!("complex(real={}, imaginary={})", part(value.r), part(value.i))
                     } else {
                         format::format_complex_alone(value, 15)
                     }
@@ -1100,6 +1237,24 @@ impl Deparser {
     }
 }
 
+/// The source text a srcref points at, as `as.character(srcref)` reads it from its srcfile, or
+/// `None` when `srcref` is not a srcref or the text cannot be read. GNU R's deparser falls back
+/// to deparsing the code in that case too.
+pub unsafe fn source_lines(srcref: Sexp) -> Option<Vec<String>> {
+    if srcref.kind() != SexpType::Integer || length(srcref) < 6 {
+        return None;
+    }
+    let lines = crate::scope(|| {
+        let call = values::call(values::install("as.character")?, &[srcref])?;
+        crate::eval::eval(call, values::base_env())
+    })
+    .ok()?;
+    if lines.kind() != SexpType::String {
+        return None;
+    }
+    Some(values::strings(lines).into_iter().map(Option::unwrap_or_default).collect())
+}
+
 /// Whether names can be written inline (`c(a = 1)`) rather than as an attribute.
 unsafe fn nice_names_ok(object: Sexp) -> bool {
     let names = get_attr(object, symbols().names);
@@ -1112,10 +1267,83 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
     // All-empty names, or an `NA` name, need the attribute form.
     let any_named = (0..length(names)).any(|index| !values::is_blank(names.element(index)));
     let any_na = (0..length(names)).any(|index| names.element(index) == values::na_string());
-    any_named && !any_na
+    // In `c(...)` these names would match `c()`'s own arguments instead of naming elements.
+    let names_an_argument = object.kind().is_atomic()
+        && (0..length(names)).any(|index| {
+            matches!(values::string_at(names, index).as_deref(), Some("recursive" | "use.names"))
+        });
+    // A run deparses as `from:to`, which has no room for names.
+    any_named && !any_na && !names_an_argument && !is_integer_run(object)
 }
 
-/// Whether deparsing `object` needs `structure(...)` around it.
+/// A run of at least two consecutive integers, increasing or decreasing, which deparses as
+/// `from:to`.
+unsafe fn is_integer_run(object: Sexp) -> bool {
+    if object.kind() != SexpType::Integer || length(object) < 2 {
+        return false;
+    }
+    let data = values::ints(object);
+    let step = data[1] as i64 - data[0] as i64;
+    data[0] != NA_INTEGER
+        && (step == 1 || step == -1)
+        && data
+            .windows(2)
+            .all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step)
+}
+
+/// The parts of an S4 object that its `new()` call names.
+struct S4Parts {
+    class: String,
+    slots: Vec<(String, Sexp)>,
+    data: Option<Sexp>,
+}
+
+/// The class, slots and data part of an S4 object, read through the methods package, which
+/// owns class definitions. Without it, or for an object whose class it does not know, the
+/// object deparses as its plain value.
+unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
+    let symbols = symbols();
+    let class = get_attr(object, symbols.class);
+    if class.kind() != SexpType::String || length(class) != 1 {
+        return None;
+    }
+    let class_name = values::string_at(class, 0)?.into_owned();
+    let methods_function = |name: &str| -> R<Sexp> {
+        values::call(symbols.double_colon, &[values::install("methods")?, values::install(name)?])
+    };
+    let quoted = values::call(symbols.quote, &[object]).ok()?;
+    let slot_names_call = values::call(methods_function("slotNames").ok()?, &[quoted]).ok()?;
+    let slot_names = crate::eval::eval(slot_names_call, values::base_namespace()).ok()?;
+    if slot_names.kind() != SexpType::String {
+        return None;
+    }
+    crate::heap().root(slot_names);
+    let mut slots = Vec::new();
+    let mut has_data_slot = false;
+    for index in 0..length(slot_names) {
+        let name = values::string_at(slot_names, index)?.into_owned();
+        has_data_slot |= name == ".Data";
+        let name_value = values::scalar_string(&name).ok()?;
+        let slot_call = values::call(methods_function("slot").ok()?, &[quoted, name_value]).ok()?;
+        let value = crate::eval::eval(slot_call, values::base_namespace()).ok()?;
+        crate::heap().root(value);
+        slots.push((name, value));
+    }
+    let data = if has_data_slot || object.kind() == SexpType::Object {
+        None
+    } else {
+        let data = values::shallow_duplicate(object).ok()?;
+        values::remove_attr(data, symbols.class);
+        for (name, _) in &slots {
+            values::remove_attr(data, values::install(name).ok()?);
+        }
+        data.set_gp_bits(gp::S4_OBJECT, false);
+        crate::heap().root(data);
+        Some(data)
+    };
+    Some(S4Parts { class: class_name, slots, data })
+}
+
 unsafe fn has_shown_attributes(object: Sexp) -> bool {
     if matches!(object.kind(), SexpType::Language | SexpType::Symbol | SexpType::Environment | SexpType::Closure) {
         return false;

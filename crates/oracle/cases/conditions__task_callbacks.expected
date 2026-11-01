@@ -1,0 +1,19 @@
+[stdout]
+| counter 
+|       1 
+| 2 
+| 2 
+| [1] "counter" "2"      
+| [1] TRUE
+| [1] FALSE
+| [1] "2"
+| [1] TRUE
+| [1] FALSE
+| character(0)
+| [1] "handler must be a function"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "handler must be a function"

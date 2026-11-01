@@ -265,6 +265,8 @@ pub enum Action {
     Return { src: usize },
     ForInit { index: usize, src: usize, refine: Option<Ty> },
     ForStep { index: usize, src: usize, slot: usize },
+    /// Releases the reference `ForInit` took on the sequence.
+    ForEnd { src: usize },
     Visible(bool),
     LogicLeft { dst: usize, src: usize, is_and: bool },
     LogicRight { dst: usize, left: usize, right: usize, is_and: bool },
@@ -757,6 +759,7 @@ impl Builder<'_> {
                 state.slots[slot] = Slot { status: status::DIRTY, ty: element };
                 Action::ForStep { index: operand(0), src: operand(1), slot }
             }
+            Op::ForEnd => Action::ForEnd { src: operand(0) },
             Op::Invisible => {
                 state.visible = Some(false);
                 Action::Visible(false)
@@ -778,6 +781,8 @@ impl Builder<'_> {
                 state.visible = Some(true);
                 Action::LogicRight { dst: operand(0), left: operand(1), right: operand(2), is_and: operand(4) == 1 }
             }
+            // The interpreter's own step sets the current srcref; it touches no register.
+            Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
             Op::Closure => {
                 state.visible = Some(true);
                 state.registers[operand(0)] = Ty::Boxed;
@@ -1051,7 +1056,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible => {}
+        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::JumpUnless | Op::Return => gen_(operand(0), live),
         Op::Arithmetic => {
             kill(operand(1), live);
@@ -1059,6 +1064,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             gen_(operand(3), live);
         }
         Op::ForInit | Op::ForStep => gen_(operand(1), live),
+        Op::ForEnd => gen_(operand(0), live),
         Op::LogicLeft => gen_(operand(1), live),
         Op::LogicRight => {
             kill(operand(0), live);

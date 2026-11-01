@@ -197,7 +197,10 @@ impl Formatter<'_> {
                 Some(Directive::Off) => enabled = false,
                 _ => {}
             }
-            pending_directive = directive(element);
+            // A trailing comment attaches inside the code it follows once the
+            // formatter drops the `;` between them, so only a comment that
+            // starts its line is stable as a directive.
+            pending_directive = directive(element).filter(|_| !self.trails(previous, element));
             if element.kind() == SEMICOLON {
                 continue;
             }
@@ -257,7 +260,7 @@ impl Formatter<'_> {
             BRACE_EXPR => self.braces(node, level, make_multiline),
             CALL_EXPR | SUBSET_EXPR | SUBSET2_EXPR => self.call_like(node, level),
             ARGUMENT_LIST | PARAMETER_LIST => self.argument_list(node, level),
-            DOLLAR_EXPR | AT_EXPR => self.field_access(node, level),
+            DOLLAR_EXPR | AT_EXPR | NAMESPACE_EXPR => self.field_access(node, level),
             FUNCTION_DEF => self.function_definition(node, level),
             IF_EXPR => self.conditional(node, level, make_multiline),
             WHILE_EXPR => self.conditional(node, level, true),
@@ -274,6 +277,13 @@ impl Formatter<'_> {
                 self.comment_end = Some(self.out.len());
             }
             TYPE_ASCRIPTION | RETURN_TYPE | TYPE_BINDER_LIST => self.inline_annotation(node),
+            TYPE_DEFINITION => self.type_definition(node, level),
+            NEW_TYPE => {
+                self.out.push('@');
+                for child in node.children() {
+                    self.inline_annotation(&child);
+                }
+            }
             _ => {
                 for element in child_elements(node) {
                     self.element(&element, level, false);
@@ -393,12 +403,16 @@ impl Formatter<'_> {
             return;
         };
         let operator = &elements[operator_index];
-        // `x : :None` keeps its spaces: `x::None` would lex as `::`.
+        // `x : :None` keeps its spaces: `x::None` would lex as `::`. The tag can
+        // also start a larger operand, as in `x : :None$field`.
         let has_spacing = !matches!(operator.kind(), COLON | CARET)
             || (operator.kind() == COLON
-                && elements[operator_index + 1..]
-                    .iter()
-                    .any(|element| element.kind() == TAG_EXPR));
+                && elements[operator_index + 1..].iter().any(|element| {
+                    element
+                        .as_node()
+                        .and_then(SyntaxNode::first_token)
+                        .is_some_and(|token| token.kind() == COLON)
+                }));
         let break_after_operator = elements[operator_index + 1..]
             .iter()
             .find(|element| element.as_node().is_some())
@@ -485,7 +499,7 @@ impl Formatter<'_> {
         let elements = child_elements(node);
         let operator = elements
             .iter()
-            .position(|element| matches!(element.kind(), DOLLAR | AT));
+            .position(|element| matches!(element.kind(), DOLLAR | AT | COLON2 | COLON3));
         // Skip comments trailing the operator: the field name's line decides.
         let is_multiline = operator.is_some_and(|operator| {
             let lhs = &elements[operator.saturating_sub(1)];
@@ -499,7 +513,7 @@ impl Formatter<'_> {
         for (previous, element) in with_previous(&elements) {
             match element.kind() {
                 COMMENT | ANNOTATION => self.place_comment(previous, element, level + 1, level),
-                DOLLAR | AT => {
+                DOLLAR | AT | COLON2 | COLON3 => {
                     self.element(element, level, false);
                     seen_operator = true;
                 }
@@ -611,6 +625,13 @@ impl Formatter<'_> {
                 }
                 COMMENT | ANNOTATION => self.continuation(element, level),
                 ARGUMENT_LIST => {
+                    // `:None (x)` calls a tag; hugged, `:None(x)` would be its payload.
+                    if let Some(tag) = previous.and_then(SyntaxElement::as_node)
+                        && tag.kind() == TAG_EXPR
+                        && tag.children().all(|child| child.kind() != ARGUMENT_LIST)
+                    {
+                        self.space();
+                    }
                     if let Some(list) = element.as_node() {
                         self.argument_list(list, level + usize::from(additional_indent));
                     }
@@ -824,7 +845,7 @@ impl Formatter<'_> {
     fn pattern(&mut self, node: &SyntaxNode) {
         if node
             .descendants_with_tokens()
-            .any(|element| element.kind() == COMMENT)
+            .any(|element| matches!(element.kind(), COMMENT | ANNOTATION))
         {
             self.out.push_str(&self.source[node.text_range()]);
             return;
@@ -860,8 +881,8 @@ impl Formatter<'_> {
         for (previous, element) in with_previous(&elements) {
             match element.kind() {
                 COMMENT | ANNOTATION => self.place_comment(previous, element, level, level),
-                EQ => self.out.push_str(" ="),
                 _ if previous.is_some_and(is_comment) => self.continuation(element, level),
+                EQ => self.out.push_str(" ="),
                 _ => {
                     if previous.is_some_and(|previous| previous.kind() == EQ) {
                         self.space();
@@ -873,19 +894,9 @@ impl Formatter<'_> {
     }
 
     /// An inline annotation renders on one line with the spacing a `#:` type gets, so a
-    /// type reads the same written either way. One holding a comment is copied as
-    /// written: joining it onto one line would comment out the code after it. So
-    /// is one with a syntax error, whose tokens may glue into different ones.
+    /// type reads the same written either way.
     fn inline_annotation(&mut self, node: &SyntaxNode) {
-        let range = node.text_range();
-        if node
-            .descendants_with_tokens()
-            .any(|element| element.kind() == COMMENT)
-            || self
-                .error_ranges
-                .iter()
-                .any(|error| range.contains_inclusive(error.start()))
-        {
+        if self.keeps_verbatim(node) {
             self.out.push_str(&self.source[node.text_range()]);
             return;
         }
@@ -900,6 +911,16 @@ impl Formatter<'_> {
                 previous = None;
                 continue;
             };
+            // A directive name lexes as `@` plus adjacent tokens (`@if-unknown`); glue it back.
+            if kind == AnnotationTokenKind::Word
+                && let Some(previous) = previous.as_mut()
+                && previous.kind == AnnotationTokenKind::Directive
+                && previous.end == token.text_range().start()
+            {
+                self.out.push_str(token.text());
+                previous.end = token.text_range().end();
+                continue;
+            }
             if let Some(previous) = &previous
                 && annotation_space_between(previous, kind)
             {
@@ -912,6 +933,41 @@ impl Formatter<'_> {
                 end: token.text_range().end(),
             });
         }
+    }
+
+    /// A type definition lays out like the `#:` block it stands for, without the markers:
+    /// author line breaks stay, a line inside brackets indents one level per bracket, and
+    /// any other continuation line, such as a union member, hangs one level in.
+    fn type_definition(&mut self, node: &SyntaxNode, level: usize) {
+        let lines = if self.keeps_verbatim(node) {
+            None
+        } else {
+            self.annotation_line_tokens(node)
+        };
+        let Some(lines) = lines else {
+            self.out.push_str(&self.source[node.text_range()]);
+            return;
+        };
+        let rendered = render_annotation_lines(&lines, &self.indent, "", 1);
+        for (index, line) in rendered.iter().enumerate() {
+            if index > 0 {
+                self.newline(level);
+            }
+            self.out.push_str(line);
+        }
+    }
+
+    /// An inline annotation holding a comment is copied as written, because joining it onto
+    /// one line would comment out the code after it. So is one with a syntax error, whose
+    /// tokens may glue into different ones.
+    fn keeps_verbatim(&self, node: &SyntaxNode) -> bool {
+        let range = node.text_range();
+        node.descendants_with_tokens()
+            .any(|element| element.kind() == COMMENT)
+            || self
+                .error_ranges
+                .iter()
+                .any(|error| range.contains_inclusive(error.start()))
     }
 
     fn function_definition(&mut self, node: &SyntaxNode, level: usize) {
@@ -1118,16 +1174,17 @@ impl Formatter<'_> {
         };
         let lines: Vec<String> = match groups {
             Some(groups) => {
+                // A leading `;` is dropped, so it does not make the head trail code.
                 // A head trailing code renders apart from its continuation
                 // lines, so they never indent relative to a column the
                 // formatter does not control.
                 let trailing_head =
                     !line_prefix(self.source, &self.line_starts, usize::from(range.start()))
                         .chars()
-                        .all(char::is_whitespace);
+                        .all(|character| character.is_whitespace() || character == ';');
                 let (head, rest) = groups.split_at(usize::from(trailing_head).min(groups.len()));
-                let mut lines = render_annotation_lines(head, &self.indent);
-                lines.extend(render_annotation_lines(rest, &self.indent));
+                let mut lines = render_annotation_lines(head, &self.indent, "#: ", 0);
+                lines.extend(render_annotation_lines(rest, &self.indent, "#: ", 0));
                 lines
             }
             None => self.source[range]
@@ -1489,8 +1546,15 @@ fn parse_directive(text: &str) -> Option<Directive> {
 }
 
 /// An opener ending its line expands (its closer gets its own line at the
-/// opener's indent); anything else hugs.
-fn render_annotation_lines(line_tokens: &[Vec<AnnotationToken>], indent: &str) -> Vec<String> {
+/// opener's indent); anything else hugs. Each line starts with `prefix`, and a
+/// continuation line outside every bracket indents `hanging` levels.
+fn render_annotation_lines(
+    line_tokens: &[Vec<AnnotationToken>],
+    indent: &str,
+    prefix: &str,
+    hanging: usize,
+) -> Vec<String> {
+    let blank = prefix.trim_end();
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_level = 0usize;
@@ -1504,7 +1568,7 @@ fn render_annotation_lines(line_tokens: &[Vec<AnnotationToken>], indent: &str) -
             if started {
                 pending_empty_lines += 1;
             } else {
-                lines.push("#:".to_owned());
+                lines.push(blank.to_owned());
             }
             continue;
         }
@@ -1521,13 +1585,13 @@ fn render_annotation_lines(line_tokens: &[Vec<AnnotationToken>], indent: &str) -
                     closes_expanded
                 };
             if break_before {
-                lines.push(annotation_line(current_level, &current, indent));
+                lines.push(annotation_line(prefix, current_level, &current, indent));
                 current.clear();
-                lines.extend(repeat_n("#:".to_owned(), pending_empty_lines));
+                lines.extend(repeat_n(blank.to_owned(), pending_empty_lines));
                 current_level = match open_delimiters.last() {
                     Some(delimiter) if closer => delimiter.opener_level,
                     Some(delimiter) => delimiter.opener_level + usize::from(delimiter.expanded),
-                    None => 0,
+                    None => hanging,
                 };
                 previous = None;
             }
@@ -1553,13 +1617,13 @@ fn render_annotation_lines(line_tokens: &[Vec<AnnotationToken>], indent: &str) -
         }
     }
     if started {
-        lines.push(annotation_line(current_level, &current, indent));
+        lines.push(annotation_line(prefix, current_level, &current, indent));
     }
     lines
 }
 
-fn annotation_line(level: usize, content: &str, indent: &str) -> String {
-    format!("#: {}{content}", indent.repeat(level))
+fn annotation_line(prefix: &str, level: usize, content: &str, indent: &str) -> String {
+    format!("{prefix}{}{content}", indent.repeat(level))
 }
 
 struct OpenDelimiter {
@@ -1577,6 +1641,8 @@ struct AnnotationToken {
 enum AnnotationTokenKind {
     Word,
     Directive,
+    /// The `=` of an inline type definition.
+    Equals,
     Dots,
     Arrow,
     Pipe,
@@ -1616,6 +1682,7 @@ fn annotation_token_kind(token: &SyntaxToken) -> Option<AnnotationTokenKind> {
         COMMA => Comma,
         COLON => Colon,
         PIPE => Pipe,
+        EQ => Equals,
         MINUS_GREATER => Arrow,
         DOTS => Dots,
         AT => Directive,

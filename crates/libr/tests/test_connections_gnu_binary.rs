@@ -15,7 +15,7 @@ fn a_package_built_against_gnu_r_runs_the_scenarios() {
         return;
     }
     let library = build_package("ryconn", Headers::GnuR);
-    let r = r();
+    let r = r_with_base();
     r.load(&library);
     let expected = std::fs::read_to_string(expectation_path()).expect("the recorded GNU R output");
     let actual = run_in_ry(&r, "gnu-binary");

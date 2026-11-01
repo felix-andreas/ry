@@ -130,7 +130,11 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
             }
         }
         SexpType::Expression => {
-            let lines = deparse::deparse_lines(value, 60, deparse::options::SIMPLE);
+            let opts = match options.use_source {
+                true => deparse::options::SIMPLE | deparse::options::USE_SOURCE,
+                false => deparse::options::SIMPLE,
+            };
+            let lines = deparse::deparse_lines(value, 60, opts);
             for line in lines {
                 out(&format!("{line}\n"));
             }
@@ -226,8 +230,11 @@ unsafe fn print_primitive(value: Sexp) -> R<()> {
 }
 
 unsafe fn print_closure(function: Sexp, options: &PrintOptions) -> R<()> {
-    let _ = options;
-    let lines = deparse::deparse_lines(function, 60, deparse::options::SIMPLE);
+    let source = match options.use_source {
+        true => deparse::source_lines(get_attr(function, symbols().srcref)),
+        false => None,
+    };
+    let lines = source.unwrap_or_else(|| deparse::deparse_lines(function, 60, deparse::options::SIMPLE));
     for line in lines {
         out(&format!("{line}\n"));
     }
@@ -422,12 +429,30 @@ pub unsafe fn print_matrix(
             }
         })
         .collect();
-    let row_label_width = row_labels
-        .iter()
-        .map(|label| display_width(label))
-        .chain(std::iter::once(display_width(&row_title)))
-        .max()
-        .unwrap_or(0);
+    // Row names align left, but GNU R right-aligns the `[i,]` labels that stand in for them.
+    // Named dimnames (even named "") indent the row labels by at least two columns, or enough
+    // for the row title, and always print the column title line.
+    let numbered_rows = row_names == nil();
+    let titled = dimnames_names != nil();
+    let label_width = row_labels.iter().map(|label| display_width(label)).max().unwrap_or(0);
+    let offset = if !titled {
+        0
+    } else if display_width(&row_title) < label_width + 2 {
+        2
+    } else {
+        display_width(&row_title) - label_width
+    };
+    let row_label_width = label_width + offset;
+    let row_labels: Vec<String> = row_labels
+        .into_iter()
+        .map(|label| {
+            if numbered_rows {
+                pad(&label, row_label_width, true)
+            } else {
+                pad(&format!("{}{label}", " ".repeat(offset)), row_label_width, false)
+            }
+        })
+        .collect();
     let columns = matrix_columns(matrix, rows, cols, options)?;
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
@@ -456,7 +481,7 @@ pub unsafe fn print_matrix(
         text.push_str(&pad(&row_title, row_label_width, false));
         text.push('\n');
         for label in &row_labels {
-            text.push_str(&pad(label, row_label_width, false));
+            text.push_str(label);
             text.push('\n');
         }
         out(&text);
@@ -471,9 +496,8 @@ pub unsafe fn print_matrix(
             end += 1;
         }
         let mut text = String::new();
-        if !col_title.is_empty() {
+        if titled {
             text.push_str(&" ".repeat(row_label_width));
-            text.push_str(&" ".repeat(options.gap));
             text.push_str(&col_title);
             text.push('\n');
         }
@@ -485,7 +509,7 @@ pub unsafe fn print_matrix(
         }
         text.push('\n');
         for row in 0..rows {
-            text.push_str(&pad(&row_labels[row], row_label_width, false));
+            text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
                 text.push_str(&pad(&columns[col][row], widths[col], right));
@@ -623,7 +647,7 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             || name == symbols.srcfile
             || (name == symbols.comment)
             || (name == symbols.row_names && values::inherits(value, "data.frame"))
-            || (matches!(value.kind(), SexpType::Pairlist | SexpType::Language));
+            || value.kind() == SexpType::Pairlist;
         if !skip {
             let saved = tag.clone();
             // An attribute's label continues the labels of the attributes it is nested in, but
@@ -716,9 +740,11 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     Ok(value)
 }
 
+/// `print.function(x, useSource, ...)`.
 unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
-    let options = PrintOptions::defaults(call.env);
+    let mut options = PrintOptions::defaults(call.env);
+    options.use_source = values::as_logical_scalar(call.arg(1)) != 0;
     match function.kind() {
         SexpType::Closure => print_closure(function, &options)?,
         SexpType::Builtin | SexpType::Special => print_primitive(function)?,

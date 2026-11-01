@@ -1,5 +1,5 @@
 //! The native routines of GNU R's own default packages (methods, utils, stats, grDevices,
-//! graphics, tools), implemented in Rust.
+//! graphics, tools) and of parallel, implemented in Rust.
 //!
 //! Those packages' R code loads from the GNU R installation, but their shared libraries cannot:
 //! GNU R builds them against its internal headers, so they read GNU R's object layout directly
@@ -33,8 +33,16 @@ impl NativeCall<'_> {
         self.args.get(index).map_or_else(nil, |arg| arg.value)
     }
 
+    /// An error from inside the routine. GNU R reports it against the closure that made the
+    /// foreign call, not the `.Call` itself, because `error()` skips the builtin's context.
     pub fn error(&self, message: impl Into<String>) -> crate::unwind::Unwind {
-        error_in(self.call, message)
+        // SAFETY: the frame stack holds live calls.
+        error_in(unsafe { crate::unwind::current_call() }, message)
+    }
+
+    /// A warning from inside the routine, reported against the calling closure as `error` is.
+    pub unsafe fn warning(&self, message: impl Into<String>) -> R<()> {
+        crate::conditions::warning_call(crate::unwind::current_call(), message)
     }
 }
 
@@ -182,7 +190,7 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     };
     let native = NativeCall { call, args: &routine_args, env };
     if routine.3 >= 0 && matches!(routine.1, RoutineKind::Call) && routine.3 as usize != routine_args.len() {
-        return Err(native.error(format!(
+        return Err(error_in(call, format!(
             "Incorrect number of arguments ({}), expecting {} for '{}'",
             routine_args.len(),
             routine.3,
@@ -214,26 +222,27 @@ pub unsafe fn c_result(call: &NativeCall<'_>, values_out: &[Sexp]) -> R<Sexp> {
     Ok(result)
 }
 
-const PACKAGES: [&str; 6] = ["methods", "utils", "stats", "grDevices", "graphics", "tools"];
+const PACKAGES: [&str; 7] = ["methods", "utils", "stats", "grDevices", "graphics", "tools", "parallel"];
 
 const LIBRARY_MARKER: &str = "ry builtin library";
 const ROUTINE_MARKER: &str = "ry builtin routine";
 
 fn implementation(package: &str, name: &str) -> Option<NativeFn> {
-    let table: &[(&str, NativeFn)] = match package {
-        "methods" => crate::methods::ROUTINES,
-        "stats" => crate::distributions::ROUTINES,
-        "utils" => crate::utils::ROUTINES,
-        "tools" => crate::tools::ROUTINES,
-        "grDevices" => crate::graphics::GRDEVICES_ROUTINES,
-        "graphics" => crate::graphics::GRAPHICS_ROUTINES,
+    let tables: &[&[(&str, NativeFn)]] = match package {
+        "methods" => &[crate::methods::ROUTINES],
+        "stats" => &[crate::stats::ROUTINES, crate::distributions::ROUTINES],
+        "utils" => &[crate::utils::ROUTINES],
+        "tools" => &[crate::tools::ROUTINES],
+        "parallel" => &[crate::parallel::ROUTINES],
+        "grDevices" => &[crate::graphics::GRDEVICES_ROUTINES],
+        "graphics" => &[crate::graphics::GRAPHICS_ROUTINES],
         _ => &[],
     };
-    let found = table.iter().find(|(routine, _)| *routine == name).map(|(_, function)| *function);
-    match package {
-        "graphics" | "grDevices" => Some(found.unwrap_or(crate::graphics::no_devices)),
-        _ => found,
-    }
+    tables
+        .iter()
+        .flat_map(|table| table.iter())
+        .find(|(routine, _)| *routine == name)
+        .map(|(_, function)| *function)
 }
 
 fn find(name: &str, package: Option<&str>) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
@@ -304,6 +313,28 @@ unsafe fn native_symbol(routine: &(&str, RoutineKind, &str, i32), dll: Sexp, cla
 
 /// GNU R 4.3's registered routines of these packages: package, interface, name and arity.
 const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
+    ("parallel", RoutineKind::Call, "nextStream", 1),
+    ("parallel", RoutineKind::Call, "nextSubStream", 1),
+    ("parallel", RoutineKind::Call, "mc_children", 0),
+    ("parallel", RoutineKind::Call, "mc_close_fds", 1),
+    ("parallel", RoutineKind::Call, "mc_close_stderr", 1),
+    ("parallel", RoutineKind::Call, "mc_close_stdout", 1),
+    ("parallel", RoutineKind::Call, "mc_exit", 1),
+    ("parallel", RoutineKind::Call, "mc_fds", 1),
+    ("parallel", RoutineKind::Call, "mc_fork", 1),
+    ("parallel", RoutineKind::Call, "mc_is_child", 0),
+    ("parallel", RoutineKind::Call, "mc_kill", 2),
+    ("parallel", RoutineKind::Call, "mc_master_fd", 0),
+    ("parallel", RoutineKind::Call, "mc_read_child", 1),
+    ("parallel", RoutineKind::Call, "mc_read_children", 1),
+    ("parallel", RoutineKind::Call, "mc_rm_child", 1),
+    ("parallel", RoutineKind::Call, "mc_send_master", 1),
+    ("parallel", RoutineKind::Call, "mc_select_children", 2),
+    ("parallel", RoutineKind::Call, "mc_send_child_stdin", 2),
+    ("parallel", RoutineKind::Call, "mc_affinity", 1),
+    ("parallel", RoutineKind::Call, "mc_interactive", 1),
+    ("parallel", RoutineKind::Call, "mc_cleanup", 3),
+    ("parallel", RoutineKind::Call, "mc_prepare_cleanup", 0),
     ("methods", RoutineKind::Call, "R_M_setPrimitiveMethods", 5),
     ("methods", RoutineKind::Call, "R_clear_method_selection", 0),
     ("methods", RoutineKind::Call, "R_dummy_extern_place", 0),

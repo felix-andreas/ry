@@ -554,13 +554,15 @@ pub unsafe fn native_symbol_info(name: &str, package: &str) -> ApiResult<Sexp> {
     Ok(info)
 }
 
-/// `ry_native_symbol(name, package)`: `native_symbol_info` for hosts and tests.
+/// `ry_native_symbol(name, package)`: `native_symbol_info` for hosts and tests, or `NULL` when
+/// the package is not loaded or does not register the routine. A host calls it outside any R
+/// context, where raising an error would abort the process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_native_symbol(name: *const c_char, package: *const c_char) -> Sexp {
-    enter(|| {
-        native_symbol_info(
-            &String::from_utf8_lossy(c_bytes(name)),
-            &String::from_utf8_lossy(c_bytes(package)),
-        )
-    })
+    let name = String::from_utf8_lossy(c_bytes(name));
+    let package = String::from_utf8_lossy(c_bytes(package));
+    if registered_routine(&name, &package).is_none() {
+        return runtime().nil();
+    }
+    enter(|| native_symbol_info(&name, &package))
 }

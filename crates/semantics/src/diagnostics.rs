@@ -1,9 +1,10 @@
 use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_inline_site,
+    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_inline_site, is_type_kind,
     lower_annotation, lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{
     ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
+    column_element,
 };
 use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
 use crate::hir::{ExprId, ExpressionKind, Symbol};
@@ -26,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::{iter, mem};
 use syntax::SyntaxNode;
 use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name};
+use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -111,6 +112,16 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 "Type definition blocks are only allowed at the top level of a file.".to_owned(),
             ));
         }
+    }
+    for node in root.descendants().filter(|node| {
+        node.kind() == SyntaxKind::TYPE_DEFINITION && node.parent().as_ref() != Some(&root)
+    }) {
+        diagnostics.push(Diagnostic::new(
+            node.text_range(),
+            Severity::Error,
+            "annotation",
+            "Type definitions are only allowed at the top level of a file.".to_owned(),
+        ));
     }
     diagnostics.extend(dangling_annotation_diagnostics(db, file));
     diagnostics.extend(inline_annotation_diagnostics(db, file));
@@ -489,6 +500,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics.extend(unknown_type_diagnostics(db, file));
     diagnostics.extend(annotation_rule_diagnostics(db, file));
     diagnostics.extend(annotation_agreement_diagnostics(db, file));
+    diagnostics.extend(definition_agreement_diagnostics(db, file));
 
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     diagnostics
@@ -748,12 +760,17 @@ fn file_annotations<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Annotation<'d
     annotations
 }
 
-/// The project's declarations, with a script's own declarations shadowing them.
+/// The stubs' and the project's declarations, with a script's own declarations shadowing them.
 fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> BTreeMap<String, NamedDefinition<'db>> {
     let mut definitions = BTreeMap::new();
+    if let Some(library) = stubs(db) {
+        for (name, definition) in &library.type_definitions {
+            definitions.insert(name.text(db).to_owned(), definition.clone());
+        }
+    }
     if let Some(files) = ProjectFiles::try_get(db) {
         for (name, definition) in project_type_definitions(db, files) {
             definitions.insert(name.text(db).to_owned(), definition.clone());
@@ -856,14 +873,21 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                 }],
             });
         }
-        let governing = if lowered_comment.trusted {
-            Some("@trust")
-        } else if lowered_comment.if_unknown {
-            Some("@if-unknown")
-        } else if lowered_comment.new_nominal.is_some() {
-            Some("@new")
-        } else {
-            None
+        // A coercion governs wherever it is written, the inline one first.
+        let coercion = |annotation: &Annotation| {
+            if annotation.trusted {
+                Some("@trust")
+            } else if annotation.if_unknown {
+                Some("@if-unknown")
+            } else if annotation.new_nominal.is_some() {
+                Some("@new")
+            } else {
+                None
+            }
+        };
+        let governing = match coercion(&lower_inline_annotation(db, &site)) {
+            Some(directive) => Some(("inline annotation's", directive)),
+            None => coercion(&lowered_comment).map(|directive| ("comment's", directive)),
         };
         for inline in inline_slots(db, &site) {
             let Some(written) = comment_slots.iter().find(|slot| slot.slot == inline.slot) else {
@@ -896,7 +920,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                 ),
             };
             let winner = match governing {
-                Some(directive) => format!("ry applies the comment's `{directive}`"),
+                Some((side, directive)) => format!("ry applies the {side} `{directive}`"),
                 None => "ry uses the inline type".to_owned(),
             };
             diagnostics.push(Diagnostic {
@@ -910,6 +934,180 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                     message: "the `#:` comment's type is here",
                 }],
             });
+        }
+    }
+    diagnostics
+}
+
+/// A type defined both ways (a `#:` block directly above an inline definition of the same
+/// name) must be the same definition both ways: the same kind, the same type parameters
+/// with the same constraints, and the same body once type parameters pair by position.
+fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    let root = parse(db, file).syntax_node();
+    let pairs: Vec<(SyntaxNode, SyntaxNode)> = root
+        .children()
+        .filter(|node| node.kind() == SyntaxKind::TYPE_DEFINITION)
+        .filter_map(|node| paired_comment_definition(&node).map(|comment| (node, comment)))
+        .collect();
+    if pairs.is_empty() || !inline_annotations_enabled(db) {
+        return Vec::new();
+    }
+    let definitions = visible_type_definitions(db, file);
+    let mut diagnostics = Vec::new();
+    for (inline_node, comment) in pairs {
+        let inline = lower_inline_annotation(db, &inline_node);
+        let lowered_comment = lower_annotation(db, &comment);
+        if !inline.errors.is_empty() || !lowered_comment.errors.is_empty() {
+            continue;
+        }
+        let Some(inline_definition) = inline.definitions.first() else {
+            continue;
+        };
+        let Some((comment_definition, &comment_site)) = lowered_comment
+            .definitions
+            .iter()
+            .zip(&lowered_comment.definition_sites)
+            .find(|(definition, _)| definition.name == inline_definition.name)
+        else {
+            continue;
+        };
+        let Some(directive) = comment
+            .children()
+            .find(|child| child.text_range() == comment_site)
+        else {
+            continue;
+        };
+        let name = inline_definition.name.text(db);
+        let child_of = |node: &SyntaxNode, kind: SyntaxKind| {
+            node.children().find(|child| child.kind() == kind)
+        };
+        let body_of = |node: &SyntaxNode| {
+            node.children().find(|child| {
+                is_type_kind(child.kind()) && child.kind() != SyntaxKind::TYPE_BINDER_LIST
+            })
+        };
+        let mut push = |range: TextRange,
+                        disagreement: String,
+                        related_range: TextRange,
+                        related: &'static str| {
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Warning,
+                code: "annotation-mismatch",
+                message: format!(
+                    "{disagreement}. ry uses the inline definition; make the two agree, or delete one"
+                ),
+                related: vec![RelatedLocation {
+                    file,
+                    range: related_range,
+                    message: related,
+                }],
+            });
+        };
+        let name_range = child_of(&inline_node, SyntaxKind::NAME)
+            .map_or(inline_node.text_range(), |node| node.text_range());
+        if inline_definition.alias != comment_definition.alias {
+            let (inline_kind, comment_directive) = if inline_definition.alias {
+                ("an alias", "@type")
+            } else {
+                ("a nominal type", "@alias")
+            };
+            push(
+                name_range,
+                format!(
+                    "the inline definition makes `{name}` {inline_kind}, but the `#:` comment declares it with `{comment_directive}`"
+                ),
+                directive.text_range(),
+                "the `#:` comment's definition is here",
+            );
+            continue;
+        }
+        let inline_binders = child_of(&inline_node, SyntaxKind::TYPE_BINDER_LIST);
+        let comment_binders = child_of(&directive, SyntaxKind::TYPE_BINDER_LIST);
+        let (inline_count, comment_count) = (
+            inline_definition.parameters.len(),
+            comment_definition.parameters.len(),
+        );
+        if inline_count != comment_count {
+            push(
+                inline_binders
+                    .as_ref()
+                    .map_or(name_range, |list| list.text_range()),
+                format!(
+                    "the inline definition gives `{name}` {inline_count} type {}, but the `#:` comment gives it {comment_count}",
+                    plural(inline_count, "parameter", "parameters")
+                ),
+                comment_binders
+                    .as_ref()
+                    .map_or(directive.text_range(), |list| list.text_range()),
+                "the `#:` comment's type parameters are here",
+            );
+            continue;
+        }
+        let constraints = |list: &Option<SyntaxNode>| -> Vec<(String, TextRange)> {
+            list.iter()
+                .flat_map(|list| list.children())
+                .filter(|binder| binder.kind() == SyntaxKind::TYPE_BINDER)
+                .map(|binder| {
+                    let spelling = binder
+                        .children()
+                        .filter(|word| word.kind() == SyntaxKind::NAME)
+                        .skip(1)
+                        .map(|word| word.text().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (spelling, binder.text_range())
+                })
+                .collect()
+        };
+        let describe = |spelling: &str| {
+            if spelling.is_empty() {
+                "no constraint".to_owned()
+            } else {
+                format!("`{spelling}`")
+            }
+        };
+        for ((inline_spelling, inline_range), (comment_spelling, comment_range)) in
+            constraints(&inline_binders)
+                .iter()
+                .zip(&constraints(&comment_binders))
+        {
+            if inline_spelling != comment_spelling {
+                push(
+                    *inline_range,
+                    format!(
+                        "the inline definition gives this type parameter {}, but the `#:` comment gives it {}",
+                        describe(inline_spelling),
+                        describe(comment_spelling)
+                    ),
+                    *comment_range,
+                    "the `#:` comment's type parameter is here",
+                );
+            }
+        }
+        let [inline_body, comment_body] =
+            [inline_definition, comment_definition].map(|definition| {
+                let binders: Vec<(Name, Constraint)> = definition
+                    .parameters
+                    .iter()
+                    .map(|parameter| (*parameter, Constraint::Unconstrained))
+                    .collect();
+                substitute_rigid(db, definition.body, &positional_binders(db, &binders))
+            });
+        if !same_type(db, inline_body, comment_body, &definitions)
+            && let (Some(inline_type), Some(comment_type)) =
+                (body_of(&inline_node), body_of(&directive))
+        {
+            push(
+                inline_type.text_range(),
+                format!(
+                    "the inline definition of `{name}` says `{}`, but the `#:` comment says `{}`",
+                    TypeRenderer::default().render(db, inline_definition.body),
+                    TypeRenderer::default().render(db, comment_definition.body)
+                ),
+                comment_type.text_range(),
+                "the `#:` comment's type is here",
+            );
         }
     }
     diagnostics
@@ -1158,13 +1356,27 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
 #[salsa::tracked(returns(ref))]
 fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
     let parsed = parse(db, file);
-    let mut sites = Vec::new();
-    for node in parsed
-        .syntax_node()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
-        let annotation = lower_annotation(db, &node);
+    let mut sites: Vec<(String, TextRange)> = Vec::new();
+    for node in parsed.syntax_node().descendants() {
+        let annotation = match node.kind() {
+            SyntaxKind::ANNOTATION => lower_annotation(db, &node),
+            SyntaxKind::TYPE_DEFINITION => {
+                // A `#:` block spelling the same definition directly above is the same
+                // declaration, so the inline site stands for both.
+                if let Some(comment) = paired_comment_definition(&node) {
+                    let comment_range = comment.text_range();
+                    let name = lower_inline_annotation(db, &node)
+                        .definitions
+                        .first()
+                        .map(|definition| definition.name.text(db).to_owned());
+                    sites.retain(|(site_name, range)| {
+                        Some(site_name) != name.as_ref() || !comment_range.contains_range(*range)
+                    });
+                }
+                lower_inline_annotation(db, &node)
+            }
+            _ => continue,
+        };
         for (definition, range) in annotation
             .definitions
             .iter()
@@ -2016,6 +2228,56 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             format!("{subject} has no column `{column}`{hint}")
         }
+        TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
+            "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.",
+            renderer.render(db, *x),
+            renderer.render(db, *i)
+        ),
+        TypeErrorKind::OrderedJoinOnText {
+            condition,
+            column,
+            found,
+        } => format!(
+            "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings.",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::InSubsetColumn { column, inner } => {
+            let inner = TypeError {
+                range: error.range,
+                kind: (**inner).clone(),
+            };
+            let message = render_type_error_message(db, &inner);
+            format!(
+                "{}, for the column `{column}` of `.SD`",
+                message.trim_end_matches('.')
+            )
+        }
+        TypeErrorKind::RollingNonEquiJoin => {
+            "a rolling join needs every join condition to be `==`".to_owned()
+        }
+        TypeErrorKind::LossyColumnWrite {
+            column,
+            column_ty,
+            found,
+        } => {
+            let effect = match (
+                column_element(db, *column_ty).kind(db),
+                column_element(db, *found).kind(db),
+            ) {
+                (TyKind::Scalar(Atomic::Logical), TyKind::Scalar(Atomic::Character)) => {
+                    "is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`"
+                }
+                (_, TyKind::Scalar(Atomic::Character)) => {
+                    "is parsed as a number, and a string that is not one becomes `NA`"
+                }
+                _ => "is truncated to an integer",
+            };
+            format!(
+                "column `{column}` holds `{}`, so this `{}` value {effect}",
+                renderer.render(db, *column_ty),
+                renderer.render(db, *found)
+            )
+        }
         TypeErrorKind::BadRowIndex { found } => {
             let hint = if matches!(found.kind(db), TyKind::Frame(_)) {
                 ". To join two frames, add `on =`."
@@ -2089,6 +2351,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 NativeValueKind::Record => "record",
                 NativeValueKind::Tuple => "tuple",
                 NativeValueKind::Tag => "tag",
+                NativeValueKind::Dict => "dict",
+                NativeValueKind::Set => "set",
             };
             format!(
                 "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `as.list()` first"
@@ -2340,6 +2604,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }
+        Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
     }
 }

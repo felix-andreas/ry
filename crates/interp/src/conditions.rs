@@ -6,7 +6,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    deparse, eval, heap, interp,
+    deparse, eval, interp,
     unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
     values::{
         self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
@@ -178,8 +178,30 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
             outcome = unwind;
         }
     }
+    // GNU R records the stack for `traceback()` only after the `error` option ran, so a
+    // handler there still sees the previous error's.
+    if let Err(unwind) = traceback_calls(0).and_then(|calls| {
+        Ok(crate::heap().define(values::base_env(), values::install(".Traceback")?, calls)?)
+    }) {
+        outcome = unwind;
+    }
     interp().in_error -= 1;
     outcome
+}
+
+/// The calls on the stack, innermost first and without the innermost `skip`, each deparsed and
+/// carrying the srcref of where it was made: `.Traceback` as GNU R records it.
+pub unsafe fn traceback_calls(skip: usize) -> R<Sexp> {
+    let mut items = Vec::new();
+    for frame in interp().frames.iter().rev().skip(skip) {
+        let lines = deparse::deparse_lines(frame.call, 60, deparse::options::SIMPLE);
+        let text = values::string_vector(&lines)?;
+        if frame.srcref != nil() {
+            values::set_attr(text, symbols().srcref, values::duplicate(frame.srcref)?)?;
+        }
+        items.push((nil(), text));
+    }
+    values::pairlist(&items, SexpType::Pairlist)
 }
 
 /// GNU R's concise traceback: the functions on the stack, outermost first, or `None` when the
@@ -273,15 +295,7 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         }));
     }
     if level == 1 {
-        let text = if call == nil() {
-            format!("Warning: {message}\n")
-        } else {
-            format!(
-                "Warning in {} : {message}\n",
-                deparse::deparse_first_line(call)
-            )
-        };
-        write_console(text.as_bytes(), true);
+        write_console(immediate_warning_text(call, message).as_bytes(), true);
         return Ok(());
     }
     let state = interp();
@@ -291,9 +305,19 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
     Ok(())
 }
 
-/// The first line of a call's deparse, which is all of a long call a warning shows.
-unsafe fn first_deparse_line(call: Sexp) -> String {
-    deparse::deparse_lines(call, 60, deparse::options::SIMPLE).into_iter().next().unwrap_or_default()
+/// A warning printed as it happens: the first line of the call, then the message on the same
+/// line when the two fit in 57 characters, and indented on the next line otherwise.
+unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
+    if call == nil() {
+        return format!("Warning: {message}\n");
+    }
+    let call_text = deparse::deparse_first_line(call);
+    let separator = if call_text.chars().count() + message.chars().count() + 18 > 75 {
+        " :\n  "
+    } else {
+        " : "
+    };
+    format!("Warning in {call_text}{separator}{message}\n")
 }
 
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
@@ -307,9 +331,11 @@ pub unsafe fn print_warnings() {
         text.push_str("Warning message:\n");
         let (call, message) = &warnings[0];
         if *call == nil() {
+            // GNU R ends a lone warning without a call with a space.
             text.push_str(message);
+            text.push(' ');
         } else {
-            let call_text = first_deparse_line(*call);
+            let call_text = deparse::deparse_first_line(*call);
             let separator = if call_text.len() + message.len() + 6 > 75 {
                 " :\n  "
             } else {
@@ -329,7 +355,7 @@ pub unsafe fn print_warnings() {
                 if *call == nil() {
                     text.push_str(&format!("{}: {message}\n", index + 1));
                 } else {
-                    let call_text = first_deparse_line(*call);
+                    let call_text = deparse::deparse_first_line(*call);
                     let separator = if call_text.len() + message.len() + 10 > 75 {
                         " :\n  "
                     } else {
@@ -369,7 +395,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".getRestart", 1, do_get_restart),
     internal(".invokeRestart", 2, do_invoke_restart),
     internal(".addTryHandlers", 0, |_| unsafe { Ok(nil()) }).invisible(),
-    internal(".addGlobHands", 5, |_| unsafe { Ok(nil()) }).invisible(),
+    internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
     internal("warnings", 0, |_| unsafe { Ok(nil()) }),
     internal("interruptsSuspended", -1, |_| unsafe { values::scalar_bool(false) }),
 ];
@@ -405,13 +431,35 @@ unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// `.addGlobHands(classes, handlers, parentenv, target, calling)`: replaces the global handlers
+/// at the bottom of the stack. Every frame between here and top level saved the old bottom, so
+/// each is rewritten to the new one, or returning from it would drop the new handlers.
+unsafe fn do_add_global_handlers(call: &Call<'_>) -> R<Sexp> {
+    let state = interp();
+    let same = |stack: &HandlerStack| match (stack, &state.global_handlers) {
+        (None, None) => true,
+        (Some(stack), Some(global)) => Rc::ptr_eq(stack, global),
+        _ => false,
+    };
+    if !same(&state.handlers) || !state.frames.iter().all(|frame| same(&frame.handlers)) {
+        return Err(error("should not be called with handlers on the stack"));
+    }
+    state.handlers = None;
+    do_add_cond_hands(call)?;
+    let state = interp();
+    for frame in &mut state.frames {
+        frame.handlers = state.handlers.clone();
+    }
+    state.global_handlers = state.handlers.clone();
+    Ok(nil())
+}
+
 unsafe fn do_reset_cond_hands(_call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
 unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
     let condition = call.arg(0);
-    let message = call.arg(1);
     let condition_call = call.arg(2);
     let classes = condition_classes(condition);
     let class_slices: Vec<&[u8]> = classes.iter().map(Vec::as_slice).collect();
@@ -430,7 +478,6 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
         }
     }
     interp().handlers = saved;
-    let _ = message;
     Ok(nil())
 }
 
@@ -486,15 +533,7 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
         String::new()
     };
     if immediate {
-        let text = if condition_call == nil() {
-            format!("Warning: {message}\n")
-        } else {
-            format!(
-                "Warning in {} : {message}\n",
-                deparse::deparse_first_line(condition_call)
-            )
-        };
-        write_console(text.as_bytes(), true);
+        write_console(immediate_warning_text(condition_call, &message).as_bytes(), true);
     } else {
         warning_call(condition_call, message.clone())?;
     }

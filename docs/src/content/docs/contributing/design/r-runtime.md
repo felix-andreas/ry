@@ -710,11 +710,12 @@ type. No interpreter calls it yet. The rest of this section describes the shape 
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
   filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
   `mean`, `min`, `max`, `.N`, `first`, `last`, `median`, `sd`, `var`, plus `head` and `cor`), equi,
-  keyed and rolling joins, and `:=`. Lowering adds R's semantics where Polars differs: integer
-  overflow becomes NA, aggregates propagate NA unless `na.rm`, `%/%` and `%%` follow R's signs, and
-  joins follow data.table's row and column layout. Not covered yet: `.EACHI`, `mult =`, non-equi
-  joins, and R functions inside an aggregation, which will fall back to per-group evaluation with a
-  lint saying so.
+  keyed, rolling and non-equi joins, `by = .EACHI`, `mult =`, and `:=`. Lowering adds R's
+  semantics where Polars differs: integer overflow becomes NA, aggregates propagate NA unless `na.rm`, `%/%` and `%%` follow R's signs, and
+  joins follow data.table's row and column layout. A query returns the warnings data.table would
+  raise (an overflowing grouped integer sum, a lossy `:=`) as data, for the interpreter to signal.
+  Not covered yet: R functions inside an aggregation, which will fall back to per-group evaluation
+  with a lint saying so.
 - **`:=` is copy-on-write with reference counts,** not over-allocation. A frame whose reference count
   is one is updated in place, so `tbl[, x := y * 2]` costs one new column, and a shared frame first
   copies only its column list, because the Arrow buffers themselves are immutable and shared. In the
@@ -844,6 +845,18 @@ Each step ends with something real running, and each one is a large, whole chang
    `base`, `stats`, `utils`, `methods`, `tools` and `parallel` sources) is reused as R source, so only
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
+
+   The interpreter runs. 101 of the 103 oracle cases match GNU R (`oracle compare --engine ry`); the
+   other two, `stats__lbfgsb` and `stats__arima_and_kalman`, agree only to about seven digits
+   because ry's L-BFGS-B takes a slightly different path to the same optimum. Of GNU R 4.3.3's own
+   `tests/*.R`, 41 of 66 end with GNU R's exit status and 13 print exactly GNU R's output. The rest
+   stop at a routine or internal ry lacks (`nlm`, `parse_Rd`, `file.copy`, `env.profile`, URL
+   connections), at numerical precision in the distributions, `polyroot` and complex BLAS, or at
+   time zones, which ry computes as UTC only. All six corpus packages that run R code while loading
+   (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`. Parsed
+   code keeps source references when `keep.source` asks for them. Connections are a single
+   implementation shared by the interpreter and `libR`, and graphics devices open, keep their
+   parameters and record empty plots, but draw nothing.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all

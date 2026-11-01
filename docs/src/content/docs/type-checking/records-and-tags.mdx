@@ -13,7 +13,7 @@ checker knows exactly, and `match` reports the case you forgot:
 <TabItem label="Inline">
 
 ```r
-#: @alias Shape {:Circle(radius: double) | :Rect(width: double, height: double) | :Empty}
+alias Shape = :Circle(radius: double) | :Rect(width: double, height: double) | :Empty
 
 area <- function(s: Shape) -> double {
   match (s) {
@@ -48,8 +48,7 @@ non-exhaustive-match
 ```
 
 `match` and the tag, record and tuple syntax exist only in ry, so they have a single spelling.
-Only the annotations around them come in two styles. `@alias` and `@type` definitions exist only as
-`#:` comments, which is why both tabs above define `Shape` that way.
+Only the annotations around them, including the definition of `Shape`, come in two styles.
 
 These are ry values, not R lists. R cannot run code that uses them, so they belong in code that only
 ry runs.
@@ -252,6 +251,21 @@ Error in sum(point) :
 
 Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
 `as.record()`, `as.tuple()` and `as.tag()` turn a list back.
+
+## The standard library
+
+The [standard library](/reference/standard-library/) is built on these values. Its functions return
+`:Ok(value)` or `:Err(:Reason)` where R would return `NA` or warn, so `match` handles both cases:
+
+```r
+match (List.first(xs)) {
+  :Ok(x) => x
+  :Err(:ListWasEmpty) => 0L
+}
+```
+
+It also adds `Dict` and `Set`, a dictionary and a set with value semantics, and `Result<T, E>`, the
+type of those results, which every annotation can use.
 
 ## Instead of S4, R6 and Reference Classes
 

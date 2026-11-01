@@ -2,11 +2,12 @@
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
 use crate::{
-    interp,
+    interp, records, standard_library,
     unwind::{R, error},
 };
 use heap::{
     Heap, Marker,
+    records::NativeKind,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
     strings::Encoding,
 };
@@ -202,6 +203,9 @@ pub struct Globals {
     /// Environments `attach` put on the search path are ordinary enclosures of the global
     /// environment; this keeps `Autoloads` and the like alive between `attach` and first use.
     pub keep: Vec<Sexp>,
+    /// `.cache_class`: each S4 class's S3 class vector (the class and what it extends), which
+    /// the methods package keeps current as it defines and removes classes.
+    pub s4_extends: rustc_hash::FxHashMap<Box<[u8]>, Sexp>,
 }
 
 impl Globals {
@@ -212,6 +216,7 @@ impl Globals {
             allow_primitive_methods: true,
             primitive_methods: rustc_hash::FxHashMap::default(),
             keep: Vec::new(),
+            s4_extends: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -229,6 +234,9 @@ impl Globals {
         }
         for &object in &self.keep {
             marker.mark(object);
+        }
+        for &extends in self.s4_extends.values() {
+            marker.mark(extends);
         }
     }
 }
@@ -490,7 +498,10 @@ pub unsafe fn length(object: Sexp) -> usize {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => pairlist_length(object),
         SexpType::Environment => env_length(object),
-        SexpType::Record => object.record_slot_count(),
+        SexpType::Record => match records::native_kind(object) {
+            NativeKind::Dict | NativeKind::Set => standard_library::entry_count(object),
+            NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => object.record_slot_count(),
+        },
         _ if object.kind().is_vector() => {
             if object.is_altrep() {
                 altrep_length(object)
@@ -882,19 +893,16 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
                 let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
                 list = triple(cell_kind, value, list, tag)?;
-                if attributes != nil() {
+                // The head cell's attributes and flags are the object's, copied below.
+                if position != 0 && attributes != nil() {
                     let attributes = if deep { duplicate(attributes)? } else { attributes };
                     heap.set_attrib(list, attributes);
                 }
             }
-            if object.attrib() != nil() && list != nil() {
-                let attributes = duplicate(object.attrib())?;
-                heap.set_attrib(list, attributes);
+            if list == nil() {
+                return Ok(list);
             }
-            if list != nil() && object.is_object() {
-                list.set_object(true);
-            }
-            return Ok(list);
+            list
         }
         SexpType::Closure => {
             let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;

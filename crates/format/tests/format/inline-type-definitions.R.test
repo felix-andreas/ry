@@ -1,0 +1,87 @@
+#==== inline_type_definitions
+#---- definition_spacing
+type   UserId=integer
+alias Box <T:numeric,U>   =list{ value:T,other : U }
+#++++
+type UserId = integer
+alias Box<T: numeric, U> = list{value: T, other: U}
+
+#---- union_on_one_line
+alias Answer =:Yes|:No
+#++++
+alias Answer = :Yes | :No
+
+#---- multi_line_union_with_leading_pipes
+alias Shape =
+    | :Circle(radius:double)
+  |:Rect(width: double, height: double)
+x <- 1
+#++++
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+x <- 1
+
+#---- multi_line_union_with_trailing_pipes
+alias Shape = :Circle(radius: double) |
+      :Rect(width: double, height: double)
+#++++
+alias Shape = :Circle(radius: double) |
+  :Rect(width: double, height: double)
+
+#---- multi_line_record
+alias Point = record{
+  x: double,
+     y: double
+}
+#++++
+alias Point = record{
+  x: double,
+  y: double
+}
+
+#---- definition_with_a_comment_stays_verbatim
+alias Shape =
+  | :Circle(radius: double) # round
+  | :Empty
+#++++
+alias Shape =
+  | :Circle(radius: double) # round
+  | :Empty
+
+#---- comment_pair_and_definition
+#:@type Celsius {double}
+type Celsius = double
+#++++
+#: @type Celsius {double}
+type Celsius = double
+
+#==== inline_coercions
+#---- coercion_spacing
+x :@trust  integer<- readRDS("x.rds")
+y: @if-unknown   integer = z
+id:@new UserId<-5L
+#++++
+x: @trust integer <- readRDS("x.rds")
+y: @if-unknown integer = z
+id: @new UserId <- 5L
+
+#==== nominal_constructors
+#---- constructor_spacing
+id <- @UserId(  5L )
+b <- @Box< integer >(list(value=1L))
+p <- @Point((x=1,y=2))
+#++++
+id <- @UserId(5L)
+b <- @Box<integer>(list(value = 1L))
+p <- @Point((x = 1, y = 2))
+
+#---- constructor_in_a_call
+f(@UserId(5L), y)
+#++++
+f(@UserId(5L), y)
+
+#---- constructor_with_two_type_arguments
+p <- @Pair<integer,double>(list(1L, 2))
+#++++
+p <- @Pair<integer, double>(list(1L, 2))

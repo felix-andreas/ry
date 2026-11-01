@@ -59,7 +59,7 @@ action: Add inferred type annotations for the whole file
   edit 62..62 -> "    #: integer\n"
   edit 38..38 -> "  #: fn() -> integer\n"
   edit 0..0 -> "#: fn() -> integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
 hint @45: fn() -> integer
@@ -88,7 +88,7 @@ action: Add inferred type annotations for the whole file
   edit 62..62 -> "    #: integer\n"
   edit 38..38 -> "  #: fn() -> integer\n"
   edit 0..0 -> "#: fn() -> integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
 hint @45: fn() -> integer
@@ -108,7 +108,7 @@ signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 18..18 -> "#: integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer
 hint @23: integer
 
@@ -141,6 +141,6 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 24..24 -> "  #: integer\n"
   edit 0..0 -> "#: fn() -> integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer

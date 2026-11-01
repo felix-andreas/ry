@@ -12,21 +12,19 @@ Fahrenheit, or a user ID from an email address.
 
 ## Nominal types
 
-A *nominal* type is distinct by name, even from a type with the same shape. `@type` declares one,
-and `@new` marks the one place that creates its values. Both exist only as `#:` comments, because
-ry has no inline spelling for type definitions or for `@new`. Function signatures around them can
-still be written inline:
+A *nominal* type is distinct by name, even from a type with the same shape. `type` declares one,
+and `@Money(value)` marks the one place that creates its values. The comment spelling is
+`#: @type` and `#: @new`:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
 
 ```r
-#: @type Money {list{amount: double, currency: character}}
+type Money = list{amount: double, currency: character}
 
 money <- function(amount: double, currency: character) -> Money {
   if (amount < 0) stop("negative amount")
-  #: @new Money
-  structure(list(amount = amount, currency = currency), class = "Money")
+  @Money(structure(list(amount = amount, currency = currency), class = "Money"))
 }
 
 amount_of <- function(m: Money) -> double m$amount
@@ -62,17 +60,18 @@ type-mismatch
   x expected `Money`, found `list{amount: double, currency: character}`
 ```
 
-A list with the right fields is still not a `Money`. Put `@new` in one constructor and nowhere else,
-and every `Money` in the program has passed its checks: `@new` checks the shape when ry analyzes
-the code, and `stop()` checks the values when it runs.
+A list with the right fields is still not a `Money`. Put `@Money(...)` in one constructor and
+nowhere else, and every `Money` in the program has passed its checks: `@Money(...)` checks the
+shape when ry analyzes the code, and `stop()` checks the values when it runs. At run time
+`@Money(x)` is just `(x)`.
 
-Scalars work the same way. With `@type UserId {character}` and `@type Email {character}`, passing an
+Scalars work the same way. With `type UserId = character` and `type Email = character`, passing an
 `Email` where a `UserId` is expected is an error, although both are strings at run time.
 
 ## Operators
 
 A nominal value is still accepted where its representation is, so `nchar()` works on a `UserId`.
-Arithmetic gives the plain representation back: with `@type Celsius {double}`, the sum of two
+Arithmetic gives the plain representation back: with `type Celsius = double`, the sum of two
 `Celsius` values is a `double`, because ry cannot assume that adding two temperatures gives a
 temperature. `Money` is a list, so `+` on it is an error until you declare the operator:
 
@@ -101,12 +100,61 @@ which is why the constructor sets one; ry itself needs no class to check the typ
 
 ## Parameters and aliases
 
-A type can take parameters: with `@type Page<T> {list{items: list[T], total: integer}}`, reading
+A type can take parameters: with `type Page<T> = list{items: list[T], total: integer}`, reading
 `items` from a `Page<integer>` gives a `list[integer]`.
 
-`@alias` names a type without making it nominal, so `@alias Row {list{id: integer}}` is a shorter
-way to write the shape. A `@type` or `@alias` line needs its own `#:` block, separated from other
-annotations by a blank line.
+`alias` names a type without making it nominal, so `alias Row = list{id: integer}` is a shorter
+way to write the shape. A long union can put each member on its own line, each starting with `|`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+alias Event =
+  | :Click(x: double, y: double)
+  | :Key(code: integer)
+  | :Quit
+
+handle <- function(e: Event) -> character {
+  match (e) {
+    :Click(x = x, y = y) => "click"
+    :Key(code = code) => "key"
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @alias Event {
+#:   | :Click(x: double, y: double)
+#:   | :Key(code: integer)
+#:   | :Quit
+#: }
+
+#: fn(e: Event) -> character
+handle <- function(e) {
+  match (e) {
+    :Click(x = x, y = y) => "click"
+    :Key(code = code) => "key"
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Quit`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+Definitions belong at the top level of a file. In the comment spelling, a `@type` or `@alias` line
+needs its own `#:` block, separated from other annotations by a blank line. If you keep both
+spellings, put the `#:` block directly above the inline definition: ry reads the pair as one
+definition and warns when the two disagree.
 
 ## R6 and S4 objects
 
@@ -118,12 +166,9 @@ constructor:
 <TabItem label="Inline">
 
 ```r
-#: @type Account {Any}
+type Account = Any
 
-new_account <- function() -> Account {
-  #: @new Account
-  AccountClass$new()
-}
+new_account <- function() -> Account @Account(AccountClass$new())
 ```
 
 </TabItem>

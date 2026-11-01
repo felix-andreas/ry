@@ -77,3 +77,35 @@ error: expected a type, found `,`
  --> 1:26
   | f <- function(x: list{a: , b: fn(}) x
   |                          ^
+
+#==== inline_type_definitions
+#---- definition_shares_its_line
+type UserId = integer; id <- 1L
+#++++
+error: expected the end of the line after a type definition, found `;`
+ --> 1:22
+  | type UserId = integer; id <- 1L
+  |                      ^
+
+#---- directive_name_spaced_off
+count: @ trust integer <- 1L
+#++++
+error: expected a directive name right after `@`, as in `@trust`
+ --> 1:8
+  | count: @ trust integer <- 1L
+  |        ^^^^^^^
+
+#---- binding_type_continues_on_a_pipe_line
+count: integer
+  | NULL <- 1L
+#++++
+no errors
+
+#---- slot_access_broken_across_lines
+obj
+@slot
+#++++
+error: expected a statement, found `@`
+ --> 2:1
+  | @slot
+  | ^

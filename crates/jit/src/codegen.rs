@@ -437,6 +437,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                     }
                     value
                 };
+                // The body must see the sequence as shared, as in the interpreter, so that
+                // modifying the variable it came from copies it.
+                self.increment(sequence);
                 let count = self.builder.ins().load(I64, flags(), sequence, LENGTH);
                 let zero = self.builder.ins().iconst(I64, 0);
                 self.builder.def_var(self.loop_counts[index], count);
@@ -476,6 +479,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.ins().jump(label, &[]);
                 self.fill_edges()?;
                 return Ok(true);
+            }
+            Action::ForEnd { src } => {
+                let sequence = self.load_register(src);
+                let yes = self.builder.ins().iconst(I8, 1);
+                self.decrement_if(sequence, yes);
             }
             Action::Visible(flag) => self.set_visible(&before, flag),
             Action::LogicLeft { dst, src, is_and } => {
@@ -1556,7 +1564,7 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::BranchUnlessBuiltin => vec![operand(0)],
         Op::Arithmetic => vec![operand(2), operand(3)],
         Op::SubAssign => vec![operand(2), operand(3)],
-        Op::JumpUnless | Op::Return => vec![operand(0)],
+        Op::JumpUnless | Op::Return | Op::ForEnd => vec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => vec![operand(1)],
         Op::LogicRight => vec![operand(1), operand(2)],
         Op::SetVar => vec![operand(1)],
