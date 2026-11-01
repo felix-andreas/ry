@@ -70,10 +70,9 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## In flight
 
 - Base R round 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): serialize arity, time zones, nlm, parse_Rd, nlminb PORT, file.copy, bzip2/xz, graphics devices that draw. PR #120 (stats natives, srcrefs, connections) merged as 25a05fb.
-- Table beyond queries (session_0111kWqB9LKMquDanx18xVTC, Opus): typing gaps (factors, .SDcols variables), then fread/fwrite, setkey, rbindlist, dcast/melt, shift, fifelse and friends, each typed and benchmarked. PR #124 (typed frame queries) merged as 6070d14.
 - Corpus packages round 2 (session_0111kWqDJJsagmnUNcuZLJp4, Opus): DBI and pkgbuild crashes, R6 finalizer timing, toward all 146 packages passing. PR #127 (GC crash fixes, 50/146) merged as 06ad068.
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
-- data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): verify the #125 merge, run unchanged data.table code on the engine with identical output, remove the subset := overhead. PR #125 (frames in the runtime) merged as ed69655.
+- data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): verify the #125 merge, run unchanged data.table code on the engine with identical output, remove the subset := overhead, then route data.table's functions from R to the #131 kernels and close the setkey and dcast gaps. PR #125 (frames in the runtime) merged as ed69655; PR #131 (fread/fwrite and helpers, typed; faster than data.table except setkey, 10% behind, and dcast, tied) merged as c3b4a87.
 - Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
 - Analysis performance round 3 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): a parallel cold check well under 1 s with byte-identical findings, a false-positive audit of `ry check` on the full-size benchmark code bases, memory kept at or below round 2. PR #129 (peak RSS 795 to about 570 MiB, settled re-check about 39 to 49 ms) merged as 0cee236.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
