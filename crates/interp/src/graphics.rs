@@ -2186,8 +2186,8 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
             _ => return Err(error(format!("invalid \"log={log}\" specification"))),
         }
     }
-    if (xlog && xlim.iter().any(|limit| *limit <= 0.0))
-        || (ylog && ylim.iter().any(|limit| *limit <= 0.0))
+    if (xlog && xlim.iter().any(|limit| *limit < 0.0))
+        || (ylog && ylim.iter().any(|limit| *limit < 0.0))
     {
         return Err(error("Logarithmic axis must have positive limits"));
     }
@@ -2212,12 +2212,27 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
     } else {
         yaxs
     };
+    let mut warnings = Vec::new();
     with_device(|device| {
         let lab = lab.unwrap_or([device.pars.lab[0], device.pars.lab[1]]);
-        let logged =
-            |limits: [f64; 2], log: bool| if log { limits.map(f64::log10) } else { limits };
-        let mut x = logged(xlim, xlog);
-        let mut y = logged(ylim, ylog);
+        // A zero limit on a log axis is -Inf in decades, which GNU R corrects to 1e-320 with
+        // a warning.
+        let mut logged = |limits: [f64; 2], log: bool, axis: i32| {
+            if !log {
+                return limits;
+            }
+            let decades = limits.map(f64::log10);
+            if decades.iter().any(|end| !end.is_finite()) {
+                warnings.push(format!(
+                    "nonfinite axis={axis} limits [GScale({},{},..); log=TRUE] -- corrected now",
+                    crate::linalg::format_g(decades[0]),
+                    crate::linalg::format_g(decades[1]),
+                ));
+            }
+            decades.map(|end| if end.is_finite() { end } else { -320.0 })
+        };
+        let mut x = logged(xlim, xlog, 1);
+        let mut y = logged(ylim, ylog, 2);
         if asp.is_finite() && asp > 0.0 {
             let pin = device.plot_size();
             let (x_range, y_range) = ((x[1] - x[0]).abs(), (y[1] - y[0]).abs());
@@ -2240,6 +2255,9 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
         pars.yaxp = yaxp;
         Ok(())
     })?;
+    for warning in warnings {
+        call.warning(warning)?;
+    }
     Ok(nil())
 }
 
@@ -2269,9 +2287,19 @@ fn scale_axis(limits: [f64; 2], style: char, log: bool, intervals: i32) -> ([f64
         }
     }
     if style == 'r' || style == 'e' || style == 's' {
-        let extension = (high - low) * 0.04;
-        low -= extension;
-        high += extension;
+        // The range may overflow, so extend by each end's share; an end pushed past the
+        // largest double stays at it.
+        let extension = high * 0.04 - low * 0.04;
+        low = (low - extension).max(-f64::MAX);
+        high = (high + extension).min(f64::MAX);
+    }
+    // A log axis keeps its upper end 1% below the largest double, and a lower end that
+    // underflows to zero is pulled up to 1% above the smallest normal double, as in GNU R.
+    if log {
+        high = high.min((0.99 * f64::MAX).log10());
+        if 10f64.powf(low) == 0.0 {
+            low = (1.01 * f64::MIN_POSITIVE).log10();
+        }
     }
     let data = if log {
         [10f64.powf(low), 10f64.powf(high)]
@@ -6303,6 +6331,21 @@ pub fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
 /// The ticks of a log axis spanning `[low, high]` (not logged): decades with a tick code, or a
 /// linear axis with a negative count when the range is too short for decades.
 pub fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
+    // A range past the largest double has no decades to tick, and an end that overflows
+    // or underflows is pulled back to the last decade that still is a normal double.
+    if low.is_infinite() {
+        return (f64::INFINITY, f64::INFINITY, 1);
+    }
+    let high = if high > 1e308 && low < 1e308 {
+        1e308
+    } else {
+        high
+    };
+    let low = if low < 1e-307 && high >= 1e-307 {
+        1e-307
+    } else {
+        low
+    };
     let (log_low, log_high) = (low.log10(), high.log10());
     let mut first = log_low.ceil();
     let mut last = log_high.floor();
@@ -6354,10 +6397,17 @@ pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec
     let count = code.round() as i32;
     if !log || count < 0 {
         let count = count.unsigned_abs().max(1) as usize;
-        let step = (last - first) / count as f64;
+        // Each end is divided first, since the span of an axis across the whole double range
+        // overflows.
+        let step = last / count as f64 - first / count as f64;
         return (0..=count)
             .map(|index| {
-                let tick = first + index as f64 * step;
+                let mut tick = first + index as f64 * step;
+                if !tick.is_finite() {
+                    // Halving is exact, so the halved sum is the same tick without the
+                    // intermediate overflow.
+                    tick = (first / 2.0 + index as f64 * (step / 2.0)) * 2.0;
+                }
                 // A tick that should be zero but is off by rounding is shown as zero.
                 if tick.abs() < 1e-10 * step.abs() {
                     0.0
@@ -6379,8 +6429,9 @@ pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec
     };
     let mut ticks = Vec::new();
     if count == 1 {
-        // Doubles span fewer than 700 decades, so the clamp only guards against an infinite ratio.
-        let decades = (last / first).log10().round().clamp(0.0, 700.0) as i32;
+        // The ratio of the ends can overflow, so decades are counted on the log scale.
+        let first_decade = first.log10();
+        let decades = (last.log10() - first_decade).round().clamp(0.0, 700.0) as i32;
         let intervals = intervals.max(1);
         // Too many decades for the wanted number of intervals: every few decades only. GNU R
         // also skips the first decades when the count is well past a multiple of the
@@ -6393,7 +6444,7 @@ pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec
             0
         };
         while exponent <= decades {
-            let tick = first * 10f64.powi(exponent);
+            let tick = 10f64.powf(first_decade + f64::from(exponent));
             if inside(tick) {
                 ticks.push(tick);
             }

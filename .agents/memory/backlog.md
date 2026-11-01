@@ -2304,6 +2304,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - The built-in devices have no patterns, gradients, clipping paths, masks or groups (device
     version 0), so grid's `clippaths`, `patterns`, `compositing`, `groups` and `paths` tests differ
     from GNU R's pdf output, and compound paths fill their holes.
+  - PostScript ignores `onefile = FALSE` (one file per page), `paper = "special"` (EPS) and
+    `horizontal = TRUE` (landscape), so `graphics__device_files` differs from GNU R.
   - Built-in devices ignore raster interpolation, and PostScript paints semi-transparent colours
     opaque (its prolog ignores the PDF `gs` opacity), where GNU R leaves them out with a warning.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
