@@ -305,13 +305,10 @@ protects construction but nothing after it.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
-- Reuse still copies in three shapes (`decisions.md`, "In-place updates through nested targets and
-  parameters"): a helper whose body ends in the update (`function(d, k) Dict.insert(d, k, TRUE)`),
-  a helper that passes the collection on to a second helper, and a list moved into a helper (the
-  move covers dictionaries and sets only). Closing them needs last-use analysis in the compiler.
-- A helper that updates a moved collection and then fails leaves the caller's variable holding the
-  update. GNU R semantics would keep the old value; fixing it needs the move to be undone on
-  unwind, which costs a copy-on-error path.
+- A helper that updates a collection it receives copies on every call, so `d <- helper(d, k)` in a
+  loop is quadratic (`decisions.md`, "In-place updates through nested targets", the rejected
+  move). A sound version needs escape analysis showing nothing reads the caller's variable while
+  the callee runs, plus restoring the old value on error.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says

@@ -326,6 +326,14 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 2 1\n",
     ),
     (
+        "{ main <- function() { d <- Dict.single(\"z\", 0); h <- function(x, k, y) { x <- Dict.insert(x, k, 1); Dict.len(y) }; n <- 0L; d <- { n <- h(d, \"a\", d); d }; inner <- function(x) { x <- Dict.insert(x, \"b\", 1); Dict.len(d) }; c(n, inner(d)) }; main() }",
+        "[1] 1 1\n",
+    ),
+    (
+        "{ main <- function() { st <- list(seen = Dict.single(\"z\", 0)); st$seen <- Dict.insert(st$seen, \"k\", st); old <- Result.with_default(Dict.get(st$seen, \"k\"), NULL); Dict.len(old$seen) }; main() }",
+        "[1] 1\n",
+    ),
+    (
         "{ h <- function() eval.parent(quote(x[[1]] <- 99)); f <- function() { for (i in 1) NULL; x <- list(1); r <- list(x, h()); c(r[[1]][[1]], x[[1]]) }; f() }",
         "[1]  1 99\n",
     ),

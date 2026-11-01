@@ -87,7 +87,8 @@ pub fn process_runtime() -> String {
 ///
 /// The runtime also binds each name of ry's standard library that GNU R lacks to a function that
 /// explains the library runs only on ry's runtime, which reads better than GNU R's "could not
-/// find function". A name GNU R already has, such as `col`, keeps GNU R's meaning.
+/// find function". A name the session already has, such as `col` or data.table's `copy`, keeps
+/// its meaning.
 fn runtime(transport: &str) -> String {
     let names: Vec<String> = include_str!("../../../types/ry.exports")
         .lines()
@@ -120,9 +121,6 @@ fn runtime(transport: &str) -> String {
   if (!is.environment(runtime)) {{
     runtime <- new.env(parent = baseenv())
     eval(parse(text = {source}, keep.source = FALSE), runtime)
-    for (name in runtime$.ry_standard_library_names) {{
-      if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
-    }}
     for (name in ls(runtime, all.names = TRUE)) {{
       if (is.function(runtime[[name]])) runtime[[name]] <- compiler::cmpfun(runtime[[name]])
     }}
@@ -132,6 +130,10 @@ fn runtime(transport: &str) -> String {
       saved <- tryCatch({{ saveRDS(runtime, partial); TRUE }}, error = function(error) FALSE)
       if (saved) file.rename(partial, cache) else unlink(partial)
     }}
+  }}
+  # Decided per session, not cached: a name an attached package exports keeps its meaning.
+  for (name in runtime$.ry_standard_library_names) {{
+    if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
   }}
   runtime$.ry_packages <- new.env(parent = emptyenv())
   runtime$.ry_timing <- new.env(parent = emptyenv())

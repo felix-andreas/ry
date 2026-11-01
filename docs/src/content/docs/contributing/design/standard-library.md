@@ -255,20 +255,20 @@ double when full, so a loop of `d <- Dict.insert(d, k, v)` costs amortized const
 insert. Any other holder (a second binding, a list, a closure's environment) makes the function
 copy first, so value semantics never change.
 
-Three extensions widen the `x <- f(x, ...)` form (`decisions.md`, "In-place updates through nested
-targets and parameters"):
+Two extensions widen the `x <- f(x, ...)` form (`decisions.md`, "In-place updates through nested
+targets"):
 
 - A nested target, `state$seen <- Dict.insert(state$seen, k, v)`, reuses when the target is a chain
-  of `$` or `[[` with a name, a string or a number, and every list on the chain has one reference.
-- A closure call, `seen <- remember(seen, k)`, moves the caller's dictionary or set into the
-  parameter: the argument becomes an already forced promise marked as moved, which both bindings
-  hold, and a builtin update inside the
-  callee reuses the value while that promise is its only other holder. When the callee returns a
-  collection and its environment was not captured, the callee's bindings of the value are cleared,
-  so the next call sees one reference again.
+  of `$` or `[[` with a name, a string or a number, every list on the chain has one reference, and
+  no other argument is the value or one of those lists.
 - Compiled code keeps values in registers that do not count as references. An environment that a
   compiled body runs on is flagged, and an update from outside that body (`eval.parent()`, a forced
   promise) reuses only a value no register holds.
+
+A closure never receives the value for reuse. Moving the caller's value into the parameter was
+tried and removed: after the callee updates it in place, the caller's variable no longer holds the
+old value, and a second argument, a nested function, `get()` and an error unwinding through the
+assignment can all read that variable.
 
 ## Open questions
 
@@ -276,6 +276,6 @@ targets and parameters"):
   project can declare its runtime. A pure-R build for GNU R was declined: many functions return
   result tags, which GNU R cannot represent, and a partial build would split the library into two
   dialects.
-- A helper whose body ends in the update itself (`function(d, k) Dict.insert(d, k, TRUE)`) copies
-  on every call, and so does a helper that passes the collection to a second helper. Reusing those
-  needs last-use analysis in the compiler rather than the move at the call.
+- A helper that updates a collection it receives copies on every call, so `d <- helper(d, k)` in a
+  loop is quadratic. Reusing the value needs proof that nothing reads the caller's variable until
+  the assignment completes, which takes escape analysis of the callee and an undo path for errors.

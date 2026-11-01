@@ -14,18 +14,12 @@ use {
             triple, unbound,
         },
     },
-    heap::{
-        object::{Sexp, SexpType, gp},
-        records::NativeKind,
-    },
+    heap::object::{Sexp, SexpType, gp},
     smallvec::{SmallVec, smallvec},
 };
 
 /// The promise bit set while its code runs, to report recursive default references.
 const PROMISE_SEEN: u16 = 1 << 0;
-/// A promise that carries a variable's value into a call of the form `x <- f(x, ...)` (see
-/// [`rebind_closure`]).
-const MOVED_PROMISE: u16 = 1 << 9;
 
 /// Evaluates `expression` in `env`. An error raised below is signalled here, so handlers run
 /// close to where it happened.
@@ -760,18 +754,6 @@ pub unsafe fn apply_closure(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
-    let (env, promargs) = closure_frame(call, function, args, supplied)?;
-    run_closure(call, function, env, sys_parent, promargs)
-}
-
-/// The environment of a call to the closure `function` with its formals bound to `args`, and
-/// the argument pairlist its frame records.
-unsafe fn closure_frame(
-    call: Sexp,
-    function: Sexp,
-    args: &[Arg],
-    supplied: Option<&[(Sexp, Sexp)]>,
-) -> R<(Sexp, Sexp)> {
     let formals = function.car();
     let heap = crate::heap();
     let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
@@ -805,7 +787,8 @@ unsafe fn closure_frame(
             }
         }
     }
-    Ok((env, args_pairlist(args)?))
+    let promargs = args_pairlist(args)?;
+    run_closure(call, function, env, sys_parent, promargs)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
@@ -2341,16 +2324,14 @@ unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
 /// update it in place instead of copying it. This is how `Dict.insert`, `Set.insert` and
 /// `List.append` grow in amortized constant time.
 ///
-/// A builtin that reuses its first argument is offered the value directly. A closure receives
-/// a ry dictionary or set through a moved promise, which lets the callee's own
-/// `d <- Dict.insert(d, ...)` update it (see [`rebind_closure`]). Any other call runs as usual.
+/// Only a builtin that reuses its first argument is offered the value. A closure always gets
+/// the value shared, as in GNU R: once a callee updated it in place, the caller's variable, which
+/// a second argument, a nested function or `get()` can read while the callee runs and which an
+/// error leaves in place, would no longer hold the old value.
 pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
     match function.kind() {
         SexpType::Builtin if builtin_def(function)?.reuses_first_argument => {
             reuse_first_argument(target, call, function, env)
-        }
-        SexpType::Closure if target.kind() == SexpType::Symbol => {
-            rebind_closure(call, function, target, env)
         }
         _ => apply_call(call, function, call.cdr(), env),
     }
@@ -2359,18 +2340,21 @@ pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
 unsafe fn reuse_first_argument(target: Sexp, call: Sexp, function: Sexp, env: Sexp) -> R<Sexp> {
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
+    // Argument values are not counted, so another argument that is the subject, or one of the
+    // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
         subject.refcount() == 1
-            && !args[1..].iter().any(|arg| arg.value == subject)
             && solely_held(target, subject, env)
+            && !args[1..]
+                .iter()
+                .any(|arg| arg.value == subject || holds_on_chain(target, env, arg.value))
     });
     call_builtin_reusing(definition, call, function, &args, env, reusable)
 }
 
 /// Whether `subject`, the value of `target`, is referenced only through `target`'s local binding
 /// in `env`, so updating it in place changes nothing but what `target` reads. For a symbol the
-/// binding holds the value itself, or a moved promise of it (see [`rebind_closure`]). For
-/// `a$b`, `a[["b"]]` or `a[[2]]`, and chains of them, each container is a plain list that the
+/// binding holds the value itself. For `a$b`, `a[["b"]]` or `a[[2]]`, and chains of them, each container is a plain list that the
 /// one before it holds alone, down to the binding. Every value on the way must be invisible to
 /// compiled code (see [`reuse_permitted`]).
 unsafe fn solely_held(target: Sexp, subject: Sexp, env: Sexp) -> bool {
@@ -2382,21 +2366,7 @@ unsafe fn solely_held(target: Sexp, subject: Sexp, env: Sexp) -> bool {
             if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
                 return false;
             }
-            let bound = cell.cdr();
-            let held = bound == subject
-                || (bound.kind() == SexpType::Promise
-                    && bound.has_gp(MOVED_PROMISE)
-                    && bound.car() == subject
-                    && bound.refcount() <= MOVED_PROMISE_HOLDERS);
-            if !held || !reuse_permitted(env, subject) {
-                return false;
-            }
-            if bound != subject {
-                // The callee's binding becomes the value's only holder: the promise keeps
-                // pointing at it, for the caller to restore if the call fails, without counting.
-                crate::heap().untrack_references(bound);
-            }
-            true
+            cell.cdr() == subject && reuse_permitted(env, subject)
         }
         SexpType::Language => {
             let Some(container) = held_container(target, env) else {
@@ -2406,6 +2376,19 @@ unsafe fn solely_held(target: Sexp, subject: Sexp, env: Sexp) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether `value` is one of the lists on the `a$b` or `a[[i]]` chain `target` updates.
+unsafe fn holds_on_chain(target: Sexp, env: Sexp, value: Sexp) -> bool {
+    let mut link = target;
+    while link.kind() == SexpType::Language {
+        match held_container(link, env) {
+            Some((container, _)) if container == value => return true,
+            Some(_) => link = link.cdr().car(),
+            None => return false,
+        }
+    }
+    false
 }
 
 /// The list and position `target`, an `a$b` or `a[[i]]` chain, names, when the list is held
@@ -2516,103 +2499,6 @@ pub unsafe fn reuse_permitted(env: Sexp, value: Sexp) -> bool {
             && frame.function.kind() == SexpType::Closure
             && bytecode::is_compiled(frame.function)
     }) || !bytecode::registers_hold(value)
-}
-
-/// The references a moved promise has while its callee runs: the caller's binding, the callee's
-/// binding and the callee frame's argument list.
-const MOVED_PROMISE_HOLDERS: u16 = 3;
-
-/// The binding of `target` in `env` and the ry dictionary or set it holds, when the binding is
-/// the value's only holder, so a call of the form `target <- f(target, ...)` may hand the value
-/// to `f` to update in place.
-unsafe fn movable_binding(target: Sexp, env: Sexp) -> Option<(Sexp, Sexp)> {
-    let cell = crate::heap().frame_cell(env, target)?;
-    let value = cell.cdr();
-    (!cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
-        && is_collection(value)
-        && value.refcount() == 1
-        && reuse_permitted(env, value))
-    .then_some((cell, value))
-}
-
-/// Calls the closure `function` for `target <- function(target, ...)`.
-///
-/// When `target`'s binding is the only holder of a ry dictionary or set, the value moves into
-/// the call through a forced promise that both bindings hold. While the callee runs, the
-/// promise is the value's only holder, so the callee's own `target <- Dict.insert(target, ...)`
-/// may update the value in place (see [`solely_held`]). Afterwards the caller's binding gets
-/// the value back, and the assignment then replaces it with the call's result. The value passes
-/// as an already forced promise, which is what an argument that is a plain variable becomes
-/// anyway once the callee reads it. If the callee fails after updating the value, the
-/// caller's variable keeps the updated value.
-///
-/// ry does not release a finished frame's bindings, as GNU R does when nothing references the
-/// frame any more, so the callee's binding of the dictionary or set it returns would keep
-/// counting as a holder and make the next call copy it. When nothing references the callee's
-/// environment, nothing can read that binding again, so it is released here.
-unsafe fn rebind_closure(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
-    let heap = crate::heap();
-    let moved = match movable_binding(target, env) {
-        Some((cell, value)) => {
-            let promise = forced_promise(target, value)?;
-            promise.set_gp_bits(MOVED_PROMISE, true);
-            heap.set_binding_value(cell, promise)?;
-            Some((cell, promise))
-        }
-        None => None,
-    };
-    let result = (|| -> R<(Sexp, Sexp)> {
-        let mut args = Vec::new();
-        let rest = match moved {
-            Some((_, promise)) => {
-                args.push(Arg {
-                    tag: nil(),
-                    value: promise,
-                });
-                call.cdr().cdr()
-            }
-            None => call.cdr(),
-        };
-        args.extend(promise_args(rest, env)?);
-        let (callee, promargs) = closure_frame(call, function, &args, None)?;
-        let result = run_closure(call, function, callee, env, promargs)?;
-        Ok((callee, result))
-    })();
-    if let Some((cell, promise)) = moved
-        && cell.cdr() == promise
-    {
-        heap.set_binding_value(cell, promise.car())?;
-    }
-    let (callee, result) = result?;
-    if callee.refcount() == 0 && result != callee && is_collection(result) {
-        let promise = moved.map_or(result, |(_, promise)| promise);
-        let holders: SmallVec<[Sexp; 2]> = heap
-            .frame_cells(callee)
-            .iter()
-            .copied()
-            .filter(|binding| binding.cdr() == result || binding.cdr() == promise)
-            .collect();
-        for binding in holders {
-            heap.set_binding_value(binding, nil())?;
-        }
-    }
-    // Nothing but the finished frame's argument list holds the promise any more, so it stops
-    // counting as a holder of the value.
-    if let Some((_, promise)) = moved
-        && promise.refcount() <= 1
-    {
-        heap.untrack_references(promise);
-    }
-    Ok(result)
-}
-
-/// Whether `value` is a ry dictionary or set.
-unsafe fn is_collection(value: Sexp) -> bool {
-    value.kind() == SexpType::Record
-        && matches!(
-            crate::records::native_kind(value),
-            NativeKind::Dict | NativeKind::Set
-        )
 }
 
 pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: bool) -> R<()> {

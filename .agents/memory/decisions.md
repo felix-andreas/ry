@@ -3396,44 +3396,34 @@ explicit allocators".
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
 
-## In-place updates through nested targets and parameters
+## In-place updates through nested targets
 
 - **Before.** Only `x <- f(x, ...)` with a builtin flagged `reusing_first_argument` updated in
-  place. `state$seen <- Dict.insert(state$seen, k, v)` copied because the list element was a second
-  holder, and a helper's first update of its parameter copied because the caller's binding still
-  held the value. Both made the common accumulator loops quadratic. Compiled code was a separate
-  hole: registers hold values without counting as references, so an update from outside the body
-  (`eval.parent()`, a forced promise) could change a value a register was about to use.
+  place, so `state$seen <- Dict.insert(state$seen, k, v)` copied every step: the list element was
+  a second holder. Compiled code had a hole as well: registers hold values without counting as
+  references, so an update from outside the body (`eval.parent()`, a forced promise) could change
+  a value a register was about to use, and `r <- list(x, h())` with `h` running
+  `eval.parent(quote(x[[1]] <- 99))` gave `r[[1]][[1]] == 99`.
 - **Nested targets.** `rebind` accepts a target that is a chain of `$` or `[[` with a constant
-  name, string or number (`same_expression` compares both sides), and `solely_held` walks the chain
-  requiring a reference count of one at each plain list. `complex_assign` already writes back
-  without copying when the containers are unshared.
-- **Parameter move.** `rebind_closure` handles `x <- g(x, ...)` for a closure `g` when `x` holds a
-  dictionary or set with one reference. The caller's binding and the parameter both hold one
-  forced promise flagged `MOVED_PROMISE`, and a builtin update in the callee reuses the value when
-  that promise has at most `MOVED_PROMISE_HOLDERS` references. The move is limited to dictionaries
-  and sets because those are the values an accumulator helper grows; lists keep copying.
-- **Releasing the finished frame.** ry does not drop a dead frame's bindings, so after the call
-  the callee's binding of the returned collection would make the next call copy. Environments now
-  count their enclosure as a reference (`alloc_environment_with_capacity`, `set_enclosure`), which
-  makes "the callee env has reference count zero" a valid test that no closure or `environment()`
-  captured it. When that holds and the result is a dictionary or set, the callee's bindings of the
-  result are cleared.
-- **Bytecode.** A new op, `CallRebinding`, carries the target so compiled code takes the same
-  path; it is appended last because `OPS` is indexed by discriminant. The JIT treats it as a
-  generic call and inlines it only when the target's slot type is plain.
+  name, string or number (`same_expression` compares both sides). `solely_held` walks the chain
+  requiring one reference at each plain list, and no other argument may be the value or a list
+  on the chain, because argument values are not counted (`holds_on_chain`).
+- **Bytecode.** `CallRebinding` carries the target so compiled code takes the same path. It is
+  appended last because `OPS` is indexed by discriminant. The JIT treats it as a generic call and
+  inlines it only when the target's slot type is plain.
 - **Register rule.** `gp::COMPILED_FRAME` marks an environment while a compiled body runs on it.
   `reuse_permitted(env, value)` allows an update when the flag is clear, when the innermost frame
   is that environment's own compiled closure (whose updates the compiler orders with
   `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
-  copy.
-- **Known gaps.** A failing callee leaves the caller's variable holding the updated value, and
-  `NextMethod()` sees it. A helper whose body ends in the update, or that passes the collection to
-  a second helper, still copies. Both are documented in `reference/standard-library.mdx`.
-- **Impact.** Correctness: value semantics are unchanged (pinned in
-  `crates/interp/tests/test_standard_library.rs`), and the register rule closes a real aliasing bug
-  (`list(x, h())` with `h` updating `x` via `eval.parent()`). Performance: the nested and helper
-  loops become linear. Incremental analysis is unaffected.
+  copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
+- **Rejected: moving a value into a helper's parameter.** `d <- helper(d, k)` handing the caller's
+  sole reference to the callee was implemented and removed. After an in-place update the caller's
+  variable no longer holds the old value, yet a second argument naming it, a nested closure,
+  `get(..., parent.frame())`, and an error unwinding through the assignment all read it. Making
+  it sound needs escape analysis of the callee plus an undo path, so helpers copy as in GNU R.
+- **Impact.** Value semantics are unchanged (pinned in
+  `crates/interp/tests/test_standard_library.rs`, including the cases that broke the move), nested
+  accumulator loops become linear, and incremental analysis is unaffected.
 
 ## A key of the wrong type is an error, not a missing key
 

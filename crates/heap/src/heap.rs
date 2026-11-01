@@ -605,9 +605,6 @@ impl Heap {
         let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
         std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
         object.set_enclosure_unbarriered(enclosure);
-        // The enclosure counts as a reference, so an environment nothing references any more
-        // is one no child environment can reach either.
-        enclosure.increment_refcount();
         Ok(object)
     }
 
@@ -831,7 +828,7 @@ impl Heap {
 
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
         self.binding_epoch += 1;
-        self.store(env, env.enclosure(), value);
+        self.write_barrier(env, value);
         env.set_enclosure_unbarriered(value);
     }
 
@@ -979,14 +976,6 @@ impl Heap {
             .iter()
             .map(|cell| cell.car())
             .collect()
-    }
-
-    /// The binding cells of `env`'s own frame, for an environment that is not a symbol frame.
-    pub unsafe fn frame_cells(&self, env: Sexp) -> &[Sexp] {
-        if self.is_symbol_frame(env) || env == self.known.empty_env {
-            return &[];
-        }
-        (*env.frame_ptr()).cells()
     }
 
     /// Makes `env`'s frame hashed, as `new.env(hash = TRUE, size = size)` creates it, which
