@@ -525,8 +525,15 @@ pub unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>
     }
 }
 
-/// Whether evaluating `expression` may modify a variable of the frame in place: it contains a
-/// replacement assignment such as `x[1] <- 9`, or code that evaluates other code in the frame.
+/// A binding's value with a forced promise replaced by its value; an unforced promise stays.
+unsafe fn forced_value(value: Sexp) -> Sexp {
+    if value.kind() == SexpType::Promise && value.car() != unbound() {
+        value.car()
+    } else {
+        value
+    }
+}
+
 /// The builtin behind `.Internal(inner)` when the call can run as compiled code: an internal
 /// that takes evaluated arguments and never dispatches, called without `...`, empty arguments,
 /// or arguments that could modify an earlier one in place, so that evaluating them into
@@ -553,6 +560,8 @@ unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
     Ok(simple.then_some(function))
 }
 
+/// Whether evaluating `expression` may modify a variable of the frame in place: it contains a
+/// replacement assignment such as `x[1] <- 9`, or code that evaluates other code in the frame.
 unsafe fn may_modify_in_place(expression: Sexp) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
@@ -744,6 +753,7 @@ impl Compiler {
                 ("&&" | "||", 2) => plain,
                 ("function", 2..) => true,
                 (".Internal", 1) => plain && compiled_internal(args[0].1)?.is_some(),
+                ("local", 1) => plain && args[0].1 != symbols().dots && args[0].1 != missing_arg(),
                 (operator, 2) if plain && ARITHS.iter().any(|(_, symbol)| *symbol == operator) => {
                     args.iter()
                         .all(|(_, value)| *value != missing_arg() && *value != symbols().dots)
@@ -882,11 +892,22 @@ impl Compiler {
                 | "[<-"
                 | "[[<-"
                 | ".Internal"
+                | "local"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
         }
-        let Some(expected) = crate::builtins::primitive(name) else {
+        let expected = if name == "local" {
+            // `local` is a closure, so the function to expect is base's own binding, which stays
+            // a lazy-load promise until something forces it.
+            let heap = crate::heap();
+            heap.frame_cell(heap.known().base_env, symbol)
+                .map(|cell| forced_value(cell.cdr()))
+                .filter(|value| *value != unbound())
+        } else {
+            crate::builtins::primitive(name)
+        };
+        let Some(expected) = expected else {
             return Ok(None);
         };
         // A walk that forces no promise: compiling must not run code.
@@ -894,7 +915,7 @@ impl Compiler {
         let mut env = self.enclosure;
         while env != heap.known().empty_env {
             if let Some(cell) = heap.frame_cell(env, symbol) {
-                let value = cell.cdr();
+                let value = forced_value(cell.cdr());
                 if cell.has_gp(gp::ACTIVE_BINDING) || value.kind() == SexpType::Promise {
                     return Ok(None);
                 }
@@ -1079,6 +1100,26 @@ impl Compiler {
                 self.release_to(mark);
                 self.patch(decided);
                 self.release_to(left);
+            }
+            "local" => {
+                // As GNU R's compiler does, `local(expr)` runs as `(function() expr)()`: a call
+                // of a closure made on the spot, instead of `local`'s `eval.parent(substitute(
+                // eval(quote(expr), new.env())))`, which costs several calls and an `eval`.
+                let expression = args[0].1;
+                let function_call = values::lcons(
+                    symbols().function,
+                    values::cons(nil(), values::cons(expression, nil())?)?,
+                )?;
+                let immediate_call = values::lcons(function_call, nil())?;
+                let mark = self.next_register;
+                let function = self.allocate();
+                let formals = self.constant(nil());
+                let body = self.constant(expression);
+                let srcref = self.constant(nil());
+                self.emit(Op::Closure, &[function, formals, body, srcref]);
+                let call_constant = self.constant(immediate_call);
+                self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+                self.release_to(mark);
             }
             "function" => {
                 let formals = self.constant(args[0].1);
