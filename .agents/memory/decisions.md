@@ -1982,6 +1982,41 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
   evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.
 
+# Decision record: the loader on ry's runtime
+
+`ry load` applies the loader's plan on ry's interpreter by default; `--runtime gnu-r` (or
+`RY_RUNTIME=gnu-r`) keeps the GNU R path. `ry repl` and plain-R `load_all()` stay on GNU R.
+
+- **Previous shape:** the plan crossed to R as an RDS file whose code entries carried source text,
+  which GNU R parsed again on force, so every forced function was parsed twice (once by the
+  analysis, once by R).
+- **Target shape:** one R runtime (`runtime.R`) with backend hooks (`.ry_request`,
+  `.ry_sources`, `.ry_bind_lazily`, `.ry_run`). GNU R's hooks (`gnur.R`) keep the RDS plan and
+  `makeLazy`; ry's hooks (`ry.R`) call `.Internal(ryLoaderPlan/Commit/Bind/Run/Force)` in
+  `loader::ry_runtime`, which keeps the plan in process. A lazy binding is a promise over a call to
+  `ryLoaderForce(tree, start, end)`, where `tree` is an external pointer to the file's `Parse`
+  from the analysis, and forcing lowers the node spanning `start..end` with
+  `interp::lower::lower_node`. The plan carries byte offsets (`SourceSpan::source_start/end`) so the
+  node is found without text.
+- **Why a tree, not text:** the analysis already parsed every file, the rowan green tree is shared
+  and cheap to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
+  the analysis already holds. The finalizer drops a tree after no promise of its file remains, at the
+  collector's next finalizer point (a native call's return, `gc()`, or exit), not immediately.
+- **Why `.Internal`s and not `.Call`:** the interpreter registers Rust builtins directly, so the
+  backend needs no `DllInfo`, no RDS round trip and no source strings in R memory.
+- **Planning runs on its own thread** with `ANALYSIS_STACK_SIZE`, as every analysis entry point
+  does, because the analysis recurses as deeply as the code nests.
+- **Runtime fixes the load path needed, each pinned by an oracle case:** `readDCF`, `load()`/`save()`
+  of XDR workspaces (`R/sysdata.rda`, gzip, bzip2 or xz through `gzfile()`), `readChar` on a connection, comparisons and `&`/`|` keeping
+  only names, dim and dimnames, and two hot paths (`match()` on interned ASCII strings by pointer,
+  `names(env)` and `ls()` from print names without a string round trip).
+- **Impact:** on the 326,000-line bench package a cold load is faster than the GNU R backend on the
+  same machine and a one-function reload slightly slower (932 ms and 58 ms against 1,036 ms and
+  53 ms); on the 14,000-line package the cold load is slower (104 ms against 82 ms), because the
+  interpreter evaluates the eager statements more slowly than GNU R. Correctness
+  and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
+  namespace, S3/S4, collation and reload tests on both runtimes.
+
 # Decision record: base R's linear algebra
 
 - **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.

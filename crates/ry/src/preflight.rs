@@ -2,7 +2,10 @@
 //! checks each top-level command. It prints the inline-annotation warnings and enforces strict
 //! mode; everything else stays `ry check`'s job, so plain R runs exactly as it always did.
 
-use crate::cli::{MinSeverity, OutputFormat, RelatedNote, render_findings, report, warn_config};
+use crate::cli::{
+    CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
+    render_findings, report, warn_config,
+};
 use crate::config::Config;
 use crate::diagnostics::{apply_suppressions, document_diagnostics};
 use repl::{Filtered, InputFilter};
@@ -13,7 +16,7 @@ use semantics::{
     DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode, file_typing_mode,
 };
 use std::path::{Path, PathBuf};
-use std::thread;
+use std::{fs, thread};
 use syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation};
 
 /// Analysis state for one run or one console session. A console session is checked as one
@@ -121,19 +124,99 @@ impl Preflight {
         );
         match verdict {
             Verdict::Run => self.session = source,
-            Verdict::Refuse => {
-                let problems = reported
+            Verdict::Refuse => refuse(
+                reported
                     .iter()
                     .filter(|diagnostic| is_strict_error(diagnostic))
-                    .count();
-                let noun = if problems == 1 { "error" } else { "errors" };
-                crate::cli::error(&format!(
-                    "strict mode found {problems} {noun}, so this code does not run"
-                ));
-            }
+                    .count(),
+            ),
         }
         verdict
     }
+}
+
+/// Enforces strict mode on the package `ry load` is about to load, on either runtime, because
+/// strict mode is a property of the code. Its `R/` files are checked as `ry check` checks the
+/// project, so a name another file defines resolves. A package that turns strict mode on
+/// nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips analysis entirely.
+pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
+    let sources = root.join("R");
+    let mentions_strict = |path: &Path| {
+        fs::read_to_string(path).is_ok_and(|source| source.contains("typing: strict"))
+    };
+    if !config.check.strict
+        && !fs::read_dir(&sources).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| mentions_strict(&entry.path()))
+        })
+    {
+        return Ok(Verdict::Run);
+    }
+    let analysis = thread::scope(|scope| {
+        let worker = thread::Builder::new()
+            .stack_size(crate::ANALYSIS_STACK_SIZE)
+            .spawn_scoped(scope, || {
+                let analysis = analyze_project(root, config.clone(), &[sources.clone()])?;
+                let errors = strict_errors(&analysis, config);
+                Ok::<_, CommandError>((analysis, errors))
+            });
+        match worker {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(error) => panic!("the preflight thread should spawn: {error}"),
+        }
+    });
+    let (analysis, errors) = analysis?;
+    let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
+    let mut problems = 0;
+    for (file, errors) in analysis.files.iter().zip(&errors) {
+        problems += render_findings(
+            OutputFormat::Human,
+            MinSeverity::Warning,
+            &file.path,
+            &file.source,
+            errors,
+            &resolve_note,
+        );
+    }
+    if problems == 0 {
+        return Ok(Verdict::Run);
+    }
+    refuse(problems);
+    Ok(Verdict::Refuse)
+}
+
+/// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does
+/// not cover.
+fn strict_errors(analysis: &ProjectAnalysis, config: &Config) -> Vec<Vec<Diagnostic>> {
+    analysis
+        .files
+        .iter()
+        .map(|file| {
+            let strict = match file_typing_mode(&analysis.db, file.file) {
+                Some(TypingMode::Strict) => true,
+                Some(TypingMode::On | TypingMode::Off) => false,
+                None => config.check.strict,
+            };
+            if !file.requested || !strict {
+                return Vec::new();
+            }
+            file.diagnostics
+                .iter()
+                .filter(|diagnostic| is_strict_error(diagnostic))
+                .cloned()
+                .collect()
+        })
+        .collect()
+}
+
+fn refuse(problems: usize) {
+    let noun = if problems == 1 { "error" } else { "errors" };
+    crate::cli::error(&format!(
+        "strict mode found {problems} {noun}, so this code does not run"
+    ));
 }
 
 /// The findings worth printing before code runs, and whether it may run. Without strict mode

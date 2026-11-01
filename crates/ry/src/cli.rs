@@ -117,295 +117,29 @@ pub fn check(
     let mut n_diagnostics = 0;
     let mut n_failures = 0;
     for (root, config, requested) in groups {
-        let exclude = exclude_matcher(&config, &root)?;
-        let mut paths = collect_r_files(&root, exclude.as_ref())?;
-        // `exclude` scopes the project walk; it does not veto a file named directly.
-        for target in &requested {
-            if !target.is_dir() && !paths.contains(target) {
-                paths.push(target.clone());
-            }
+        let analysis = analyze_project(&root, config, &requested)?;
+        n_failures += analysis.failures;
+        for (path, source, problems) in &analysis.stub_problems {
+            n_diagnostics += render_findings(output, min_severity, path, source, problems, &|_| None);
         }
-
-        // Override stubs fold on top of the shipped corpus (later sources win); an
-        // unreadable one is an I/O failure.
-        let project_stubs = match read_project_stubs(&root) {
-            Ok(project_stubs) => project_stubs,
-            Err((path, err)) => {
-                n_failures += 1;
-                error_because(
-                    &format!("failed to read override stub: {}", path.display()),
-                    &err,
-                );
-                Vec::new()
-            }
-        };
-        let mut stub_sources = shipped_stub_sources();
-        stub_sources.extend(
-            project_stubs
-                .iter()
-                .map(|stub| (stub.stem.clone(), stub.text.clone())),
-        );
-
-        let mut db = RootDatabase::default();
-        StubSources::new(&db, stub_sources, shipped_export_manifests());
-        AnalysisSettings::new(&db, config.check.inline_annotations);
-
-        // A broken override stub silently changes what every file checks against, so
-        // its dropped declarations are reported as findings.
-        for stub in &project_stubs {
-            let stub_text = &stub.text;
-            let stub_index = LineIndex::new(stub_text);
-            let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
-                .into_iter()
-                .map(|problem| {
-                    let start = stub_index.line_start(problem.line as u32);
-                    let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                    Diagnostic::new(
-                        TextRange::new(start.into(), end.into()),
-                        Severity::Error,
-                        "stub",
-                        problem.message,
-                    )
-                })
-                .collect();
+        let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
+        for file in analysis.files.iter().filter(|file| file.requested) {
+            n_files += 1;
             n_diagnostics += render_findings(
                 output,
                 min_severity,
-                &stub.path,
-                stub_text,
-                &problems,
-                &|_| None,
+                &file.path,
+                &file.source,
+                &file.diagnostics,
+                &resolve_note,
             );
         }
-
-        let namespace_path = root.join("NAMESPACE");
-        let namespace_source = fs::read_to_string(&namespace_path).ok();
-        let namespace_imports = namespace_source
-            .as_deref()
-            .map(parse_namespace_imports)
-            .unwrap_or_default();
-        let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
-        let dependencies = description_source
-            .as_deref()
-            .map(parse_description_dependencies)
-            .unwrap_or_default();
-        let collate = description_source
-            .as_deref()
-            .map(parse_description_collate)
-            .unwrap_or_default();
-        let metadata = PackageMetadata::new(
-            &db,
-            normalized_imports(&namespace_imports),
-            dependencies,
-            BTreeSet::new(),
-            description_source
-                .as_deref()
-                .and_then(parse_description_package),
-        );
-
-        let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
-        let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
-        for path in paths {
-            let source = match fs::read_to_string(&path) {
-                Ok(source) => analysable_source(&path, source),
-                Err(err) => {
-                    n_failures += 1;
-                    error_because(&format!("failed to read: {}", path.display()), &err);
-                    continue;
-                }
-            };
-            let asked_about = requested
-                .iter()
-                .any(|target| path == *target || path.starts_with(target));
-            if asked_about {
-                n_files += 1;
-            }
-            reported.push(asked_about);
-            checked.push((path, source));
-        }
-
-        // Analysis follows the project order; diagnostics still print in discovery order.
-        let order = project_order(&root, &collate);
-        let mut ordered: Vec<usize> = (0..checked.len()).collect();
-        ordered.sort_by_cached_key(|&index| order(&checked[index].0));
-        let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
-        let mut project = Vec::with_capacity(checked.len());
-        for index in ordered {
-            let (path, source) = &checked[index];
-            let kind = if shares_a_namespace(path, &root) {
-                DocumentKind::Package
-            } else {
-                DocumentKind::Script
-            };
-            let file = SourceFile::new(&db, source.clone(), kind);
-            files[index] = Some(file);
-            project.push(file);
-        }
-        let files: Vec<SourceFile> = files.into_iter().flatten().collect();
-        ProjectFiles::new(&db, project.clone());
-        // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
-        let workers = thread::available_parallelism()
-            .map(NonZero::get)
-            .unwrap_or(1)
-            .min(checked.len().max(1));
-        // Parsing is the one serial cost left in setup, so it runs across cores here and the
-        // `library()` scan and the used-token scan read the memoized trees.
-        let want_tokens = namespace_source.is_some();
-        let mut used_tokens = BTreeSet::new();
-        thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers)
-                .map(|worker| {
-                    let db = db.clone();
-                    let files = &files;
-                    thread::Builder::new()
-                        .stack_size(crate::ANALYSIS_STACK_SIZE)
-                        .spawn_scoped(scope, move || {
-                            let mut tokens = BTreeSet::new();
-                            for &file in files.iter().skip(worker).step_by(workers) {
-                                let _ = file_attached_namespaces(&db, file);
-                                if want_tokens {
-                                    namespace::collect_used_tokens(
-                                        &semantics::parse(&db, file).syntax_node(),
-                                        &mut tokens,
-                                    );
-                                }
-                            }
-                            tokens
-                        })
-                        .expect("check worker thread should spawn")
-                })
-                .collect();
-            for handle in handles {
-                used_tokens.extend(handle.join().expect("parse worker should not panic"));
-            }
-        });
-        let attached = attached_union(&db, project);
-        if !attached.is_empty() {
-            use salsa::Setter;
-            metadata.set_attached(&mut db).to(attached);
-        }
-
-        let path_by_file: HashMap<SourceFile, &PathBuf> = files
-            .iter()
-            .zip(&checked)
-            .map(|(&file, (path, _))| (file, path))
-            .collect();
-        // Warm per-item naming across cores first: inside the project-wide interface walk
-        // it would serialize on one thread. Largest files first so one cannot skew a chunk.
-        // Workers need the analysis stack: interface resolution recurses per dependency edge.
-        thread::scope(|scope| {
-            {
-                let db = db.clone();
-                thread::Builder::new()
-                    .stack_size(crate::ANALYSIS_STACK_SIZE)
-                    .spawn_scoped(scope, move || {
-                        let _ = stubs(&db);
-                    })
-                    .expect("check worker thread should spawn");
-            }
-            let mut by_size: Vec<usize> = (0..checked.len()).collect();
-            by_size.sort_by_key(|&index| Reverse(checked[index].1.len()));
-            for worker in 0..workers {
-                let db = db.clone();
-                let files = &files;
-                let deal: Vec<usize> = by_size
-                    .iter()
-                    .copied()
-                    .skip(worker)
-                    .step_by(workers)
-                    .collect();
-                thread::Builder::new()
-                    .stack_size(crate::ANALYSIS_STACK_SIZE)
-                    .spawn_scoped(scope, move || {
-                        for index in deal {
-                            for &item in semantics::item_tree(&db, files[index]) {
-                                let _ = semantics::item_naming(&db, item);
-                            }
-                        }
-                    })
-                    .expect("check worker thread should spawn");
-            }
-        });
-        let mut per_file: Vec<Vec<Diagnostic>> = (0..checked.len()).map(|_| Vec::new()).collect();
-        thread::scope(|scope| {
-            let mut pending: Vec<(usize, &mut Vec<Diagnostic>)> =
-                per_file.iter_mut().enumerate().collect();
-            let chunk_size = pending.len().div_ceil(workers.max(1)).max(1);
-            let mut chunks = Vec::new();
-            while !pending.is_empty() {
-                let take = chunk_size.min(pending.len());
-                chunks.push(pending.split_off(pending.len() - take));
-            }
-            for chunk in chunks {
-                let db = db.clone();
-                let checked = &checked;
-                let files = &files;
-                let config = &config;
-                let worker = thread::Builder::new()
-                    .stack_size(crate::ANALYSIS_STACK_SIZE)
-                    .spawn_scoped(scope, move || {
-                        for (index, slot) in chunk {
-                            let rendered = document_diagnostics(&db, files[index], config);
-                            *slot = apply_suppressions(rendered, &checked[index].1);
-                        }
-                    });
-                worker.expect("check worker thread should spawn");
-            }
-        });
-        // A related range often lives in another file, so resolve it against that document.
-        let resolve_note = |related: &RelatedLocation| {
-            Some(RelatedNote {
-                path: path_by_file.get(&related.file)?.as_path(),
-                source: related.file.text(&db),
-                range: related.range,
-                message: related.message,
-            })
-        };
-        for (index, (path, source)) in checked.iter().enumerate() {
-            if reported[index] {
-                n_diagnostics += render_findings(
-                    output,
-                    min_severity,
-                    path,
-                    source,
-                    &per_file[index],
-                    &resolve_note,
-                );
-            }
-        }
-
-        // Emitted last so the `unused-import` lint sees the whole package.
-        if let Some(namespace_source) = &namespace_source {
-            let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
-            let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
-            let mut problems =
-                namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
-            let defines = |name: &str| {
-                ProjectFiles::try_get(&db).is_some_and(|files| {
-                    semantics::package_definitions(&db, files).contains_key(name)
-                })
-            };
-            problems.extend(namespace::namespace_export_problems(
-                &parse_namespace_exports(namespace_source),
-                &defines,
-            ));
-            problems.extend(namespace::unused_import_diagnostics(
-                &namespace_imports,
-                &used_tokens,
-                config.lint.unused_import,
-            ));
-            n_diagnostics += render_findings(
-                output,
-                min_severity,
-                &namespace_path,
-                namespace_source,
-                &problems,
-                &|_| None,
-            );
+        if let Some((path, source, problems)) = &analysis.namespace {
+            n_diagnostics += render_findings(output, min_severity, path, source, problems, &|_| None);
         }
         // Freeing every memo one by one costs close to a second on a large project, and the
         // process is about to exit.
-        std::mem::forget(db);
+        std::mem::forget(analysis);
     }
 
     if n_failures > 0 {
@@ -419,6 +153,313 @@ pub fn check(
         Outcome::Clean
     } else {
         Outcome::Findings
+    })
+}
+
+/// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
+/// it. Analysis always covers the whole project root; `requested` only marks which files the
+/// caller asked about.
+pub(crate) struct ProjectAnalysis {
+    pub db: RootDatabase,
+    pub files: Vec<AnalyzedFile>,
+    /// A broken override stub's dropped declarations: its path, text and findings.
+    pub stub_problems: Vec<(PathBuf, String, Vec<Diagnostic>)>,
+    /// `NAMESPACE`'s findings, when the project has one.
+    pub namespace: Option<(PathBuf, String, Vec<Diagnostic>)>,
+    /// Files that could not be read, each already reported.
+    pub failures: usize,
+}
+
+pub(crate) struct AnalyzedFile {
+    pub path: PathBuf,
+    pub source: String,
+    pub file: SourceFile,
+    pub requested: bool,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl ProjectAnalysis {
+    /// Resolves a related range against the document it lives in, which is often another file.
+    pub fn related_note(&self, related: &RelatedLocation) -> Option<RelatedNote<'_>> {
+        let analyzed = self.files.iter().find(|analyzed| analyzed.file == related.file)?;
+        Some(RelatedNote {
+            path: &analyzed.path,
+            source: &analyzed.source,
+            range: related.range,
+            message: related.message,
+        })
+    }
+}
+
+pub(crate) fn analyze_project(
+    root: &Path,
+    config: config::Config,
+    requested: &[PathBuf],
+) -> Result<ProjectAnalysis, CommandError> {
+    let mut failures = 0;
+    let exclude = exclude_matcher(&config, &root)?;
+    let mut paths = collect_r_files(&root, exclude.as_ref())?;
+    // `exclude` scopes the project walk; it does not veto a file named directly.
+    for target in requested {
+        if !target.is_dir() && !paths.contains(target) {
+            paths.push(target.clone());
+        }
+    }
+
+    // Override stubs fold on top of the shipped corpus (later sources win); an
+    // unreadable one is an I/O failure.
+    let project_stubs = match read_project_stubs(&root) {
+        Ok(project_stubs) => project_stubs,
+        Err((path, err)) => {
+            failures += 1;
+            error_because(
+                &format!("failed to read override stub: {}", path.display()),
+                &err,
+            );
+            Vec::new()
+        }
+    };
+    let mut stub_sources = shipped_stub_sources();
+    stub_sources.extend(
+        project_stubs
+            .iter()
+            .map(|stub| (stub.stem.clone(), stub.text.clone())),
+    );
+
+    let mut db = RootDatabase::default();
+    StubSources::new(&db, stub_sources, shipped_export_manifests());
+    AnalysisSettings::new(&db, config.check.inline_annotations);
+
+    // A broken override stub silently changes what every file checks against, so
+    // its dropped declarations are reported as findings.
+    let mut stub_problems = Vec::new();
+    for stub in &project_stubs {
+        let stub_text = &stub.text;
+        let stub_index = LineIndex::new(stub_text);
+        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
+            .into_iter()
+            .map(|problem| {
+                let start = stub_index.line_start(problem.line as u32);
+                let end = start + stub_index.line_length(problem.line as u32, stub_text);
+                Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    Severity::Error,
+                    "stub",
+                    problem.message,
+                )
+            })
+            .collect();
+        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
+    }
+
+    let namespace_path = root.join("NAMESPACE");
+    let namespace_source = fs::read_to_string(&namespace_path).ok();
+    let namespace_imports = namespace_source
+        .as_deref()
+        .map(parse_namespace_imports)
+        .unwrap_or_default();
+    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
+    let dependencies = description_source
+        .as_deref()
+        .map(parse_description_dependencies)
+        .unwrap_or_default();
+    let collate = description_source
+        .as_deref()
+        .map(parse_description_collate)
+        .unwrap_or_default();
+    let metadata = PackageMetadata::new(
+        &db,
+        normalized_imports(&namespace_imports),
+        dependencies,
+        BTreeSet::new(),
+        description_source
+            .as_deref()
+            .and_then(parse_description_package),
+    );
+
+    let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
+    let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => analysable_source(&path, source),
+            Err(err) => {
+                failures += 1;
+                error_because(&format!("failed to read: {}", path.display()), &err);
+                continue;
+            }
+        };
+        let asked_about = requested
+            .iter()
+            .any(|target| path == *target || path.starts_with(target));
+        reported.push(asked_about);
+        checked.push((path, source));
+    }
+
+    // Analysis follows the project order; diagnostics still print in discovery order.
+    let order = project_order(&root, &collate);
+    let mut ordered: Vec<usize> = (0..checked.len()).collect();
+    ordered.sort_by_cached_key(|&index| order(&checked[index].0));
+    let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
+    let mut project = Vec::with_capacity(checked.len());
+    for index in ordered {
+        let (path, source) = &checked[index];
+        let kind = if shares_a_namespace(path, &root) {
+            DocumentKind::Package
+        } else {
+            DocumentKind::Script
+        };
+        let file = SourceFile::new(&db, source.clone(), kind);
+        files[index] = Some(file);
+        project.push(file);
+    }
+    let files: Vec<SourceFile> = files.into_iter().flatten().collect();
+    ProjectFiles::new(&db, project.clone());
+    // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
+    let workers = thread::available_parallelism()
+        .map(NonZero::get)
+        .unwrap_or(1)
+        .min(checked.len().max(1));
+    // Parsing is the one serial cost left in setup, so it runs across cores here and the
+    // `library()` scan and the used-token scan read the memoized trees.
+    let want_tokens = namespace_source.is_some();
+    let mut used_tokens = BTreeSet::new();
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let db = db.clone();
+                let files = &files;
+                thread::Builder::new()
+                    .stack_size(crate::ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, move || {
+                        let mut tokens = BTreeSet::new();
+                        for &file in files.iter().skip(worker).step_by(workers) {
+                            let _ = file_attached_namespaces(&db, file);
+                            if want_tokens {
+                                namespace::collect_used_tokens(
+                                    &semantics::parse(&db, file).syntax_node(),
+                                    &mut tokens,
+                                );
+                            }
+                        }
+                        tokens
+                    })
+                    .expect("check worker thread should spawn")
+            })
+            .collect();
+        for handle in handles {
+            used_tokens.extend(handle.join().expect("parse worker should not panic"));
+        }
+    });
+    let attached = attached_union(&db, project);
+    if !attached.is_empty() {
+        use salsa::Setter;
+        metadata.set_attached(&mut db).to(attached);
+    }
+
+    // Warm per-item naming across cores first: inside the project-wide interface walk
+    // it would serialize on one thread. Largest files first so one cannot skew a chunk.
+    // Workers need the analysis stack: interface resolution recurses per dependency edge.
+    thread::scope(|scope| {
+        {
+            let db = db.clone();
+            thread::Builder::new()
+                .stack_size(crate::ANALYSIS_STACK_SIZE)
+                .spawn_scoped(scope, move || {
+                    let _ = stubs(&db);
+                })
+                .expect("check worker thread should spawn");
+        }
+        let mut by_size: Vec<usize> = (0..checked.len()).collect();
+        by_size.sort_by_key(|&index| Reverse(checked[index].1.len()));
+        for worker in 0..workers {
+            let db = db.clone();
+            let files = &files;
+            let deal: Vec<usize> = by_size
+                .iter()
+                .copied()
+                .skip(worker)
+                .step_by(workers)
+                .collect();
+            thread::Builder::new()
+                .stack_size(crate::ANALYSIS_STACK_SIZE)
+                .spawn_scoped(scope, move || {
+                    for index in deal {
+                        for &item in semantics::item_tree(&db, files[index]) {
+                            let _ = semantics::item_naming(&db, item);
+                        }
+                    }
+                })
+                .expect("check worker thread should spawn");
+        }
+    });
+    let mut per_file: Vec<Vec<Diagnostic>> = (0..checked.len()).map(|_| Vec::new()).collect();
+    thread::scope(|scope| {
+        let mut pending: Vec<(usize, &mut Vec<Diagnostic>)> =
+            per_file.iter_mut().enumerate().collect();
+        let chunk_size = pending.len().div_ceil(workers.max(1)).max(1);
+        let mut chunks = Vec::new();
+        while !pending.is_empty() {
+            let take = chunk_size.min(pending.len());
+            chunks.push(pending.split_off(pending.len() - take));
+        }
+        for chunk in chunks {
+            let db = db.clone();
+            let checked = &checked;
+            let files = &files;
+            let config = &config;
+            let worker = thread::Builder::new()
+                .stack_size(crate::ANALYSIS_STACK_SIZE)
+                .spawn_scoped(scope, move || {
+                    for (index, slot) in chunk {
+                        let rendered = document_diagnostics(&db, files[index], config);
+                        *slot = apply_suppressions(rendered, &checked[index].1);
+                    }
+                });
+            worker.expect("check worker thread should spawn");
+        }
+    });
+    // Computed last so the `unused-import` lint sees the whole package.
+    let mut namespace = None;
+    if let Some(namespace_source) = &namespace_source {
+        let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
+        let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
+        let mut problems =
+            namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
+        let defines = |name: &str| {
+            ProjectFiles::try_get(&db).is_some_and(|files| {
+                semantics::package_definitions(&db, files).contains_key(name)
+            })
+        };
+        problems.extend(namespace::namespace_export_problems(
+            &parse_namespace_exports(namespace_source),
+            &defines,
+        ));
+        problems.extend(namespace::unused_import_diagnostics(
+            &namespace_imports,
+            &used_tokens,
+            config.lint.unused_import,
+        ));
+        namespace = Some((namespace_path, namespace_source.clone(), problems));
+    }
+    let files = checked
+        .into_iter()
+        .zip(files)
+        .zip(reported)
+        .zip(per_file)
+        .map(|((((path, source), file), requested), diagnostics)| AnalyzedFile {
+            path,
+            source,
+            file,
+            requested,
+            diagnostics,
+        })
+        .collect();
+    Ok(ProjectAnalysis {
+        db,
+        files,
+        stub_problems,
+        namespace,
+        failures,
     })
 }
 

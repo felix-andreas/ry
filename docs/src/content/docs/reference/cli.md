@@ -79,6 +79,8 @@ routine of a default package, or a graphics device, since only the null device e
 
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
+Unlike `ry run`, it uses ry's own runtime by default, and `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`)
+loads on GNU R instead.
 `ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
 `source(pipe("ry load --r-entry"))`. `load_all()` is available in `ry repl` and `ry run` sessions
 on GNU R too, but not yet with `--runtime ry`.

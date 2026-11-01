@@ -15,7 +15,8 @@ strict = true
 A `# typing: strict` comment turns it on for a single file instead.
 
 Strict mode also guards running code. `ry run` prints the errors and exits with status 1 instead
-of running a script that has one, and `ry repl` refuses each command that has one:
+of running a script that has one, `ry load` does the same for a package whose `R/` files have one,
+and `ry repl` refuses each command that has one:
 
 ```text
   x strict mode found 1 error, so this code does not run

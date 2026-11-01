@@ -13,11 +13,21 @@ use heap::object::{Sexp, SexpType};
 use std::io::{Read, Write};
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("file", 6, |call| unsafe { open_connection(call, Class::File) }),
-    internal("gzfile", 4, |call| unsafe { open_connection(call, Class::Gzfile) }),
-    internal("bzfile", 4, |call| unsafe { open_connection(call, Class::Gzfile) }),
-    internal("xzfile", 4, |call| unsafe { open_connection(call, Class::Gzfile) }),
-    internal("url", 6, |call| unsafe { Err(call.error("url connections are not supported")) }),
+    internal("file", 6, |call| unsafe {
+        open_connection(call, Class::File)
+    }),
+    internal("gzfile", 4, |call| unsafe {
+        open_connection(call, Class::Gzfile)
+    }),
+    internal("bzfile", 4, |call| unsafe {
+        open_connection(call, Class::Gzfile)
+    }),
+    internal("xzfile", 4, |call| unsafe {
+        open_connection(call, Class::Gzfile)
+    }),
+    internal("url", 6, |call| unsafe {
+        Err(call.error("url connections are not supported"))
+    }),
     internal("textConnection", 5, do_text_connection),
     internal("textConnectionValue", 1, do_text_connection_value),
     internal("open", 3, do_open).invisible(),
@@ -29,14 +39,21 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("readLines", 6, do_read_lines),
     internal("readDCF", 3, do_read_dcf),
     internal("writeLines", 4, do_write_lines).invisible(),
-    internal("readChar", 3, do_read_char),
-    internal("writeChar", 5, |call| unsafe { Err(call.error("writeChar is not supported")) }),
+    // R 4.3 passes `con, nchars, useBytes`; later versions add `allowNUL`.
+    internal("readChar", -1, do_read_char),
+    internal("writeChar", 5, |call| unsafe {
+        Err(call.error("writeChar is not supported"))
+    }),
     internal("readBin", 6, do_read_bin),
-    internal("writeBin", 5, |call| unsafe { Err(call.error("writeBin is not supported")) }),
+    internal("writeBin", 5, |call| unsafe {
+        Err(call.error("writeBin is not supported"))
+    }),
     internal("cat", 6, do_cat).invisible(),
     internal("summary.connection", 1, do_summary_connection),
     internal("getAllConnections", 0, do_get_all_connections),
-    internal("getConnection", 1, |call| unsafe { connection_object(values::as_integer_scalar(call.arg(0))) }),
+    internal("getConnection", 1, |call| unsafe {
+        connection_object(values::as_integer_scalar(call.arg(0)))
+    }),
     internal("flush", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("isIncomplete", 1, |_| unsafe { scalar_bool(false) }),
     internal("isSeekable", 1, |_| unsafe { scalar_bool(false) }),
@@ -142,7 +159,11 @@ unsafe fn connection_object(index: i32) -> R<Sexp> {
     let class_name = {
         let table = &mut interp().connections;
         table.ensure_standard();
-        match table.connections.get(index.max(0) as usize).and_then(Option::as_ref) {
+        match table
+            .connections
+            .get(index.max(0) as usize)
+            .and_then(Option::as_ref)
+        {
             Some(connection) => match connection.class {
                 Class::File => "file",
                 Class::Gzfile => "gzfile",
@@ -171,27 +192,31 @@ pub unsafe fn connection_index(object: Sexp) -> R<i32> {
     Ok(values::as_integer_scalar(object))
 }
 
-fn read_file_bytes(path: &str, compressed: bool) -> R<Vec<u8>> {
+fn read_file_bytes(path: &str, gzip: bool) -> R<Vec<u8>> {
     let path = expand_path(path);
     let bytes = std::fs::read(&path).map_err(|failure| {
-        error(format!("cannot open file '{path}': {}", io_reason(&failure)))
+        error(format!(
+            "cannot open file '{path}': {}",
+            io_reason(&failure)
+        ))
     })?;
-    if !compressed {
+    if !gzip {
         return Ok(bytes);
     }
-    // GNU R's `gzfile` reads gzip, bzip2 and xz files, and plain ones, whatever it was asked
-    // to open, and so do `bzfile` and `xzfile`.
+    // `gzfile()` reads all three of R's compressions, as GNU R's does, because `save()` and
+    // `usethis::use_data()` write bzip2 or xz `.rda` files through it.
     let mut decoded = Vec::new();
-    let outcome = if bytes.starts_with(&[0x1f, 0x8b]) {
+    let result = if bytes.starts_with(&[0x1f, 0x8b]) {
         MultiGzDecoder::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
     } else if bytes.starts_with(b"BZh") {
         bzip2_rs::DecoderReader::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
-    } else if bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]) {
-        lzma_rs::xz_decompress(&mut &bytes[..], &mut decoded).map_err(|failure| std::io::Error::other(failure.to_string()))
+    } else if bytes.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        lzma_rs::xz_decompress(&mut &bytes[..], &mut decoded)
+            .map_err(|failure| std::io::Error::other(failure.to_string()))
     } else {
         return Ok(bytes);
     };
-    outcome.map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
+    result.map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
     Ok(decoded)
 }
 
@@ -216,7 +241,9 @@ pub fn expand_path(path: &str) -> String {
 
 unsafe fn open_connection(call: &Call<'_>, class: Class) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
-    let mode = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
+    let mode = values::first_string(call.arg(1))
+        .map(|text| text.into_owned())
+        .unwrap_or_default();
     let mut connection = Connection {
         class,
         description: description.clone(),
@@ -241,7 +268,11 @@ unsafe fn open_connection(call: &Call<'_>, class: Class) -> R<Sexp> {
 }
 
 fn open(connection: &mut Connection) -> R<()> {
-    let mode = if connection.mode.is_empty() { "r".to_owned() } else { connection.mode.clone() };
+    let mode = if connection.mode.is_empty() {
+        "r".to_owned()
+    } else {
+        connection.mode.clone()
+    };
     connection.mode = mode.clone();
     if mode.starts_with('r') {
         connection.input = read_file_bytes(&connection.description, true)?;
@@ -260,16 +291,21 @@ fn flush_to_file(connection: &mut Connection) -> R<()> {
     if connection.mode.starts_with('w') || connection.mode.starts_with('a') {
         let path = expand_path(&connection.description);
         if connection.class == Class::Gzfile {
-            let file = std::fs::File::create(&path)
-                .map_err(|failure| error(format!("cannot open file '{path}': {}", io_reason(&failure))))?;
+            let file = std::fs::File::create(&path).map_err(|failure| {
+                error(format!(
+                    "cannot open file '{path}': {}",
+                    io_reason(&failure)
+                ))
+            })?;
             let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::new(6));
             encoder
                 .write_all(&connection.output)
                 .and_then(|()| encoder.finish().map(drop))
                 .map_err(|failure| error(format!("cannot write '{path}': {failure}")))?;
         } else {
-            std::fs::write(&path, &connection.output)
-                .map_err(|failure| error(format!("cannot write '{path}': {}", io_reason(&failure))))?;
+            std::fs::write(&path, &connection.output).map_err(|failure| {
+                error(format!("cannot write '{path}': {}", io_reason(&failure)))
+            })?;
         }
     }
     Ok(())
@@ -277,7 +313,9 @@ fn flush_to_file(connection: &mut Connection) -> R<()> {
 
 unsafe fn do_open(call: &Call<'_>) -> R<Sexp> {
     let index = connection_index(call.arg(0))?;
-    let mode = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
+    let mode = values::first_string(call.arg(1))
+        .map(|text| text.into_owned())
+        .unwrap_or_default();
     let connection = interp().connections.get(index)?;
     if !mode.is_empty() {
         connection.mode = mode;
@@ -336,7 +374,11 @@ unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
         }
         open(connection)?;
     }
-    table.sinks.push(Sink { connection: index, close_on_exit, split });
+    table.sinks.push(Sink {
+        connection: index,
+        close_on_exit,
+        split,
+    });
     Ok(nil())
 }
 
@@ -392,7 +434,9 @@ pub unsafe fn with_input<T>(file: Sexp, read: impl FnOnce(&[u8], &mut usize) -> 
     }
     let mut position = connection.position;
     let result = read(&connection.input, &mut position);
-    connection.pushed = connection.pushed.saturating_sub(position - connection.position);
+    connection.pushed = connection
+        .pushed
+        .saturating_sub(position - connection.position);
     connection.position = position;
     if !was_open && connection.class != Class::Text {
         connection.open = false;
@@ -463,7 +507,10 @@ pub unsafe fn write_output(bytes: &[u8]) {
             crate::unwind::Unwind::Error(failure) => failure.message,
             _ => "the sink connection could not be written".to_owned(),
         };
-        crate::write_terminal(format!("Error writing to the sink connection: {message}\n").as_bytes(), true);
+        crate::write_terminal(
+            format!("Error writing to the sink connection: {message}\n").as_bytes(),
+            true,
+        );
         crate::write_terminal(bytes, false);
     }
 }
@@ -502,8 +549,12 @@ pub unsafe fn write_text(file: Sexp, text: &str) -> R<()> {
             write_console(text.as_bytes(), false);
             return Ok(());
         }
-        std::fs::write(expand_path(&path), text)
-            .map_err(|failure| error(format!("cannot open file '{path}': {}", io_reason(&failure))))?;
+        std::fs::write(expand_path(&path), text).map_err(|failure| {
+            error(format!(
+                "cannot open file '{path}': {}",
+                io_reason(&failure)
+            ))
+        })?;
         return Ok(());
     }
     write_bytes(file, text.as_bytes())
@@ -515,7 +566,11 @@ pub unsafe fn description(file: Sexp) -> Option<String> {
         return values::first_string(file).map(|text| text.into_owned());
     }
     let index = connection_index(file).ok()?;
-    interp().connections.get(index).ok().map(|connection| connection.description.clone())
+    interp()
+        .connections
+        .get(index)
+        .ok()
+        .map(|connection| connection.description.clone())
 }
 
 unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
@@ -549,10 +604,15 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
     let text = call.arg(0);
     let file = call.arg(1);
-    let separator = values::first_string(call.arg(2)).map(|text| text.into_owned()).unwrap_or_else(|| "\n".into());
+    let separator = values::first_string(call.arg(2))
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|| "\n".into());
     let mut output = String::new();
     for index in 0..length(text) {
-        output.push_str(&values::string_at(text, index).map_or_else(|| "NA".to_owned(), |line| line.into_owned()));
+        output.push_str(
+            &values::string_at(text, index)
+                .map_or_else(|| "NA".to_owned(), |line| line.into_owned()),
+        );
         output.push_str(&separator);
     }
     write_bytes(file, output.as_bytes())?;
@@ -566,24 +626,129 @@ unsafe fn do_read_char(call: &Call<'_>) -> R<Sexp> {
     let counts = call.arg(1);
     let mut wanted = Vec::with_capacity(length(counts));
     for index in 0..length(counts) {
-        wanted.push(values::as_integer_scalar(crate::subset::vector_element(counts, index)?).max(0) as usize);
+        let count = values::as_integer_scalar(crate::subset::vector_element(counts, index)?);
+        wanted.push(count.max(0) as usize);
     }
-    let read = |input: &[u8], position: &mut usize| {
+    let take = |bytes: &[u8], offset: &mut usize| {
         let mut items = Vec::with_capacity(wanted.len());
         for &count in &wanted {
-            let end = (*position + count).min(input.len());
-            items.push(String::from_utf8_lossy(&input[*position..end]).into_owned());
-            *position = end;
+            let end = (*offset + count).min(bytes.len());
+            items.push(String::from_utf8_lossy(&bytes[*offset..end]).into_owned());
+            *offset = end;
         }
         items
     };
+    // A connection gives up only what was read, so `load()` can read the magic number and
+    // hand the connection on.
     let items = if source.kind() == SexpType::String {
-        let bytes = read_file_bytes(&values::require_string(source, "con")?, false)?;
-        read(&bytes, &mut 0)
+        take(
+            &read_file_bytes(&values::require_string(source, "con")?, false)?,
+            &mut 0,
+        )
     } else {
-        with_input(source, read)?
+        with_input(source, take)?
     };
     string_vector(&items)
+}
+
+/// `read.dcf()`: one row per record of a Debian control file (records are separated by blank
+/// lines), one column per field. Values of the fields not in `keep.white` are folded: every line
+/// is trimmed and the lines are joined with newlines. A continuation line holding only `.`
+/// stands for an empty line.
+unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
+    let fields = call.arg(1);
+    let keep_white = values::strings(call.arg(2));
+    let text = with_input(call.arg(0), |bytes, position| {
+        let text = String::from_utf8_lossy(&bytes[*position..]).into_owned();
+        *position = bytes.len();
+        text
+    })?;
+    let mut records: Vec<Vec<(String, String)>> = Vec::new();
+    let mut record: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !record.is_empty() {
+                records.push(std::mem::take(&mut record));
+            }
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let Some((tag, value)) = record.last_mut() else {
+                let start: String = line.chars().take(20).collect();
+                return Err(call.error(format!(
+                    "Found continuation line starting '{start} ...' at begin of record."
+                )));
+            };
+            let line = if line.trim() == "." { "" } else { line };
+            let keep = keep_white
+                .iter()
+                .any(|kept| kept.as_deref() == Some(tag.as_str()));
+            value.push('\n');
+            value.push_str(if keep { line } else { line.trim() });
+            continue;
+        }
+        let Some((tag, value)) = line.split_once(':').filter(|(tag, _)| !tag.is_empty()) else {
+            let start: String = line.chars().take(20).collect();
+            return Err(call.error(format!("Line starting '{start} ...' is malformed!")));
+        };
+        let keep = keep_white.iter().any(|kept| kept.as_deref() == Some(tag));
+        let value = if keep {
+            value.trim_start()
+        } else {
+            value.trim()
+        }
+        .to_owned();
+        match record.iter_mut().find(|(seen, _)| seen == tag) {
+            Some(entry) => entry.1 = value,
+            None => record.push((tag.to_owned(), value)),
+        }
+    }
+    if !record.is_empty() {
+        records.push(record);
+    }
+    let columns: Vec<String> = if fields == nil() {
+        let mut columns: Vec<String> = Vec::new();
+        for (tag, _) in records.iter().flatten() {
+            if !columns.contains(tag) {
+                columns.push(tag.clone());
+            }
+        }
+        columns
+    } else {
+        values::strings(fields)
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect()
+    };
+    let mut cells = Vec::with_capacity(records.len() * columns.len());
+    for column in &columns {
+        let keep = keep_white
+            .iter()
+            .any(|kept| kept.as_deref() == Some(column.as_str()));
+        for record in &records {
+            cells.push(
+                record
+                    .iter()
+                    .find(|(tag, _)| tag == column)
+                    .map(|(_, value)| {
+                        if keep {
+                            value.clone()
+                        } else {
+                            value.trim().to_owned()
+                        }
+                    }),
+            );
+        }
+    }
+    let matrix = values::string_vector_na(&cells)?;
+    let dim = values::integer_vector(&[records.len() as i32, columns.len() as i32])?;
+    values::set_attr(matrix, symbols().dim, dim)?;
+    let dimnames = alloc(SexpType::List, 2)?;
+    if !columns.is_empty() {
+        values::set_elt(dimnames, 1, string_vector(&columns)?);
+    }
+    values::set_attr(matrix, symbols().dimnames, dimnames)?;
+    Ok(matrix)
 }
 
 unsafe fn do_read_bin(call: &Call<'_>) -> R<Sexp> {
@@ -613,7 +778,11 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     let separators = call.arg(2);
     let fill = call.arg(3);
     let fill_width = if fill.kind() == SexpType::Logical {
-        if values::as_logical_scalar(fill) == 1 { crate::format::width_option() } else { 0 }
+        if values::as_logical_scalar(fill) == 1 {
+            crate::format::width_option()
+        } else {
+            0
+        }
     } else {
         values::as_integer_scalar(fill).max(0) as usize
     };
@@ -622,18 +791,24 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
         if separator_count == 0 {
             String::new()
         } else {
-            values::string_at(separators, index % separator_count).map_or_else(|| "NA".into(), |text| text.into_owned())
+            values::string_at(separators, index % separator_count)
+                .map_or_else(|| "NA".into(), |text| text.into_owned())
         }
     };
     // With `fill`, every line starts with the next of `labels` and a space.
     let labels = call.arg(4);
-    let label_count = if fill_width > 0 && labels.kind() == SexpType::String { length(labels) } else { 0 };
+    let label_count = if fill_width > 0 && labels.kind() == SexpType::String {
+        length(labels)
+    } else {
+        0
+    };
     let mut line_index = 0usize;
     let mut output = String::new();
     let mut line_width = 0usize;
     let mut start_line = |output: &mut String, line_width: &mut usize| {
         if label_count > 0 {
-            let label = values::string_at(labels, line_index % label_count).map_or_else(|| "NA".into(), |text| text.into_owned());
+            let label = values::string_at(labels, line_index % label_count)
+                .map_or_else(|| "NA".into(), |text| text.into_owned());
             output.push_str(&label);
             output.push(' ');
             *line_width = label.len() + 1;
@@ -648,20 +823,31 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             SexpType::Nil => continue,
             SexpType::Symbol => vec![values::symbol_name(item).into_owned()],
             SexpType::String => (0..length(item))
-                .map(|index| values::string_at(item, index).map_or_else(|| "NA".into(), |text| text.into_owned()))
+                .map(|index| {
+                    values::string_at(item, index)
+                        .map_or_else(|| "NA".into(), |text| text.into_owned())
+                })
                 .collect(),
-            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw => {
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw => {
                 let item = values::materialize(item)?;
                 (0..length(item))
                     .map(|index| cat_element(item, index))
                     .collect()
             }
-            SexpType::List if (0..length(item)).all(|index| {
-                let element = item.element(index);
-                element.kind().is_atomic() && length(element) == 1
-            }) => (0..length(item))
-                .map(|index| cat_element(item.element(index), 0))
-                .collect(),
+            SexpType::List
+                if (0..length(item)).all(|index| {
+                    let element = item.element(index);
+                    element.kind().is_atomic() && length(element) == 1
+                }) =>
+            {
+                (0..length(item))
+                    .map(|index| cat_element(item.element(index), 0))
+                    .collect()
+            }
             SexpType::Language => vec![crate::deparse::deparse_one_line(item)],
             kind => {
                 return Err(call.error(format!(
@@ -682,7 +868,10 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                     line_width = separator.len() - position - 1;
                 }
                 let next_separator = separator_at(piece_index).len();
-                if fill_width > 0 && line_width > 0 && line_width + text.len() + next_separator > fill_width {
+                if fill_width > 0
+                    && line_width > 0
+                    && line_width + text.len() + next_separator > fill_width
+                {
                     output.push('\n');
                     line_width = 0;
                     start_line(&mut output, &mut line_width);
@@ -718,8 +907,12 @@ unsafe fn cat_element(vector: Sexp, index: usize) -> String {
                 crate::format::format_real_alone_scipen(value, digits)
             }
         }
-        SexpType::String => values::string_at(vector, index).map_or_else(|| "NA".into(), |text| text.into_owned()),
-        SexpType::Complex => crate::format::format_complex_alone(values::complexes(vector)[index], 7),
+        SexpType::String => {
+            values::string_at(vector, index).map_or_else(|| "NA".into(), |text| text.into_owned())
+        }
+        SexpType::Complex => {
+            crate::format::format_complex_alone(values::complexes(vector)[index], 7)
+        }
         _ => crate::coerce::element_as_charsxp(vector, index)
             .map(|charsxp| {
                 if charsxp == values::na_string() {
@@ -755,7 +948,10 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
     if mode.starts_with('r') || mode.is_empty() {
         let mut text = String::new();
         for index in 0..length(object) {
-            text.push_str(&values::string_at(object, index).map_or_else(|| "NA".into(), |line| line.into_owned()));
+            text.push_str(
+                &values::string_at(object, index)
+                    .map_or_else(|| "NA".into(), |line| line.into_owned()),
+            );
             text.push('\n');
         }
         connection.input = text.into_bytes();
@@ -785,7 +981,10 @@ unsafe fn publish_text(connection: &mut Connection) -> R<()> {
     if let Some((symbol, env)) = connection.text_target {
         let mut lines = Vec::new();
         let existing = crate::eval::find_var_in_frame(symbol, env)?;
-        if existing.kind() == SexpType::String && connection.mode.starts_with('a') && connection.text_lines.is_empty() {
+        if existing.kind() == SexpType::String
+            && connection.mode.starts_with('a')
+            && connection.text_lines.is_empty()
+        {
             return Ok(());
         }
         lines.extend(connection.text_lines.iter().cloned());
@@ -822,10 +1021,24 @@ unsafe fn do_summary_connection(call: &Call<'_>) -> R<Sexp> {
     let description = values::scalar_string(&connection.description)?;
     let class = values::scalar_string(class)?;
     let mode = values::scalar_string(&connection.mode)?;
-    let text = values::scalar_string(if connection.mode.contains('b') { "binary" } else { "text" })?;
+    let text = values::scalar_string(if connection.mode.contains('b') {
+        "binary"
+    } else {
+        "text"
+    })?;
     let opened = values::scalar_string(if connection.open { "opened" } else { "closed" })?;
-    let can_read = values::scalar_string(if connection.mode.starts_with('r') { "yes" } else { "no" })?;
-    let can_write = values::scalar_string(if connection.mode.starts_with('w') || connection.mode.starts_with('a') { "yes" } else { "no" })?;
+    let can_read = values::scalar_string(if connection.mode.starts_with('r') {
+        "yes"
+    } else {
+        "no"
+    })?;
+    let can_write = values::scalar_string(
+        if connection.mode.starts_with('w') || connection.mode.starts_with('a') {
+            "yes"
+        } else {
+            "no"
+        },
+    )?;
     values::named_list(&[
         ("description", description),
         ("class", class),
@@ -848,107 +1061,6 @@ unsafe fn do_get_all_connections(_call: &Call<'_>) -> R<Sexp> {
         .map(|(index, _)| index as i32)
         .collect();
     values::integer_vector(&indices)
-}
-
-/// `readDCF(file, fields, keep.white)`: the records of a Debian control file as a character
-/// matrix, one row per record. Without `fields`, the columns are every field in order of first
-/// appearance. A field repeated in a record keeps its last value. A continuation line joins its
-/// field with a newline, and one holding only `.` stands for an empty line. Whitespace is trimmed
-/// around a value and each continuation line, except in the `keep.white` fields, which keep the
-/// continuation lines as written.
-unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
-    let wanted = call.arg(1);
-    let wanted: Option<Vec<String>> = (wanted != nil())
-        .then(|| values::strings(wanted).into_iter().map(Option::unwrap_or_default).collect());
-    let keep_white: Vec<String> = if call.arg(2) == nil() {
-        Vec::new()
-    } else {
-        values::strings(call.arg(2)).into_iter().flatten().collect()
-    };
-    let text = with_input(call.arg(0), |input, position| {
-        let rest = input.get(*position..).unwrap_or_default().to_vec();
-        *position = input.len();
-        rest
-    })?;
-    let text = String::from_utf8_lossy(&text);
-    let mut fields: Vec<String> = Vec::new();
-    let mut records: Vec<Vec<(usize, String)>> = Vec::new();
-    let mut record: Vec<(usize, String)> = Vec::new();
-    // The open field: its column and whether it keeps whitespace.
-    let mut current: Option<(usize, bool)> = None;
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line.trim().is_empty() {
-            if !record.is_empty() {
-                records.push(std::mem::take(&mut record));
-            }
-            current = None;
-            continue;
-        }
-        if line.starts_with([' ', '\t']) {
-            let Some((column, keep)) = current else {
-                return Err(call.error(format!("Found continuation line starting '{} ...' at begin of record.", truncate(line))));
-            };
-            let Some((_, value)) = record.iter_mut().rev().find(|(index, _)| *index == column) else {
-                continue;
-            };
-            let content = if line.trim() == "." {
-                ""
-            } else if keep {
-                line
-            } else {
-                line.trim()
-            };
-            value.push('\n');
-            value.push_str(content);
-            continue;
-        }
-        let Some((tag, value)) = line.split_once(':') else {
-            return Err(call.error(format!("Line starting '{} ...' is malformed!", truncate(line))));
-        };
-        let column = match fields.iter().position(|field| field == tag) {
-            Some(column) => column,
-            None => {
-                fields.push(tag.to_owned());
-                fields.len() - 1
-            }
-        };
-        let keep = keep_white.iter().any(|field| field == tag);
-        record.retain(|(index, _)| *index != column);
-        record.push((column, value.trim_start().to_owned()));
-        current = Some((column, keep));
-    }
-    if !record.is_empty() {
-        records.push(record);
-    }
-    let columns: Vec<Option<usize>> = match &wanted {
-        Some(wanted) => wanted.iter().map(|name| fields.iter().position(|field| field == name)).collect(),
-        None => (0..fields.len()).map(Some).collect(),
-    };
-    let rows = records.len();
-    let mut cells: Vec<Option<String>> = vec![None; rows * columns.len()];
-    for (row, record) in records.iter().enumerate() {
-        for (position, column) in columns.iter().enumerate() {
-            let Some(column) = column else { continue };
-            if let Some((_, value)) = record.iter().find(|(index, _)| index == column) {
-                let keep = keep_white.contains(&fields[*column]);
-                cells[position * rows + row] = Some(if keep { value.clone() } else { value.trim().to_owned() });
-            }
-        }
-    }
-    let result = values::string_vector_na(&cells)?;
-    crate::heap().root(result);
-    let dim = values::integer_vector(&[rows as i32, columns.len() as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    let names = match wanted {
-        Some(wanted) => wanted,
-        None => fields,
-    };
-    let names = values::string_vector(&names)?;
-    crate::heap().root(names);
-    let dimnames = values::list_vector(&[nil(), names])?;
-    values::set_attr(result, symbols().dimnames, dimnames)?;
-    Ok(result)
 }
 
 fn truncate(line: &str) -> &str {
