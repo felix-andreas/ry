@@ -148,7 +148,9 @@ fn main() -> ExitCode {
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
-    let source = match fs::read_to_string(file) {
+    // R reads a script in the session's encoding, so a Latin-1 script is valid R; the runtime
+    // reads the bytes itself, and the check sees them with invalid UTF-8 replaced.
+    let source = match fs::read(file) {
         Ok(source) => source,
         Err(error) => {
             cli::error(&format!("cannot read {}: {error}", file.display()));
@@ -158,7 +160,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
         return ExitCode::from(2);
     };
-    if preflight.check(&source) == Verdict::Refuse {
+    if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
         return ExitCode::from(1);
     }
     match runtime {

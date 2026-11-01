@@ -736,8 +736,8 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
 
 /// `.bincode(x, breaks, right, include.lowest)`.
 unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
-    let points = values::reals(call.arg(0)).to_vec();
-    let breaks = values::reals(call.arg(1)).to_vec();
+    let points = values::reals(coerce_vector(call.arg(0), SexpType::Real)?).to_vec();
+    let breaks = values::reals(coerce_vector(call.arg(1), SexpType::Real)?).to_vec();
     let right = values::as_logical_scalar(call.arg(2)) == 1;
     let lowest = values::as_logical_scalar(call.arg(3)) == 1;
     let count = breaks.len();
@@ -1142,7 +1142,7 @@ fn real_kernel<A: Copy, B: Copy>(
         Op::Divide => recycle(a, b, output, |x, y| left(x) / right(y)),
         Op::Power => recycle(a, b, output, |x, y| power(left(x), right(y))),
         Op::Modulo => recycle(a, b, output, |x, y| real_modulo(left(x), right(y))),
-        Op::IntegerDivide => recycle(a, b, output, |x, y| (left(x) / right(y)).floor()),
+        Op::IntegerDivide => recycle(a, b, output, |x, y| real_integer_divide(left(x), right(y))),
     }
 }
 

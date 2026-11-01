@@ -101,6 +101,9 @@ pub unsafe fn dot_dot_index(symbol: Sexp) -> Option<usize> {
 }
 
 unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
+    if index == 0 {
+        return Err(error("indexing '...' with non-positive index 0"));
+    }
     let dots = find_var(symbols().dots, env)?;
     if dots == unbound() {
         return Err(error(format!(

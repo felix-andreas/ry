@@ -1173,7 +1173,6 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     get_slot(object, symbol, call.call)
 }
 
-/// `R_do_slot`: an S4 slot, which is an attribute, with `.Data` and `.S3Class` special.
 /// The elements a matrix subscript selects from an array with `dims`: one row per element and one
 /// column per dimension, holding indices or (for a character matrix) dimnames. `None` when
 /// `index` is not such a matrix; a row with an `NA` selects `NA`.
@@ -1195,6 +1194,12 @@ unsafe fn matrix_index_positions(
         return Ok(None);
     }
     let dimnames = get_attr(object, symbols().dimnames);
+    if !numeric && dimnames == nil() {
+        return Err(crate::unwind::error_in(
+            call,
+            "no 'dimnames' attribute for array",
+        ));
+    }
     let rows = index_dims[0];
     let mut positions = Vec::with_capacity(rows);
     for row in 0..rows {
@@ -1237,6 +1242,7 @@ unsafe fn matrix_index_positions(
     Ok(Some(positions))
 }
 
+/// `R_do_slot`: an S4 slot, which is an attribute, with `.Data` and `.S3Class` special.
 pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
     if symbol == symbols().dot_data {
         let methods = interp_methods_function("getDataPart")?;
@@ -1416,12 +1422,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             Ok(result)
         };
     }
-    // GNU R leaves an empty object alone when the value is empty too, whatever the index, so
-    // `x <- numeric(0); x[1] <- numeric(0)` is not the "replacement has length zero" error.
+    // GNU R leaves `NULL`, or an empty vector given `NULL`, alone whatever the index, so
+    // `x <- NULL; x[1] <- character(0)` is not the "replacement has length zero" error. An
+    // empty vector given an empty vector is handled below, where it may still be coerced.
     if (object == nil() || object.kind().is_vector())
         && length(object) == 0
-        && (value == nil() || (value.kind().is_vector() && length(value) == 0))
-        && (object == nil() || object.kind() == value.kind() || value.kind() != SexpType::List)
+        && (value == nil() || (object == nil() && value.kind().is_vector() && length(value) == 0))
     {
         return Ok(object);
     }
@@ -1706,6 +1712,13 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[[i]] <- value`.
 pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    // `x[[i]] <- x` stores the old `x`, which is also the assignment's value, so the new `x`
+    // is a copy: modified in place, the list would contain itself.
+    let object = if value == object && object.kind() != SexpType::Environment {
+        values::shallow_duplicate(object)?
+    } else {
+        object
+    };
     if object.kind() == SexpType::Record {
         return crate::records::subassign2(object, indices, value, call);
     }
@@ -1880,6 +1893,12 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
 }
 
 pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -> R<Sexp> {
+    // `x$name <- x` stores the old `x`, as for `[[<-`.
+    let object = if value == object && object.kind() != SexpType::Environment {
+        values::shallow_duplicate(object)?
+    } else {
+        object
+    };
     if object.kind() == SexpType::Record {
         return crate::records::dollar_assign(object, name.bytes(), value, call);
     }
@@ -2915,7 +2934,6 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
             copy_element(object, row + col * rows, result, col + row * cols)?;
         }
     }
-    values::copy_most_attributes(object, result, false)?;
     let dim = values::integer_vector(&[cols as i32, rows as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
     if dimnames != nil() {

@@ -1757,7 +1757,12 @@ unsafe fn runmed(call: &NativeCall<'_>) -> R<Sexp> {
     let missing: Vec<usize> = (0..n).filter(|&index| x[index].is_nan()).collect();
     if !missing.is_empty() {
         match na_action {
-            4 => return Err(call.error("runmed(x, .., na.action=\"na.fail\"): have NAs in x")),
+            4 => {
+                return Err(call.error(format!(
+                    "runmed(x, .., na.action=\"na.fail\"): have NAs starting at x[{}]",
+                    missing[0] + 1
+                )));
+            }
             3 => {
                 let kept: Vec<f64> = x.iter().copied().filter(|value| !value.is_nan()).collect();
                 let smoothed = running_median(&kept, span, end_rule);
