@@ -735,6 +735,19 @@ impl Parser<'_, '_> {
             Some(COLON) if self.next_token_is(IDENT) => self.ann_tag(end),
             Some(IDENT) if self.token_str(self.pos) == ".." => self.wrap(TYPE_OTHER_TAGS),
             Some(IDENT | NULL_KW) => match self.token_str(self.pos) {
+                old @ ("frame" | "record" | "tuple") if self.ann_next_significant(end) == Some(L_BRACE) => {
+                    let new = match old {
+                        "frame" => "DataFrame",
+                        "record" => "Record",
+                        _ => "Tuple",
+                    };
+                    self.error_here(format!("ry's own types are capitalized: write `{new}{{...}}`, not `{old}{{...}}`"));
+                    // Inside `ERROR`, lowering reads the type as unknown, so the one finding is not
+                    // followed by mismatches against a type the user did not mean.
+                    self.start(ERROR);
+                    self.ann_list_braces(end);
+                    self.finish();
+                }
                 "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
                     self.ann_list_brackets(end);
                 }

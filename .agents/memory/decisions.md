@@ -2863,3 +2863,43 @@ first lines R had already read, leaving R mid-command.
 - **Impact:** every feature reads per-item query results, so incremental analysis is unchanged; the
   fixtures in `crates/ide/tests/ide/records-and-tags.R.test`, `frames.R.test` and the typing suite's
   `mismatch_blame` group pin the behavior.
+
+## The DataFrame API is Polars', and ry's own types are UpperCamelCase
+
+- **Previous shape:** the built-in table was `frame`, queried only through data.table's
+  `x[i, j, by]`, and ry's own types were lowercase (`frame{...}`, `record{...}`, `tuple{...}`), so
+  nothing in a type told R's types from ry's.
+- **Names:** every type and type constructor ry adds to R is UpperCamelCase (`DataFrame`,
+  `LazyFrame`, `GroupBy`, `LazyGroupBy`, `Expr`, `Record{...}`, `Tuple{...}`, alongside the
+  standard library's `Result`, `List`, `Str`, `Dict`, `Set`), and R's own types stay lowercase.
+  The case is the visible line between R's types and ry's. No lowercase alias was kept: the old
+  names had no users outside this repository, so a deprecation path would only add a second
+  spelling to every renderer and fixture.
+- **API:** Polars' verbs over expressions, as qualified functions used with `|>`:
+  `DataFrame.select`, `with_columns`, `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`,
+  `head`/`tail`, `lazy`, and the `LazyFrame.*` mirror with `collect` and `explain`. Expressions are
+  `col("x")`, `lit(v)`, R's operators through `Ops.Expr`, and `Expr.*` functions (`alias`, the
+  aggregations, `len`, `is_null`, `if_else`, `cor`). There is no method dispatch: a qualified name
+  always means one function, which keeps the checker's and the IDE's view a plain name lookup. A
+  string names a column wherever a verb takes an expression, as in Polars.
+- **One plan for eager and lazy:** every verb appends a `table::lazy::Step` to a `Plan`, and an
+  eager verb collects at once. The optimizer pushes filters below `with_columns` and projections
+  and into a scan, prunes scan columns, and turns a leading `head` into a scan row limit;
+  `crates/table/tests/test_lazy.rs` fuzzes that optimizing never changes a result. Errors name the
+  schema of the longest valid prefix (`Plan::valid_schema`), so a misspelled column lists the
+  columns that exist at that step.
+- **Typing:** the checker refines a verb call after the ordinary call has checked the arguments
+  against `types/ry.Rtypes` (`refine_dataframe_call` in `crates/semantics/src/check.rs`), reading
+  each argument's syntax for its output name and column type. The refinement applies only when the
+  name reaches the library (`reaches_library`), so a project's own `DataFrame.filter` is an
+  ordinary function. An argument the checker cannot read (an `Expr` in a variable) leaves the
+  columns unknown rather than guessing. `as.data.table` and `as.DataFrame` keep the columns.
+- **data.table syntax stays as compatibility, typing included.** The runtime still answers
+  `x[i, j, by]` on a DataFrame and routes plain data.table queries to the same engine, so existing
+  code keeps working; the bracket typing already existed and costs nothing to keep. The docs teach
+  the verbs and present the brackets only as compatibility.
+- **R-side classes:** the value's class is `"DataFrame"` alone; `as.data.frame` and
+  `as.data.table` methods are registered with `registerS3method` into the generics' namespaces, so
+  they work whether or not the package is attached first.
+- **Impact:** column checks and completion cover the whole query rather than one bracket;
+  incremental analysis is unchanged, since the refinement reads only the item's own recorded types.

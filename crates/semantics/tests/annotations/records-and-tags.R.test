@@ -74,3 +74,8 @@ error: `:Some(integer)` and `:Some(integer, integer)` give one tag two payload s
 @alias Option<T> {:Some(T) | :None}
 #++++
 alias Option<T> = :Some(T) | :None
+
+#---- lowercase_heads_point_at_the_capitalized_spelling
+record{x: double}
+#++++
+syntax error: ry's own types are capitalized: write `Record{...}`, not `record{...}`

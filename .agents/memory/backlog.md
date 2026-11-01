@@ -1833,7 +1833,21 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
-## Open: the built-in frame
+## Open: DataFrame
+
+- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
+  `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
+  expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
+  has no parquet predicate statistics use beyond what Polars' reader does.
+- **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
+  column string to the verb or constructor argument that created it are not implemented; hover and
+  completion are.
+- **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
+  unknown, because the refinement reads argument syntax. Typing `Expr` with its column type
+  (`Expr<double>`) would close it. The column-error wording says "the frame `x`" for every table
+  kind.
+- **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
+  recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
 - **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
   needs R code (including under `.EACHI`) stop with an error.
