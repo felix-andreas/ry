@@ -28,7 +28,7 @@ ry's own syntax gets the same features as plain R:
 - **Records and tuples.** Hover on a field name, in a literal or in a pattern, shows the field's
   type, and `$` completes only what the value really has. Inside a record literal, a tag's payload
   or an `@Name(...)` constructor, completion offers the fields the expected type still lacks, so
-  `m: record{amount: double, currency: character} <- (amount = 1, cu)` completes `currency`.
+  `m: Record{amount: double, currency: character} <- (amount = 1, cu)` completes `currency`.
 - **Type definitions and annotations.** Go-to-definition on a type name or a type parameter such as
   `T` jumps to its definition, and a type parameter renames within its definition or function.
   Hover on a standard-library alias such as `Result` shows its definition.
