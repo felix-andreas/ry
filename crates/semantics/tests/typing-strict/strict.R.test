@@ -207,6 +207,21 @@ first <- function(...) utils::head(...)
 total: fn(x: Any) -> double
 first: fn(...: Any) -> Any
 
+#---- calling_a_value_declared_any_is_any
+# A parameter or variable declared `Any` is the author's opt-out, so calling it is `Any`, while
+# its arguments are still checked. A stub declared bare `Any` stays a strict finding.
+#~~~~ R/main.R
+#: fn(callback: Any) -> Any
+run <- function(callback) callback(1 + "a")
+#: fn(m: matrix) -> Any
+flip <- function(m) t(m)
+#++++
+== R/main.R
+run: fn(callback: Any) -> Any
+flip: fn(m: matrix) -> Any
+67..70 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+116..120 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
 #---- stop_is_strict_clean_in_either_position
 #~~~~ R/main.R
 #: fn(x: double) -> double

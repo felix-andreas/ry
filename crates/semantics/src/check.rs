@@ -6703,6 +6703,13 @@ impl<'db> Checker<'db, '_> {
         // A literal-`Any` callee is the escape hatch for stubs with no expressible
         // signature: the call is uncheckable, so findings inside its arguments are discarded.
         let resolved_callee = self.table.shallow_resolve(self.db, callee_ty);
+        // A parameter or variable the author declared `Any` is their own opt-out, so calling
+        // it opts out too; its arguments are still ordinary code and are checked.
+        if matches!(resolved_callee.kind(self.db), TyKind::Any) && self.names_declared_value(callee)
+        {
+            self.infer_call_arguments(range, arguments);
+            return any(self.db);
+        }
         if matches!(resolved_callee.kind(self.db), TyKind::Any) {
             let recorded_errors = self.errors.len();
             let recorded_origins = self.strict_origins.len();
