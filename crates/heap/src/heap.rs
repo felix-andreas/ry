@@ -638,7 +638,7 @@ impl Heap {
             return Ok(found);
         }
         let object = self.new_char(bytes, bits)?;
-        object.set_capacity(hash as isize);
+        object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
         self.strings.insert(hash, object);
         Ok(object)

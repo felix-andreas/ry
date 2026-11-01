@@ -80,8 +80,8 @@ pub struct Runtime {
     pub error_buffer: Vec<u8>,
     pub dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
-    /// `TRUELENGTH` values set on objects whose storage has no field for one: strings and
-    /// vectors set to a value other than their capacity. Each key is preserved while it has an
+    /// `TRUELENGTH` values set on vectors to a value other than their capacity, which their
+    /// storage has no field for. Each key is preserved while it has an
     /// entry, so its address cannot be reused by another object.
     pub truelengths: FxHashMap<Sexp, isize>,
     pub rng: arith::Rng,
