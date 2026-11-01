@@ -1479,6 +1479,15 @@ unsafe fn fold_numbers(
     integer: fn(i32, i32) -> Option<i32>,
     double: fn(f64, f64) -> f64,
 ) -> R<Sexp> {
+    // A double Array folds straight over its storage, which skips building a million boxed
+    // numbers for a million-item Array.
+    let [list] = arguments(call, ["list"])?;
+    if list.is_array() && list.kind() == SexpType::Real {
+        let total = values::reals(list)
+            .iter()
+            .fold(f64::from(start), |total, &item| double(total, item));
+        return scalar_real(total);
+    }
     let numbers = list_numbers(call)?;
     let mut total = Number::Integer(start);
     for number in numbers {
