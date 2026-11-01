@@ -1889,8 +1889,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   grDevices and graphics routines"). Missing: rendering output files, GNU R's `R_pretty` warnings
   on subnormal axis ranges, cairo font metrics for bitmap devices, plotmath sizes (an expression is
   measured as its deparsed text), and `stem()` beyond the empty case.
-- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources). reg-plot,
-  reg-plot-latin1 and reg-S4-examples run to the end; the rest stop at large missing pieces:
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, 41 of 66 ending with
+  GNU R's exit status). First failures: precision in `polyroot` (complex), noncentral `qchisq`
+  and `dbeta` (d-p-q-r-tests, d-p-q-r-tst-2), complex `%*%` (reg-BLAS), `iconv` to ASCII,
+  `file.copy` (reg-packages), `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
+  `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
   stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
   (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
   (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
