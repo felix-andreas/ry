@@ -97,6 +97,12 @@ impl<'db> InferenceTable<'db> {
         Ty::new(db, TyKind::Var(var))
     }
 
+    /// The id the next fresh variable gets, so a caller can tell the variables it creates
+    /// from here on.
+    pub fn next_var(&self) -> InferenceVar {
+        InferenceVar(self.entries.len() as u32)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             entries: self.entries.len(),

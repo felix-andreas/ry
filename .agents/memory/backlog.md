@@ -302,15 +302,27 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
-- `Result.and_then` keeps one error type: a step that fails with another tag is a `type-mismatch`,
-  because a generic's tag union does not widen across calls. Widen `E` to the union of both, then
-  drop the limit from `reference/standard-library.mdx` ("Limits").
-- `Dict.insert`, `Set.insert` and `List.append` copy, so a growing loop is quadratic. Reuse the
-  value in place when the compiler proves the argument is the last use of its binding.
 - A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
   error; the checker rejects it statically, so only `Unknown` code reaches it.
-- The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
-  touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
+- A diagnostic for library calls in a project that targets GNU R, once a project can declare its
+  runtime (`decisions.md`, "The standard library runs only on ry's runtime").
+- Reuse misses two shapes: a nested update (`state$seen <- Dict.insert(state$seen, k, v)`, about
+  28 s for 20,000 inserts in a debug build, quadratic) and the first update of a parameter inside
+  a helper. Both need either a nested-replacement path in `eval::rebind` or last-use analysis.
+- **Bytecode registers are uncounted, so in-place updates can be observed.** In a compiled
+  closure, `r <- list(d, mod())` keeps `d` in a register without a reference; if `mod` runs
+  `d <- Dict.insert(d, ...)` in that frame through `eval.parent`, the count reads 1 and `r[[1]]`
+  sees the insert. `x[[1]] <- 99` through `eval.parent` misbehaves the same way, so the cause is
+  in `crates/interp/src/bytecode.rs` (`may_modify_in_place` is syntactic), not the library. Fix
+  by counting register references or refusing reuse while a compiled frame for the environment
+  is live.
+- `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
+  signalling) for the reuse path, and `bytecode::reuses_first_argument` matches the callee's name
+  against `BUILTINS` as a string for every subexpression. Fold the first into `eval_call` and give
+  the second a name set.
+- When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
+  "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
+  constraint. Belongs to the checker diagnostics work.
 
 ## Open: strict mode restricts what a file's top level runs
 

@@ -2753,8 +2753,8 @@ first lines R had already read, leaving R mid-command.
 - **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
   with value semantics, insertion order and an open-addressing index, because a named list
   matches partially and allows duplicates, and an environment has reference semantics.
-  `identical()` ignores order, as Roc's equality does. Updates copy, which makes a growing loop
-  quadratic until the compiler can reuse a value it owns (backlog).
+  `identical()` ignores order, as Roc's equality does. Updates reuse a uniquely held value in
+  place (see "Standard library updates reuse a uniquely held value").
 - **Errors are tags, not conditions:** a function that can fail returns `:Ok(x) | :Err(:Tag)`, and a
   wrong argument type raises an R error that names the parameter, so a misuse is loud and a domain
   failure is a value.
@@ -2762,6 +2762,73 @@ first lines R had already read, leaving R mid-command.
   checker, hover, completion and goto-definition read the stub file like any other, so incremental
   analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
   the draft with open questions is `contributing/design/standard-library.md`.
+
+## Standard library updates reuse a uniquely held value
+
+- **Previous source of truth.** Every update (`Dict.insert`, `Set.insert`, `List.append`, ...)
+  built a fresh value, because a builtin could not know whether its caller would overwrite the
+  argument's binding. A loop growing a collection was quadratic: 40,000 `Dict.insert`s took 17.4 s.
+- **Target shape.** Perceus-style reuse, as Roc and Koka do it. `eval::rebind` recognizes
+  `x <- f(x, ...)` for a builtin flagged `reusing_first_argument` and passes the first argument as
+  `Call::reusable` when the frame binding holds its only reference and no other argument is the
+  same value; `standard_library::owned` also accepts a reference-count-zero temporary. Dicts and
+  sets are counted records whose key and value vectors are resizable and double when full, and
+  `build_index` takes spare room so `reserve` can presize the index. The bytecode compiler hands
+  such assignments to the AST evaluator.
+- **Why not a special form or last-use analysis.** A special form would make every library update
+  syntax, and last-use analysis needs the compiler; the reference count is exact at the call
+  boundary for AST frames, so reuse is decided where it is cheapest. It is not exact for a frame a
+  compiled closure owns: bytecode registers hold uncounted references (`backlog.md`). The remaining copies (a parameter's
+  first update, `state$seen <- Dict.insert(state$seen, ...)`) are in `backlog.md`.
+- **Impact.** Value semantics are unchanged (any second holder copies). 40,000 inserts: 0.04 s.
+  The checker is unaffected.
+
+## Standard library breadth against Roc's builtins
+
+- Each module was compared with Roc's builtins (pre-`Try` API) and everything that is typed,
+  `NA`-free and reports failure as a tag was taken; the full list and the renames are in
+  `contributing/design/standard-library.md`.
+- **Skipped, with the reason:**
+  - `Bool`, `Box`, `Encode`, `Decode`, `Hash`, `Inspect`: R covers booleans; the rest serve Roc's
+    memory layout or abilities, which ry does not have.
+  - Bitwise operations, shifts, `add_wrap`, `pow_int`: R's 32-bit integer reserves its minimum for
+    `NA`, so wrapping has no total definition and integer `pow` overflows almost at once.
+  - Unchecked `sqrt` and `log`, `asin`, `acos`, `is_nan`: they produce `NaN`, which the library
+    never returns.
+  - `pi`, `tau`, `e`: constants are not functions and R already has `pi`.
+  - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
+    and strings are immutable.
+  - `List.range`: `seq_len` and `seq` cover it.
+  - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
+    first key fixes the key type.
+- **Changed:** `Num.ceiling`, `floor` and `round` keep the number type (R integers are 32-bit, so a
+  rounded large double cannot become an integer); `Num.to_integer_checked` converts with
+  `:Err(:OutOfBounds)`. Saturating integer arithmetic clamps to plus or minus 2147483647.
+- **Hover docs** come from `#'` lines directly above a declaration in a `.Rtypes` file
+  (`StubLibrary::documentation`); a later source's first declaration of a name replaces or clears
+  them, the same override rule as the type.
+
+## A call's result drops unconstrained type-parameter members of a union
+
+- `Result.and_then : <A, B, E, F> ... -> Result<B, E | F>`. Without a rule, a step that never fails
+  left `F` an open variable, so the result rendered `:Err(:InvalidNumStr | ?)` and later
+  unification could bind it to anything.
+- `Checker::callback_outputs` picks the scheme's instantiated variables that occur in parameter
+  types only as a callback's return; `Checker::drop_unconstrained_members` removes those that are
+  still unbound after the call and that no variable older than the call reaches. A broader first
+  version dropped any still-open instantiated variable and wrongly typed `Find` in an unannotated
+  function and every return-only generic (`<T> fn() -> T | NULL`) as `NULL`; the fixtures
+  `standard-library.R.test` "an_open_parameter_filled_by_an_argument_is_kept" and
+  "a_return_only_parameter_is_kept" pin both. A union of only such members stays. Contract:
+  `type-system.mdx`, "Union normalization".
+
+## The standard library runs only on ry's runtime
+
+- A pure-R build for GNU R was declined. Many functions return result tags and `Dict`/`Set`
+  values, which GNU R cannot represent, and a partial build covering only `Str` and `Num` would
+  split the library into two dialects with different availability.
+- Instead, a diagnostic should flag library calls once a project can declare that it targets GNU R
+  (`backlog.md`).
 
 ## The benchmark harness compares test by test through `ry load`
 

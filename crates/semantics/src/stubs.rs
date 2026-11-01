@@ -40,6 +40,9 @@ pub struct StubLibrary<'db> {
     /// Manifest-listed exports of the active namespaces; these always resolve, untyped ones as
     /// `Unknown`.
     pub known_exports: FxHashSet<String>,
+    /// The `#'` lines written directly above a declaration, joined as Markdown, which hover and
+    /// completion show beside its type.
+    pub documentation: FxHashMap<String, String>,
 }
 
 /// `source_index` indexes the `StubSources` order the host fed in.
@@ -248,10 +251,16 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         // replaces any earlier source's set.
         let mut seen_here: FxHashSet<&str> = FxHashSet::default();
         let mut line_start = 0usize;
+        let mut pending_documentation: Vec<&str> = Vec::new();
         for raw_segment in text.split_inclusive('\n') {
             let raw_line = raw_segment.trim_end_matches(['\n', '\r']);
             let this_line_start = line_start;
             line_start += raw_segment.len();
+            if let Some(line) = raw_line.trim_start().strip_prefix("#'") {
+                pending_documentation.push(line.strip_prefix(' ').unwrap_or(line));
+                continue;
+            }
+            let documentation = std::mem::take(&mut pending_documentation);
             let content = strip_comment(raw_line).trim();
             if content.is_empty() {
                 continue;
@@ -318,6 +327,13 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             }
             namespace_exports.insert(name.to_owned());
             if seen_here.insert(name) {
+                if documentation.is_empty() {
+                    library.documentation.remove(name);
+                } else {
+                    library
+                        .documentation
+                        .insert(name.to_owned(), documentation.join("\n"));
+                }
                 library.schemes.insert(name.to_owned(), vec![scheme]);
                 if let Some(range) = name_range(name) {
                     library.declarations.insert(
