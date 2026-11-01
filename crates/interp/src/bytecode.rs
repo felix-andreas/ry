@@ -410,7 +410,7 @@ pub mod feedback {
 
 /// The [`feedback`] bit for `value`.
 pub unsafe fn value_kind(value: Sexp) -> u8 {
-    if values::has_attributes(value) || value.is_altrep() {
+    if values::has_attributes(value) || value.is_altrep() || value.is_array() {
         return feedback::OTHER;
     }
     let scalar = value.length() == 1;
@@ -1951,6 +1951,7 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             && value.length() == 1
             && !values::has_attributes(value)
             && !value.is_altrep()
+            && !value.is_array()
     };
     if !scalar(left) || !scalar(right) {
         return Ok(None);

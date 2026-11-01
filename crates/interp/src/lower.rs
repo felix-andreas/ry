@@ -445,6 +445,13 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             }
             values::pairlist(&items, SexpType::Language)
         }
+        SyntaxKind::ARRAY_EXPR => {
+            let mut items = vec![(nil(), install(".ry_array")?)];
+            if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                items.extend(literal_items(&arguments, source)?);
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
         SyntaxKind::TAG_EXPR => {
             let name =
                 child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag needs a name"))?;

@@ -2479,7 +2479,11 @@ pub unsafe fn complex_assign(
     }
     let local_binding = crate::heap().frame_cell(env, inner).is_some();
     if values::maybe_shared(base) || (!superassign && !local_binding) {
+        // A copy-on-write copy is the same value, so an Array stays an Array; the
+        // replacement function decides whether the write keeps it one.
+        let was_array = base.is_array();
         base = values::shallow_duplicate(base)?;
+        base.set_array(was_array);
     }
     // Values of each level, innermost first: the variable, then each getter applied to it.
     let mut levels = vec![base];
@@ -2496,7 +2500,9 @@ pub unsafe fn complex_assign(
         let mut level = eval(getter_call, env)?;
         if values::maybe_shared(level) || shared {
             shared = true;
+            let was_array = level.is_array();
             level = values::shallow_duplicate(level)?;
+            level.set_array(was_array);
         }
         levels.push(level);
     }

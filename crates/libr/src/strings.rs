@@ -120,6 +120,11 @@ pub fn type_c_name(kind: SexpType) -> &'static CStr {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_CHAR(object: Sexp) -> *const c_char {
+    // Packages read strings from worker threads (data.table's `fwrite` does), and the boundary
+    // touches the runtime's handle stack, so the common case must not enter it.
+    if object.kind() == SexpType::Char {
+        return object.data() as *const c_char;
+    }
     enter(|| {
         check_charsxp(object, "CHAR")?;
         Ok(object.data() as *const c_char)

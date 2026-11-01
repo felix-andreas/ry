@@ -12,7 +12,8 @@ Each edit is followed by the revert, so the code base ends where it started. `fi
 first publish after the edit (the fast wave plus whatever the server had ready) and `settled`
 is the last publish before the server went quiet for `--quiet` seconds (the semantic wave).
 
-It then times editor requests (hover, completion, definition, references and rename) at
+It then times editor requests (hover, completion, definition, references, rename, code
+actions, and inlay hints over a screen of lines) at
 identifiers sampled with a fixed seed from `--request-files` open files, twice: on a settled
 server, and right after a body edit, while the semantic wave is still pending. Each reports
 p50 and p99 from the request to its response.
@@ -153,7 +154,7 @@ def edit(client, uri, version, line, start, end, replacement):
     )
 
 
-REQUESTS = ("hover", "completion", "definition", "references", "rename")
+REQUESTS = ("hover", "completion", "definition", "references", "rename", "codeAction", "inlayHint")
 IDENTIFIER = re.compile(r"(?<![\w.$@:])([A-Za-z][\w.]*[A-Za-z0-9_])(?![\w.(]*\s*=[^=])")
 
 
@@ -180,6 +181,13 @@ def request_params(method, uri, line, start, end):
         return {"textDocument": document, "position": position, "context": {"includeDeclaration": True}}
     if method == "rename":
         return {"textDocument": document, "position": position, "newName": "bench_renamed"}
+    if method == "codeAction":
+        span = {"start": position, "end": {"line": line, "character": end}}
+        return {"textDocument": document, "range": span, "context": {"diagnostics": []}}
+    if method == "inlayHint":
+        # The viewport an editor asks for: about a screen of lines around the position.
+        viewport = {"start": {"line": max(0, line - 30), "character": 0}, "end": {"line": line + 30, "character": 0}}
+        return {"textDocument": document, "range": viewport}
     return {"textDocument": document, "position": position}
 
 
@@ -247,7 +255,9 @@ def main():
         "textDocument/didOpen",
         {"textDocument": {"uri": uri, "languageId": "r", "version": 1, "text": text}},
     )
-    initial = [received for received in client.drain(uri, args.quiet, 120) if received >= opened]
+    # A longer quiet window: during the startup check the semantic wave can trail the fast
+    # wave by more than `--quiet`.
+    initial = [received for received in client.drain(uri, max(args.quiet, 2.0), 120) if received >= opened]
     if not initial:
         sys.exit("the server published no diagnostics for the opened file")
     cold = (initial[0] - opened, initial[-1] - opened)

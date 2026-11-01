@@ -4,12 +4,13 @@ description: Edit your package, run the next command, and see the change, withou
 ---
 
 When you work on an R package, most of your time goes into one loop: edit a function, run it, look at
-the result, edit again. Start `ry R` anywhere inside the package and that loop needs no extra
+the result, edit again. Start `ry run` anywhere inside the package and that loop needs no extra
 step, because ry reloads what you changed before each command:
 
 ```text
-$ ry R
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+$ ry run
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 ```
@@ -31,7 +32,7 @@ takes 8.6 s (see [Speed](#speed)).
 ## Running one command or a script
 
 `ry load` loads the package, runs something, and exits, which suits a quick check from the shell or
-a script in CI. Unlike `ry R`, it runs the package on ry's own runtime, which is still incomplete
+a script in CI. Like `ry run`, it runs the package on ry's own runtime, which is still incomplete
 ([Which R runs your package](#which-r-runs-your-package)):
 
 ```text
@@ -58,9 +59,9 @@ call it, as devtools' does.
 
 ## Controlling reloads
 
-In `ry R`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
-scratch when you want a clean slate, and `ry R --no-load` starts the console without loading the
-package at all.
+In the console, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
+scratch when you want a clean slate, and `--no-load` (`ry R --no-load`, `ry run --no-load`) starts
+the console without loading the package at all.
 
 ## Differences from devtools
 
@@ -70,9 +71,10 @@ package's `inst/`, and datasets in `data/` are not loaded.
 
 ## Which R runs your package
 
-`ry R` and `load_all()` in an R session run your package on GNU R. `ry load` and `ry run` scripts
-run it on ry's own runtime, and `load_all()` loads on whichever runtime calls it. The console of
-`ry run` does not load the package yet.
+`ry run` and `ry load` run your package on ry's own runtime. `ry R` and `load_all()` in an R session
+run it on GNU R, and `load_all()` loads on whichever runtime calls it. The consoles of `ry run` and
+`ry R` load and reload a package the same way, so when ry's runtime lacks something your package
+needs, `ry R` gives you the same loop on GNU R.
 
 A package written in plain R, with or without [inline annotations](/type-checking/inline-annotations),
 loads on both. A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads only
@@ -88,6 +90,9 @@ definitions you changed. On a generated package of 500 files, against `devtools:
 | --- | --- | --- | --- | --- |
 | cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
 | reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |
+
+In the `ry run` console, a command after a body edit takes 57 to 86 ms including the reload, and
+the console takes 2.9 s to start on this package.
 
 These are medians of five runs of `tools/loader-bench` (`load_all()` is `pkgload::load_all()`, which
 `devtools::load_all()` calls). The machine was shared and ry was built without link-time
