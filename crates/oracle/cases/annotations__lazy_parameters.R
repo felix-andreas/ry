@@ -28,5 +28,9 @@ cleanup(4)
 tail(log_lines, 1L)
 default_uses_other <- function(n: integer, width: integer = n * 2L) -> integer width
 default_uses_other(3L)
+# A literal default is checked only when the body uses it, like any other default.
+titled <- function(title: character = NULL) -> character if (missing(title)) "none" else title
+titled()
+titled("report")
 handled <- tryCatch(stop("plain error"), error = function(e) conditionMessage(e))
 handled

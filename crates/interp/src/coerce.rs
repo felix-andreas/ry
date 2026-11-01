@@ -224,13 +224,10 @@ pub unsafe fn coerce_vector_quiet(
             )));
         }
     };
-    if source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression) {
-        if kind.is_vector() {
-            values::copy_attributes(object, result)?;
-            if kind.is_atomic() && source == SexpType::List {
-                // Classes of a list do not carry over to an atomic vector.
-            }
-        }
+    if (source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression))
+        && kind.is_vector()
+    {
+        values::copy_attributes(object, result)?;
     }
     Ok(result)
 }
@@ -817,9 +814,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     .generic(Generic::Internal),
     builtin("is.atomic", 1, |call| unsafe {
         {
-            // GNU R 4.3, whose R code runs here, still counts NULL as atomic.
+            // NULL stopped counting as atomic in R 4.4, and R 4.3's own `var()` relies on
+            // the older answer.
             let kind = call.arg(0).kind();
-            scalar_bool(kind.is_atomic() || kind == SexpType::Nil)
+            scalar_bool(
+                kind.is_atomic() || (kind == SexpType::Nil && !crate::system::r_at_least(4, 4)),
+            )
         }
     }),
     builtin("is.recursive", 1, |call| unsafe {
@@ -861,7 +861,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             ))
         }
     }),
-    builtin("is.single", 1, |call| unsafe {
+    builtin("is.single", 1, |call| {
         Err(call.error("type \"single\" unimplemented in R"))
     }),
     internal("is.builtin.internal", 1, |call| unsafe {
@@ -888,9 +888,9 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         )));
     }
     if values::inherits(object, "factor") && kind == SexpType::String {
-        return factor_as_character(object).and_then(|result| {
+        return factor_as_character(object).map(|result| {
             values::clear_attributes(result);
-            Ok(result)
+            result
         });
     }
     let result = match object.kind() {

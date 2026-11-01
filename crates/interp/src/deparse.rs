@@ -173,12 +173,11 @@ pub fn is_syntactic(name: &str) -> bool {
     if !(first.is_alphabetic() || first == '.') {
         return false;
     }
-    if first == '.' {
-        if let Some(second) = name.chars().nth(1)
-            && second.is_ascii_digit()
-        {
-            return false;
-        }
+    if first == '.'
+        && let Some(second) = name.chars().nth(1)
+        && second.is_ascii_digit()
+    {
+        return false;
     }
     name.chars()
         .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
@@ -405,11 +404,11 @@ impl Deparser {
     }
 
     unsafe fn closure(&mut self, function: Sexp) {
-        if self.opts & options::USE_SOURCE != 0 {
-            if let Some(lines) = source_lines(get_attr(function, symbols().srcref)) {
-                self.source(&lines);
-                return;
-            }
+        if self.opts & options::USE_SOURCE != 0
+            && let Some(lines) = source_lines(get_attr(function, symbols().srcref))
+        {
+            self.source(&lines);
+            return;
         }
         let saved = self.opts;
         self.opts &= !options::QUOTE_EXPRESSIONS;
@@ -640,8 +639,11 @@ impl Deparser {
                         }
                         return;
                     }
+                    // Every `PP_BINARY` operator called with one argument deparses as a
+                    // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
                     (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
-                        if matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
+                        if info.kind == Kind::Binary
+                            || matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
                     {
                         let operand = arguments.car();
                         let info = if info.precedence == precedence::SUM {

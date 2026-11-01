@@ -142,9 +142,7 @@ impl Reader<'_> {
 
     fn string(&mut self, length: usize) -> R<Vec<u8>> {
         if self.format == Format::Ascii {
-            let word = self.ascii_word()?;
-            return Ok(crate::lower::unescape_bytes(&word)
-                .map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
+            return Ok(unescape_ascii(self.ascii_word()?.as_bytes()));
         }
         Ok(self.take(length)?.to_vec())
     }
@@ -956,8 +954,8 @@ pub unsafe fn saved_bindings(
     Ok(items)
 }
 
-/// `memCompress(from, type)`, with `type` 1 to 4 for none, gzip (a zlib stream, as GNU R
-/// writes), bzip2 and xz.
+/// `memCompress(from, type)`, with `type` 1 to 5 for none, gzip (a zlib stream, as GNU R
+/// writes), bzip2, xz and zstd. Base R offers zstd from R 4.5 on.
 unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
     let from = values::raws(call.arg(0));
     let compressed = match values::as_integer_scalar(call.arg(1)) {
@@ -989,13 +987,17 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
                 .finish()
                 .map_err(|failure| call.error(failure.to_string()))?
         }
+        // GNU R compresses at zstd's default level.
+        5 => zstd::bulk::compress(from, 3).map_err(|failure| {
+            call.error(format!("internal libzstd error ({failure}) in memCompress"))
+        })?,
         _ => return Err(call.error("invalid 'type' argument")),
     };
     raw_vector(&compressed)
 }
 
-/// `memDecompress(from, type)`, with `type` 1 to 5 for none, gzip, bzip2, xz and unknown, which
-/// detects the format from its magic bytes.
+/// `memDecompress(from, type)`, with `type` 1 to 6 for none, gzip, bzip2, xz, unknown (which
+/// detects the format from its magic bytes) and zstd.
 unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     let from = values::raws(call.arg(0));
     let gzip_header = from.starts_with(&[0x1f, 0x8b]);
@@ -1008,6 +1010,8 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
             3
         } else if xz_header {
             4
+        } else if from.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+            6
         } else {
             crate::conditions::warning("unknown compression, assuming none")?;
             1
@@ -1025,6 +1029,9 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
             .map(drop),
         4 => lzma_rust2::XzReader::new(from, true)
             .read_to_end(&mut output)
+            .map(drop),
+        6 => zstd::stream::read::Decoder::new(from)
+            .and_then(|mut decoder| decoder.read_to_end(&mut output))
             .map(drop),
         _ => return Err(call.error("invalid 'type' argument")),
     };
@@ -1046,4 +1053,48 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     }
     let bytes = crate::connections::read_binary(source)?;
     unserialize(&bytes, call.arg(1))
+}
+
+/// Decodes a string of the ASCII format as GNU R's `InString` does: C escapes, up to three octal
+/// digits, and any other escaped byte (`\?`, `\"`, `\\`) standing for itself. R's string
+/// literal rules do not apply, because they reject `\?`, which the writer emits.
+fn unescape_ascii(word: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(word.len());
+    let mut index = 0;
+    while let Some(&current) = word.get(index) {
+        index += 1;
+        if current != b'\\' {
+            bytes.push(current);
+            continue;
+        }
+        let Some(&escaped) = word.get(index) else {
+            break;
+        };
+        index += 1;
+        let decoded = match escaped {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'v' => 0x0b,
+            b'b' => 0x08,
+            b'r' => b'\r',
+            b'f' => 0x0c,
+            b'a' => 0x07,
+            b'0'..=b'7' => {
+                let mut value = u32::from(escaped - b'0');
+                for _ in 0..2 {
+                    match word.get(index) {
+                        Some(&octal @ b'0'..=b'7') => {
+                            value = value * 8 + u32::from(octal - b'0');
+                            index += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                value as u8
+            }
+            other => other,
+        };
+        bytes.push(decoded);
+    }
+    bytes
 }

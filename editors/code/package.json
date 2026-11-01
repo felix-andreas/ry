@@ -3,7 +3,7 @@
 	"displayName": "ry",
 	"description": "R language support",
 	"author": "Felix Andreas",
-	"version": "0.3.2",
+	"version": "0.4.0",
 	"publisher": "felix-andreas",
 	"license": "UPL-1.0",
 	"homepage": "https://ry-lang.org",

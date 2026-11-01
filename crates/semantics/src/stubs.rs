@@ -384,7 +384,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     for raw_line in text.lines() {
         let content = strip_comment(raw_line).trim();
         if let Some(name) = definition_line_name(content) {
-            known_nominals.insert(name.to_owned());
+            if type_definition_line(db, content).is_some() {
+                known_nominals.insert(name.to_owned());
+            }
         } else if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
             if is_nominal_name(name) {
@@ -421,7 +423,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 }
                 None => problems.push(StubProblem {
                     line,
-                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}` or `@type NAME<T>`.".to_owned(),
+                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.".to_owned(),
                 }),
             }
             continue;
@@ -526,13 +528,14 @@ fn collect_unknown_nominals<'db>(
     });
 }
 
-/// The declared name of an `@alias` line or a generic `@type NAME<T, ...>` line. A plain
-/// `@type NAME` is the older opaque form, handled on its own.
+/// The declared name of an `@alias` line, a generic `@type NAME<T, ...>` line, or a `@type NAME
+/// {TYPE}` line with a representation. A plain `@type NAME` is the older opaque form, handled on
+/// its own.
 fn definition_line_name(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("@alias").or_else(|| {
         content
             .strip_prefix("@type")
-            .filter(|rest| rest.contains('<'))
+            .filter(|rest| rest.contains(['<', '{']))
     })?;
     let rest = rest.trim_start();
     let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
@@ -540,12 +543,12 @@ fn definition_line_name(content: &str) -> Option<&str> {
     is_nominal_name(name).then_some(name)
 }
 
-/// An `@alias NAME<T> {TYPE}` or `@type NAME<T>` line, lowered through the annotation grammar a
-/// project's own `#: @alias` uses. A generic opaque type is a `@type` whose representation is
-/// `Unknown`, which the checker already treats as having none.
+/// An `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>` line, lowered through the
+/// annotation grammar a project's own `#: @alias` uses. A generic opaque type is a `@type` whose
+/// representation is `Unknown`, which the checker already treats as having none.
 fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefinition<'db>> {
     definition_line_name(content)?;
-    let text = if content.starts_with("@type") {
+    let text = if content.starts_with("@type") && !content.contains('{') {
         format!("#: {content} {{Unknown}}")
     } else {
         format!("#: {content}")
@@ -701,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type_name_must_be_an_identifier() {
+    fn a_representation_must_be_a_type() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         let problems = stub_source_problems(
@@ -711,7 +714,7 @@ mod tests {
         assert_eq!(problems[0].line, 0);
         assert_eq!(
             problems[0].message,
-            "`structural { a: integer }` is not a valid type name."
+            "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`."
         );
         // The nominal is refused, so the use below reports too, and an author
         // who reads only the second error is not sent to a correct line.

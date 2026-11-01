@@ -5,6 +5,8 @@
 #ifndef R_INTERNALS_H_
 #define R_INTERNALS_H_
 
+#include <Rversion.h>
+
 #ifdef __cplusplus
 #include <cstdio>
 #include <climits>
@@ -103,8 +105,10 @@ void (MARK_NOT_MUTABLE)(SEXP x);
 int (ALTREP)(SEXP x);
 SEXP (ATTRIB)(SEXP x);
 void SET_ATTRIB(SEXP x, SEXP v);
+#if R_VERSION >= R_Version(4, 5, 0)
 int (ANY_ATTRIB)(SEXP x);
 void (CLEAR_ATTRIB)(SEXP x);
+#endif
 void DUPLICATE_ATTRIB(SEXP to, SEXP from);
 void SHALLOW_DUPLICATE_ATTRIB(SEXP to, SEXP from);
 
@@ -143,7 +147,15 @@ void SET_STRING_ELT(SEXP x, R_xlen_t i, SEXP v);
 SEXP SET_VECTOR_ELT(SEXP x, R_xlen_t i, SEXP v);
 SEXP *(STRING_PTR)(SEXP x);
 const SEXP *(STRING_PTR_RO)(SEXP x);
+#if R_VERSION >= R_Version(4, 5, 0)
 const SEXP *(VECTOR_PTR_RO)(SEXP x);
+#endif
+/* The headers declare the API of the R version ry presents (Rversion.h), so a package's version
+ * branches see the same names they would under that GNU R: Rcpp names VECTOR_PTR below 4.5,
+ * and rlang and yaml define their own R_mkClosure and ANY_ATTRIB there. */
+#if R_VERSION < R_Version(4, 5, 0)
+SEXP *(VECTOR_PTR)(SEXP x);
+#endif
 int INTEGER_ELT(SEXP x, R_xlen_t i);
 double REAL_ELT(SEXP x, R_xlen_t i);
 int LOGICAL_ELT(SEXP x, R_xlen_t i);
@@ -186,14 +198,18 @@ SEXP R_altrep_data1(SEXP x);
 SEXP R_altrep_data2(SEXP x);
 void R_set_altrep_data1(SEXP x, SEXP v);
 void R_set_altrep_data2(SEXP x, SEXP v);
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_altrep_class_name(SEXP x);
 SEXP R_altrep_class_package(SEXP x);
+#endif
 SEXP R_tryWrap(SEXP x);
 
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_allocResizableVector(SEXPTYPE type, R_xlen_t maxlen);
 void R_resizeVector(SEXP x, R_xlen_t newlen);
 Rboolean R_isResizable(SEXP x);
 R_xlen_t R_maxLength(SEXP x);
+#endif
 
 /* Strings. */
 const char *(R_CHAR)(SEXP x);
@@ -202,9 +218,11 @@ int (IS_ASCII)(SEXP x);
 int (IS_UTF8)(SEXP x);
 int (IS_LATIN1)(SEXP x);
 int (IS_BYTES)(SEXP x);
+#if R_VERSION >= R_Version(4, 5, 0)
 Rboolean Rf_charIsASCII(SEXP x);
 Rboolean Rf_charIsUTF8(SEXP x);
 Rboolean Rf_charIsLatin1(SEXP x);
+#endif
 SEXP Rf_mkChar(const char *);
 SEXP Rf_mkCharCE(const char *, cetype_t);
 SEXP Rf_mkCharLen(const char *, int);
@@ -271,10 +289,12 @@ SEXP (PRINTNAME)(SEXP x);
 SEXP (FORMALS)(SEXP x);
 SEXP (BODY)(SEXP x);
 SEXP (CLOENV)(SEXP x);
+#if R_VERSION >= R_Version(4, 5, 0)
 SEXP R_ClosureFormals(SEXP x);
 SEXP R_ClosureBody(SEXP x);
 SEXP R_ClosureEnv(SEXP x);
 SEXP R_mkClosure(SEXP formals, SEXP body, SEXP env);
+#endif
 SEXP (PRCODE)(SEXP x);
 SEXP (PRENV)(SEXP x);
 SEXP (PRVALUE)(SEXP x);
@@ -284,15 +304,19 @@ void SET_PRVALUE(SEXP x, SEXP v);
 SEXP R_PromiseExpr(SEXP x);
 SEXP (PREXPR)(SEXP x);
 SEXP (ENCLOS)(SEXP x);
+#if R_VERSION >= R_Version(4, 5, 0)
 SEXP R_ParentEnv(SEXP x);
+#endif
 SEXP R_NewEnv(SEXP enclos, int hash, int size);
 void Rf_defineVar(SEXP symbol, SEXP value, SEXP rho);
 void Rf_setVar(SEXP symbol, SEXP value, SEXP rho);
 SEXP Rf_findVar(SEXP symbol, SEXP rho);
 SEXP Rf_findVarInFrame(SEXP rho, SEXP symbol);
 SEXP Rf_findVarInFrame3(SEXP rho, SEXP symbol, Rboolean doGet);
+#if R_VERSION >= R_Version(4, 5, 0)
 SEXP R_getVar(SEXP sym, SEXP rho, Rboolean inherits);
 SEXP R_getVarEx(SEXP sym, SEXP rho, Rboolean inherits, SEXP ifnotfound);
+#endif
 Rboolean R_existsVarInFrame(SEXP rho, SEXP symbol);
 void R_removeVarFromFrame(SEXP symbol, SEXP env);
 SEXP Rf_findFun(SEXP symbol, SEXP rho);
@@ -316,7 +340,9 @@ SEXP Rf_allocMatrix(SEXPTYPE, int, int);
 SEXP Rf_alloc3DArray(SEXPTYPE, int, int, int);
 SEXP Rf_allocArray(SEXPTYPE, SEXP);
 SEXP Rf_allocList(int);
+#if R_VERSION >= R_Version(4, 5, 0)
 SEXP Rf_allocLang(int);
+#endif
 SEXP Rf_allocS4Object(void);
 SEXP Rf_allocSExp(SEXPTYPE);
 SEXP Rf_ScalarLogical(int);
@@ -361,7 +387,9 @@ SEXP Rf_dimgets(SEXP, SEXP);
 SEXP Rf_dimnamesgets(SEXP, SEXP);
 SEXP Rf_GetRowNames(SEXP);
 Rboolean Rf_inherits(SEXP, const char *);
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_mapAttrib(SEXP x, SEXP (*FUN)(SEXP, SEXP, void *), void *data);
+#endif
 
 /* Type predicates and coercion. */
 Rboolean Rf_isNull(SEXP s);
@@ -392,7 +420,9 @@ Rboolean Rf_isTs(SEXP s);
 Rboolean Rf_isFunction(SEXP s);
 Rboolean Rf_isPrimitive(SEXP s);
 Rboolean Rf_isFrame(SEXP s);
+#if R_VERSION >= R_Version(4, 5, 0)
 Rboolean Rf_isDataFrame(SEXP s);
+#endif
 Rboolean Rf_isS4(SEXP s);
 R_len_t Rf_length(SEXP);
 R_xlen_t Rf_xlength(SEXP);
@@ -532,21 +562,28 @@ typedef enum {
     R_BindingTypeForced = 4,
     R_BindingTypeActive = 5
 } R_BindingType_t;
+#if R_VERSION >= R_Version(4, 6, 0)
 R_BindingType_t R_GetBindingType(SEXP sym, SEXP env);
+#endif
 void R_MakeActiveBinding(SEXP sym, SEXP fun, SEXP env);
+#if R_VERSION >= R_Version(4, 6, 0)
 void R_MakeDelayedBinding(SEXP sym, SEXP expr, SEXP eval_env, SEXP env);
 void R_MakeForcedBinding(SEXP sym, SEXP expr, SEXP value, SEXP env);
 void R_MakeMissingBinding(SEXP sym, SEXP env);
+#endif
 SEXP R_ActiveBindingFunction(SEXP sym, SEXP env);
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_DelayedBindingExpression(SEXP sym, SEXP env);
 SEXP R_DelayedBindingEnvironment(SEXP sym, SEXP env);
 SEXP R_ForcedBindingExpression(SEXP sym, SEXP env);
+#endif
 typedef enum {
     R_DotTypeValue = 0,
     R_DotTypeMissing = 1,
     R_DotTypeDelayed = 2,
     R_DotTypeForced = 3
 } R_DotType_t;
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_findDotsEnv(SEXP env);
 Rboolean R_DotsExist(SEXP env);
 int R_DotsLength(SEXP env);
@@ -557,10 +594,13 @@ SEXP R_DotDelayedExpression(int i, SEXP env);
 SEXP R_DotDelayedEnvironment(int i, SEXP env);
 SEXP R_DotForcedExpression(int i, SEXP env);
 SEXP R_envSymbols(SEXP env);
+#endif
 SEXP Rf_topenv(SEXP target, SEXP env);
 SEXP R_NamespaceEnvSpec(SEXP rho);
 SEXP R_PackageEnvName(SEXP rho);
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_getRegisteredNamespace(const char *name);
+#endif
 SEXP Rf_GetOption(SEXP tag, SEXP rho);
 int Rf_GetOptionWidth(void);
 int Rf_GetOptionDigits(void);
@@ -584,8 +624,10 @@ void R_dot_Last(void);
 void R_RunExitFinalizers(void);
 
 /* Classes and S4. */
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_data_class(SEXP x, Rboolean single);
 SEXP R_class(SEXP x);
+#endif
 SEXP R_do_slot(SEXP obj, SEXP name);
 SEXP R_do_slot_assign(SEXP obj, SEXP name, SEXP value);
 int R_has_slot(SEXP obj, SEXP name);
@@ -596,15 +638,19 @@ int R_check_class_etc(SEXP x, const char **valid);
 SEXP Rf_asS4(SEXP x, Rboolean flag, int complete);
 
 /* Attribute queries. */
+#if R_VERSION >= R_Version(4, 6, 0)
 R_xlen_t R_getAttribCount(SEXP x);
 SEXP R_getAttribNames(SEXP x);
 SEXP R_getAttributes(SEXP x);
+#endif
 #ifndef __cplusplus
 #include <stdbool.h>
 #endif
+#if R_VERSION >= R_Version(4, 6, 0)
 bool R_hasAttrib(SEXP x, SEXP name);
 R_xlen_t R_nrow(SEXP x);
 R_xlen_t R_ncol(SEXP x);
+#endif
 int Rf_nlevels(SEXP f);
 SEXP Rf_GetColNames(SEXP dimnames);
 SEXP Rf_GetArrayDimnames(SEXP x);
@@ -615,14 +661,20 @@ SEXP Rf_duplicated(SEXP x, Rboolean from_last);
 R_xlen_t Rf_any_duplicated(SEXP x, Rboolean from_last);
 R_xlen_t Rf_any_duplicated3(SEXP x, SEXP incomp, Rboolean from_last);
 Rcomplex Rf_asComplex(SEXP x);
+#if R_VERSION >= R_Version(4, 5, 0)
 Rboolean Rf_asRboolean(SEXP x);
 bool Rf_asBool(SEXP x);
+#endif
+#if R_VERSION >= R_Version(4, 4, 0)
 Rboolean R_isTRUE(SEXP x);
+#endif
 void Rf_copyVector(SEXP s, SEXP t);
 void Rf_copyMatrix(SEXP s, SEXP t, Rboolean byrow);
 void Rf_copyListMatrix(SEXP s, SEXP t, Rboolean byrow);
 Rboolean Rf_isVectorizable(SEXP s);
+#if R_VERSION >= R_Version(4, 6, 0)
 Rboolean Rf_isScalarString(SEXP s);
+#endif
 Rboolean Rf_isUnsorted(SEXP x, Rboolean strictly);
 Rboolean Rf_pmatch(SEXP formal, SEXP tag, Rboolean exact);
 Rboolean Rf_psmatch(const char *formal, const char *tag, Rboolean exact);
@@ -630,7 +682,9 @@ Rboolean Rf_NonNullStringMatch(SEXP s, SEXP t);
 char *Rf_acopy_string(const char *s);
 void R_orderVector(int *indx, int n, SEXP arglist, Rboolean nalast, Rboolean decreasing);
 void R_orderVector1(int *indx, int n, SEXP x, Rboolean nalast, Rboolean decreasing);
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP R_duplicateAsResizable(SEXP x);
+#endif
 typedef enum { Bytes, Chars, Width } nchar_type;
 int R_nchar(SEXP string, nchar_type type, Rboolean allowNA, Rboolean keepNA, const char *msg_name);
 

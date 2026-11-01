@@ -11,7 +11,7 @@ action: Add inferred type annotation for `x`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): x, break, else, FALSE, for, function, if, in
 hint @1: integer
 
 #---- local_read
@@ -306,7 +306,7 @@ f <- function() {
   for (i$0tem in 1:3) print(item)
 }
 #++++
-hover 20..49: NULL
+hover 25..29: item: integer
 definition 25..29
 references: 25..29*, 44..48
 rename: 2 edit(s)
@@ -315,8 +315,9 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: fn() -> NULL\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn() -> NULL\n"
-completion (128+): I, if, in, Inf, item, iconv, iconvlist, icuGetCollate
+completion (128+): I, item, if, in, Inf, iconv, iconvlist, icuGetCollate
 hint @1: fn() -> NULL
+hint @29: integer
 
 #==== signature
 #---- positional_first
@@ -335,7 +336,7 @@ signature: fn(x: double, [y]: double) -> double
 parameters: [x: double] | [y]: double
 action: Add inferred type annotations for the whole file
   edit 263..263 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): x = , y = , f, g, break, else, FALSE, for
 hint @264: <T: numeric> fn(x: T, [y]: T) -> T
 
 #---- second_after_comma
@@ -353,7 +354,7 @@ action: Add inferred type annotation for `g`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"
   edit 30..30 -> "#: fn() -> double\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): y = , f, g, break, else, FALSE, for, function
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 hint @31: fn() -> double
 
@@ -369,7 +370,7 @@ signature: <T: numeric> fn(x: T, [y]: T) -> T
 parameters: x: T | [[y]: T]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): f, g, break, else, FALSE, for, function, if
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 
 #---- stub_with_dots
@@ -385,7 +386,7 @@ action: Add inferred type annotation for `h`
   edit 0..0 -> "#: fn() -> character\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn() -> character\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): h, break, else, FALSE, for, function, if, in
 hint @1: fn() -> character
 
 #---- unknown_name_hits_dots
@@ -425,7 +426,7 @@ action: Add inferred type annotation for `h`
   edit 0..0 -> "#: fn() -> integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn() -> integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): h, break, else, FALSE, for, function, if, in
 hint @1: fn() -> integer
 
 #---- overload_second_candidate_active
@@ -449,7 +450,7 @@ action: Add inferred type annotation for `h`
   edit 0..0 -> "#: fn() -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn() -> double\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): h, break, else, FALSE, for, function, if, in
 hint @1: fn() -> double
 
 #==== hints
@@ -691,7 +692,7 @@ definition 12..16
 references: 12..16*, 52..56, 71..75, 107..111
 rename: 4 edit(s)
 signature: none
-completion (23): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, Arg
+completion (24): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, Arg
 
 #---- declaring_string_of_a_generic_reaches_its_calls
 setGeneric("ar$0ea", function(shape) standardGeneric("area"))

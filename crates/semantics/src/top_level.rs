@@ -140,7 +140,7 @@ fn root_name(module: &Module, target: ExprId) -> Option<Symbol> {
         ExpressionKind::Index { target, .. } | ExpressionKind::Field { target, .. } => {
             root_name(module, *target)
         }
-        ExpressionKind::Call { arguments, .. } => arguments
+        ExpressionKind::Call { arguments, .. } => module[arguments]
             .first()
             .and_then(|argument| argument.value)
             .and_then(|value| root_name(module, value)),
@@ -310,8 +310,8 @@ impl Classifier<'_> {
                 TopLevel::Definition
             }
             ExpressionKind::Block { statements } => {
-                for statement in statements {
-                    if let effect @ TopLevel::Effect { .. } = self.statement(*statement) {
+                for &statement in &self.module[statements] {
+                    if let effect @ TopLevel::Effect { .. } = self.statement(statement) {
                         return effect;
                     }
                 }
@@ -341,7 +341,7 @@ impl Classifier<'_> {
             ExpressionKind::Call { callee, arguments } => {
                 self.callee_name(*callee)
                     .is_some_and(|(_, name)| IMPORTS.contains(&name))
-                    && arguments
+                    && self.module[arguments]
                         .iter()
                         .filter_map(|argument| argument.value)
                         .all(|argument| self.effect(argument, &mut None).is_none())
@@ -427,7 +427,7 @@ impl Classifier<'_> {
                 if QUOTING.contains(&name) {
                     return None;
                 }
-                arguments
+                self.module[arguments]
                     .iter()
                     .filter_map(|argument| argument.value)
                     .find_map(|argument| self.effect(argument, locals))
@@ -539,12 +539,13 @@ impl Classifier<'_> {
         id: ExprId,
         locals: &mut Option<FxHashSet<Symbol>>,
     ) -> Option<TopLevel> {
-        self.module
-            .expression(id)
-            .kind
-            .child_ids()
-            .into_iter()
-            .find_map(|child| self.effect(child, locals))
+        let mut found = None;
+        self.module.for_each_child(id, |child| {
+            if found.is_none() {
+                found = self.effect(child, locals);
+            }
+        });
+        found
     }
 
     /// Whether the project binds `name` once, unconditionally, to a value that is plainly a
@@ -567,7 +568,10 @@ impl Classifier<'_> {
                 names.insert(*name);
             }
             ExpressionKind::Call { arguments, .. } => {
-                for value in arguments.iter().filter_map(|argument| argument.value) {
+                for value in self.module[arguments]
+                    .iter()
+                    .filter_map(|argument| argument.value)
+                {
                     self.pattern_names(value, names);
                 }
             }

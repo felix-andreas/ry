@@ -70,10 +70,10 @@
             root = unfilteredRoot;
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources unfilteredRoot)
-              # Non-Rust files read by `include_str!` and tests, which `commonCargoSources` drops.
+              # Non-Rust files that `commonCargoSources` drops: libR's C sources and headers, the
+              # stubs and fixtures read by `include_str!` and tests, and the release metadata.
+              ./crates
               ./types
-              ./crates/format/tests/format
-              ./crates/ry/ry.exe.manifest
               ./editors/code/package.json
             ];
           };
@@ -84,8 +84,14 @@
             strictDeps = true;
           };
 
+          # libR links zlib, bzip2 and xz (crates/libr/build.rs).
           commonArgsNative = commonArgs // {
-            cargoExtraArgs = "-p ry-lang";
+            cargoExtraArgs = "-p ry-lang -p libr";
+            buildInputs = [
+              pkgs.zlib
+              pkgs.bzip2
+              pkgs.xz
+            ];
           };
 
           # The dep-only build stubs out every local .rs file, but chrono compiles against the
@@ -102,16 +108,45 @@
               extraDummyScript = keepPatchesInDummySrc;
             }
           );
-          packageNative = craneLib.buildPackage (
+          packageUnwrapped = craneLib.buildPackage (
             commonArgsNative
             // {
               cargoArtifacts = cargoArtifactsNative;
+              # libr's own suites drive GNU R binaries and the corpus, which the sandbox lacks.
+              checkPhaseCargoCommand = "cargoWithProfile test -p ry-lang";
+              # No GNU R in the check phase, so the CLI's runtime tests skip: nixpkgs ships R 4.6,
+              # whose base packages ry's runtime does not load yet (MEMORY.md, mid-term).
               # Stub materialization writes to the user cache; the sandbox's HOME is read-only.
               preCheck = ''
                 export XDG_CACHE_HOME="$TMPDIR/.cache"
               '';
+              # `ry run` finds ry's runtime at ../lib/ry/libR.so relative to the executable, and the
+              # name must stay libR.so, the soname compiled packages record.
+              postInstall = ''
+                mkdir -p "$out/lib/ry"
+                mv "$out"/lib/libR${pkgs.stdenv.hostPlatform.extensions.sharedLibrary} "$out/lib/ry/"
+                rm -f "$out"/lib/libR.a "$out"/lib/*.rlib
+              '';
+              meta.mainProgram = "ry";
             }
           );
+
+          # `ry R` loads GNU R's libR, and ry's runtime reads base R from it. A Nix-built binary
+          # cannot load a libR built against another distribution's libraries, so R_HOME defaults
+          # to nixpkgs' R (shared) even where another R comes first on PATH; setting R_HOME still
+          # overrides it.
+          packageNative =
+            pkgs.runCommand "ry-${packageUnwrapped.version}"
+              {
+                nativeBuildInputs = [ pkgs.makeWrapper ];
+                meta.mainProgram = "ry";
+              }
+              ''
+                mkdir -p "$out/bin" "$out/lib"
+                ln -s ${packageUnwrapped}/lib/ry "$out/lib/ry"
+                makeWrapper ${packageUnwrapped}/bin/ry "$out/bin/ry" \
+                  --set-default R_HOME ${pkgs.R}/lib/R --prefix PATH : ${pkgs.R}/bin
+              '';
 
           # Release binaries are cross-linked by zig and cannot run in the sandbox, so they skip
           # tests. Linux targets glibc 2.17 with the standard /lib64 loader, so it can load R. zig
@@ -181,6 +216,8 @@
         in
         {
           default = packageNative;
+          ry = packageNative;
+          ry-unwrapped = packageUnwrapped;
           ry-linux-x86_64 = buildCrossPackage "x86_64-unknown-linux-gnu.2.17";
           ry-macos-aarch64 = buildCrossPackage "aarch64-apple-darwin";
           ry-windows-x86_64 = buildCrossPackage "x86_64-pc-windows-gnu";
@@ -233,6 +270,12 @@
               zip
             ];
           };
+      });
+
+      # `nix flake check` builds the package, which runs ry-lang's tests, and the dev shell.
+      checks = self.lib.eachSystem (system: {
+        ry = self.packages.${system}.ry;
+        devshell = self.devShells.${system}.default;
       });
     };
 }

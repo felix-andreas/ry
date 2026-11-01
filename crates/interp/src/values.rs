@@ -56,6 +56,13 @@ pub struct Symbols {
     pub dot_last_value: Sexp,
     pub dot_package_name: Sexp,
     pub dot_namespace: Sexp,
+    pub package_arg: Sexp,
+    pub na_ok: Sexp,
+    pub dup: Sexp,
+    pub encoding: Sexp,
+    pub name: Sexp,
+    pub spec: Sexp,
+    pub dot_environment: Sexp,
     pub dot_ry_loader: Sexp,
     pub bracket: Sexp,
     pub bracket2: Sexp,
@@ -153,6 +160,13 @@ symbol_table! {
     dot_last_value = ".Last.value",
     dot_package_name = ".packageName",
     dot_namespace = ".__NAMESPACE__.",
+    package_arg = "PACKAGE",
+    na_ok = "NAOK",
+    dup = "DUP",
+    encoding = "ENCODING",
+    name = "name",
+    spec = "spec",
+    dot_environment = ".Environment",
     dot_ry_loader = ".__ry_loader__.",
     bracket = "[",
     bracket2 = "[[",
@@ -373,6 +387,21 @@ pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
     Ok(crate::heap().install(name)?)
 }
 
+/// The symbol named by the `CHARSXP` `name`. An interned ASCII string is already the print name
+/// `install` would intern, so it skips hashing the bytes again; any other string goes through
+/// `install`, which also rejects an empty or overlong name. `NA_STRING` is not the interned
+/// `"NA"`, so it goes through `install` too.
+pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
+    if name != na_string()
+        && name.has_gp(gp::ASCII)
+        && name.has_gp(gp::CACHED)
+        && (1..=10_000).contains(&name.length())
+    {
+        return Ok(crate::heap().install_char(name)?);
+    }
+    install_bytes(name.bytes())
+}
+
 pub unsafe fn scalar_logical(value: i32) -> R<Sexp> {
     let known = crate::heap().known();
     Ok(match value {
@@ -542,13 +571,19 @@ pub unsafe fn pairlist_length(mut list: Sexp) -> usize {
 }
 
 pub unsafe fn env_length(env: Sexp) -> usize {
-    crate::heap().frame_symbols(env).len()
+    crate::heap().bound_symbols(env).len()
 }
 
+/// Asks the class's `Length` method, without materializing the elements. `length` cannot
+/// fail, so an error from the method is parked like an element accessor's
+/// ([`crate::unwind::park`]) and the length reads as 0 until it is raised.
 unsafe fn altrep_length(object: Sexp) -> usize {
-    match materialize(object) {
-        Ok(vector) => vector.length() as usize,
-        Err(_) => 0,
+    match (interp().hooks.altrep_length)(object) {
+        Ok(count) => count,
+        Err(unwind) => {
+            crate::unwind::park(unwind);
+            0
+        }
     }
 }
 
@@ -570,9 +605,13 @@ macro_rules! typed_slice {
         #[inline]
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
+                // The accessor cannot fail, so a method's error is parked, as for elements.
                 match materialize(object) {
                     Ok(vector) => vector.slice::<$type>(),
-                    Err(_) => &[],
+                    Err(unwind) => {
+                        crate::unwind::park(unwind);
+                        &[]
+                    }
                 }
             } else {
                 object.slice::<$type>()
@@ -722,6 +761,15 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         remove_attr(object, name);
         return Ok(());
     }
+    // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
+    // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
+    let value = if value == object {
+        let copy = duplicate(value)?;
+        heap.root(copy);
+        copy
+    } else {
+        value
+    };
     let mut cell = object.attrib();
     let mut last = nil;
     while cell.kind() == SexpType::Pairlist {
@@ -972,14 +1020,8 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             }
             list
         }
-        SexpType::Closure => {
-            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
-            copy
-        }
-        SexpType::Object => {
-            let copy = triple(SexpType::Object, nil(), nil(), nil())?;
-            copy
-        }
+        SexpType::Closure => triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?,
+        SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
         _ if kind.is_vector() => {
             let source = materialize(object)?;
             let count = source.length() as usize;

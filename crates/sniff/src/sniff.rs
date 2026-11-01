@@ -91,6 +91,43 @@ pub fn sniff_head(text: &[u8]) -> Layout {
     sniff_records(complete, false)
 }
 
+/// The properties every layout holds, whatever the bytes. Shared with the coverage-guided `fuzz/`
+/// target so the in-tree harness and the fuzzer check one contract.
+pub fn check_sniff_invariants(text: &[u8]) {
+    let layout = sniff(text);
+    assert_eq!(layout, sniff(text), "non-deterministic sniff of {text:?}");
+    let head = sniff_head(text);
+    for layout in [&layout, &head] {
+        assert!(!layout.columns.is_empty(), "no columns for {text:?}");
+        let mut names = std::collections::HashSet::new();
+        for column in &layout.columns {
+            assert!(!column.name.is_empty(), "an empty column name for {text:?}");
+            assert!(
+                names.insert(column.name.as_str()),
+                "column name {:?} repeats for {text:?}",
+                column.name
+            );
+        }
+        if layout.columns.len() > 1 {
+            assert!(
+                SEPARATORS.contains(&layout.separator),
+                "separator {:?} is not one a file may use, for {text:?}",
+                layout.separator
+            );
+        }
+    }
+    // Under the head sample's record count, the whole-file sniff has no jump points to add, so a
+    // file whose last line is complete must sniff the same through both entry points. Every
+    // record but the last takes at least two bytes.
+    let complete = text.last() == Some(&b'\n') || !text.contains(&b'\n');
+    if complete && text.len() < 2 * HEAD_RECORDS - 1 {
+        assert_eq!(
+            layout, head,
+            "the head and the whole file disagree on {text:?}"
+        );
+    }
+}
+
 /// The type a column of fields reads as so far. Joining moves only up, and a column's final type
 /// is [`Guess::column_type`] of the join of all its fields.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]

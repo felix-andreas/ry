@@ -25,8 +25,31 @@ use {
         ffi::c_void,
         fmt,
         ptr::NonNull,
+        sync::OnceLock,
     },
 };
+
+/// Reads and writes elements of ALTREP string and list vectors. Only the C API host knows the
+/// classes' methods, so it installs these; the heap and the interpreter then treat every vector
+/// alike.
+#[derive(Clone, Copy)]
+pub struct AltrepElements {
+    pub read: unsafe fn(Sexp, usize) -> Sexp,
+    pub write: unsafe fn(Sexp, usize, Sexp),
+}
+
+static ALTREP_ELEMENTS: OnceLock<AltrepElements> = OnceLock::new();
+
+/// Installs the accessors behind [`Sexp::element`] and `Heap::set_element` for ALTREP
+/// instances. Later calls keep the first.
+pub fn install_altrep_elements(elements: AltrepElements) {
+    ALTREP_ELEMENTS.get_or_init(|| elements);
+}
+
+/// The installed ALTREP accessors, for an object that has the ALTREP flag.
+pub(crate) fn altrep_elements() -> Option<&'static AltrepElements> {
+    ALTREP_ELEMENTS.get()
+}
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -295,6 +318,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// An environment a compiled closure body is running on. The body keeps values in registers
+    /// that do not count as references, which code running on the environment from elsewhere
+    /// must respect before it updates a value in place.
+    pub const COMPILED_FRAME: u16 = 1 << 9;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
     /// compiled code revalidates its lookups only when the epoch moved.
@@ -349,6 +376,17 @@ pub(crate) struct TripleObject {
     pub first: Cell<Sexp>,
     pub second: Cell<Sexp>,
     pub third: Cell<Sexp>,
+}
+
+/// A symbol is a triple (print name, base binding, internal) followed by the state of its lookup
+/// caches, which no collection traces: every reader checks the stamp first, and a cell whose
+/// stamp is current is still bound in an environment on the search path.
+#[repr(C)]
+pub(crate) struct SymbolObject {
+    pub triple: TripleObject,
+    pub epoch: Cell<u64>,
+    pub global_cell: Cell<Option<Sexp>>,
+    pub global_stamp: Cell<u64>,
 }
 
 #[repr(C)]
@@ -495,6 +533,7 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 .checked_add(15)
                 .map(|size| size & !15)
         }
+        Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),
         Shape::Environment => Some(size_of::<EnvironmentObject>()),
         Shape::ExternalPtr => Some(size_of::<ExternalPtrObject>()),
@@ -710,9 +749,17 @@ impl Sexp {
         unsafe { self.slice::<u8>() }
     }
 
-    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`.
+    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`. An ALTREP instance has no element
+    /// storage, so its class's `Elt` method answers through the accessor the host installed.
     pub unsafe fn element(self, index: usize) -> Sexp {
-        unsafe { *(self.data() as *const Sexp).add(index) }
+        unsafe {
+            if self.is_altrep()
+                && let Some(elements) = ALTREP_ELEMENTS.get()
+            {
+                return (elements.read)(self, index);
+            }
+            *(self.data() as *const Sexp).add(index)
+        }
     }
 
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {
@@ -749,6 +796,10 @@ impl Sexp {
 
     pub(crate) unsafe fn frame_ptr(self) -> *mut Frame {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
+    }
+
+    pub(crate) unsafe fn symbol_payload(self) -> &'static SymbolObject {
+        unsafe { &*self.0.as_ptr().cast::<SymbolObject>() }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {

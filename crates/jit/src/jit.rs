@@ -48,10 +48,14 @@ impl Mode {
     }
 }
 
-/// Calls a body makes before it compiles, in the default mode.
-const ENTRY_THRESHOLD: i32 = 10;
-/// Backward jumps a body takes before a loop compiles, in the default mode.
-const BACK_EDGE_THRESHOLD: i32 = 500;
+/// Calls a body makes before it compiles, in the default mode. Compiling a body costs about as
+/// much as interpreting it a few thousand times, and loading a package runs many bodies (the
+/// methods package's, for each `setClass`) only a few dozen times: at 10 calls, compiling them
+/// took half the time of a large package's S4 definitions. Code that is really hot passes 1000
+/// calls within milliseconds, so the benchmarks lose nothing.
+const ENTRY_THRESHOLD: i32 = 1000;
+/// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
+const BACK_EDGE_THRESHOLD: i32 = 10_000;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
@@ -105,10 +109,21 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
         let constants = machine.code.cdr();
         let tier1 = constants.element(TIER1);
         if tier1 != values::nil() {
-            let compiled = &*(tier1.external_address() as *const Compiled);
-            // Closures made by one `function` expression share their body but not their
-            // enclosure, which the compiled lookups are specialized to.
-            return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+            if tier1.external_protected().weak_key() != values::nil() {
+                let compiled = &*(tier1.external_address() as *const Compiled);
+                // Closures made by one `function` expression share their body but not their
+                // enclosure, which the compiled lookups are specialized to.
+                return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+            }
+            // The enclosure the code was compiled for died, and no activation can still run the
+            // code, because a running one keeps its enclosure reachable. The address is cleared
+            // so that a copy of the constants sharing this pointer does not free it twice.
+            let address = tier1.external_address() as *mut Compiled;
+            if !address.is_null() {
+                tier1.set_external_address(std::ptr::null_mut());
+                drop(Box::from_raw(address));
+            }
+            heap().set_element(constants, TIER1, values::nil());
         }
         let counters = values::ints_mut(constants.element(PROFILE));
         if !hot || counters[profile::TIER_STATE] < 0 {
@@ -185,7 +200,10 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
             osr,
         });
         // Everything the machine code and the speculations point to stays reachable from the
-        // external pointer, so the collector never frees an object compiled code embeds.
+        // external pointer while the enclosure lives, so the collector never frees an object
+        // compiled code embeds. They hang off a weak reference keyed on the enclosure, because
+        // the body outlives any one closure: R6 gives every object's methods the same body, and a
+        // strong reference would keep the first object compiled for alive with its finalizer.
         let mut kept = vec![enclosure];
         kept.extend(plan.slots.iter().copied());
         for speculation in &plan.speculations {
@@ -201,8 +219,12 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
             for (index, object) in kept.iter().enumerate() {
                 heap.set_element(protected, index, *object);
             }
+            let weak = heap
+                .alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
+                .map_err(|_| error("the JIT could not allocate its code object"))?;
+            heap.root(weak);
             let address = Box::into_raw(compiled) as *mut c_void;
-            heap.alloc_external_ptr(address, values::nil(), protected)
+            heap.alloc_external_ptr(address, values::nil(), weak)
                 .map_err(|_| error("the JIT could not allocate its code object"))
         })();
         heap.release_handles(mark);

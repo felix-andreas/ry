@@ -5,7 +5,7 @@
 #[cfg(unix)]
 use std::fs;
 use {
-    crate::ReplError,
+    crate::{ReplError, gnu_r_home},
     libloading::Library,
     std::{
         env,
@@ -607,32 +607,57 @@ unsafe extern "C" fn yes_no_cancel_default(question: *const c_char) -> c_int {
     -1
 }
 
+/// `R_HOME` when set, else what `R RHOME` prints, else the platform's usual installations
+/// (`interp/src/gnu_r_home.rs`), which matter where `R` is rarely on the `PATH`: Windows, and
+/// an editor started from the macOS Dock.
 fn discover_r_home() -> Result<PathBuf, ReplError> {
-    let (home, origin) = match env::var("R_HOME") {
-        Ok(home) if !home.is_empty() => (home, "R_HOME is set to"),
-        _ => {
-            let output = Command::new("R").arg("RHOME").output().map_err(|error| {
-                ReplError(format!(
-                    "no R found: R_HOME is not set and running `R RHOME` failed ({error}). \
-                     Install R or set R_HOME to an R installation."
-                ))
-            })?;
-            let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if home.is_empty() {
-                return Err(ReplError(
-                    "`R RHOME` printed nothing. Set R_HOME to an R installation".to_owned(),
-                ));
-            }
-            (home, "`R RHOME` reported")
+    if let Ok(home) = env::var("R_HOME")
+        && !home.is_empty()
+    {
+        let path = PathBuf::from(&home);
+        if !path.is_dir() {
+            return Err(ReplError(format!(
+                "R_HOME is set to {home}, but that directory does not exist"
+            )));
         }
-    };
-    let path = PathBuf::from(&home);
-    if !path.is_dir() {
-        return Err(ReplError(format!(
-            "{origin} {home}, but that directory does not exist"
-        )));
+        return Ok(path);
     }
-    Ok(path)
+    let reported = Command::new("R")
+        .arg("RHOME")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|home| !home.is_empty());
+    if let Some(home) = reported {
+        let path = PathBuf::from(&home);
+        if !path.is_dir() {
+            return Err(ReplError(format!(
+                "`R RHOME` reported {home}, but that directory does not exist"
+            )));
+        }
+        return Ok(path);
+    }
+    let candidates = gnu_r_home::candidate_r_homes();
+    if let Some(home) = candidates
+        .iter()
+        .find(|home| home.join("library").join("base").is_dir())
+    {
+        return Ok(home.clone());
+    }
+    let searched: Vec<String> = candidates
+        .iter()
+        .map(|home| home.display().to_string())
+        .collect();
+    Err(ReplError(format!(
+        "no R found: R_HOME is not set, `R RHOME` did not run, and no R installation is in \
+         the usual places ({}). Install R or set R_HOME to an R installation.",
+        if searched.is_empty() {
+            "none".to_owned()
+        } else {
+            searched.join(", ")
+        }
+    )))
 }
 
 /// Embedding bypasses R's shell wrapper, which exports `R_SHARE_DIR`,

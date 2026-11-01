@@ -50,14 +50,17 @@ pub fn match_findings<'db>(
 ) -> Vec<MatchFinding> {
     let mut findings = Vec::new();
     let checker = Coverage { db, definitions };
-    for expression in &module.expressions {
-        let ExpressionKind::Match { scrutinee, arms } = &expression.kind else {
+    for expression in module.expression_ids() {
+        let ExpressionKind::Match { scrutinee, arms } = *module.kind(expression) else {
             continue;
         };
-        let subject = types.get(scrutinee).copied().unwrap_or_else(|| unknown(db));
+        let subject = types
+            .get(&scrutinee)
+            .copied()
+            .unwrap_or_else(|| unknown(db));
         let subject = structural(db, definitions, subject);
         let mut rows: Vec<Vec<Pat>> = Vec::with_capacity(arms.len());
-        for arm in arms.iter() {
+        for arm in module[arms].iter() {
             let row = vec![lower(db, definitions, module, arm.pattern, subject)];
             if checker.useful(&rows, &row, &[subject], 1).is_empty() {
                 findings.push(MatchFinding {
@@ -83,9 +86,9 @@ pub fn match_findings<'db>(
             .take(WITNESS_LIMIT)
             .filter_map(|witness| witness.first().map(render))
             .collect();
-        let scrutinee_range = module.expression(*scrutinee).range;
+        let scrutinee_range = module.range(scrutinee);
         findings.push(MatchFinding {
-            range: TextRange::new(expression.range.start(), scrutinee_range.end()),
+            range: TextRange::new(module.range(expression).start(), scrutinee_range.end()),
             kind: MatchFindingKind::NonExhaustive { missing, more },
         });
     }
@@ -476,7 +479,7 @@ fn lower<'db>(
     match &module.pattern(pattern).kind {
         PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => Pat::Wild,
         PatternKind::Or(alternatives) => Pat::Or(
-            alternatives
+            module[alternatives]
                 .iter()
                 .map(|&alternative| lower(db, definitions, module, alternative, ty))
                 .collect(),
@@ -490,7 +493,7 @@ fn lower<'db>(
                 LiteralKind::Integer(text)
                 | LiteralKind::Double(text)
                 | LiteralKind::Complex(text) => {
-                    let value = text.trim_end_matches('L');
+                    let value = module[text].trim_end_matches('L');
                     Constructor::Literal(if *negative {
                         format!("-{value}")
                     } else {
@@ -539,7 +542,7 @@ fn lower<'db>(
         PatternKind::Tuple(items) => {
             let constructor = Constructor::Tuple(items.len());
             let item_types = constructor_field_types(db, ty, &constructor);
-            let fields = items
+            let fields = module[items]
                 .iter()
                 .zip(item_types)
                 .map(|(&item, item_type)| lower(db, definitions, module, item, item_type))
@@ -555,7 +558,7 @@ fn lower<'db>(
             let shape = members.iter().find_map(|member| match member.kind(db) {
                 TyKind::NativeRecord(native)
                     if (*rest || native.len() == fields.len())
-                        && fields.iter().all(|field| {
+                        && module[fields].iter().all(|field| {
                             native
                                 .iter()
                                 .any(|native| native.name.text(db) == field.name.as_str())
@@ -571,7 +574,7 @@ fn lower<'db>(
                 _ => None,
             });
             let shape = shape.unwrap_or_else(|| {
-                let mut names: Vec<(String, Ty<'db>)> = fields
+                let mut names: Vec<(String, Ty<'db>)> = module[fields]
                     .iter()
                     .map(|field| (field.name.as_str().to_owned(), unknown(db)))
                     .collect();
@@ -581,7 +584,10 @@ fn lower<'db>(
             let lowered = shape
                 .iter()
                 .map(|(name, field_type)| {
-                    match fields.iter().find(|field| field.name.as_str() == name) {
+                    match module[fields]
+                        .iter()
+                        .find(|field| field.name.as_str() == name)
+                    {
                         Some(field) => lower(db, definitions, module, field.pattern, *field_type),
                         None => Pat::Wild,
                     }

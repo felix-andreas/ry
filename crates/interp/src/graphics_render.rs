@@ -76,6 +76,8 @@ pub enum Format {
     Png,
     Bmp,
     Tiff,
+    Jpeg,
+    PostScript,
 }
 
 /// Renders `pages` of a device `size` inches across into one file for PDF, or into one file
@@ -89,13 +91,22 @@ pub fn write_pages(
     resolution: f64,
     title: &str,
 ) -> std::io::Result<()> {
-    if format == Format::Pdf {
-        return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
+    match format {
+        Format::Pdf => {
+            return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
+        }
+        Format::PostScript => {
+            return std::fs::write(
+                file_for_page(file, 1),
+                postscript_document(pages, size, title),
+            );
+        }
+        _ => {}
     }
     for (index, page) in pages.iter().enumerate() {
         let bytes = match format {
             Format::Svg => svg_document(page, size).into_bytes(),
-            Format::Png | Format::Bmp | Format::Tiff => {
+            Format::Png | Format::Bmp | Format::Tiff | Format::Jpeg => {
                 let pixels = rasterize(page, size, resolution)
                     .ok_or_else(|| std::io::Error::other("the page is too large to rasterize"))?;
                 match format {
@@ -103,10 +114,11 @@ pub fn write_pages(
                         .encode_png()
                         .map_err(|failure| std::io::Error::other(failure.to_string()))?,
                     Format::Bmp => bmp(&pixels),
+                    Format::Jpeg => jpeg(&pixels, resolution)?,
                     _ => tiff(&pixels, resolution),
                 }
             }
-            Format::Pdf => Vec::new(),
+            Format::Pdf | Format::PostScript => Vec::new(),
         };
         std::fs::write(file_for_page(file, index + 1), bytes)?;
     }
@@ -562,6 +574,57 @@ fn pdf_string(text: &str) -> String {
         }
     }
     out
+}
+
+// PostScript.
+
+/// Procedures named after the PDF content operators that `pdf_content` writes, so that a page's
+/// PDF content stream is also a PostScript program. PDF keeps separate stroke and fill colours
+/// where PostScript has one current colour, so `RG` and `rg` store theirs and each painting
+/// operator sets the one it needs. Opacity has no PostScript equivalent, so `gs` drops it, as
+/// GNU R's `postscript` device does.
+const POSTSCRIPT_PROLOG: &str = "\
+/FillColor [0 0 0] def /StrokeColor [0 0 0] def
+/rg { 3 array astore /FillColor exch def } bind def
+/RG { 3 array astore /StrokeColor exch def } bind def
+/m { moveto } bind def /l { lineto } bind def /c { curveto } bind def /h { closepath } bind def
+/re { 4 2 roll moveto 1 index 0 rlineto 0 exch rlineto neg 0 rlineto closepath } bind def
+/f { FillColor aload pop setrgbcolor fill } bind def
+/S { StrokeColor aload pop setrgbcolor stroke } bind def
+/B { gsave f grestore S } bind def
+/q { gsave } bind def /Q { grestore } bind def /W { clip } bind def /n { newpath } bind def
+/w { setlinewidth } bind def /J { setlinecap } bind def /j { setlinejoin } bind def
+/M { setmiterlimit } bind def /d { setdash } bind def /gs { pop } bind def
+/BT { gsave } bind def /ET { grestore } bind def
+/Tf { exch findfont exch scalefont setfont } bind def
+/Tm { 6 array astore concat 0 0 moveto } bind def
+/Tj { FillColor aload pop setrgbcolor show } bind def
+/reencode { findfont dup length dict begin { 1 index /FID ne { def } { pop pop } ifelse } forall
+  /Encoding ISOLatin1Encoding def currentdict end definefont pop } bind def
+/F1 /Helvetica reencode /F2 /Helvetica-Bold reencode /F3 /Helvetica-Oblique reencode
+/F4 /Helvetica-BoldOblique reencode /F5 /Symbol findfont definefont pop
+";
+
+/// A PostScript document of `pages`, each `size` inches. Text uses the standard Helvetica
+/// fonts in the ISO Latin-1 encoding, which matches the escapes `pdf_string` writes for it.
+fn postscript_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
+    let [width, height] = size.map(|inches| (inches * POINTS_PER_INCH).round() as i64);
+    let mut out = format!(
+        "%!PS-Adobe-3.0\n%%DocumentNeededResources: font Helvetica Helvetica-Bold \
+         Helvetica-Oblique Helvetica-BoldOblique Symbol\n%%Title: {}\n%%Creator: R (ry)\n\
+         %%Pages: {}\n%%BoundingBox: 0 0 {width} {height}\n%%EndComments\n\
+         %%BeginProlog\n{POSTSCRIPT_PROLOG}%%EndProlog\n",
+        title.replace(['\n', '\r'], " "),
+        pages.len()
+    );
+    let mut opacities = BTreeMap::new();
+    for (index, page) in pages.iter().enumerate() {
+        out.push_str(&format!("%%Page: {0} {0}\n", index + 1));
+        out.push_str(&pdf_content(page, &mut opacities));
+        out.push_str("showpage\n");
+    }
+    out.push_str("%%EOF\n");
+    out.into_bytes()
 }
 
 // SVG.
@@ -1066,6 +1129,31 @@ fn on_white([red, green, blue, a]: [u8; 4]) -> [u8; 3] {
         ((u32::from(channel) * a + 255 * (255 - a) + 127) / 255) as u8
     };
     [blend(red), blend(green), blend(blue)]
+}
+
+/// A baseline JPEG at GNU R's default quality of 75, transparent pixels composited on white.
+fn jpeg(pixmap: &tiny_skia::Pixmap, resolution: f64) -> std::io::Result<Vec<u8>> {
+    let (Ok(width), Ok(height)) = (
+        u16::try_from(pixmap.width()),
+        u16::try_from(pixmap.height()),
+    ) else {
+        return Err(std::io::Error::other("the page is too large for a JPEG"));
+    };
+    let image: Vec<u8> = rgba_rows(pixmap)
+        .iter()
+        .flat_map(|pixel| on_white(*pixel))
+        .collect();
+    let mut out = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, 75);
+    let density = resolution.round().clamp(1.0, f64::from(u16::MAX)) as u16;
+    encoder.set_density(jpeg_encoder::Density::Inch {
+        x: density,
+        y: density,
+    });
+    encoder
+        .encode(&image, width, height, jpeg_encoder::ColorType::Rgb)
+        .map_err(|failure| std::io::Error::other(failure.to_string()))?;
+    Ok(out)
 }
 
 /// An uncompressed baseline RGB TIFF, transparent pixels composited on white.

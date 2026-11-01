@@ -17,7 +17,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("format", 9, do_format),
     internal("formatC", 7, do_format_c),
     internal("encodeString", 5, do_encode_string),
-    internal("prettyNum", -1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("prettyNum", -1, |call| Ok(call.arg(0))),
     internal("format.info", 3, do_format_info),
 ];
 
@@ -264,8 +264,12 @@ pub fn format_complex_with(
     let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
     let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
     let real_text = format_real_with(real_part, real, "NA");
-    let sign = if imaginary_part < 0.0 { '-' } else { '+' };
     let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
+    let sign = if imaginary_part < 0.0 && imaginary_text != "0" {
+        '-'
+    } else {
+        '+'
+    };
     format!("{real_text}{sign}{imaginary_text}i")
 }
 
@@ -297,8 +301,12 @@ pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
 }
 
 /// `value` rounded to `digits` significant digits relative to its larger part, as GNU R's
-/// `z_prec_r` rounds before printing: a part far smaller than the other one prints as zero.
+/// `z_prec_r` rounds before printing through R 4.3: a part far smaller than the other one
+/// prints as zero. From R 4.4 on, each part formats on its own, so nothing is rounded.
 fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
+    if crate::system::r_at_least(4, 4) {
+        return value;
+    }
     let magnitude = [value.r.abs(), value.i.abs()]
         .into_iter()
         .filter(|part| part.is_finite())
@@ -702,7 +710,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     let exponent: i32 = text
         .split_once('e')
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
-    let text = if exponent < -4 || exponent >= significant as i32 {
+    if exponent < -4 || exponent >= significant as i32 {
         let text = scientific_text(value, significant.saturating_sub(1));
         if keep_zeros {
             text
@@ -719,8 +727,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         } else {
             trim_zeros(&text).to_owned()
         }
-    };
-    text
+    }
 }
 
 fn trim_zeros(text: &str) -> &str {

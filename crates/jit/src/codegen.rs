@@ -395,6 +395,15 @@ impl<'p, 'b> Translator<'p, 'b> {
         let pc = inst.pc;
         match action {
             Action::Skip | Action::FallThrough => {}
+            Action::Clear { registers } => {
+                let nil = self
+                    .builder
+                    .ins()
+                    .iconst(I64, interp::heap().known().nil.as_ptr() as i64);
+                for register in registers {
+                    self.store_register(register, nil);
+                }
+            }
             Action::Constant { dst, value, ty } => {
                 match ty {
                     Ty::Int | Ty::Lgl => {
@@ -2394,7 +2403,7 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::CallBuiltin => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))
             .collect(),
-        Op::CallGeneric => vec![operand(1)],
+        Op::CallGeneric | Op::CallRebinding => vec![operand(1)],
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }

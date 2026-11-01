@@ -26,10 +26,10 @@
 #   arguments are type-checked instead of being absorbed untyped into `...`. The `...` is written at
 #   its position in R's formal list: formals before it fill positionally, formals after it fill by
 #   name only, exactly as R matches them.
-# - Functions whose calls carry *arbitrary* identifier-named arguments (`data.frame(x = 1)`,
-#   `Sys.setenv(VAR = "v")`, `structure(x, my_attr = 1)`, plotting `par(...)` sinks) stay `Any`
-#   values: their keyword arguments are data, not formals, and a typed rest element would reject
-#   forms R accepts.
+# - Functions whose calls carry *arbitrary* identifier-named arguments (`Sys.setenv(VAR = "v")`,
+#   `structure(x, my_attr = 1)`, plotting `par(...)` sinks) stay `Any` values unless their result
+#   type is known: their keyword arguments are data, not formals. An `...: Any` rest absorbs them,
+#   which is how `data.frame(x = 1)` returns `data.frame`.
 # - Functions with trailing-dot formals (`stop`/`warning` take `call.`) stay `Any`: parameter names
 #   allow interior dots only, so the signature is not yet writable. `stop`'s `Any` also stands in for a
 #   missing `Never` type: `x <- if (ok) 1L else stop("bad")` must not force a `NULL` join.
@@ -43,7 +43,10 @@
 # `@type NAME` declares a named type with no inspectable representation — compatible only with
 # itself, produced only by functions declared to return it. Consumers that accept them keep `Any`
 # parameters (R coerces liberally), so the nominals tighten *returns* without rejecting calls.
-@type data.frame
+#
+# A data frame is a named list of columns at run time, and `lapply(frame, f)` or `vapply` over its
+# columns is everyday R, so it declares that representation. Its columns are not typed.
+@type data.frame {list[named: Unknown]}
 @type factor
 @type matrix
 @type formula
@@ -130,6 +133,15 @@ Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double[]) -> logical
 Compare.matrix : fn(e1: double[], e2: matrix) -> logical
+
+# Arithmetic on a data frame works column by column and keeps the frame, while a
+# comparison gives a logical matrix. `[` keeps the frame unless it drops to one
+# column, which only the index values decide, so its result is untyped.
+Arith.data.frame : fn(e1: data.frame, e2: Any) -> data.frame
+Arith.data.frame : fn(e1: Any, e2: data.frame) -> data.frame
+Compare.data.frame : fn(e1: data.frame, e2: Any) -> matrix
+Compare.data.frame : fn(e1: Any, e2: data.frame) -> matrix
+[.data.frame : fn(x: data.frame, ...: Any) -> Any
 
 # Reserved value constants and built-in constant vectors.
 T : logical
@@ -472,9 +484,10 @@ unclass : @pure fn(x: Any) -> Any
 # arguments can be absorbed by a rest parameter, so `Any`.
 structure : @pure Any
 
-# Builders. `data.frame`/`table`/`cbind`/`rbind` take arbitrary column/cell names as named arguments —
-# `Any` values (see header). `matrix`/`array`/`factor` have closed formal sets but no nameable return
-# type yet. The atomic-vector constructors genuinely return fixed-element vectors.
+# Builders. `table`/`cbind`/`rbind` take arbitrary column/cell names as named arguments and return a
+# type that depends on them, so they stay `Any` values (see header). `data.frame` and `matrix` return
+# their opaque nominals; `array` has no nameable return type yet. The atomic-vector constructors
+# genuinely return fixed-element vectors.
 vector : @pure fn([mode]: character, [length]: Any) -> Any
 logical : @pure fn([length]: Any) -> logical[]
 integer : @pure fn([length]: Any) -> integer[]

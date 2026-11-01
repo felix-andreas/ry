@@ -287,6 +287,10 @@ pub enum Argument {
 pub enum Action {
     /// Nothing: the instruction is unreachable or folds away.
     Skip,
+    /// Stores `NULL` into registers whose values are dead, so the collector can reclaim them.
+    Clear {
+        registers: Vec<usize>,
+    },
     Constant {
         dst: usize,
         value: Sexp,
@@ -1125,9 +1129,18 @@ impl Builder<'_> {
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
-            Op::CallGeneric => {
+            Op::CallGeneric | Op::CallRebinding => {
                 let call = self.constant(operand(2));
+                // `x <- f(x, ...)` may move a ry dictionary or set into the call to update it in
+                // place, which only tier 0 does, so the call is inlined only when the variable
+                // cannot hold one.
+                let inlinable = inst.op == Op::CallGeneric
+                    || self
+                        .slot_of
+                        .get(&self.constant(operand(3)))
+                        .is_some_and(|&slot| state.slots[slot].ty.is_plain());
                 let inlined = match state.registers[operand(1)] {
+                    _ if !inlinable => None,
                     Ty::Closure(formals, body) => {
                         self.inline(state, call, formals, body, None, operand(0))
                     }
@@ -1279,6 +1292,20 @@ impl Builder<'_> {
                 objects: Vec::new(),
                 dst: None,
             },
+            // Compiled code keeps boxed values in the same register window as tier 0, so it
+            // clears the finished statement's registers too, or they would keep its temporaries
+            // alive until the function returns.
+            Op::EndStatement => {
+                let registers: Vec<usize> = std::iter::once(operand(0))
+                    .chain(operand(1)..operand(2))
+                    .collect();
+                for &register in &registers {
+                    if let Some(ty) = state.registers.get_mut(register) {
+                        *ty = Ty::Boxed;
+                    }
+                }
+                Action::Clear { registers }
+            }
             Op::Closure => {
                 state.visible = Some(true);
                 let ty = Ty::Closure(self.constant(operand(1)), self.constant(operand(2)));
@@ -2256,11 +2283,17 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric => {
+        Op::CallGeneric | Op::CallRebinding => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
         Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
+        Op::EndStatement => {
+            kill(operand(0), live);
+            for register in operand(1)..operand(2) {
+                kill(register, live);
+            }
+        }
         Op::JumpUnless | Op::Return => gen_(operand(0), live),
         Op::Arithmetic => {
             kill(operand(1), live);

@@ -498,27 +498,12 @@ unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
     let fail = |failure: &dyn std::fmt::Display| {
         error_in(call.call, format!("cannot read `{path}`: {failure}"))
     };
-    let table =
+    let mut table =
         table::io::read_csv(std::path::Path::new(&path)).map_err(|failure| fail(&failure))?;
-    if !factors {
-        return wrap(table);
+    if factors {
+        table::io::strings_as_factors(&mut table).map_err(|failure| fail(&failure))?;
     }
-    let mut frame = table.into_frame();
-    let text: Vec<_> = frame
-        .columns()
-        .iter()
-        .filter(|column| column.dtype().is_string())
-        .map(|column| column.name().clone())
-        .collect();
-    for name in text {
-        let column = frame.column(&name).map_err(|failure| fail(&failure))?;
-        let factor = convert::string_to_factor(column.as_materialized_series())
-            .map_err(|failure| fail(&failure))?;
-        frame
-            .with_column(factor.into_column())
-            .map_err(|failure| fail(&failure))?;
-    }
-    wrap(Table::new(frame).map_err(|failure| fail(&failure))?)
+    wrap(table)
 }
 
 unsafe fn do_read_parquet(call: &Call<'_>) -> R<Sexp> {
@@ -2708,10 +2693,7 @@ unsafe fn grouped_fallback(
         )
         .agg([col(ROW_INDEX)]);
     if keyed {
-        grouping = grouping.sort(
-            group_names.iter().cloned().collect::<Vec<_>>(),
-            Default::default(),
-        );
+        grouping = grouping.sort(group_names.to_vec(), Default::default());
     }
     let groups = grouping.collect().map_err(|failure| fail(&failure))?;
     let rows_column = groups.column(ROW_INDEX).map_err(|failure| fail(&failure))?;
