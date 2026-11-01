@@ -116,7 +116,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         map_paths(call, |path| Path::new(path).is_dir())
     }),
     internal("file.info", 2, do_file_info),
-    internal("list.files", 8, do_list_files),
+    internal("list.files", -1, do_list_files),
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
     internal("path.expand", 1, |call| unsafe {
@@ -203,7 +203,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", 3, do_system),
+    internal("system", -1, do_system),
     internal("Cstack_info", 0, |_| unsafe {
         values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
     }),
@@ -226,7 +226,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
-    internal("format.POSIXlt", 3, do_format_posixlt),
+    internal("format.POSIXlt", -1, do_format_posixlt),
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
@@ -1485,10 +1485,22 @@ unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
     values::set_attr(result, symbols().names, padded)
 }
 
+/// `format.POSIXlt(x, format, usetz)`, plus R 4.4's `digits`. A bare `%OS` prints that many
+/// decimals; before R 4.4 the C code read them from `options("digits.secs")` itself.
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let formats = call.arg(1);
     let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
+    let digits = if call.len() > 3 {
+        call.arg(3)
+    } else {
+        crate::envir::get_option("digits.secs")
+    };
+    let second_digits = if digits == nil() {
+        0
+    } else {
+        values::as_integer_scalar(digits).clamp(0, 6)
+    };
     let seconds = posixlt_seconds(list)?;
     let count = seconds.len();
     let result = alloc(SexpType::String, count)?;
@@ -1517,9 +1529,21 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             values::set_elt(result, index, values::mkchar(text)?);
             continue;
         }
-        let format = values::string_at(formats, index % length(formats).max(1))
+        let mut format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+        if second_digits > 0 {
+            let pieces: Vec<&str> = format.split("%OS").collect();
+            let mut widened = pieces[0].to_owned();
+            for piece in &pieces[1..] {
+                widened.push_str("%OS");
+                if !piece.starts_with(|character: char| character.is_ascii_digit()) {
+                    widened.push_str(&second_digits.to_string());
+                }
+                widened.push_str(piece);
+            }
+            format = widened;
+        }
         // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
         let dst = if length(isdst) > 0 {
             crate::subset::numeric_element(isdst, index % length(isdst))
@@ -2057,14 +2081,18 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     let ignore_case = values::as_logical_scalar(call.arg(5)) == 1;
     let include_dirs = values::as_logical_scalar(call.arg(6)) == 1;
     let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
+    // R 4.5 added `fixed`, which matches the pattern as a literal string.
+    let fixed = values::as_logical_scalar(call.arg(8)) == 1;
     let regex = match &pattern {
         Some(pattern) => Some(
-            regex::RegexBuilder::new(&crate::strings::translate_regex(pattern, true))
-                .case_insensitive(ignore_case)
-                .build()
-                .map_err(|failure| {
-                    error(format!("invalid 'pattern' regular expression: {failure}"))
-                })?,
+            regex::RegexBuilder::new(&if fixed {
+                regex::escape(pattern)
+            } else {
+                crate::strings::translate_regex(pattern, true)
+            })
+            .case_insensitive(ignore_case)
+            .build()
+            .map_err(|failure| error(format!("invalid 'pattern' regular expression: {failure}")))?,
         ),
         None => None,
     };
@@ -2357,28 +2385,143 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
+    let version = r_version();
     let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
+    let (year, month, day) = (
+        version.date.get(0..4).unwrap_or(""),
+        version.date.get(5..7).unwrap_or(""),
+        version.date.get(8..10).unwrap_or(""),
+    );
     let fields: Vec<(&str, String)> = vec![
         ("platform", platform.clone()),
         ("arch", std::env::consts::ARCH.to_owned()),
         ("os", "linux-gnu".to_owned()),
         ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
         ("status", String::new()),
-        ("major", "4".to_owned()),
-        ("minor", "3.3".to_owned()),
-        ("year", "2024".to_owned()),
-        ("month", "02".to_owned()),
-        ("day", "29".to_owned()),
-        ("svn rev", "86002".to_owned()),
+        ("major", version.major.to_string()),
+        ("minor", format!("{}.{}", version.minor, version.patch)),
+        ("year", year.to_owned()),
+        ("month", month.to_owned()),
+        ("day", day.to_owned()),
+        ("svn rev", version.revision.clone()),
         ("language", "R".to_owned()),
-        ("version.string", "R version 4.3.3 (2024-02-29)".to_owned()),
-        ("nickname", "Angel Food Cake".to_owned()),
+        (
+            "version.string",
+            format!(
+                "R version {}.{}.{} ({})",
+                version.major, version.minor, version.patch, version.date
+            ),
+        ),
+        ("nickname", version.nickname.clone()),
     ];
     let items: Vec<(&str, Sexp)> = fields
         .iter()
         .map(|(name, value)| Ok((*name, scalar_string(value)?)))
         .collect::<R<_>>()?;
     values::named_list(&items)
+}
+
+/// The version of the GNU R whose base packages the session loads, which is the version the
+/// session presents (`R.version`, `getRversion()`, the `Built:` field it writes). Presenting
+/// that version, rather than a fixed one, is what keeps base R's own version checks honest:
+/// `library()` warns about a package built under a newer R by comparing its `Built:` field
+/// with `R.version`, and the default packages were built by exactly the R in `R_HOME`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    /// The release date, `YYYY-MM-DD`.
+    pub date: String,
+    pub revision: String,
+    pub nickname: String,
+}
+
+impl RVersion {
+    /// GNU R's `R_Version(major, minor, patch)`, as `R_VERSION` and the serialization header
+    /// encode a version.
+    pub fn code(&self) -> i32 {
+        ((self.major << 16) + (self.minor << 8) + self.patch) as i32
+    }
+
+    pub fn number(&self) -> String {
+        format!("{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// The oldest GNU R whose base packages ry's runtime loads. Older releases call internals
+/// with argument lists ry does not implement.
+pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
+
+/// The version of the R in [`r_home`], read once.
+pub fn r_version() -> &'static RVersion {
+    static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| read_r_version(&r_home()))
+}
+
+/// Reads the version from the installation itself: the base package's `DESCRIPTION` holds
+/// the version and build date that `library()`'s checks compare against, `SVN-REVISION` the
+/// revision and release date, and `Rversion.h` the nickname. Without a usable installation
+/// the session cannot start anyway ([`missing_r_home`]), so the fallback only keeps
+/// `R.version` answering.
+pub fn read_r_version(home: &str) -> RVersion {
+    let fallback = RVersion {
+        major: 4,
+        minor: 6,
+        patch: 1,
+        date: "2026-06-24".to_owned(),
+        revision: "90187".to_owned(),
+        nickname: "Happy Hop".to_owned(),
+    };
+    let home = Path::new(home);
+    let Ok(description) = std::fs::read_to_string(home.join("library/base/DESCRIPTION")) else {
+        return fallback;
+    };
+    let field = |text: &str, name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_owned())
+        })
+    };
+    let Some(numbers) = field(&description, "Version").and_then(|version| {
+        let mut parts = version.split('.').map(|part| part.parse::<u32>().ok());
+        Some((
+            parts.next()??,
+            parts.next()??,
+            parts.next().flatten().unwrap_or(0),
+        ))
+    }) else {
+        return fallback;
+    };
+    let svn = std::fs::read_to_string(home.join("SVN-REVISION")).unwrap_or_default();
+    let built_date = field(&description, "Built")
+        .and_then(|built| built.split(';').nth(2).map(|date| date.trim().to_owned()))
+        .and_then(|date| date.get(0..10).map(str::to_owned));
+    let date = field(&svn, "Last Changed Date")
+        .or(built_date)
+        .unwrap_or_default();
+    let revision = field(&svn, "Revision").unwrap_or_default();
+    // Debian keeps the headers outside R_HOME and names them in the `R_INCLUDE_DIR` that
+    // `bin/R` exports.
+    let shared_include = std::env::var_os("R_INCLUDE_DIR").map(PathBuf::from);
+    let nickname = std::iter::once(home.join("include"))
+        .chain(shared_include)
+        .find_map(|include| {
+            let header = std::fs::read_to_string(include.join("Rversion.h")).ok()?;
+            header.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("#define R_NICK")?;
+                Some(rest.trim().trim_matches('"').to_owned())
+            })
+        })
+        .unwrap_or_default();
+    RVersion {
+        major: numbers.0,
+        minor: numbers.1,
+        patch: numbers.2,
+        date,
+        revision,
+        nickname,
+    }
 }
 
 unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {

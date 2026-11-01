@@ -55,6 +55,16 @@ pub const BUILTINS: &[BuiltinDef] = &[
         matrix_product(call, Product::Matrix)
     })
     .generic(Generic::MatrixOps),
+    // R 4.4 made `crossprod` and `tcrossprod` primitives in the `matrixOps` group; before that
+    // base R defined them as closures over the internals. Both exist so that either base loads.
+    builtin("crossprod", -1, |call| unsafe {
+        matrix_product(call, Product::Cross)
+    })
+    .generic(Generic::MatrixOps),
+    builtin("tcrossprod", -1, |call| unsafe {
+        matrix_product(call, Product::TransposedCross)
+    })
+    .generic(Generic::MatrixOps),
     internal("crossprod", 2, |call| unsafe {
         matrix_product(call, Product::Cross)
     }),
@@ -143,8 +153,11 @@ enum Product {
 /// optimized BLAS may not. Reference BLAS sums in the same order as that loop, so the loop also
 /// stands in for BLAS when the library is missing.
 unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
+    let internal = crate::interp()
+        .builtin(call.op.primitive_index())
+        .is_some_and(|definition| definition.is_internal());
     let report = |message: &str| {
-        if product == Product::Matrix {
+        if !internal {
             call.error(message)
         } else {
             error(message)

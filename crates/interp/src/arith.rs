@@ -327,9 +327,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rowMeans", 4, |call| unsafe {
         margin_sums(call, true, true)
     }),
-    internal("findInterval", 5, do_find_interval),
+    internal("findInterval", -1, do_find_interval),
     internal("pretty", 8, do_pretty),
-    internal("sequence", 3, do_sequence),
+    internal("sequence", -1, do_sequence),
     internal("bincode", 4, do_bincode),
 ];
 
@@ -400,6 +400,8 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
 }
 
 /// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`.
+/// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`, plus `checkNA` from R 4.4 on,
+/// which only lets GNU R skip its NA scan, so the answer does not depend on it.
 unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
     let breaks = values::reals(call.arg(0)).to_vec();
     let points = call.arg(1);
@@ -588,13 +590,34 @@ pub fn pretty(
 }
 
 /// `sequence(nvec, from, by)`.
+/// `sequence(nvec, from, by)`, plus R 4.4's `recycle`: `TRUE` recycles all three to the longest,
+/// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
+/// to `nvec`, with a warning when that drops elements.
 unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
     let lengths = coerce_vector(call.arg(0), SexpType::Integer)?;
     let from = coerce_vector(call.arg(1), SexpType::Integer)?;
     let by = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let recycle = call.arg(3);
+    let longest = length(from).max(length(by));
+    let total = if call.len() > 3
+        && recycle.kind() == SexpType::Logical
+        && values::as_logical_scalar(recycle) == 1
+        && length(lengths) > 0
+    {
+        length(lengths).max(longest)
+    } else {
+        if call.len() > 3 && recycle.kind() != SexpType::Logical && length(lengths) < longest {
+            crate::conditions::warning(format!(
+                "length(nvec) {} < {longest} = max(length(from), length(by)) -- future R`s \
+                     default 'recycle = TRUE' will recycle 'nvec'",
+                length(lengths)
+            ))?;
+        }
+        length(lengths)
+    };
     let mut output = Vec::new();
-    for index in 0..length(lengths) {
-        let count = values::ints(lengths)[index];
+    for index in 0..total {
+        let count = values::ints(lengths)[index % length(lengths).max(1)];
         let start = values::ints(from)[index % length(from).max(1)];
         let step = values::ints(by)[index % length(by).max(1)];
         for position in 0..count.max(0) {
