@@ -98,6 +98,7 @@ export default defineConfig({
 					label: "4. Go fully typed",
 					items: [
 						{ slug: 'type-checking/records-and-tags' },
+						{ slug: 'type-checking/arrays' },
 						{ slug: 'type-checking/dataframes' },
 						{ slug: 'guides/dataframes' },
 						{ slug: 'reference/standard-library' },

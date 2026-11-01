@@ -363,7 +363,13 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     match ty.kind(db) {
         TyKind::Scalar(_) => Ty::new(db, TyKind::Vector(ty)),
         TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
-        _ => ty,
+        // A frame stores an Array column as the plain R vector underneath it.
+        _ => match array_element(db, ty) {
+            Some(element) if matches!(element.kind(db), TyKind::Scalar(_)) => {
+                Ty::new(db, TyKind::Vector(element))
+            }
+            _ => ty,
+        },
     }
 }
 

@@ -253,7 +253,10 @@ Result.on_err(Str.to_integer("x"), function(e) :Ok(0L))
 
 ### List
 
-Functions over R lists, typed `list[T]`.
+Functions over R lists, typed `list[T]`, and over [Arrays](/type-checking/arrays/). Each function
+also takes an `Array<T>` wherever it takes a `list[T]`, and then returns an Array where it would
+return a list, so `List.map([1, 2, 3], \(x) x * 2)` is the `Array<double>` `[2, 4, 6]`. The
+signatures below show the list form.
 
 #### `List.from_vector`
 

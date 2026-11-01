@@ -901,6 +901,68 @@ exceptions are the functions the runtime lets them through: those that understan
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
+## Arrays
+
+An Array is ry's strict typed vector. The user guide is [Arrays](/type-checking/arrays/); this
+section is its typing contract. The `[...]` literal is inline syntax, so with
+`[check] inline-annotations = false` each literal is a `ry-syntax` warning, and it is still typed.
+The type `Array<T>` may be written in `#:` comments either way.
+
+### Array literals
+
+`[a, b, c]` types as `Array<T>`, where `T` is the type of the first item. Every other item must have
+exactly that type: items are never converted into each other, so `[1L, 2.5]` is a `type-mismatch` at
+`2.5`. The one exception is tags, whose types join into a tag union, so `[:Ok(1), :Err("no")]` is an
+`Array<:Ok(double) | :Err(character)>`.
+
+An item is a scalar-like `logical`, `integer`, `double` or `character`, or a ry value: a record,
+tuple, tag, dictionary, set or another Array. Any other item type is a `type-mismatch`, and so is an
+item that may be `NA`, such as the literal `NA`. In an annotation, `Array<T>` with any other `T`,
+such as `Array<double[]>` or `Array<double | NULL>`, is an `annotation` error.
+
+The empty literal `[]` takes its item type from an annotation, as in `#: Array<character>`, or else
+is `Array<Unknown>` until a use such as `List.append(xs, 1L)` gives it one.
+
+### Arrays and R vectors
+
+- `Array<T>` fits `T[]` when `T` is atomic, and `list[T]` when `T` is a ry value, so an Array passes
+  to any R function that takes a vector or a list.
+- A plain R vector never fits `Array<T>`. `as.Array(x)` converts one: a `T[]` gives `Array<T>`, and a
+  list of ry values of one type gives an Array of that type.
+- At run time `as.Array()` stops with an error on an `NA` or a classed object, and drops names.
+  Setting any attribute on an Array turns it into a plain R vector.
+
+### Array operators
+
+An elementwise operator takes two Arrays with the same item type, or an Array and a scalar-like value
+of the item type. `integer` and `double` never mix, and an R vector operand is a `type-mismatch`
+whose message suggests `as.Array()`.
+
+| Operator | Items | Result |
+| --- | --- | --- |
+| `+ - * %% %/%`, unary `-` | `integer` or `double` | `Array<T>` |
+| `/ ^` | `integer` or `double` | `Array<double>` |
+| `== != < > <= >=` | atomic | `Array<logical>` |
+| `& \| !` | `logical` | `Array<logical>` |
+
+When the code runs, two Arrays of different lengths are an error rather than recycled, and a result
+that holds `NA` or `NaN`, such as an integer overflow, is an error. An operator on Arrays of ry
+values is an error.
+
+### Array indexing
+
+- `xs[[i]]` takes one `integer` or `double` position and types as `T`.
+- `xs[i]` takes positions, a `logical` mask, or no index, and types as `Array<T>`.
+- A `character` index, or more than one index, is a `type-mismatch`, because an Array has one
+  dimension and no names.
+- When the code runs, a position outside the Array, or a mask of a different length, is an error,
+  never `NA`. A replacement through `[<-` or `[[<-` must have the item type and hold no `NA`, and
+  `[<-` does not recycle it.
+
+`for (x in xs)` binds `x` as `T`. Every `List` function of the
+[standard library](/reference/standard-library/) has an Array overload, so `List.map` on an
+`Array<T>` returns an Array and `List.len` returns its length.
+
 ## Function types
 
 A function can be annotated in one of two styles, but not both at once:

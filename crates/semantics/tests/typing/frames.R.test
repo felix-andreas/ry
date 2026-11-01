@@ -9,6 +9,11 @@ labels <- DataFrame(count = 1L, label = "a")
 #++++
 labels: DataFrame{count: integer[], label: character[]}
 
+#---- an_array_column_types_as_its_item_vector
+prices <- DataFrame(id = [1L, 2L], price = [12.5, 9.99])
+#++++
+prices: DataFrame{id: integer[], price: double[]}
+
 #---- an_unnamed_variable_keeps_its_name
 id <- 1:3
 items <- DataFrame(id, price = c(1, 2, 3))
