@@ -250,7 +250,7 @@ Opening \`ry R\` inside the package. Try:
   then edit $demo/tally/R/count.R in another window
   (for example, make it return the words) and run the same command again.
 
-\`ry run\` with no file opens ry's own console instead; it does not load packages yet.
+\`ry run\` with no file opens the same console on ry's runtime, and it reloads too.
 Quit with q() or Ctrl-D. To use ry from your shell later, add it to your PATH:
 
   export PATH="$bin_dir:\$PATH"
