@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 211 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 235 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -173,7 +173,23 @@ classes, largest first:
   it; settle which before the list grows.
 - **A declared vector into a scalar parameter is still reported** (`double[]` into ks
   `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
-  variables pass by length (`without_inferred_length`).
+  variables pass by length (`without_inferred_length`), and only when their type is a union with
+  a scalar member: a computed plain `logical[]` into a parameter whose scalar claim was inferred
+  from the body (zoo `rlength(idx0)`, renv `unlink(recursive =)`, diffobj, ks, mgcv: about 13
+  corpus reports) is reported, because the call site cannot tell an inferred scalar parameter from
+  an annotated one (`pick(c(TRUE, FALSE))` against `fn(flag: logical)` is a real error). Exporting
+  whether each parameter type was declared with the item scheme would let only declared scalars
+  hold.
+- **Negating a parameter whose only type is a `NULL` default is reported** (pracma
+  `quadprog(A = NULL, b = NULL)` negates `b` under `if (!is.null(A))`: 2 corpus reports). Dropping
+  the `NULL` there constrains the parameter's variable to numeric, and the rendered scheme
+  `fn([b]: U)` then no longer admits its `NULL` default, which fails the annotation round trip.
+  A fix needs the scheme to keep `U | NULL` for a numeric-constrained defaulted parameter.
+- **Stubs cannot select an overload by a literal argument value.** `sort(x, index.return = TRUE)`
+  returns `list{x, ix}`, so `sorted$ix` reports `$` on an atomic vector (rmgarch, mgcv: 5 corpus
+  reports). An overload that merely requires `index.return` also matches `index.return = FALSE`,
+  which returns a vector, so it was dropped. Literal `TRUE`/`FALSE` parameter types in stubs
+  would express it.
 - **A `NULL` placeholder that a reflective write replaces is reported** (renv `cond <- NULL` then
   `do.call(delayedAssign, list("cond", ...))`, brew's package-level `.extendedError = NULL` set by
   `assign()` into the namespace). The checker does not see `assign()` or `delayedAssign()` as a
