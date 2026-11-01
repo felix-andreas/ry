@@ -535,10 +535,42 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     {
         return Ok(result);
     }
+    if kind == RoutineKind::Call
+        && let Some(result) = data_table_routine(call)?
+    {
+        return Ok(result);
+    }
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
     native_call(call, kind, false)
+}
+
+/// Hands a data.table routine to the table engine, which runs it only when its answer is
+/// identical to the C routine's and declines otherwise. data.table registers its routines, so
+/// `.NAME` is a `NativeSymbolInfo` whose DLL is `data_table`.
+unsafe fn data_table_routine(call: &Call<'_>) -> ApiResult<Option<Sexp>> {
+    let Some(name) = call.args.first().map(|arg| arg.value) else {
+        return Ok(None);
+    };
+    if name.kind() != SexpType::List {
+        return Ok(None);
+    }
+    let Some(dll) = list_element(name, "dll").filter(|dll| dll.kind() == SexpType::List) else {
+        return Ok(None);
+    };
+    let is_data_table = list_element(dll, "name")
+        .is_some_and(|dll_name| dll_name.kind() == SexpType::String && dll_name.length() == 1 && dll_name.element(0).bytes() == b"data_table");
+    if !is_data_table {
+        return Ok(None);
+    }
+    let Some(routine) = list_element(name, "name")
+        .filter(|routine| routine.kind() == SexpType::String && routine.length() == 1)
+    else {
+        return Ok(None);
+    };
+    let args: Vec<Sexp> = call.args.iter().skip(1).map(|arg| arg.value).collect();
+    Ok(interp::data_table::native(routine.element(0).bytes(), &args)?)
 }
 
 /// `.External2`, whose routines also receive the call, the primitive and the calling

@@ -1141,6 +1141,14 @@ or_null_api!(RAW_OR_NULL, u8, [SexpType::Raw], "RAW", "raw");
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
+    // String kernels read every element, so a plain in-bounds read skips the boundary. The
+    // element needs no handle: it stays reachable from `object` as long as GNU R's would.
+    if object.kind() == SexpType::String
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        return object.element(index as usize);
+    }
     enter(|| {
         refuse_native(object)?;
         if object.kind() != SexpType::String {
@@ -1155,6 +1163,12 @@ pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
+    if matches!(object.kind(), SexpType::List | SexpType::Expression)
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        return object.element(index as usize);
+    }
     enter(|| {
         refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
@@ -1175,6 +1189,14 @@ pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Sexp) {
+    if object.kind() == SexpType::String
+        && value.kind() == SexpType::Char
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        runtime().heap.set_element(object, index as usize, value);
+        return;
+    }
     enter(|| {
         refuse_native(object)?;
         if object.kind() != SexpType::String {
@@ -1201,6 +1223,13 @@ pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Se
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_VECTOR_ELT(object: Sexp, index: R_xlen_t, value: Sexp) -> Sexp {
+    if matches!(object.kind(), SexpType::List | SexpType::Expression)
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        runtime().heap.set_element(object, index as usize, value);
+        return value;
+    }
     enter(|| {
         refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
