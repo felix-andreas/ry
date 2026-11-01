@@ -198,7 +198,7 @@ A DataFrame also answers data.table's `df[i, j, by]` queries, including `:=`, jo
 `.N` and `.SD`, so code written for data.table keeps working. This syntax is there for
 compatibility. New code should use the verbs above, which the checker and the editor understand
 better and which read in the order they run. The
-[typing reference](/reference/type-system/#data-table-queries) lists what the checker understands
+[typing reference](/reference/type-system/#datatable-queries) lists what the checker understands
 of the bracket syntax.
 
 Unlike data.table, a DataFrame follows R's copy-on-modify rule, so `df[, y := value]` leaves a copy
@@ -249,38 +249,8 @@ Key: <g>
 
 ## Speed
 
-`tools/bench/table/` runs db-benchmark's group-by and join questions, `:=` update loops and a
-keyed rolling join, written once for data.table under GNU R and once for DataFrames under
-`ry run --runtime ry`. At 1 million rows on 4 threads, the DataFrame version runs the whole set in
-2.4 s against data.table's 4.8 s, about twice as fast. It is ahead on most group-by and join
-questions and on the `:=` loops, and behind on the median-and-sd question (0.13 s against 0.08 s)
-and the keyed rolling join (0.03 s against 0.02 s). The
-[design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
-
-Calls to data.table's other functions (`fread`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`
-and the rest) run data.table's own C code through ry's C API, so their results are data.table's by
-construction. `tools/bench/table/ops.R` times them on the db-benchmark group-by file (10 million
-rows, 4 threads), once under GNU R and once under `ry run --runtime ry`, and both runs give the same
-checksums. Times are in seconds.
-
-| Operation | GNU R | ry |
-|---|---|---|
-| `fread` | 3.09 | 2.03 |
-| `fwrite` | 0.76 | 1.21 |
-| `setkey` | 0.43 | 0.40 |
-| `setorder` | 0.88 | 0.92 |
-| `unique` | 0.073 | 0.070 |
-| `uniqueN` | 0.11 | 0.12 |
-| `rbindlist` | 0.85 | 1.26 |
-| `melt` | 1.21 | 1.38 |
-| `dcast` | 0.20 | 0.19 |
-| `shift` | 0.024 | 0.024 |
-| `fifelse` | 0.086 | 0.088 |
-| `fcoalesce` | 0.062 | 0.061 |
-| `nafill` | 0.082 | 0.085 |
-| `rleid` | 0.025 | 0.026 |
-| `between` | 0.016 | 0.016 |
-| `%chin%` | 0.077 | 0.081 |
-| `tstrsplit` | 5.79 | 4.16 |
-
-Each cell is the fastest of at least four runs.
+`tools/bench/table/` times db-benchmark's group-by and join questions, `:=` update loops and a keyed
+rolling join, written once for data.table under GNU R and once for DataFrames under
+`ry run --runtime ry`, and `tools/bench/table/ops.R` times data.table's own functions (`fread`,
+`setkey`, `rbindlist`, `melt` and the rest), which run data.table's C code through ry's C API. The
+[design notes](/contributing/design/r-runtime/#7-the-table-type) have the results.

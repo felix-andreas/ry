@@ -10,7 +10,7 @@ section lists the places where ry reports correct code instead.
 ## Not checked
 
 - **Data frame columns.** Everything read out of a base data frame is `Unknown`, so `df$whatever`
-  passes even if the column does not exist. A [`DataFrame`](/reference/type-system#dataframes) types its
+  passes even if the column does not exist. A [`DataFrame`](/type-checking/dataframes) types its
   columns.
 - **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
   Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
