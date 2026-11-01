@@ -95,11 +95,39 @@ expression in parentheses first.
 | `DataFrame.sort(df, ..., descending = FALSE)` | orders the rows |
 | `DataFrame.head(df, n = 5)` and `DataFrame.tail(df, n = 5)` | the first or last rows |
 | `DataFrame.join(df, other, on, how = "inner")` | joins two DataFrames |
+| `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
 
 A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
 is short for `DataFrame.select(df, col("region"))`. Inside `GroupBy.agg`, each expression must
 give one value per group. `col("units")` alone gives one value per row, so the checker and the
 runtime both reject it until you aggregate it.
+
+The one exception is `Expr.head(n)`, which keeps up to `n` values per group. Polars would give a
+list per group here, but ry has no list columns, so the values become rows. After a descending
+sort, this gives each group's largest values:
+
+```r
+sales |>
+  DataFrame.lazy() |>
+  LazyFrame.sort("units", descending = TRUE) |>
+  LazyFrame.group_by("region") |>
+  LazyGroupBy.agg(top_units = col("units") |> Expr.head(2L)) |>
+  LazyFrame.collect()
+```
+
+```text
+   region top_units
+   <char>     <int>
+1:   asia         7
+2:     us         5
+3:     us         1
+4:     eu         3
+5:     eu         2
+```
+
+The groups come in the order of their first row in the sorted data. Written lazily, the sort and
+the grouping run as one step that keeps only each group's best rows, instead of sorting the whole
+table first.
 
 ```r
 sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3L)
@@ -135,6 +163,26 @@ DataFrame.join(sales, regions, on = "region", how = "left")
 3:     eu     2   3.0     Ana
 4:   asia     7   0.5    <NA>
 5:     us     1   4.0      Bo
+```
+
+`DataFrame.join_asof` matches each left row to one right row: the `by` columns must be equal, and
+the `on` column takes the nearest value. With the default `strategy = "backward"` that is the last
+right row at or before the left row's value. `"forward"` takes the first one at or after it, and
+`"nearest"` the closest. A left row with no match gets `NA`, and the columns are laid out as for a
+left join.
+
+```r
+trades <- DataFrame(ticker = c("a", "b", "a"), time = c(5L, 3L, 1L), size = c(10, 20, 30))
+quotes <- DataFrame(ticker = c("a", "a", "b"), time = c(2L, 4L, 1L), bid = c(1.5, 1.6, 7))
+DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
+```
+
+```text
+   ticker  time  size   bid
+   <char> <int> <num> <num>
+1:      a     5    10   1.6
+2:      b     3    20   7.0
+3:      a     1    30    NA
 ```
 
 ## Lazy queries

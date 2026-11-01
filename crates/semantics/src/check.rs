@@ -293,19 +293,43 @@ enum DataFrameVerb {
     KeepColumns { lazy: bool },
     GroupBy { lazy: bool },
     Agg,
-    Join { lazy: bool },
+    Join { lazy: bool, asof: bool },
     /// `lazy` and `collect`, which keep the columns and change the kind.
     Convert(FrameKind),
     ReadCsv(FrameKind),
 }
 
 /// The column a DataFrame expression computes. `reads_column` tells an expression from a
-/// constant, and `aggregated` whether it gives one value per group.
+/// constant, and `shape` how many values it gives per group.
 struct ComputedColumn<'db> {
     name: String,
     ty: Ty<'db>,
     reads_column: bool,
-    aggregated: bool,
+    shape: Shape,
+}
+
+/// How many values a DataFrame expression gives inside `GroupBy.agg`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// One per row, which `agg` rejects.
+    PerRow,
+    /// One per group.
+    PerGroup,
+    /// `Expr.head(n)`: up to `n` per group, which `agg` accepts only as a whole item, exploding
+    /// them into rows.
+    Head,
+}
+
+impl Shape {
+    /// The shape of an expression combining two others: one value per group only when both give
+    /// one.
+    fn combine(self, other: Shape) -> Shape {
+        if self == Shape::PerGroup && other == Shape::PerGroup {
+            Shape::PerGroup
+        } else {
+            Shape::PerRow
+        }
+    }
 }
 
 /// The binding a call head reaches after skipping non-function bindings.
@@ -6168,7 +6192,8 @@ impl<'db> Checker<'db, '_> {
             "with_columns" => DataFrameVerb::WithColumns { lazy },
             "filter" | "sort" | "head" | "tail" => DataFrameVerb::KeepColumns { lazy },
             "group_by" => DataFrameVerb::GroupBy { lazy },
-            "join" => DataFrameVerb::Join { lazy },
+            "join" => DataFrameVerb::Join { lazy, asof: false },
+            "join_asof" => DataFrameVerb::Join { lazy, asof: true },
             "lazy" => DataFrameVerb::Convert(FrameKind::LazyFrame),
             "collect" => DataFrameVerb::Convert(FrameKind::DataFrame),
             "read_csv" if !lazy => DataFrameVerb::ReadCsv(FrameKind::DataFrame),
@@ -6263,7 +6288,7 @@ impl<'db> Checker<'db, '_> {
                 };
                 let computed = expressions(self, &|_| true)?;
                 for (argument, column) in rest.iter().filter_map(|argument| argument.value).zip(&computed) {
-                    if !column.aggregated {
+                    if column.shape == Shape::PerRow {
                         self.errors.push(TypeError {
                             range: self.blame_range(argument),
                             kind: TypeErrorKind::NotAnAggregation {
@@ -6276,7 +6301,7 @@ impl<'db> Checker<'db, '_> {
                 result.extend(fields(computed));
                 Some(frame_of(db, frame_kind(lazy), result))
             }
-            DataFrameVerb::Join { lazy } => self.join_type(lazy, &columns, frame, rest),
+            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, &columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
@@ -6285,17 +6310,24 @@ impl<'db> Checker<'db, '_> {
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
     /// other than its keys, with `suffix` added to a name the left already has. A semi or anti
-    /// join keeps only the left's columns.
+    /// join keeps only the left's columns. `DataFrame.join_asof(left, right, on, by)` joins on
+    /// `by` and then `on`, with a left join's columns.
     fn join_type(
         &mut self,
         lazy: bool,
+        asof: bool,
         left: &[RecordField<'db>],
         frame: Option<Symbol>,
         arguments: &[Argument],
     ) -> Option<Ty<'db>> {
         let db = self.db;
         let module = self.module;
-        let matched = match_formals(arguments, &["other", "on", "how", "left_on", "right_on", "suffix"]);
+        let formals: &[&str] = if asof {
+            &["other", "on", "by", "strategy", "suffix"]
+        } else {
+            &["other", "on", "how", "left_on", "right_on", "suffix"]
+        };
+        let matched = match_formals(arguments, formals);
         let other = matched[0]?;
         let other_ty = *self.recorded.get(&other)?;
         let right = match self.structural(other_ty).kind(db).clone() {
@@ -6311,13 +6343,21 @@ impl<'db> Checker<'db, '_> {
                 },
             }
         };
-        let how = string(2)?.unwrap_or_else(|| "inner".to_owned());
-        let suffix = string(5)?.unwrap_or_else(|| "_right".to_owned());
         let keys = |position: usize| matched[position].map(|value| literal_strings(module, value));
-        let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
-            (Some(on), None, None) => (on.clone()?, on?),
-            (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
-            _ => return None,
+        let (how, suffix, left_keys, right_keys) = if asof {
+            let mut keys_of_both = keys(2).unwrap_or(Some(Vec::new()))?;
+            keys_of_both.extend(keys(1)??);
+            let suffix = string(4)?.unwrap_or_else(|| "_right".to_owned());
+            ("left".to_owned(), suffix, keys_of_both.clone(), keys_of_both)
+        } else {
+            let how = string(2)?.unwrap_or_else(|| "inner".to_owned());
+            let suffix = string(5)?.unwrap_or_else(|| "_right".to_owned());
+            let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
+                (Some(on), None, None) => (on.clone()?, on?),
+                (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
+                _ => return None,
+            };
+            (how, suffix, left_keys, right_keys)
         };
         let other_name = variable_name(module, other);
         // `on` names each key once for both frames, so a key missing from both is reported once,
@@ -6395,7 +6435,7 @@ impl<'db> Checker<'db, '_> {
             name: name.to_owned(),
             ty,
             reads_column: true,
-            aggregated: false,
+            shape: Shape::PerRow,
         }
     }
 
@@ -6422,7 +6462,7 @@ impl<'db> Checker<'db, '_> {
                 let argument = |checker: &mut Self| checker.frame_expression(first?, columns, frame);
                 let aggregate = |column: ComputedColumn<'db>, ty: Ty<'db>| ComputedColumn {
                     ty,
-                    aggregated: true,
+                    shape: Shape::PerGroup,
                     ..column
                 };
                 match name.as_str() {
@@ -6439,14 +6479,14 @@ impl<'db> Checker<'db, '_> {
                             name: "literal".to_owned(),
                             ty,
                             reads_column: false,
-                            aggregated: false,
+                            shape: Shape::PerRow,
                         })
                     }
                     "Expr.len" => Some(ComputedColumn {
                         name: "len".to_owned(),
                         ty: vector(Atomic::Integer),
                         reads_column: false,
-                        aggregated: true,
+                        shape: Shape::PerGroup,
                     }),
                     "Expr.alias" => {
                         let column = argument(self)?;
@@ -6481,6 +6521,13 @@ impl<'db> Checker<'db, '_> {
                         let column = argument(self)?;
                         Some(aggregate(column, vector(Atomic::Integer)))
                     }
+                    "Expr.head" => {
+                        let column = argument(self)?;
+                        Some(ComputedColumn {
+                            shape: Shape::Head,
+                            ..column
+                        })
+                    }
                     "Expr.is_null" => {
                         let column = argument(self)?;
                         Some(ComputedColumn {
@@ -6503,7 +6550,7 @@ impl<'db> Checker<'db, '_> {
                             name,
                             ty,
                             reads_column: yes.reads_column || no.reads_column,
-                            aggregated: yes.aggregated && no.aggregated,
+                            shape: yes.shape.combine(no.shape),
                         })
                     }
                     _ => None,
@@ -6555,7 +6602,7 @@ impl<'db> Checker<'db, '_> {
                     name,
                     ty,
                     reads_column: left.reads_column || right.reads_column,
-                    aggregated: left.aggregated && right.aggregated,
+                    shape: left.shape.combine(right.shape),
                 })
             }
             _ => None,
@@ -6581,7 +6628,7 @@ impl<'db> Checker<'db, '_> {
             name: "literal".to_owned(),
             ty: column_type(self.db, self.table.resolve(self.db, ty)),
             reads_column: false,
-            aggregated: true,
+            shape: Shape::PerGroup,
         })
     }
 

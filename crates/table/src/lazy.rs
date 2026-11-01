@@ -29,7 +29,7 @@ use crate::{
     Error, Result, Schema, Table,
     io::{self, ReadOptions},
     query::{
-        self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Rows,
+        self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Roll, Rows,
         Select, SortKey, UnaryOp, Warning, collapses, join_layout,
     },
 };
@@ -89,6 +89,39 @@ pub enum How {
     Semi,
     /// The left rows that match nothing, with only the left columns.
     Anti,
+    /// Every left row, matched on the leading keys exactly and on the last key to the nearest
+    /// right row in the strategy's direction, with `NA` in the right columns when none is near.
+    Asof(Strategy),
+}
+
+/// Which right row an as-of join takes for a left row, comparing the last key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Strategy {
+    /// The last right row whose key is at or before the left row's.
+    Backward,
+    /// The first right row whose key is at or after the left row's.
+    Forward,
+    /// The right row whose key is closest.
+    Nearest,
+}
+
+impl Strategy {
+    pub fn parse(text: &str) -> Option<Strategy> {
+        Some(match text {
+            "backward" => Strategy::Backward,
+            "forward" => Strategy::Forward,
+            "nearest" => Strategy::Nearest,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Strategy::Backward => "backward",
+            Strategy::Forward => "forward",
+            Strategy::Nearest => "nearest",
+        }
+    }
 }
 
 impl How {
@@ -110,6 +143,7 @@ impl How {
             How::Full => "full",
             How::Semi => "semi",
             How::Anti => "anti",
+            How::Asof(_) => "asof",
         }
     }
 }
@@ -197,8 +231,11 @@ pub fn output_name(expr: &Expr) -> PlSmallStr {
 
 /// Whether `expr` gives one value for a whole group: every column it reads sits inside an
 /// aggregation. `GroupBy.agg` accepts only such expressions.
+/// Whether `expr` may be an item of `agg`: it gives one value per group, or it is
+/// `Expr.head(n)`, which gives up to `n` rows per group. ry has no list columns, so where Polars
+/// would give a list per group the rows are exploded, as data.table recycles them.
 pub fn is_aggregation(expr: &Expr) -> bool {
-    collapses(expr)
+    collapses(expr) || matches!(expr, Expr::Head(..))
 }
 
 /// Runs the plan, optimized.
@@ -307,7 +344,7 @@ fn push_down_predicates(source_schema: &Schema, steps: &mut Vec<Step>) -> Result
             // its left row. A full join also adds rows no left row produced, so it keeps its
             // filters.
             Step::Join {
-                how: How::Inner | How::Left | How::Semi | How::Anti,
+                how: How::Inner | How::Left | How::Semi | How::Anti | How::Asof(_),
                 ..
             } if row_wise => {
                 let left = schema_before(source_schema, &steps[..before])?;
@@ -551,7 +588,7 @@ pub fn step_schema(schema: &Schema, step: &Step) -> Result<Schema> {
             check_join_keys(schema, &right, left_on, right_on)?;
             Ok(match how {
                 How::Semi | How::Anti => schema.clone(),
-                How::Inner | How::Left | How::Full => {
+                How::Inner | How::Left | How::Full | How::Asof(_) => {
                     let mut columns = schema.columns.clone();
                     for (name, kind) in &right.columns {
                         if right_on.contains(name) {
@@ -742,7 +779,7 @@ fn join(
 ) -> Result<Table> {
     check_join_keys(&left.schema(), &right.schema(), left_on, right_on)?;
     match how {
-        How::Inner | How::Left => {
+        How::Inner | How::Left | How::Asof(_) => {
             let on: Vec<On> = right_on
                 .iter()
                 .zip(left_on)
@@ -772,6 +809,15 @@ fn join(
             }
             let mut join = Join::new(left, on);
             join.drop_unmatched = how == How::Inner;
+            if let How::Asof(strategy) = how {
+                // The left side is data.table's `i`, so the left row's backward match is
+                // `roll = TRUE`.
+                join.roll = match strategy {
+                    Strategy::Backward => Roll::Backward(None),
+                    Strategy::Forward => Roll::Forward(None),
+                    Strategy::Nearest => Roll::Nearest,
+                };
+            }
             let mut right = right;
             let mut joined = execute(
                 &mut right,
@@ -863,7 +909,14 @@ fn write_plan(text: &mut String, plan: &Plan, depth: usize) {
                         }
                     })
                     .collect();
-                text.push_str(&format!("{} JOIN ON [{}]\n", how.name().to_uppercase(), keys.join(", ")));
+                match how {
+                    How::Asof(strategy) => text.push_str(&format!(
+                        "ASOF JOIN ON [{}] {}\n",
+                        keys.join(", "),
+                        strategy.name().to_uppercase()
+                    )),
+                    _ => text.push_str(&format!("{} JOIN ON [{}]\n", how.name().to_uppercase(), keys.join(", "))),
+                }
                 indent(text, depth + 1);
                 text.push_str("RIGHT:\n");
                 write_plan(text, other, depth + 2);

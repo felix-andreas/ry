@@ -4,8 +4,8 @@
 use syntax::testing::{SplitMix64, fuzz_iterations};
 use table::{
     Table,
-    convert::{RVector, to_r},
-    lazy::{self, How, Plan, Source, Step},
+    convert::{RVector, is_na_real, to_r},
+    lazy::{self, How, Plan, Source, Step, Strategy},
     polars::prelude::PlSmallStr,
     query::{
         Aggregate, BinaryOp, Expr, SortKey,
@@ -29,6 +29,17 @@ fn ints(values: &[i32]) -> RVector {
 
 fn doubles(values: &[f64]) -> RVector {
     RVector::Double(values.to_vec())
+}
+
+/// A double column with `NA` as `None`, because `NA` is a NaN and never equals itself.
+fn na_doubles(table: &Table, name: &str) -> Vec<Option<f64>> {
+    match column_values(table, name) {
+        RVector::Double(values) => values
+            .into_iter()
+            .map(|value| (!is_na_real(value)).then_some(value))
+            .collect(),
+        other => panic!("`{name}` is not a double column: {other:?}"),
+    }
 }
 
 fn strings(values: &[&str]) -> RVector {
@@ -139,6 +150,61 @@ fn joins_follow_polars_layout() {
     assert_eq!(names(&join(How::Semi)), ["id", "name", "score"]);
     assert_eq!(column_values(&join(How::Anti), "id"), ints(&[2]));
     assert_eq!(join(How::Full).height(), 4);
+}
+
+#[test]
+fn an_asof_join_takes_the_nearest_row_within_each_by_group() {
+    let trades = frame(vec![
+        ("ticker", strings(&["a", "b", "a", "c"])),
+        ("time", ints(&[5, 3, 1, 9])),
+    ]);
+    let quotes = frame(vec![
+        ("ticker", strings(&["a", "a", "b", "b"])),
+        ("time", ints(&[2, 4, 1, 6])),
+        ("bid", doubles(&[1.5, 1.6, 7.0, 7.5])),
+    ]);
+    let join = |strategy| {
+        collect(Plan::new(Source::Table(trades.clone())).with(Step::Join {
+            other: Box::new(Plan::new(Source::Table(quotes.clone()))),
+            left_on: vec!["ticker".into(), "time".into()],
+            right_on: vec!["ticker".into(), "time".into()],
+            how: How::Asof(strategy),
+            suffix: "_right".into(),
+        }))
+    };
+    let backward = join(Strategy::Backward);
+    assert_eq!(names(&backward), ["ticker", "time", "bid"]);
+    assert_eq!(column_values(&backward, "time"), ints(&[5, 3, 1, 9]));
+    assert_eq!(na_doubles(&backward, "bid"), [Some(1.6), Some(7.0), None, None]);
+    assert_eq!(
+        na_doubles(&join(Strategy::Forward), "bid"),
+        [None, Some(7.5), Some(1.5), None]
+    );
+    assert_eq!(
+        na_doubles(&join(Strategy::Nearest), "bid"),
+        [Some(1.6), Some(7.0), Some(1.5), None]
+    );
+}
+
+#[test]
+fn head_in_an_aggregation_keeps_each_groups_best_rows_after_a_sort() {
+    let table = frame(vec![
+        ("g", strings(&["p", "q", "p", "p", "q"])),
+        ("v", doubles(&[3.0, 9.0, 7.0, 1.0, 2.0])),
+    ]);
+    let result = collect(
+        Plan::new(Source::Table(table))
+            .with(Step::Sort(vec![SortKey {
+                expr: column("v"),
+                descending: true,
+            }]))
+            .with(Step::Aggregate {
+                keys: vec![("g".into(), column("g"))],
+                aggregates: vec![("v".into(), Expr::Head(Box::new(column("v")), 2))],
+            }),
+    );
+    assert_eq!(column_values(&result, "g"), strings(&["q", "q", "p", "p"]));
+    assert_eq!(column_values(&result, "v"), doubles(&[9.0, 2.0, 7.0, 3.0]));
 }
 
 #[test]

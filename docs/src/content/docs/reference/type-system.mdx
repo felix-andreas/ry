@@ -2699,6 +2699,7 @@ expression built from `col("x")`:
 | `DataFrame.group_by(df, ...)` | `GroupBy{keys; rest}`: the key columns, then `df`'s other columns |
 | `GroupBy.agg(groups, ...)` | `DataFrame{keys, aggregates}` |
 | `DataFrame.join(df, other, on, how)` | `df`'s columns, then `other`'s non-key columns, with `suffix` added to a name `df` already has; `"semi"` and `"anti"` keep `df`'s columns only |
+| `DataFrame.join_asof(df, other, on, by)` | as a left join on the `by` columns and then `on` |
 | `DataFrame.lazy(df)`, `LazyFrame.collect(plan)` | the same columns, as a `LazyFrame` or a `DataFrame` |
 | `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)) |
 
@@ -2714,14 +2715,16 @@ first column it reads, as Polars names it. Its type follows R's rules for the op
 | `a / b`, `a ^ b`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | `double` |
 | comparisons, `&`, `\|`, `!`, `Expr.is_null` | `logical` |
 | `Expr.sum` | `integer` for an `integer` or `logical` column, otherwise `double` |
-| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last` | the type of the column |
+| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column |
 | `Expr.len()`, `Expr.count` | `integer` |
 | `Expr.if_else(test, yes, no)` | the type `yes` and `no` share |
 | `lit(value)`, a plain R value | the value's type |
 
 A string or `col("x")` naming a column the subject does not have is a type error on that string,
 and so is a join key missing on either side. Inside `GroupBy.agg`, an expression that reads a
-column must aggregate it, since `agg` needs one value per group:
+column must aggregate it, since `agg` needs one value per group. The exception is an item that is
+exactly `Expr.head(n)`, whose up to `n` values per group become rows; `Expr.head` inside a larger
+expression is the same error:
 
 ```text
 type-mismatch
