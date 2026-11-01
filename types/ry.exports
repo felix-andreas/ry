@@ -1,5 +1,10 @@
 # Exports of ry's runtime package, `package:ry`: the standard library and the frame functions.
-# `test_standard_library.rs` keeps this list equal to what the runtime binds.
+# `test_standard_library.rs` keeps this list equal to what the runtime binds, except for the `as.*`
+# conversions: those are base builtins on ry's runtime, listed here only because `ry.Rtypes` declares
+# them for the checker and the stub tests require every declaration to appear in its manifest.
+as.record
+as.tag
+as.tuple
 Dict.contains
 Dict.drop_if
 Dict.empty

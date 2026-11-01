@@ -19,9 +19,12 @@ use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
     shipped_stub_sources, stub_source_problems,
 };
-use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{
+    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+};
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Read;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -326,6 +329,7 @@ pub(crate) fn analyze_project(
     }
     let files: Vec<SourceFile> = files.into_iter().flatten().collect();
     ProjectFiles::new(&db, project.clone());
+    DataFiles::new(&db, scan_data_files(&root));
     let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
     // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
     // Workers need the analysis stack: interface resolution recurses per dependency edge.
@@ -540,6 +544,62 @@ pub(crate) fn shares_a_namespace(path: &Path, root: &Path) -> bool {
         || path
             .parent()
             .is_some_and(|parent| parent == root.join("tests").join("testthat"))
+}
+
+/// How much of a data file the checker sniffs: enough rows to type the columns, and little
+/// enough that a project with large data files still starts fast.
+const DATA_FILE_HEAD_BYTES: u64 = 64 * 1024;
+
+/// The layouts of the project's `.csv` and `.tsv` files, keyed by their path relative to
+/// `root`, so `fread("data/prices.csv")` types with the file's columns. Data directories are
+/// commonly gitignored, so this walk ignores `.gitignore` and skips only hidden and vendored
+/// directories.
+pub(crate) fn scan_data_files(root: &Path) -> BTreeMap<String, sniff::Layout> {
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder.standard_filters(false).hidden(true);
+    builder.filter_entry(|entry| {
+        let is_dir = entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir());
+        !(is_dir
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| VENDORED_DIRECTORIES.contains(&name)))
+    });
+    builder
+        .build()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let key = data_file_key(root, path)?;
+            Some((key, sniff_data_file(path)?))
+        })
+        .collect()
+}
+
+/// The project-relative key of a data file, or `None` for any other path.
+pub(crate) fn data_file_key(root: &Path, path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if extension != "csv" && extension != "tsv" {
+        return None;
+    }
+    let relative = path.strip_prefix(root).ok()?;
+    let parts: Vec<&str> = relative
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<_>>()?;
+    Some(parts.join("/"))
+}
+
+/// An unreadable data file has no layout, and reads of it type with unknown columns.
+pub(crate) fn sniff_data_file(path: &Path) -> Option<sniff::Layout> {
+    let file = fs::File::open(path).ok()?;
+    let mut head = Vec::new();
+    file.take(DATA_FILE_HEAD_BYTES)
+        .read_to_end(&mut head)
+        .ok()?;
+    Some(sniff::sniff_head(&head))
 }
 
 pub(crate) fn collect_r_files(

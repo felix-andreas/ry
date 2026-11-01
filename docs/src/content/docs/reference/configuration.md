@@ -74,6 +74,22 @@ silence it. A project that wants none of these classes sets `object-systems = fa
 definition becomes an error, whatever the lint level says. Only definitions are reported, so a call
 to `new()` on a class from another package is not.
 
+`ry run` and `ry repl` on ry's runtime (`--runtime ry`) enforce the setting too. A call to
+`setClass`, `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`
+from your own code stops with the same message as the lint:
+
+```text
+Error in setClass("P", representation(x = "numeric")) :
+  S4 classes are turned off in this project (`[check] object-systems = false`), so `setClass` cannot define an S4 class. Use a record or a tagged union instead
+Execution halted
+```
+
+Your own code means code that runs at the top level of a script or the console, or inside a
+function defined there. Code inside a package, installed or loaded with `ry load`, may still define
+classes, so packages such as `stats4` keep loading. The runtime recognizes the call by name
+(`setClass(...)` or `methods::setClass(...)`), so a renamed alias such as `f <- setClass` is not
+caught. GNU R (`--runtime gnu-r`) does not enforce the setting.
+
 ## `exclude`
 
 Patterns follow gitignore rules and are anchored at the directory holding `ry.toml`, so

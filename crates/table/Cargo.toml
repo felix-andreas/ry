@@ -27,17 +27,29 @@ polars = { version = "0.55", default-features = false, features = [
     "dtype-i16",
     "dtype-u8",
     "dtype-u16",
+    "cum_agg",
 ] }
 polars-arrow = { version = "0.55", default-features = false }
 # The kernels run on Polars' own thread pool, so `POLARS_MAX_THREADS` governs them too.
 polars-core = { version = "0.55", default-features = false }
 polars-buffer = { version = "0.55", default-features = false }
 rayon = "1.12"
+memmap2 = "0.9"
+ryu = "1.0"
+itoa = "1.0"
+sniff = { path = "../sniff" }
+rustc-hash.workspace = true
+foldhash.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
 
 [[bench]]
 name = "db_benchmark"
+harness = false
+
+[[bench]]
+name = "ops_benchmark"
 harness = false

@@ -413,10 +413,14 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[], [na.rm]: logical) -> double
-parameters: [...: double[]] | [na.rm]: logical
-signature: fn(...: Any, [na.rm]: logical) -> Any
-parameters: [...: Any] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: difftime, [na.rm]: logical) -> difftime
+parameters: [...: difftime] | [na.rm]: logical
+signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
+parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `h`
   edit 0..0 -> "#: fn() -> integer\n"
 action: Add inferred type annotations for the whole file
@@ -433,10 +437,14 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[], [na.rm]: logical) -> double (active)
-parameters: [...: double[]] | [na.rm]: logical
-signature: fn(...: Any, [na.rm]: logical) -> Any
-parameters: [...: Any] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double (active)
+parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: difftime, [na.rm]: logical) -> difftime
+parameters: [...: difftime] | [na.rm]: logical
+signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
+parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `h`
   edit 0..0 -> "#: fn() -> double\n"
 action: Add inferred type annotations for the whole file

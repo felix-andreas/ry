@@ -3680,6 +3680,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "similar",
+ "sniff",
  "syntax",
  "tempfile",
  "thiserror 2.0.17",
@@ -3798,6 +3799,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "salsa",
  "serde",
+ "sniff",
  "stacker",
  "syntax",
 ]
@@ -4054,6 +4056,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
+name = "sniff"
+version = "0.3.2-beta"
+
+[[package]]
 name = "socket2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4288,11 +4294,17 @@ dependencies = [
 name = "table"
 version = "0.3.2-beta"
 dependencies = [
+ "foldhash 0.2.0",
+ "itoa",
+ "memmap2",
  "polars",
  "polars-arrow",
  "polars-buffer",
  "polars-core",
  "rayon",
+ "rustc-hash 2.1.3",
+ "ryu",
+ "sniff",
  "syntax",
  "thiserror 2.0.17",
 ]

@@ -293,6 +293,33 @@ impl Context<'_> {
     }
 
     /// The current frame's slot for `name`, minted at this site if the frame has none yet.
+    /// A frame's `:=` is copy-on-write, which ry models as a new write of the subject's slot,
+    /// so later reads see the updated columns. It writes only a slot the current scope already
+    /// owns (a top-level name, a local, or a parameter): on any other subject, such as a global
+    /// `data.table` updated inside a function, the update works by reference, so it must not
+    /// shadow the subject with a local binding that would capture navigation and rename. The
+    /// target's own read keeps its resolution, since it reads the value before the update.
+    fn record_column_update(&mut self, id: ExprId, target: ExprId) {
+        let module = self.module;
+        let ExpressionKind::NameRef(name) = &module.expression(target).kind else {
+            return;
+        };
+        if self.quoted_depth != 0 {
+            return;
+        }
+        let owned = match self.current_scope().kind {
+            ScopeKind::TopLevel => true,
+            ScopeKind::Function | ScopeKind::Local => self.current_scope().slots.contains_key(name),
+        };
+        if owned {
+            let range = module.expression(target).range;
+            let kind = self.assignment_binding_kind();
+            let slot = self.frame_slot(name, range, kind);
+            self.record_write_site(id, name, range, slot, false);
+            self.naming.column_updates.insert(id, slot);
+        }
+    }
+
     fn frame_slot(&mut self, name: &str, range: TextRange, kind: BindingKind) -> BindingId {
         if let Some(&slot) = self.current_scope().slots.get(name) {
             return slot;
@@ -407,6 +434,18 @@ impl Context<'_> {
                         self.resolve_switch(arguments);
                         return;
                     }
+                    // data.table's `setnames(f, ...)` and `setcolorder(f, ...)` change the
+                    // frame's columns by reference, which ry models like `:=`: a new write of
+                    // the subject's slot.
+                    Some("setnames" | "setcolorder") if !arguments.is_empty() => {
+                        self.resolve_arguments(arguments);
+                        if let Some(subject) =
+                            arguments[0].value.filter(|_| arguments[0].name.is_none())
+                        {
+                            self.record_column_update(id, subject);
+                        }
+                        return;
+                    }
                     // A quoting form binds nothing inside it. Reads are still walked, as deferred,
                     // because `eval` may run the expression later. Quiet too: a quoted name need
                     // not exist yet, as in `quote(x <- 1)`.
@@ -500,24 +539,8 @@ impl Context<'_> {
                 // function, `:=` works by reference, so it must not shadow the subject with a
                 // local binding that would capture navigation and rename. The target's own
                 // read keeps its resolution, since it reads the value before the update.
-                if !*double
-                    && self.quoted_depth == 0
-                    && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
-                    && is_column_update(module, arguments)
-                {
-                    let owned = match self.current_scope().kind {
-                        ScopeKind::TopLevel => true,
-                        ScopeKind::Function | ScopeKind::Local => {
-                            self.current_scope().slots.contains_key(name)
-                        }
-                    };
-                    if owned {
-                        let range = module.expression(*target).range;
-                        let kind = self.assignment_binding_kind();
-                        let slot = self.frame_slot(name, range, kind);
-                        self.record_write_site(id, name, range, slot, false);
-                        self.naming.column_updates.insert(id, slot);
-                    }
+                if !*double && is_column_update(module, arguments) {
+                    self.record_column_update(id, *target);
                 }
             }
             ExpressionKind::Field { target, .. } => self.resolve(*target),
