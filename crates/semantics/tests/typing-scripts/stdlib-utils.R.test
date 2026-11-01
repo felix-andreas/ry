@@ -7,7 +7,7 @@ integer[]
 #---- head_accepts_count
 head(c(1L, 2L, 3L), 2)
 #++++
-Any
+integer[]
 
 #---- tail_accepts_named_count
 tail(c(1L, 2L), n = 1L)

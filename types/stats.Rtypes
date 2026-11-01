@@ -59,7 +59,7 @@ density : Any
 ecdf : @pure Any
 # `power.t.test` solves for whichever of `n`, `delta`, `sd`, `power` and `sig.level` is left out, and
 # returns them all in a "power.htest" list.
-power.t.test : @pure fn([n]: Any, [delta]: Any, [sd]: Any, [sig.level]: Any, [power]: Any, [type]: character, [alternative]: character, [strict]: logical, [tol]: double) -> list{n: double, delta: double, sd: double, sig.level: double, power: double, alternative: character, note: character, method: character}
+power.t.test : @pure fn([n]: Any, [delta]: Any, [sd]: Any, [sig.level]: Any, [power]: Any, [type]: character, [alternative]: character, [strict]: logical, [tol]: double) -> list{n: double, delta: double, sd: double, sig.level: double, power: double, alternative: character, note: character | NULL, method: character}
 p.adjust : @pure fn(p: Any, [method]: character, [n]: Any) -> double[]
 t.test : Any
 wilcox.test : Any

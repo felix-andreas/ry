@@ -3932,6 +3932,11 @@ explicit allocators".
   (`nrow`) was already silent when the stub has one signature, so this makes overloaded and plain
   calls agree. An unannotated parameter is a type parameter, not an inferred `Unknown`, so
   `t(m)` on an untyped `m` is `Any` too; strict mode already reports the parameter itself.
+- The cost is that an `Any` result hides a mismatch every candidate would share:
+  `#: fn(x: Any) -> character` over `sum(x)` is clean, though each `sum` candidate returns a number.
+  Rejected: joining the disagreeing results (`integer | double`), because the union then fails an
+  honest `-> double` annotation and operators do not dispatch per union member. Picking a common
+  family without a union would be the refinement, if the hidden mismatches turn out to matter.
 
 ## A formula is the nominal `formula`, and its operands are not judged
 

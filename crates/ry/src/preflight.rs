@@ -22,6 +22,7 @@ use {
     std::{
         env, fs,
         hash::{DefaultHasher, Hash, Hasher},
+        io,
         path::{Path, PathBuf},
         thread,
         time::UNIX_EPOCH,
@@ -207,7 +208,12 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         );
     }
     if problems == 0 {
-        if let Some((fingerprint, record)) = record {
+        // A file saved while the analysis ran would leave the earlier contents marked clean
+        // although the analysis judged the later ones, so the verdict is kept only when the
+        // inputs still hash the same afterwards.
+        if let Some((fingerprint, record)) = record
+            && strict_fingerprint(root, config)?.as_ref() == Some(&fingerprint)
+        {
             remember_clean(&record, &fingerprint);
         }
         return Ok(Verdict::Run);
@@ -239,25 +245,39 @@ fn strict_fingerprint(root: &Path, config: &Config) -> Result<Option<String>, Co
     };
     feed(binary.as_os_str().as_encoded_bytes());
     feed(&metadata.len().to_le_bytes());
-    let modified = metadata
+    let Some(modified) = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |since| since.as_nanos());
-    feed(&modified.to_le_bytes());
+    else {
+        return Ok(None);
+    };
+    feed(&modified.as_nanos().to_le_bytes());
     feed(env!("CARGO_PKG_VERSION").as_bytes());
     feed(format!("{config:?}").as_bytes());
     let exclude = exclude_matcher(config, root)?;
+    // An input that cannot be read cannot be fingerprinted, so that load keeps no verdict; the
+    // analysis itself reports the unreadable file.
     for path in collect_r_files(root, exclude.as_ref())? {
+        let Ok(contents) = fs::read(&path) else {
+            return Ok(None);
+        };
         feed(path.as_os_str().as_encoded_bytes());
-        feed(&fs::read(&path).unwrap_or_default());
+        feed(&contents);
     }
     for (path, stem) in project_stub_paths(root) {
+        let Ok(contents) = fs::read(&path) else {
+            return Ok(None);
+        };
         feed(stem.as_bytes());
-        feed(&fs::read(&path).unwrap_or_default());
+        feed(&contents);
     }
     for name in ["DESCRIPTION", "NAMESPACE"] {
-        feed(&fs::read(root.join(name)).unwrap_or_default());
+        match fs::read(root.join(name)) {
+            Ok(contents) => feed(&contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => feed(b"absent"),
+            Err(_) => return Ok(None),
+        }
     }
     feed(format!("{:?}", scan_data_files(root)).as_bytes());
     Ok(Some(format!("{:016x}{:016x}", low.finish(), high.finish())))

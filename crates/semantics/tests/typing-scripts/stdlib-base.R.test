@@ -917,3 +917,8 @@ pick(2L)
 #++++
 pick: <T: numeric> fn([x]: T) -> T | integer
 integer
+
+#---- seq_from_beyond_the_integer_range_is_double_vector
+seq(1e10, 1e10 + 5)
+#++++
+double[]

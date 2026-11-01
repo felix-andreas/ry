@@ -88,7 +88,7 @@ f <- function(x) unique(x, foo = TRUE)
 g <- function(x) head(x, n = 2, keepnums = FALSE)
 #++++
 f: <T> fn(x: T) -> T
-g: <T> fn(x: T) -> Any
+g: <T> fn(x: T) -> T
 
 #---- a_parameter_shadowing_an_unstubbed_base_function
 draw <- function(range, pretty = TRUE) {

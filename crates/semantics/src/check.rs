@@ -9133,14 +9133,14 @@ impl<'db> Checker<'db, '_> {
         unknown(self.db)
     }
 
-    /// `c(x, unknown)` is as unchecked as `unknown` itself: its element type fits every
-    /// candidate too.
     /// Like `is_unchecked`, but only for `Unknown`: a type inference could not determine.
     fn is_inferred_unknown(&mut self, ty: Ty<'db>) -> bool {
         let element = self.unchecked_candidate(ty);
         matches!(element.kind(self.db), TyKind::Unknown)
     }
 
+    /// `c(x, unknown)` is as unchecked as `unknown` itself: its element type fits every
+    /// candidate too.
     fn is_unchecked(&mut self, ty: Ty<'db>) -> bool {
         let element = self.unchecked_candidate(ty);
         matches!(element.kind(self.db), TyKind::Unknown | TyKind::Any)

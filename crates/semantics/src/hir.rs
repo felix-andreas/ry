@@ -1744,9 +1744,11 @@ fn literal_kind(node: GreenNodeAt<'_>, buffer: &mut String) -> LiteralKind {
     }
 }
 
+/// A double literal R would treat like an integer: whole, and inside R's integer range, so
+/// `1e10` stays a double (`1e10:(1e10 + 5)` is a double vector in R).
 pub fn is_whole_number_double(text: &str) -> bool {
     text.parse::<f64>()
-        .is_ok_and(|value| value.fract() == 0.0 && value.is_finite())
+        .is_ok_and(|value| value.fract() == 0.0 && value.abs() <= f64::from(i32::MAX))
 }
 
 /// 0-based. Whole-number doubles count: R indexes `x[[2]]` exactly like `x[[2L]]`.
