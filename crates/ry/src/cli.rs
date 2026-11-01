@@ -887,6 +887,9 @@ pub(crate) fn render_findings<'a>(
     let mut line_index = None;
     let mut snippet_lines = None;
     let mut rendered = 0;
+    let fixable = !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "syntax-error");
     for diagnostic in diagnostics {
         if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
             continue;
@@ -897,7 +900,7 @@ pub(crate) fn render_findings<'a>(
         match output {
             OutputFormat::Human => {
                 let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
-                render_human_diagnostic(path, source, lines, diagnostic, &related)
+                render_human_diagnostic(path, source, lines, diagnostic, &related, fixable)
             }
             OutputFormat::Json => {
                 let index = line_index.get_or_insert_with(|| LineIndex::new(source));
@@ -922,6 +925,7 @@ fn render_human_diagnostic(
     lines: &LineStarts,
     diagnostic: &Diagnostic,
     related: &[RelatedNote],
+    fixable: bool,
 ) {
     let related_lines: Vec<LineStarts> = related
         .iter()
@@ -953,10 +957,19 @@ fn render_human_diagnostic(
                 ..Report::default()
             })
             .collect(),
-        help: diagnostic.fix.as_ref().map(|fix| match fix.applicability {
-            Applicability::Safe => format!("{} (`ry check --fix` applies it)", fix.title),
-            Applicability::Unsafe => {
-                format!("{} (`ry check --fix --unsafe-fixes` applies it)", fix.title)
+        help: diagnostic.fix.as_ref().map(|fix| {
+            let command = match fix.applicability {
+                Applicability::Safe => "`ry check --fix`",
+                Applicability::Unsafe => "`ry check --fix --unsafe-fixes`",
+            };
+            // `fixes_apply` refuses a file with a syntax error, so promising the fix would be
+            // wrong until that error is gone.
+            match fixable {
+                true => format!("{} ({command} applies it)", fix.title),
+                false => format!(
+                    "{} ({command} applies it once the syntax error is fixed)",
+                    fix.title
+                ),
             }
         }),
         ..Report::default()

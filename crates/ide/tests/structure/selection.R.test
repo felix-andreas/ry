@@ -232,6 +232,73 @@ token "=>" Operator
 fix Add arms for the missing cases (unsafe): "" -> "    :Green => stop(\"not handled yet\")\n    :Blue => stop(\"not handled yet\")\n"
 lens references "f"
 
+#---- missing_arms_after_a_continued_arm
+#: fn(c: :Red | :Green | :Blue) -> integer
+f <- function(c) {
+  match (c) {
+    :Red => as.integer(
+      1
+    )
+  }
+}
+#++++
+symbol f (Function fn(c)) at "f"
+fold 1..=6 Block
+fold 3..=4 Block
+token "fn" Keyword
+token "(" Operator
+token "c" Parameter
+token ":" Operator
+token ":" Tag
+token "Red" Tag
+token "|" Operator
+token ":" Tag
+token "Green" Tag
+token "|" Operator
+token ":" Tag
+token "Blue" Tag
+token ")" Operator
+token "->" Operator
+token "integer" Type
+token "f" Function
+token "c" Parameter
+token "match" Keyword
+token "c" Parameter
+token ":" Tag
+token "Red" Tag
+token "=>" Operator
+token "as.integer" LibraryFunction
+fix Add arms for the missing cases (unsafe): "" -> "    :Green => stop(\"not handled yet\")\n    :Blue => stop(\"not handled yet\")\n"
+lens references "f"
+
+#---- missing_arms_without_any_arm
+#: fn(c: :Red | :Green) -> integer
+f <- function(c) {
+  match (c) {
+  }
+}
+#++++
+symbol f (Function fn(c)) at "f"
+fold 1..=3 Block
+token "fn" Keyword
+token "(" Operator
+token "c" Parameter
+token ":" Operator
+token ":" Tag
+token "Red" Tag
+token "|" Operator
+token ":" Tag
+token "Green" Tag
+token ")" Operator
+token "->" Operator
+token "integer" Type
+token "f" Function
+token "c" Parameter
+token "match" Keyword
+token "c" Parameter
+fix Add arms for the missing cases (unsafe): "" -> "    :Red => stop(\"not handled yet\")\n    :Green => stop(\"not handled yet\")\n"
+lens references "f"
+
 #---- comment_follows_inline_annotation
 #: double
 total: integer <- 1L

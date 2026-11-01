@@ -16,6 +16,7 @@ use {
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
+        metadata::is_own_package,
         naming::{BindingId, BindingKind, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
@@ -1164,6 +1165,13 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                         SemanticClass::Function if library_reads.contains(&start) => {
                             SemanticClass::LibraryFunction
                         }
+                        // `pkg::name` naming the project's own package reads its own function.
+                        SemanticClass::LibraryFunction
+                            if namespace_of(&token)
+                                .is_some_and(|package| is_own_package(db, &package)) =>
+                        {
+                            SemanticClass::Function
+                        }
                         class => class,
                     })
                 }
@@ -1174,6 +1182,15 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
         }
     }
     spans
+}
+
+/// The package `pkg` of the name token in `pkg::name` or `pkg:::name`.
+fn namespace_of(token: &SyntaxToken) -> Option<String> {
+    let namespace = token.parent()?.parent()?;
+    (namespace.kind() == NAMESPACE_EXPR)
+        .then(|| child_node(&namespace, NAME))
+        .flatten()
+        .map(|package| package.text().to_string())
 }
 
 /// A token of type syntax, classified from its place in the tree alone; stub files, which have no
@@ -5295,6 +5312,24 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     if !spells_name {
                         continue;
                     }
+                    // `ownpkg::name` reaches the project's own definition, so it is a use too.
+                    result.extend(
+                        node.descendants()
+                            .filter(|namespace| namespace.kind() == NAMESPACE_EXPR)
+                            .filter_map(|namespace| {
+                                let mut names =
+                                    namespace.children().filter(|child| child.kind() == NAME);
+                                let package = names.next()?;
+                                let used = names.next()?;
+                                (used.text() == name.as_str()
+                                    && is_own_package(db, &package.text().to_string()))
+                                .then(|| Occurrence {
+                                    file,
+                                    range: used.text_range(),
+                                    is_declaration: false,
+                                })
+                            }),
+                    );
                     let Some(naming) = item_naming(db, item) else {
                         continue;
                     };

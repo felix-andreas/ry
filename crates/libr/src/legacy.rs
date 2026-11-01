@@ -16,7 +16,7 @@ use {
         runtime,
         vectors::sexp_type,
     },
-    heap::object::{Sexp, SexpType},
+    heap::object::{Sexp, SexpType, gp},
     std::ffi::c_int,
 };
 
@@ -182,8 +182,8 @@ pub unsafe extern "C" fn FRAME(env: Sexp) -> Sexp {
                 .heap
                 .alloc_triple(SexpType::Pairlist, cell.cdr(), list, symbol)?;
             runtime.heap.root(list);
-            if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
-                list.set_gp_bits(heap::object::gp::ACTIVE_BINDING, true);
+            if cell.has_gp(gp::ACTIVE_BINDING) {
+                list.set_gp_bits(gp::ACTIVE_BINDING, true);
             }
         }
         Ok(list)
@@ -199,58 +199,58 @@ pub unsafe extern "C" fn HASHTAB(env: Sexp) -> Sexp {
     })
 }
 
-/// `SET_FRAME(env, frame)`: replaces every binding of `env` with the pairlist's, keeping each
-/// node's active-binding mark.
+/// `SET_FRAME(env, list)`: replaces `env`'s bindings with the tagged elements of `list`, the
+/// shape `FRAME` returns. Serializers that rebuild environments (qs) call it on a fresh one.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn SET_FRAME(env: Sexp, frame: Sexp) {
+pub unsafe extern "C" fn SET_FRAME(env: Sexp, list: Sexp) {
     enter(|| {
         let env = checked(env, SexpType::Environment, "SET_FRAME")?;
-        replace_bindings(env, &[frame])
+        clear_frame(env)?;
+        define_from_pairlist(env, list)
     })
 }
 
-/// `SET_HASHTAB(env, table)`: `HASHTAB` always reads `NULL` here, so a `NULL` table, which is
-/// what code copying one environment's table into another passes, leaves the frame alone. A
-/// list is a table built by hand, each element one bucket's pairlist of bindings.
+/// `SET_HASHTAB(env, table)`: replaces `env`'s bindings with those of `table`, a list of
+/// bucket pairlists as GNU R hashes a frame. `NULL` is what `HASHTAB` reports for every frame,
+/// so setting it back leaves the frame as it is.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_HASHTAB(env: Sexp, table: Sexp) {
     enter(|| {
         let env = checked(env, SexpType::Environment, "SET_HASHTAB")?;
-        match table.kind() {
-            SexpType::Nil => Ok(()),
-            SexpType::List => {
-                let buckets: Vec<Sexp> = (0..table.length())
-                    .map(|index| table.element(index as usize))
-                    .collect();
-                replace_bindings(env, &buckets)
-            }
-            other => Err(error(format!(
-                "SET_HASHTAB() takes a list or NULL, not a '{}'",
-                other.name()
-            ))),
+        if table.kind() == SexpType::Nil {
+            return Ok(());
         }
+        let table = checked(table, SexpType::List, "SET_HASHTAB")?;
+        clear_frame(env)?;
+        for index in 0..table.length() as usize {
+            define_from_pairlist(env, table.element(index))?;
+        }
+        Ok(())
     })
 }
 
-unsafe fn replace_bindings(env: Sexp, chains: &[Sexp]) -> ApiResult<()> {
+unsafe fn clear_frame(env: Sexp) -> ApiResult<()> {
     let runtime = runtime();
     for symbol in runtime.heap.frame_symbols(env) {
         runtime.heap.remove_binding(env, symbol)?;
     }
-    for &chain in chains {
-        let mut node = chain;
-        while node.kind() == SexpType::Pairlist {
-            let symbol = node.tag();
-            if symbol.kind() == SexpType::Symbol {
-                runtime.heap.define(env, symbol, node.car())?;
-                if node.has_gp(heap::object::gp::ACTIVE_BINDING)
-                    && let Some(cell) = runtime.heap.frame_cell(env, symbol)
-                {
-                    cell.set_gp_bits(heap::object::gp::ACTIVE_BINDING, true);
-                }
+    Ok(())
+}
+
+/// Binds each tagged element of a pairlist, keeping the active-binding mark `FRAME` sets.
+unsafe fn define_from_pairlist(env: Sexp, mut list: Sexp) -> ApiResult<()> {
+    let runtime = runtime();
+    while list.kind() == SexpType::Pairlist {
+        let symbol = list.tag();
+        if symbol.kind() == SexpType::Symbol {
+            runtime.heap.define(env, symbol, list.car())?;
+            if list.has_gp(gp::ACTIVE_BINDING)
+                && let Some(cell) = runtime.heap.frame_cell(env, symbol)
+            {
+                cell.set_gp_bits(gp::ACTIVE_BINDING, true);
             }
-            node = node.cdr();
         }
+        list = list.cdr();
     }
     Ok(())
 }

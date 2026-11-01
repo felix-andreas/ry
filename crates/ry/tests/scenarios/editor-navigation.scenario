@@ -21,6 +21,8 @@ file R/ledger.R
 |   ok = T
 |   balance(entries, opening = 1)
 | }
+|
+| audit <- function(entries) ledger::balance(entries) + stats::median(entries)
 
 open R/ledger.R
 
@@ -40,14 +42,18 @@ expect selection R/ledger.R "opening = 1" "entries, opening = 1"
 # Signature help follows the named argument.
 expect signature R/ledger.R after "balance(entries, opening = " "[opening: U = 0]"
 
+# A `pkg::name` call into the package's own code is not colored as a library function.
+expect token R/ledger.R "balance(entries) +" "function"
+expect token R/ledger.R "median" "function+defaultLibrary"
+
 # Code lenses count a function's uses and run a test file or one test in it.
-expect lens R/ledger.R "balance <- function" "1 reference"
+expect lens R/ledger.R "balance <- function" "2 references"
 expect lens R/ledger.R "report <- function" "0 references"
 open tests/testthat/test-ledger.R
 expect lens tests/testthat/test-ledger.R "test_that" "Run file"
 expect lens tests/testthat/test-ledger.R "test_that" "Run test"
 expect lens tests/testthat/test-ledger.R "test_that" "Debug test"
-expect lens R/ledger.R "balance <- function" "2 references"
+expect lens R/ledger.R "balance <- function" "3 references"
 
 # Lint fixes come from the diagnostics they resolve.
 expect diagnostics R/ledger.R "Use TRUE, not T"

@@ -656,6 +656,55 @@ impl Journey {
                     ))
                 }
             }
+            // `class` is the token type, then its modifiers, as `function` or
+            // `function+defaultLibrary`.
+            ["expect", "token", path, anchor, class] => {
+                const TYPES: [&str; 9] = [
+                    "type",
+                    "typeParameter",
+                    "parameter",
+                    "operator",
+                    "decorator",
+                    "keyword",
+                    "enumMember",
+                    "function",
+                    "namespace",
+                ];
+                let response = self.request_at(RequestKind::SemanticTokens, path, "", "")?;
+                let text = self.text_of(path)?;
+                let target = self.find(path, anchor)?;
+                let data: Vec<u64> = response["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_u64)
+                    .collect();
+                let (mut line, mut column) = (0u64, 0u64);
+                for token in data.chunks_exact(5) {
+                    if token[0] > 0 {
+                        column = 0;
+                    }
+                    line += token[0];
+                    column += token[1];
+                    let position = lsp_types::Position::new(line as u32, column as u32);
+                    if offset_of(&text, position, self.options.utf8) != target {
+                        continue;
+                    }
+                    let mut found = TYPES
+                        .get(token[3] as usize)
+                        .copied()
+                        .unwrap_or("unknown")
+                        .to_owned();
+                    if token[4] & 1 != 0 {
+                        found.push_str("+defaultLibrary");
+                    }
+                    return match found == *class {
+                        true => Ok(()),
+                        false => Err(format!("`{anchor}` is a {found} token, not {class}")),
+                    };
+                }
+                Err(format!("no semantic token starts at `{anchor}`"))
+            }
             ["expect", "selection", path, anchor, expected] => {
                 let response = self.request_at(RequestKind::SelectionRange, path, anchor, "")?;
                 let text = self.text_of(path)?;
