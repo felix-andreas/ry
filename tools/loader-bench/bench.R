@@ -6,7 +6,7 @@
 #   python3 generate.py medium 80 12 /tmp/medium
 #   LOADER=pkgload PKG=/tmp/medium Rscript bench.R
 #   LOADER=loadfast PKG=/tmp/medium Rscript bench.R
-#   LOADER=ry PKG=/tmp/medium ry run bench.R
+#   LOADER=ry PKG=/tmp/medium ry R bench.R
 #
 # The large package of the loading-packages docs page is `generate.py large 500 46 <dir>`.
 # The script edits R/file0001.R and restores it at the end.

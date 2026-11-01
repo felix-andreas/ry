@@ -41,8 +41,8 @@ illegal dependency unrepresentable.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It depends on nothing else in the
   workspace.
-- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
-  `repl` included, needs R to build. With `--runtime ry` it loads ry's `libR.so` instead of GNU R's,
+- **`repl`** is the R console behind `ry run` and `ry R`. It loads R at run time, so no crate,
+  `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
   allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,

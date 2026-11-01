@@ -1,11 +1,13 @@
-use clap::{Parser, Subcommand};
-use ry::cli::{self, CommandError, Outcome, OutputFormat};
+use clap::Parser;
+use ry::cli::{self, CommandError, Outcome};
+use ry::command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime};
 use ry::config::Config;
 use ry::load;
 use ry::preflight::{self, ConsoleFilter, Erase, Preflight, Verdict};
+use ry::repl_completer::AnalysisCompleter;
 use ry::server;
 use ry::stats::analysis_stats;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
 use tracing_subscriber::prelude::*;
@@ -49,148 +51,29 @@ fn main() -> ExitCode {
     let experimental_features =
         cli::parse_experimental_flags(cli.experimental_features.as_deref().unwrap_or_default());
 
-    // Embedded R assumes it owns the thread it initializes on, so it must stay on `main`.
-    let embedded_options = match &cli.command {
-        Command::Repl {
-            keybindings,
-            file,
-            no_load,
-            runtime,
-        } => {
-            let working_directory = match env::current_dir() {
-                Ok(directory) => directory,
-                Err(error) => {
-                    cli::error(&format!("cannot read the working directory: {error}"));
-                    return ExitCode::from(2);
-                }
-            };
-            let Some(preflight) =
-                Preflight::discover(&working_directory, PathBuf::from("<console>"))
-            else {
-                return ExitCode::from(2);
-            };
-            let flags = runtime_flags(preflight.config());
-            let on_ry_runtime = runtime.resolve(Runtime::GnuR) == Runtime::Ry;
-            let keybindings = match keybindings {
-                ReplKeybindings::Emacs => repl::Keybindings::Emacs,
-                ReplKeybindings::Vi => repl::Keybindings::Vi,
-            };
-            let filter: Box<dyn repl::InputFilter> =
-                Box::new(ConsoleFilter::new(preflight, !on_ry_runtime));
-            if on_ry_runtime {
-                // ry's runtime has no `.Call` routines or package loader of ry's yet, so the
-                // console starts bare.
-                let options = repl::RunOptions {
-                    keybindings,
-                    file: file.clone(),
-                    filter: Some(filter),
-                    completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
-                    ..repl::RunOptions::default()
-                };
-                return runtime_exit(repl::run_console_on_ry_runtime(options, flags));
-            }
-            let mut startup = vec![load::embedded_runtime()];
-            let package = (!no_load).then(load::current_package).flatten();
-            if let Some(root) = &package {
-                startup.push(load::load_statement(root, true));
-            }
-            Some(repl::RunOptions {
+    if let Some(session) = cli.command.session(env::var("RY_RUNTIME").ok().as_deref()) {
+        // Embedded R assumes it owns the thread it initializes on, so sessions stay on `main`.
+        return match session.mode {
+            Mode::Script { file, arguments } => run_script(session.runtime, &file, arguments),
+            Mode::Console {
+                file,
                 keybindings,
-                routines: load::call_routines(),
-                startup,
-                file: file.clone(),
-                completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
-                hooks: Some(Box::new(load::ReloadWatcher)),
-                filter: Some(filter),
-                ..repl::RunOptions::default()
-            })
-        }
-        Command::Run {
-            file,
-            runtime,
-            arguments,
-        } => {
-            let Some(mut preflight) = Preflight::discover(file, file.clone()) else {
-                return ExitCode::from(2);
-            };
-            // An unreadable script is the runtime's to report, in its own words.
-            if let Ok(source) = fs::read_to_string(file)
-                && preflight.check(&source) == Verdict::Refuse
-            {
-                return ExitCode::from(1);
-            }
-            if runtime.resolve(Runtime::GnuR) == Runtime::Ry {
-                let flags = runtime_flags(preflight.config());
-                return runtime_exit(repl::run_on_ry_runtime(Some(file), None, arguments, flags));
-            }
-            Some(repl::RunOptions {
-                routines: load::call_routines(),
-                startup: vec![load::embedded_runtime()],
-                file: Some(file.clone()),
-                batch: true,
-                arguments: arguments.clone(),
-                filter: Some(Box::new(Erase)),
-                ..repl::RunOptions::default()
-            })
-        }
-        Command::Load {
-            path,
-            expressions,
-            file,
-            runtime,
-            emit_plan: None,
-            r_entry: false,
-            ..
-        } => {
-            let root = match load::package_root(path) {
-                Ok(root) => root,
-                Err(error) => {
-                    eprintln!("error: {error}");
-                    return ExitCode::from(2);
-                }
-            };
-            // A new session has nothing loaded, so its first load is always a full one.
-            let mut input = load::load_statement(&root, false);
-            for expression in expressions {
-                input.push('\n');
-                input.push_str(expression);
-            }
-            let Some(preflight) = Preflight::discover(&root, root.clone()) else {
-                return ExitCode::from(2);
-            };
-            match preflight::check_package(&root, preflight.config()) {
-                Ok(Verdict::Run) => {}
-                Ok(Verdict::Refuse) => return ExitCode::from(1),
-                Err(CommandError) => return ExitCode::from(2),
-            }
-            if runtime.resolve(Runtime::Ry) == Runtime::Ry {
-                let flags = runtime_flags(preflight.config());
-                return runtime_exit(repl::run_on_ry_runtime(
-                    file.as_deref(),
-                    Some(&input),
-                    &[],
-                    flags,
-                ));
-            }
-            Some(repl::RunOptions {
-                routines: load::call_routines(),
-                startup: vec![load::embedded_runtime()],
-                input,
-                file: file.clone(),
-                batch: true,
-                ..repl::RunOptions::default()
-            })
-        }
-        _ => None,
-    };
-    if let Some(options) = embedded_options {
-        return match repl::run(options) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::from(2)
-            }
+                load_package,
+            } => run_console(session.runtime, file, keybindings, load_package),
         };
+    }
+
+    if let Command::Load {
+        path,
+        expressions,
+        file,
+        runtime,
+        emit_plan: None,
+        r_entry: false,
+        ..
+    } = &cli.command
+    {
+        return run_load(path, expressions, file.as_deref(), *runtime);
     }
 
     // Recursive tree walks can exceed a constrained `ulimit -s` main stack.
@@ -232,7 +115,7 @@ fn main() -> ExitCode {
             match load::emit_plan(&path, &plan_file, &state, full) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
-                    eprintln!("error: {error}");
+                    cli::error(&error.to_string());
                     ExitCode::from(2)
                 }
             }
@@ -241,7 +124,7 @@ fn main() -> ExitCode {
             println!("{}", load::process_runtime());
             ExitCode::SUCCESS
         }
-        Command::Repl { .. } | Command::Run { .. } | Command::Load { .. } => {
+        Command::Run { .. } | Command::R { .. } | Command::Repl { .. } | Command::Load { .. } => {
             unreachable!("handled on the main thread above")
         }
     };
@@ -254,6 +137,172 @@ fn main() -> ExitCode {
         .expect("command thread should not panic")
 }
 
+/// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
+/// refuses, 2 when the script cannot be read or the runtime cannot start.
+fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
+    let source = match fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            cli::error(&format!("cannot read {}: {error}", file.display()));
+            return ExitCode::from(2);
+        }
+    };
+    let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
+        return ExitCode::from(2);
+    };
+    if preflight.check(&source) == Verdict::Refuse {
+        return ExitCode::from(1);
+    }
+    match runtime {
+        Runtime::Ry => runtime_exit(repl::run_on_ry_runtime(
+            Some(file),
+            None,
+            &arguments,
+            runtime_flags(preflight.config()),
+        )),
+        Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
+            routines: load::call_routines(),
+            startup: vec![load::embedded_runtime()],
+            file: Some(file.to_path_buf()),
+            arguments,
+            batch: true,
+            filter: Some(Box::new(Erase)),
+            ..repl::RunOptions::default()
+        })),
+    }
+}
+
+fn run_console(
+    runtime: Runtime,
+    file: Option<PathBuf>,
+    keybindings: Keybindings,
+    load_package: bool,
+) -> ExitCode {
+    let script = match &file {
+        Some(file) => match fs::read_to_string(file) {
+            Ok(source) => Some(source),
+            Err(error) => {
+                cli::error(&format!("cannot read {}: {error}", file.display()));
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    let working_directory = match env::current_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            cli::error(&format!("cannot read the working directory: {error}"));
+            return ExitCode::from(2);
+        }
+    };
+    let console = PathBuf::from("<console>");
+    let Some(mut preflight) =
+        Preflight::discover(&working_directory, file.clone().unwrap_or(console.clone()))
+    else {
+        return ExitCode::from(2);
+    };
+    // The script is checked under its own name and then fed as console input, so the console's
+    // filter does not check it a second time, and later commands see its definitions.
+    let input = match script {
+        Some(script) => {
+            if preflight.check(&script) == Verdict::Refuse {
+                return ExitCode::from(1);
+            }
+            preflight.rename(console);
+            match runtime {
+                Runtime::GnuR => preflight::erase(&script),
+                Runtime::Ry => script,
+            }
+        }
+        None => String::new(),
+    };
+    let flags = runtime_flags(preflight.config());
+    let keybindings = match keybindings {
+        Keybindings::Emacs => repl::Keybindings::Emacs,
+        Keybindings::Vi => repl::Keybindings::Vi,
+    };
+    let filter: Box<dyn repl::InputFilter> =
+        Box::new(ConsoleFilter::new(preflight, runtime == Runtime::GnuR));
+    let completer = Some(Box::new(AnalysisCompleter::new()) as Box<dyn repl::SessionCompleter>);
+    match runtime {
+        // ry's runtime has no package loader in its console yet, so the console starts bare.
+        Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
+            repl::RunOptions {
+                keybindings,
+                input,
+                filter: Some(filter),
+                completer,
+                ..repl::RunOptions::default()
+            },
+            flags,
+        )),
+        Runtime::GnuR => {
+            let mut startup = vec![load::embedded_runtime()];
+            if let Some(root) = load_package.then(load::current_package).flatten() {
+                startup.push(load::load_statement(&root, true));
+            }
+            gnu_r_exit(repl::run(repl::RunOptions {
+                keybindings,
+                routines: load::call_routines(),
+                startup,
+                input,
+                completer,
+                hooks: Some(Box::new(load::ReloadWatcher)),
+                filter: Some(filter),
+                ..repl::RunOptions::default()
+            }))
+        }
+    }
+}
+
+/// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
+/// it, and exits with the session's status.
+fn run_load(
+    path: &Path,
+    expressions: &[String],
+    file: Option<&Path>,
+    runtime: Option<Runtime>,
+) -> ExitCode {
+    let root = match load::package_root(path) {
+        Ok(root) => root,
+        Err(error) => {
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    // A new session has nothing loaded, so its first load is always a full one.
+    let mut input = load::load_statement(&root, false);
+    for expression in expressions {
+        input.push('\n');
+        input.push_str(expression);
+    }
+    let Some(preflight) = Preflight::discover(&root, root.clone()) else {
+        return ExitCode::from(2);
+    };
+    match preflight::check_package(&root, preflight.config()) {
+        Ok(Verdict::Run) => {}
+        Ok(Verdict::Refuse) => return ExitCode::from(1),
+        Err(CommandError) => return ExitCode::from(2),
+    }
+    let runtime_variable = env::var("RY_RUNTIME").ok();
+    match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
+        Runtime::Ry => runtime_exit(repl::run_on_ry_runtime(
+            file,
+            Some(&input),
+            &[],
+            runtime_flags(preflight.config()),
+        )),
+        Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
+            routines: load::call_routines(),
+            startup: vec![load::embedded_runtime()],
+            input,
+            file: file.map(Path::to_path_buf),
+            batch: true,
+            ..repl::RunOptions::default()
+        })),
+    }
+}
+
 /// With inline annotations turned off they are erased and nothing checks them, at run time
 /// as in analysis. With object systems turned off, user code cannot define S4, R6 or Reference
 /// Classes.
@@ -264,11 +313,23 @@ fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     }
 }
 
+/// ry's runtime returns the script's status; failing to start it is ry's failure, so 2.
 fn runtime_exit(result: Result<i32, repl::ReplError>) -> ExitCode {
     match result {
         Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
         Err(error) => {
-            eprintln!("error: {error}");
+            cli::error(&error.to_string());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// GNU R quits the process itself with the script's status, so returning means success.
+fn gnu_r_exit(result: Result<(), repl::ReplError>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            cli::error(&error.to_string());
             ExitCode::from(2)
         }
     }
@@ -282,189 +343,4 @@ fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
         Ok(Outcome::Findings) => ExitCode::from(1),
         Err(CommandError) => ExitCode::from(2),
     }
-}
-
-#[derive(Parser)]
-// Clap defaults to the package name, `ry-lang`; the command is `ry`.
-#[command(name = "ry", version, after_help = experimental_features_help())]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-    /// Ignored ... here only to please VS Code
-    #[clap(long, default_value_t = true)]
-    stdio: bool,
-    // Documented only in the root help's trailing section: a clap global cannot be
-    // hidden from subcommand help selectively.
-    #[clap(long, global = true, hide = true)]
-    experimental_features: Option<Vec<String>>,
-}
-
-fn experimental_features_help() -> String {
-    let features = ry::config::ExperimentalFeatures::KNOWN
-        .iter()
-        .map(|feature| format!("            {}: {}", feature.name, feature.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Global options:\n      --experimental-features <FEATURES>\n          \
-         Enable experimental features (space-separated, or \"all\" for every one):\n{features}"
-    )
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Lint and type-check the given files or directories
-    ///
-    /// Analysis covers the whole project the paths belong to, which is the
-    /// directory holding `ry.toml` or `DESCRIPTION`. Cross-file names therefore
-    /// resolve the same however the paths are named, and only reporting is
-    /// scoped to what was named. The exit status is 0 for no findings, 1 for
-    /// findings, and 2 for a usage or IO failure.
-    /// Type errors are opt-in via `[check] typing` in `ry.toml`.
-    Check {
-        /// R files to check
-        files: Option<Vec<PathBuf>>,
-        /// Diagnostic output format
-        #[clap(long, value_enum, default_value = "human")]
-        output: OutputFormat,
-        /// Only report diagnostics at or above this severity (and only they
-        /// affect the exit code)
-        #[clap(long, value_enum, default_value = "warning")]
-        min_severity: cli::MinSeverity,
-    },
-    /// Run the formatter on the given files or directories
-    #[clap(alias = "format")]
-    Fmt {
-        /// R files to format
-        files: Option<Vec<PathBuf>>,
-        /// Exit with error if files would be modified without making changes
-        #[clap(long, default_value_t = false)]
-        check: bool,
-        /// Show diff instead of modifying files; exit with error if changes needed
-        #[clap(long, default_value_t = false)]
-        diff: bool,
-        /// Print verbose output
-        #[clap(short, long, default_value_t = false)]
-        verbose: bool,
-    },
-    /// Run the language server
-    #[clap(alias = "lsp")]
-    Server {
-        /// Ignored ... here only to please VS Code
-        #[clap(long, default_value_t = true)]
-        stdio: bool,
-        /// Enable verbose logging (ignored for now)
-        #[clap(short, long, default_value_t = false)]
-        verbose: bool,
-        /// Surface internal analysis facts in hover debug sections. This is a
-        /// developer aid for working on ry itself. Setting `RY_DEBUG=1` in the
-        /// environment turns on the same thing.
-        #[clap(long, default_value_t = false)]
-        debug: bool,
-    },
-    /// Start an interactive R console (finds and embeds the system R)
-    Repl {
-        /// Editing keybindings for the console
-        #[clap(long, value_enum, default_value_t = ReplKeybindings::Emacs)]
-        keybindings: ReplKeybindings,
-        /// Execute this R file before the first prompt
-        #[clap(long, short)]
-        file: Option<PathBuf>,
-        /// Do not load the package the working directory belongs to
-        #[clap(long, default_value_t = false)]
-        no_load: bool,
-        /// The R implementation behind the console: GNU R (the default), or ry's own runtime
-        /// (also `RY_RUNTIME=ry`)
-        #[clap(long, value_enum)]
-        runtime: Option<Runtime>,
-    },
-    /// Load an R package from source into the embedded R, lazily, and run code against it
-    ///
-    /// Function definitions are bound lazily, so each is parsed and evaluated on first use,
-    /// and other top-level code runs in collation order. The exit status is 0 when the
-    /// package loaded and the code ran without a top-level error.
-    Load {
-        /// The package, or any path inside it
-        #[clap(default_value = ".")]
-        path: PathBuf,
-        /// With `--emit-plan`, plan a full load whatever the state says
-        #[clap(long, hide = true, default_value_t = false)]
-        full: bool,
-        /// The R implementation that loads the package: ry's own runtime (the default), or GNU R
-        /// (also `RY_RUNTIME`)
-        #[clap(long, value_enum)]
-        runtime: Option<Runtime>,
-        /// R code to run after loading (repeatable)
-        #[clap(long = "expr", short = 'e')]
-        expressions: Vec<String>,
-        /// An R file to run after loading
-        #[clap(long, short)]
-        file: Option<PathBuf>,
-        /// Write a load plan for a plain R session to this file instead of loading
-        #[clap(long, hide = true)]
-        emit_plan: Option<PathBuf>,
-        /// Where `--emit-plan` keeps what the session has loaded
-        #[clap(long, hide = true, requires = "emit_plan")]
-        state: Option<PathBuf>,
-        /// Print R code that defines `load_all()` for a plain R session, then exit
-        #[clap(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
-        r_entry: bool,
-    },
-    /// Run an R file through the embedded R and exit (a top-level error
-    /// exits with a failing status)
-    Run {
-        /// The R file to execute
-        file: PathBuf,
-        /// The R implementation that runs the file: GNU R (the default), or ry's own runtime
-        /// (also `RY_RUNTIME=ry`)
-        #[clap(long, value_enum)]
-        runtime: Option<Runtime>,
-        /// Arguments the script reads with `commandArgs(trailingOnly = TRUE)`
-        #[clap(trailing_var_arg = true)]
-        arguments: Vec<String>,
-    },
-    /// Debugging and development commands
-    #[command(subcommand)]
-    Debug(Debug),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Runtime {
-    /// GNU R, loaded from its installation
-    #[clap(name = "gnu-r")]
-    GnuR,
-    /// ry's own interpreter
-    Ry,
-}
-
-trait ResolveRuntime {
-    fn resolve(&self, default: Runtime) -> Runtime;
-}
-
-impl ResolveRuntime for Option<Runtime> {
-    /// The flag wins, then `RY_RUNTIME`, then the command's default.
-    fn resolve(&self, default: Runtime) -> Runtime {
-        match self {
-            Some(runtime) => *runtime,
-            None => match env::var("RY_RUNTIME").as_deref() {
-                Ok("ry") => Runtime::Ry,
-                Ok("gnu-r") => Runtime::GnuR,
-                _ => default,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum ReplKeybindings {
-    Emacs,
-    Vi,
-}
-
-#[derive(Debug, Subcommand)]
-enum Debug {
-    /// Print the syntax tree for the given file
-    Ast { path: PathBuf },
-    /// Analyze a workspace and report where time and memory go
-    AnalysisStats { path: Option<PathBuf> },
 }
