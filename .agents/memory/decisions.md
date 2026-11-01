@@ -2858,9 +2858,10 @@ first lines R had already read, leaving R mid-command.
     lint can fire.
   - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
     binders in one query, cached in `SalsaGlobals`.
-  - `Name` and `Ty` are interned with `revisions = usize::MAX`. They are never garbage-collected.
-    That costs nothing in a one-shot check. In the server the tables grow with the distinct types
-    and names ever seen, which repeat heavily because types are structural.
+  - `Name` and `Ty` are never garbage-collected. That costs nothing in a one-shot check. In the
+    server the tables grow with the distinct types and names ever seen, which repeat heavily
+    because types are structural. They later left salsa entirely ("Types and names are
+    hash-consed outside salsa").
   - The CLI creates every input at `Durability::HIGH` except `PackageMetadata.attached`, the one
     input it sets after analysis starts.
 - **Impact.** About 26% less CPU, 30% less wall time and 70 MiB less peak memory on the
@@ -2868,6 +2869,28 @@ first lines R had already read, leaving R mid-command.
   query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
   tables never shrink.
 
+
+## Types and names are hash-consed outside salsa
+
+- **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
+  through salsa's interner (a shard lock plus an id-to-slot lookup), every `ty.kind(db)` resolved an
+  id back to its slot, and `type_size` was a tracked query keyed by the type.
+- **Weakness.** Types are built and read per expression, so this salsa bookkeeping was the largest
+  constant cost in item checking (`Ty::intern_id` alone was 4% of samples). It bought nothing: types
+  carry no revision-dependent state, and the immortal-interning decision above already gave up
+  collecting them. The `SalsaGlobals` name cache existed only to dodge the interner.
+- **Target shape.** `Ty` is a `&'static` pointer to a leaked `TypeEntry { kind, size }` in a global,
+  64-way sharded `hashbrown` table, with pointer equality and hashing. `Name` wraps a `Symbol`.
+  Both keep the `Ty::new(db, kind)` and `ty.kind(db)` API, so no inference rule changed. The size is
+  computed once at construction. A tracked function keyed by one name takes `QueryName`, a
+  salsa-interned wrapper, because salsa requires a salsa struct as a single key. The name cache is
+  gone.
+- **Impact.** On the benchmark code bases, about 12% less CPU and 15-18% less wall time on the cold
+  check (with the parallel `NAMESPACE` parse and borrowed token scan of the same change), and
+  17-21 MiB less peak memory, with byte-identical findings. Invalidation is unchanged: a type has no
+  inputs, so memos that hold one compare it by pointer exactly as they compared ids. The table is
+  process-global, so two databases in one process share it, which is harmless because entries are
+  immutable and structural.
 
 ## The checker presumes R code is correct where R's semantics leave the question open
 
