@@ -10,7 +10,7 @@ use crate::{
         self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
     },
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real};
+use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real};
 
 unsafe extern "C" {
     fn tgamma(x: f64) -> f64;
@@ -2819,6 +2819,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     if names != nil() {
         let new_names = crate::subset::select_elements(names, &indices)?;
         values::set_attr(result, symbols().names, new_names)?;
+    }
+    // GNU R keeps the class of an S4 object that extends a basic type, such as
+    // `setClass("SQL", contains = "character")`, so the repeated value is still that class.
+    if object.has_gp(gp::S4_OBJECT) {
+        values::set_attr(result, symbols().class, values::get_attr(object, symbols().class))?;
+        result.set_gp_bits(gp::S4_OBJECT, true);
     }
     Ok(result)
 }

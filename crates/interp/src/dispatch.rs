@@ -426,7 +426,7 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
     }
     // GNU R dispatches on the first supplied argument, so a generic called without one, even
     // where the formal has a default, dispatches on NULL.
-    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(eval::BINDING_MISSING)) {
+    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING)) {
         return Ok(nil());
     }
     let value = eval::find_var_in_frame(first, env)?;

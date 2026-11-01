@@ -528,7 +528,10 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write) {
+    // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
+    // and then the connection becomes a `gzfile` for good. `readBin(path)` opens with "rb", so it
+    // sees the compressed bytes.
+    let compression = if !raw && matches!(open.as_str(), "" | "r" | "rt") {
         file_compression(&path).ok().flatten()
     } else {
         None
@@ -536,12 +539,12 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let device = Device::File(FileDevice {
         path,
         temporary,
-        gzip: false,
-        raw,
+        gzip: compression.is_some(),
         compression: 6,
         stream: None,
     });
-    let object = new_builtin("file", description.as_bytes(), &open, "r", device, |con| {
+    let default_mode = if compression.is_some() { "rt" } else { "r" };
+    let object = new_builtin("file", description.as_bytes(), &open, default_mode, device, |con| {
         (*con).blocking = blocking as Rboolean;
     })?;
     // The object keeps the class it was created with; only the struct says what it became.
@@ -573,7 +576,6 @@ unsafe fn compressed_file(call: &Call<'_>, class: &str) -> R<Sexp> {
         path: PathBuf::from(expand_path(&description)),
         temporary: false,
         gzip: true,
-        raw: false,
         compression: compression as u32,
         stream: None,
     });
@@ -2475,10 +2477,9 @@ struct FileDevice {
     path: PathBuf,
     /// `file("")`: an anonymous file, removed when closed.
     temporary: bool,
-    /// `gzfile()`: writes compress; reads decompress when the file is compressed.
+    /// `gzfile()`, or a `file()` that found compressed data when it was created: writes
+    /// compress, and reads decompress when the file is compressed.
     gzip: bool,
-    /// `file(raw = TRUE)`: reads never decompress.
-    raw: bool,
     compression: u32,
     stream: Option<Stream>,
 }
@@ -2670,7 +2671,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
         let encoder = GzEncoder::new(file, Compression::new(device.compression));
         return Ok(Stream::Deflate { encoder, position: 0 });
     }
-    if mode.read && !mode.write && !device.raw && file_compression(&device.path)?.is_some() {
+    if mode.read && !mode.write && device.gzip {
         return Ok(Stream::Inflate(open_inflate(&device.path)?));
     }
     let file = OpenOptions::new()

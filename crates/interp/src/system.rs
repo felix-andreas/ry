@@ -117,7 +117,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.sleep", 1, |call| unsafe { {
         let seconds = values::as_real_scalar(call.arg(0));
         if seconds.is_finite() && seconds > 0.0 {
-            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            std::thread::sleep(std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX));
         }
         Ok(nil())
     } }).invisible(),
@@ -447,11 +447,10 @@ unsafe fn do_sys_set_file_time(call: &Call<'_>) -> R<Sexp> {
 }
 
 fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
-    let time = if seconds >= 0.0 {
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(seconds)
-    } else {
-        std::time::UNIX_EPOCH - std::time::Duration::from_secs_f64(-seconds)
-    };
+    let out_of_range = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "time out of range");
+    let offset = std::time::Duration::try_from_secs_f64(seconds.abs()).map_err(|_| out_of_range())?;
+    let time = if seconds >= 0.0 { std::time::UNIX_EPOCH.checked_add(offset) } else { std::time::UNIX_EPOCH.checked_sub(offset) }
+        .ok_or_else(out_of_range)?;
     let file = if Path::new(path).is_dir() { std::fs::File::open(path)? } else { std::fs::File::options().write(true).open(path)? };
     file.set_times(std::fs::FileTimes::new().set_modified(time).set_accessed(time))
 }
@@ -780,8 +779,8 @@ fn session_zone_name() -> String {
 /// only an unset `TZ` leaves the session zone nameless.
 fn effective_zone_name(tz: &str) -> String {
     match std::env::var("TZ") {
-        Ok(name) if tz.is_empty() => name,
-        _ => tz.to_string(),
+        Ok(name) if tz.is_empty() => name.trim_start_matches(':').to_string(),
+        _ => tz.trim_start_matches(':').to_string(),
     }
 }
 

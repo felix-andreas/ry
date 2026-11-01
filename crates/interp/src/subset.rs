@@ -1641,7 +1641,8 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
 struct Flattener {
     kind: SexpType,
     values: Vec<(Sexp, usize)>,
-    names: Vec<String>,
+    /// `None` is an NA name, which GNU R keeps as NA unless a tag is prefixed to it.
+    names: Vec<Option<String>>,
     any_names: bool,
     recursive: bool,
     use_names: bool,
@@ -1668,7 +1669,7 @@ impl Flattener {
         if is_list && self.recursive && value.kind() != SexpType::Language {
             for index in 0..count {
                 let name = self.child_name(tag, element_names, index, count);
-                self.add(value.element(index), &name)?;
+                self.add(value.element(index), name.as_deref().unwrap_or("NA"))?;
             }
             return Ok(());
         }
@@ -1677,7 +1678,7 @@ impl Flattener {
         }
         if !value.kind().is_vector() {
             self.values.push((value, usize::MAX));
-            self.names.push(tag.to_owned());
+            self.names.push(Some(tag.to_owned()));
             return Ok(());
         }
         for index in 0..count {
@@ -1688,27 +1689,26 @@ impl Flattener {
         Ok(())
     }
 
-    unsafe fn child_name(&self, tag: &str, names: Sexp, index: usize, count: usize) -> String {
+    unsafe fn child_name(&self, tag: &str, names: Sexp, index: usize, count: usize) -> Option<String> {
         if !self.use_names {
-            return String::new();
+            return Some(String::new());
         }
         let inner = if names != nil() && index < length(names) {
-            values::string_at(names, index)
-                .map_or_else(|| "NA".to_owned(), |text| text.into_owned())
+            values::string_at(names, index).map(|text| text.into_owned())
         } else {
-            String::new()
+            Some(String::new())
         };
-        match (tag.is_empty(), inner.is_empty()) {
-            (true, _) => inner,
-            (false, false) => format!("{tag}.{inner}"),
-            (false, true) => {
-                if count == 1 {
-                    tag.to_owned()
-                } else {
-                    format!("{tag}{}", index + 1)
-                }
-            }
+        if tag.is_empty() {
+            return inner;
         }
+        let inner = inner.unwrap_or_else(|| "NA".to_owned());
+        Some(if !inner.is_empty() {
+            format!("{tag}.{inner}")
+        } else if count == 1 {
+            tag.to_owned()
+        } else {
+            format!("{tag}{}", index + 1)
+        })
     }
 
     unsafe fn kind_of(&mut self, value: Sexp) -> R<()> {
@@ -1744,7 +1744,7 @@ impl Flattener {
             }
         }
         if self.any_names && self.use_names {
-            let names = string_vector(&self.names)?;
+            let names = values::string_vector_na(&self.names)?;
             values::set_attr(result, symbols().names, names)?;
         }
         Ok(result)

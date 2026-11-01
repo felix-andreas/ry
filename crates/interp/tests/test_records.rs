@@ -342,10 +342,6 @@ const ERRORS: &[(&str, &str)] = &[
         "as.tuple(list(a = 1))",
         "`as.tuple()`: element 1 is named `a`",
     ),
-    (
-        ".Internal(serialize(list(point), NULL, FALSE, FALSE, 3L, NULL))",
-        "the value is a ry record, not an R object",
-    ),
 ];
 
 thread_local! {

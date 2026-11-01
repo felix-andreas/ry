@@ -15,12 +15,6 @@ use crate::{
 };
 use heap::object::{Sexp, SexpType, gp};
 
-/// The binding-cell bit that marks a formal bound to its default, which `missing()` reads.
-pub const BINDING_MISSING: u16 = 1 << 0;
-/// The binding-cell bit that marks an S4 method's formal whose argument was missing from the
-/// generic's call (GNU R's `MISSING == 1`). Unlike a plain default it stays missing when the
-/// method passes it on, so `missing()` in a callee sees it.
-pub const BINDING_ABSENT: u16 = 1 << 1;
 /// The promise bit set while its code runs, to report recursive default references.
 const PROMISE_SEEN: u16 = 1 << 0;
 
@@ -214,7 +208,7 @@ pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
                 return Ok(());
             }
             heap.set_binding_value(cell, value)?;
-            cell.set_gp_bits(BINDING_MISSING | BINDING_ABSENT, false);
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
             return Ok(());
         }
         frame = frame.enclosure();
@@ -706,7 +700,7 @@ pub unsafe fn apply_closure(
             let promise = make_promise(formal.car(), env)?;
             heap.define(env, symbol, promise)?;
             if let Some(cell) = heap.frame_cell(env, symbol) {
-                cell.set_gp_bits(BINDING_MISSING, true);
+                cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
         } else {
             heap.define(env, symbol, actual)?;
@@ -1086,7 +1080,7 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
         }
         return value_is_missing(item.car());
     }
-    if cell.has_gp(BINDING_ABSENT) || (defaults_count && cell.has_gp(BINDING_MISSING)) {
+    if cell.has_gp(gp::BINDING_ABSENT) || (defaults_count && cell.has_gp(gp::BINDING_MISSING)) {
         return Ok(true);
     }
     value_is_missing(cell.cdr())
@@ -2024,7 +2018,7 @@ pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: b
                 return Ok(());
             }
             heap.set_binding_value(cell, value)?;
-            cell.set_gp_bits(BINDING_MISSING | BINDING_ABSENT, false);
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
             return Ok(());
         }
         define(symbol, value, env)

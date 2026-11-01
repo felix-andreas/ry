@@ -7,9 +7,10 @@
 | evaluated
 | [1] 42
 | [1] 42
+| [1] FALSE FALSE FALSE FALSE
 [messages]
 [warnings]
 [errors]
 [value]
-double
-| 42
+logical
+| c(FALSE, FALSE, FALSE, FALSE)

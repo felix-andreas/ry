@@ -600,11 +600,12 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     String::from_utf8_lossy(bytes)
 }
 
-/// Whether two distinct interned strings hold the same text, which happens only when one is
-/// marked latin1 and the other is not, as GNU R's `Seql` decides by translating both to UTF-8.
+/// Whether two distinct interned strings hold the same text. Strings intern by bytes and
+/// encoding, so a native string and a UTF-8 one with the same bytes are distinct objects, and so
+/// are a latin1 string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because
+/// it compares their UTF-8 translations, and the session's native encoding is UTF-8.
 pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
-    let latin1 = |charsxp: Sexp| charsxp.has_gp(gp::LATIN1);
-    if latin1(left) == latin1(right) || left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
+    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
         return false;
     }
     char_str(left) == char_str(right)

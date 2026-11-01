@@ -831,6 +831,9 @@ enum Column<'a> {
     Real(&'a [f64]),
     Complex(&'a [Rcomplex]),
     String(Vec<Option<Cow<'a, str>>>),
+    /// Strings the radix sort orders: GNU R's radix sort compares bytes, as in the C locale,
+    /// whatever the session's collation.
+    Bytes(Vec<Option<Cow<'a, str>>>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
     /// `decreasing` and `na.last` say.
@@ -866,7 +869,10 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                 .collect();
             Some(Column::Grouped(codes))
         }
-        _ => column(vector),
+        _ => match column(vector) {
+            Some(Column::String(items)) => Some(Column::Bytes(items)),
+            other => other,
+        },
     }
 }
 
@@ -876,7 +882,7 @@ impl Column<'_> {
             Column::Integer(items) => items[index] == NA_INTEGER,
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
-            Column::String(items) => items[index].is_none(),
+            Column::String(items) | Column::Bytes(items) => items[index].is_none(),
             Column::Grouped(_) => false,
         }
     }
@@ -900,6 +906,7 @@ impl Column<'_> {
                 (Some(left), Some(right)) => collate(left, right),
                 _ => Ordering::Equal,
             },
+            Column::Bytes(items) => items[left].cmp(&items[right]),
         }
     }
 

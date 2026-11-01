@@ -403,6 +403,10 @@ pub unsafe fn print_matrix(
     options: &PrintOptions,
     _top: bool,
 ) -> R<()> {
+    if rows == 0 && cols == 0 {
+        out("<0 x 0 matrix>\n");
+        return Ok(());
+    }
     let dimnames = get_attr(matrix, symbols().dimnames);
     let (row_names, col_names) = if dimnames.kind() == SexpType::List && length(dimnames) == 2 {
         (dimnames.element(0), dimnames.element(1))
@@ -423,7 +427,7 @@ pub unsafe fn print_matrix(
     let row_labels: Vec<String> = (0..rows)
         .map(|row| {
             if row_names != nil() {
-                values::string_at(row_names, row).map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(row_names, row).map_or_else(|| options.na_string_noquote.clone(), |text| text.into_owned())
             } else {
                 format!("[{},]", row + 1)
             }
@@ -434,7 +438,9 @@ pub unsafe fn print_matrix(
     // for the row title, and always print the column title line.
     let numbered_rows = row_names == nil();
     let titled = dimnames_names != nil();
-    let label_width = row_labels.iter().map(|label| display_width(label)).max().unwrap_or(0);
+    // With no rows, numbered labels still reserve the width of `[0,]`.
+    let empty_width = if numbered_rows { format!("[{rows},]").len() } else { 0 };
+    let label_width = row_labels.iter().map(|label| display_width(label)).max().unwrap_or(empty_width);
     let offset = if !titled {
         0
     } else if display_width(&row_title) < label_width + 2 {
@@ -459,7 +465,7 @@ pub unsafe fn print_matrix(
     let col_labels: Vec<String> = (0..cols)
         .map(|col| {
             if col_names != nil() {
-                values::string_at(col_names, col).map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(col_names, col).map_or_else(|| options.na_string_noquote.clone(), |text| text.into_owned())
             } else {
                 format!("[,{}]", col + 1)
             }

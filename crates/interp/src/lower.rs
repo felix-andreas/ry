@@ -15,6 +15,7 @@ use crate::{
     values::{self, alloc, install, missing_arg, nil, symbols},
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
+use heap::strings::Encoding;
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -785,7 +786,7 @@ unsafe fn tag_from_node(node: &SyntaxNode) -> R<Sexp> {
 
 unsafe fn token_name(token: &SyntaxToken) -> R<String> {
     match token.kind() {
-        SyntaxKind::STRING => string_literal(token.text()),
+        SyntaxKind::STRING => Ok(String::from_utf8_lossy(&string_literal(token.text())?.bytes).into_owned()),
         SyntaxKind::RAW_STRING => Ok(raw_string(token.text())),
         SyntaxKind::IDENT => Ok(identifier(token.text())),
         _ => Ok(token.text().to_owned()),
@@ -810,7 +811,10 @@ fn identifier(text: &str) -> String {
         .strip_prefix('`')
         .and_then(|rest| rest.strip_suffix('`'))
     {
-        Some(inner) => unescape(inner).unwrap_or_else(|_| inner.to_owned()),
+        Some(inner) => match unescape(inner) {
+            Ok(unescaped) => String::from_utf8_lossy(&unescaped.bytes).into_owned(),
+            Err(_) => inner.to_owned(),
+        },
         None => text.to_owned(),
     }
 }
@@ -891,7 +895,8 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         }
         SyntaxKind::STRING => {
             let content = string_literal(text)?;
-            values::scalar_string(&content)
+            let encoding = if content.byte_escapes { Encoding::Native } else { Encoding::Utf8 };
+            values::scalar_string_charsxp(values::mkchar_bytes(&content.bytes, encoding)?)
         }
         SyntaxKind::RAW_STRING => values::scalar_string(&raw_string(text)),
         SyntaxKind::TRUE_KW => Ok(values::fresh_logical(1)?),
@@ -943,7 +948,7 @@ pub fn parse_number(text: &str) -> f64 {
 }
 
 /// The content of a quoted string literal, with escapes resolved.
-pub fn string_literal(text: &str) -> R<String> {
+pub fn string_literal(text: &str) -> R<Unescaped> {
     let inner = &text[1..text.len().saturating_sub(1).max(1)];
     unescape(inner).map_err(|message| error(message))
 }
@@ -962,9 +967,19 @@ fn raw_string(text: &str) -> String {
     text.get(body_start..body_end).unwrap_or("").to_owned()
 }
 
+/// The bytes of a string literal with its escapes resolved.
+pub struct Unescaped {
+    pub bytes: Vec<u8>,
+    /// An octal or `\x` escape writes a raw byte, not a code point, so GNU R leaves such a
+    /// string in the native encoding instead of marking it UTF-8, even when the bytes are valid.
+    pub byte_escapes: bool,
+}
+
 /// Resolves R's string escapes.
-pub fn unescape(text: &str) -> Result<String, String> {
+pub fn unescape(text: &str) -> Result<Unescaped, String> {
     let mut result = String::with_capacity(text.len());
+    let mut bytes = Vec::new();
+    let mut byte_escapes = false;
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
         if character != '\\' {
@@ -1003,7 +1018,9 @@ pub fn unescape(text: &str) -> Result<String, String> {
                 if value == 0 {
                     return Err("nul character not allowed".into());
                 }
-                result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                bytes.append(&mut std::mem::take(&mut result).into_bytes());
+                bytes.push(value as u8);
+                byte_escapes = true;
             }
             'x' => {
                 let mut value = 0;
@@ -1024,7 +1041,9 @@ pub fn unescape(text: &str) -> Result<String, String> {
                 if value == 0 {
                     return Err("nul character not allowed".into());
                 }
-                result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                bytes.append(&mut std::mem::take(&mut result).into_bytes());
+                bytes.push(value as u8);
+                byte_escapes = true;
             }
             'u' | 'U' => {
                 let limit = if escape == 'u' { 4 } else { 8 };
@@ -1061,7 +1080,8 @@ pub fn unescape(text: &str) -> Result<String, String> {
             }
         }
     }
-    Ok(result)
+    bytes.append(&mut result.into_bytes());
+    Ok(Unescaped { bytes, byte_escapes })
 }
 
 // The internals.

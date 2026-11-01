@@ -788,7 +788,10 @@ impl Heap {
     /// `Rf_defineVar`: binds `symbol` in `env`'s own frame.
     pub unsafe fn define(&mut self, env: Sexp, symbol: Sexp, value: Sexp) -> HeapResult<()> {
         if let Some(cell) = self.frame_cell(env, symbol) {
-            return self.set_binding_value(cell, value);
+            self.set_binding_value(cell, value)?;
+            // A formal that was missing stops being missing once it is assigned, as in GNU R.
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+            return Ok(());
         }
         if env == self.known.empty_env {
             return Err(HeapError::EmptyEnvironment);
