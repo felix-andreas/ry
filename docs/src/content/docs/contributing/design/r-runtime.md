@@ -1036,7 +1036,11 @@ JIT fits around them.
   - R.dll carries the Windows-only parts of GNU R's interface that packages link: the
     `libintl_gettext` family (GNU R's `libintl.h` renames `gettext` to it; messages are not
     translated, so each returns its message id), `EmitEmbeddedUTF8`, and `xerbla_`, the BLAS
-    error handler that R's `Rblas.dll` and `Rlapack.dll` import from R.dll.
+    error handler that R's `Rblas.dll` and `Rlapack.dll` import from R.dll. `xerbla_` raises
+    GNU R's error when a package calls the routine, but returns while the interpreter calls BLAS
+    or LAPACK from Rust (`DirectFortran` in `crates/interp/src/linalg.rs`), because the jump
+    would cross Rust frames; the routine then returns a negative `info`, which the interpreter
+    reports.
   - `native.c` jumps with the CRT's `_setjmp(buffer, NULL)` and `longjmp`. The null frame makes
     `longjmp` restore registers only, as on Unix, instead of unwinding through SEH. Neither
     mingw's `setjmp` macro (which unwinds) nor clang's `__builtin_setjmp` works: the builtin
@@ -1058,7 +1062,12 @@ JIT fits around them.
   - `ry.exe` reserves a 64 MiB main-thread stack and embeds `ry.exe.manifest`, which makes UTF-8
     the active code page as `R.exe`'s manifest does (`crates/ry/build.rs`, through `windres`).
   - `ry run` loads `R.dll` from beside `ry.exe`, and BLAS and LAPACK from the R installation's
-    `bin/x64/Rblas.dll` and `Rlapack.dll`.
+    `bin/x64/Rblas.dll` and `Rlapack.dll`. DLLs load with `LOAD_WITH_ALTERED_SEARCH_PATH` from a
+    backslashed path, so `Rlapack.dll` finds `Rblas.dll` in its own directory.
+  - `ry R` loads GNU R's `R.dll` before its siblings, by full path. ry's own `R.dll` beside
+    `ry.exe` is first in the default search order, and Windows binds a later import of `R.dll` by
+    name to whichever module of that name loaded first. This ordering is unverified, because the
+    checks do not run GNU R's DLLs.
 
   Both binaries must be linked with LLVM's `lld`. GNU ld as packaged by Ubuntu's mingw-w64
   (2.41) emits a base relocation for each `SECREL32` thread-local offset, so when Windows loads

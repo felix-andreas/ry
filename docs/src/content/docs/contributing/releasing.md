@@ -69,5 +69,5 @@ therefore the one counter across channels: never release `0.4.0-beta` and `0.4.0
    hand and run `ry --version`.
 7. Update [Installation](/installation). For the first release from the workflow that means: each
    archive holds `ry` and the runtime, which must stay side by side (or the runtime goes in
-   `../lib/ry/`); the Windows archive is now `ry-x86_64-pc-windows-gnullvm.zip` and carries `R.dll`, so `ry run` and `ry load` work on Windows; Linux needs glibc
+   `../lib/ry/`); the Windows archive is now `ry-x86_64-pc-windows-gnullvm.zip` and carries `R.dll` (say that `ry run` and `ry load` work on Windows only if the Windows smoke test passed); Linux needs glibc
    2.35; and Linux arm64 and Intel macOS archives exist.

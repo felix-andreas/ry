@@ -871,9 +871,14 @@ __declspec(dllexport) char *libintl_dngettext(const char *domain, const char *si
 
 /* R's own Rblas.dll and Rlapack.dll leave the reference error handler to R.dll and fail to load
  * without it. Linux and macOS use the system BLAS and LAPACK, which carry their own, and an export
- * from libR would interpose on it. */
+ * from libR would interpose on it. When the interpreter calls a routine from Rust, jumping would
+ * cross Rust frames, so the handler returns and the routine reports the negative `info` to its
+ * caller, which raises the error instead. */
+int ry_direct_fortran_active(void);
 __declspec(dllexport) void xerbla_(const char *routine, int *info, size_t routine_length)
 {
+    if (ry_direct_fortran_active())
+        return;
     char name[7];
     size_t length = routine_length < 6 ? routine_length : 6;
     memcpy(name, routine, length);

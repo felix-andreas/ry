@@ -4069,6 +4069,11 @@ explicit allocators".
   address, but its landing code uses it as the frame pointer, so `R_UnwindProtect`, whose frame
   pointer sits above its stack pointer, resumed with garbage locals when an R error landed in it.
   A null frame makes the CRT's `longjmp` a plain register restore, as on Unix.
+- **`xerbla_` never jumps over Rust.** Windows' R.dll exports it for R's `Rblas.dll`/`Rlapack.dll`.
+  It raises an R error for a package's call, but returns while the interpreter's `DirectFortran`
+  guard (`linalg.rs`) is alive, and the routine's negative `info` reaches the Rust caller.
+- **Two modules named `R.dll`.** ry's runtime beside `ry.exe` shares GNU R's DLL name, so `ry R`
+  loads GNU R's `R.dll` first by full path; later by-name imports bind to the loaded module.
 - **Toolchain.** The release runner uses MSYS2's clang64 environment (`msys2/setup-msys2`).
   Cross-building from Linux works with the host clang and lld over MSYS2's clang64 sysroot
   packages; packages for tests are built with the Rtools ABI from MSYS2's ucrt64 GCC 14 headers

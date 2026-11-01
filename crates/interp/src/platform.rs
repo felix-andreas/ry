@@ -722,8 +722,10 @@ mod imp {
 
     /// Opens a DLL. Windows resolves each DLL's imports against the DLLs it names, so
     /// `global` has no counterpart; the DLL's own directory is searched for its dependencies.
+    /// That altered search order applies only to a path written with backslashes, and R spells
+    /// paths with forward slashes, so they are converted first.
     pub fn open_library(path: &str, _global: bool) -> Result<*mut c_void, String> {
-        let wide = wide_string(path);
+        let wide = wide_string(&path.replace('/', "\\"));
         // SAFETY: `wide` is a NUL-terminated UTF-16 string.
         let handle = unsafe {
             LoadLibraryExW(

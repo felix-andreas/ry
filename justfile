@@ -180,6 +180,14 @@ package version target="":
     cargo build --release --locked --target "$target" -p ry-lang -p libr
     case "$target" in
     	*windows*)
+    		# The archive carries no toolchain runtime, so the binaries may import only Windows and
+    		# the UCRT. Rust links libunwind statically on gnullvm, and this keeps it that way.
+    		runtimes=$("${OBJDUMP:-llvm-objdump}" -p "$build/ry.exe" "$build/R.dll" | sed -n 's/^ *DLL Name: //p' |
+    			grep -iE '^(libunwind|libc\+\+|libwinpthread|libgcc|libstdc|msvcrt|vcruntime)' || true)
+    		if [ -n "$runtimes" ]; then
+    			echo "error: ry.exe or R.dll imports a toolchain runtime the archive lacks: $runtimes" >&2
+    			exit 1
+    		fi
     		cp "$build/ry.exe" "$build/R.dll" LICENSE "$stage/"
     		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe R.dll LICENSE >/dev/null)
     		;;
