@@ -274,9 +274,11 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded promptpkg");
     session.send("options(prompt = \"R> \")\r");
-    session.settle(Duration::from_millis(300));
+    // The echoed command line never contains the joined text, so only the output matches.
+    session.send("cat(\"prompt\", \"changed\\n\")\r");
+    session.expect("prompt changed");
     fs::write(package.join("R/a.R"), "level <- function() \"level two\"\n").expect("write");
-    session.send("answer <- readline(\"answer: \")\r");
+    session.send("answer <- readline(paste0(\"ans\", \"wer: \"))\r");
     session.expect("answer: ");
     session.send("typed\r");
     session.send("cat(\"got\", answer, level(), \"\\n\")\r");

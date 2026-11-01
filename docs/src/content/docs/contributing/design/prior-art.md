@@ -30,7 +30,7 @@ sources:
     title: "goose-lang/goose: a Go subset with a semantics in Coq"
   - id: vx
     resource: https://github.com/vx-lang/Vx
-    title: "Vx repository: README.md, ROADMAP.md"
+    title: "Vx repository: README.md, ROADMAP.md, docs/language_rules_for_a_parallel_compiler.md, www/book/src/quick-reference.md"
     last_modified: 2026-10-31T07:28:21-07:00
   - id: okf
     resource: https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md
@@ -65,6 +65,9 @@ by native code without regard for its reference count.
 | Residency of data as a tracked fact | Vx | **Adopt the idea, not the syntax** | Table columns: Arrow buffer or R vector, plus a lint |
 | Content-hashed identifiers | Vx | **Adopt for on-disk caches only** | Cache keys for bytecode and runtime summaries |
 | LLVM and MLIR as the JIT backend | Vx | **Reject** | Compile latency; Cranelift is the choice |
+| A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
+| Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
+| Macros | Vx (`macro_rules`), Bend (templates) | **Reject** | ry has no macros, for checking speed; R's own non-standard evaluation keeps working |
 
 ## Roc
 
@@ -123,6 +126,14 @@ a web server allocate each request into an arena and reset it afterwards.[^roc]
   dynamic by definition, and existing code depends on that. ry gets most of the benefit by
   speculating on the class seen at a call site, guarded by the class attribute.
 - **Whole-program monomorphization,** because R loads code at runtime.
+- **Purity inference.** Roc infers which functions are effectful, lets only those call each other,
+  and so guarantees that a top-level constant performs no effect and can be evaluated at compile
+  time. It has no effect polymorphism, so a higher-order function exists twice, as `Try.map_ok` and
+  `Try.map_ok!`.[^roc] R cannot split `lapply` or `Map` that way, effect polymorphism would put an
+  extra variable in the types R code calls most, and an inferred effect in a function's type would
+  let a body edit change every caller's interface. ry takes the guarantee without the inference:
+  strict mode is planned to limit a library file's top level to definitions and constants that call
+  only functions declared pure.
 - **A host-provided allocator as a design principle.** R already has the parts it needs: `R_alloc`
   is an arena by R's own contract (freed when the foreign call returns), and `allocVector3` with an
   `R_allocator_t` is R's hook for custom vector allocation. ry implements both as specified.
@@ -291,4 +302,4 @@ footnote also carries the source's link.
 [^bend]: Bend repository: README.md, guide/EFFECTS.md, <https://github.com/HigherOrderCO/Bend>
 [^goose]: goose repository: README.md, docs/implementation.md, docs/reference.md, <https://github.com/aardappel/goose>
 [^goose-lang]: goose-lang/goose: a Go subset with a semantics in Coq, <https://github.com/goose-lang/goose>
-[^vx]: Vx repository: README.md, ROADMAP.md, <https://github.com/vx-lang/Vx>
+[^vx]: Vx repository: README.md, ROADMAP.md, docs/language_rules_for_a_parallel_compiler.md, www/book/src/quick-reference.md, <https://github.com/vx-lang/Vx>

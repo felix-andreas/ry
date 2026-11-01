@@ -1045,6 +1045,17 @@ enum VectorIndexShape {
     VectorLike,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogicalOperand {
+    Scalar,
+    Vector,
+    /// `Any`, the deliberate opt-out, which the result inherits.
+    Any,
+    /// `Unknown`: the result is undetermined too, with no origin of its own, because the
+    /// operand's type was lost where it was computed.
+    Unknown,
+}
+
 enum NumericOperand<'db> {
     Concrete(OperandShape, Atomic),
     ConcreteUnion(Vec<(OperandShape, Atomic)>),
@@ -4067,6 +4078,17 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// `stop()` never returns, so no value of its result can be misused: it types as `Any`, the
+    /// one type that fits every context, which also keeps strict mode from reporting it.
+    fn infer_stop(&mut self, arguments: &[Argument]) -> Ty<'db> {
+        for argument in arguments {
+            if let Some(value) = argument.value {
+                self.infer(value);
+            }
+        }
+        any(self.db)
+    }
+
     /// Whether a `break` in `id` leaves the loop enclosing it; an inner loop or function
     /// owns its own `break`s.
     fn breaks_out(&self, id: ExprId) -> bool {
@@ -4693,17 +4715,72 @@ impl<'db> Checker<'db, '_> {
                 scalar(self.db, Atomic::Logical)
             }
             // Opaque constructs: operands still infer for the IDE, but their diagnostics are
-            // discarded because nothing inside the construct is judged.
+            // discarded because nothing inside the construct is judged. Elementwise `&` and `|`
+            // over logical or numeric operands are typed; any other operand (raw, a classed
+            // object with its own method) leaves them opaque.
             And | Or | Special | Pipe | Tilde | Help => {
                 let errors_mark = self.errors.len();
                 let origins_mark = self.strict_origins.len();
-                self.infer(lhs);
-                self.infer(rhs);
+                let left = self.infer(lhs);
+                let right = self.infer(rhs);
+                if matches!(operator, And | Or) {
+                    // An operand whose type is still a variable is not constrained: it may be a
+                    // scalar or a vector, which no single type expresses, so the operator stays
+                    // opaque for it.
+                    match (
+                        self.elementwise_logical_operand(left),
+                        self.elementwise_logical_operand(right),
+                    ) {
+                        (Some(LogicalOperand::Scalar), Some(LogicalOperand::Scalar)) => {
+                            return scalar(self.db, Atomic::Logical);
+                        }
+                        (Some(LogicalOperand::Unknown), Some(_))
+                        | (Some(_), Some(LogicalOperand::Unknown)) => {
+                            // The operand that could not be typed is already an origin.
+                            return unknown(self.db);
+                        }
+                        (Some(LogicalOperand::Any), Some(_)) | (Some(_), Some(LogicalOperand::Any)) => {
+                            return any(self.db);
+                        }
+                        (Some(_), Some(_)) => {
+                            let logical = scalar(self.db, Atomic::Logical);
+                            return Ty::new(self.db, TyKind::Vector(logical));
+                        }
+                        _ => {}
+                    }
+                }
                 self.errors.truncate(errors_mark);
                 self.strict_origins.truncate(origins_mark);
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
             }
+        }
+    }
+
+    /// The shape of an operand of elementwise `&` or `|`; `None` when it is not a plain logical
+    /// or numeric value, or when its type is still a variable.
+    fn elementwise_logical_operand(&self, ty: Ty<'db>) -> Option<LogicalOperand> {
+        let element_fits = |ty: Ty<'db>| {
+            matches!(
+                ty.kind(self.db),
+                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+            )
+        };
+        let resolved = self.table.resolve(self.db, ty);
+        match resolved.kind(self.db) {
+            TyKind::Any => Some(LogicalOperand::Any),
+            TyKind::Unknown => Some(LogicalOperand::Unknown),
+            _ if element_fits(resolved) => Some(LogicalOperand::Scalar),
+            TyKind::Vector(element) | TyKind::NamedVector(element)
+                if element_fits(*element)
+                    || matches!(
+                        element.kind(self.db),
+                        TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_)
+                    ) =>
+            {
+                Some(LogicalOperand::Vector)
+            }
+            _ => None,
         }
     }
 
@@ -5806,6 +5883,7 @@ impl<'db> Checker<'db, '_> {
                 "switch" => Some(self.infer_switch(range, arguments)),
                 "structure" => self.infer_structure(id, arguments),
                 "return" => Some(self.infer_return(range, arguments)),
+                "stop" => Some(self.infer_stop(arguments)),
                 "DataFrame" => self.infer_frame_constructor(callee, arguments),
                 family @ ("lapply" | "sapply" | "vapply" | "Reduce") => {
                     self.infer_apply(id, callee, family, arguments)

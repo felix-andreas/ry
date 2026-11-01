@@ -17,7 +17,7 @@ mod codegen;
 mod runtime;
 
 use analysis::Refusal;
-use heap::object::{Header, Sexp, SexpType};
+use heap::object::{Header, Sexp, SexpType, gp};
 use interp::{
     bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
     heap, interp,
@@ -53,7 +53,6 @@ const BACK_EDGE_THRESHOLD: i32 = 500;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
-    static STRAIGHT_LINE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Installs the JIT in the current interpreter, in the mode `RY_JIT` asks for.
@@ -73,19 +72,11 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1),
     };
     ENTRY_LIMIT.with(|limit| limit.set(entries));
-    // A body without a loop runs each compiled instruction once per call, so entering compiled
-    // code and forcing the arguments through helpers costs more than tier 0's dispatch saves.
-    // Such bodies pay off only once calls go directly from compiled code to compiled code, so
-    // the default mode leaves them to tier 0 and only `force` compiles them, for coverage.
-    STRAIGHT_LINE.with(|straight_line| straight_line.set(mode == Mode::Force));
     bytecode::set_tier(Some(Tier { enter, back_edge, back_edge_threshold: back_edges }));
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
-        if bytecode::loop_count(machine.code) == 0 && !STRAIGHT_LINE.with(Cell::get) {
-            return None;
-        }
         let entries = values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES];
         let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get))?;
         run(machine, compiled, 0)
@@ -150,7 +141,20 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
         let plan = analysis::plan(machine.code, machine.function.car(), enclosure)?;
         let entry = codegen::compile(&plan, machine.code)?;
         if std::env::var_os("RY_JIT_LOG").is_some() {
-            eprintln!("jit: compiled {}", describe(machine.code));
+            // The instructions left to tier 0 are where compiled code is slow.
+            let steps: Vec<String> = plan
+                .insts
+                .iter()
+                .zip(&plan.actions)
+                .filter(|(_, action)| matches!(action, analysis::Action::Step { .. }))
+                .map(|(inst, _)| format!("{:?}@{}", inst.op, inst.pc))
+                .collect();
+            eprintln!(
+                "jit: compiled {} ({} speculations; tier 0 runs: {})",
+                describe(machine.code),
+                plan.speculations.len(),
+                if steps.is_empty() { "nothing".to_string() } else { steps.join(", ") }
+            );
         }
         let osr = plan.loop_headers.iter().map(|&block| plan.insts[plan.blocks[block].start].pc).collect();
         let compiled = Box::new(Compiled {
@@ -169,8 +173,8 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
         kept.extend(plan.slots.iter().copied());
         for speculation in &plan.speculations {
             kept.extend([speculation.symbol, speculation.cell, speculation.function]);
-            kept.extend(speculation.frames.iter().copied());
-            kept.extend(speculation.home);
+            speculation.symbol.set_gp_bits(gp::WATCHED, true);
+            speculation.cell.set_gp_bits(gp::WATCHED, true);
         }
         let heap = heap();
         let mark = heap.handle_mark();
@@ -232,6 +236,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             _ => {}
         }
         Some(TierExit::Finished(match Sexp::from_raw(result) {
+            // An error parked by a helper whose failure compiled code does not branch on.
+            Some(_) if activation.pending.is_some() => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
             Some(value) => Ok(value),
             None => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
         }))

@@ -10,7 +10,7 @@ section lists the places where ry reports correct code instead.
 ## Not checked
 
 - **Data frame columns.** Everything read out of a base data frame is `Unknown`, so `df$whatever`
-  passes even if the column does not exist. A [`DataFrame`](/reference/type-system#dataframes) types its
+  passes even if the column does not exist. A [`DataFrame`](/type-checking/dataframes) types its
   columns.
 - **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
   Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
@@ -49,8 +49,6 @@ These are known bugs, not design decisions:
   reports the trailing comma as it would for `c(1, 2, )`.
 - **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
   namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
-- **A `stop()` guard in strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an
-  undetermined type.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
   reported, because type parameters on a function that is not bound to a name are not instantiated.
   Leave the function's types off, or bind it to a name first.

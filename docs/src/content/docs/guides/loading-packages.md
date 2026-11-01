@@ -55,27 +55,14 @@ are what the interpreter evaluates, so a lazy function is lowered from that tree
 `load_all()` loads on the runtime it is called from: ry's in a `ry run` script, and GNU R in
 `ry R` and in plain R.
 
-A package that uses ry's own syntax (records, tags, `match`, frames) loads and runs only on ry's
+A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads and runs only on ry's
 runtime, because GNU R's parser rejects it (`unexpected ':'` for a tag). Inline annotations alone
 are fine on both.
 
-Median of five runs of the load call itself, in a fresh session without source references, on
-generated packages (`tools/loader-bench` regenerates them). The GNU R numbers are on R 4.3.
-
-| Package | Loader | Cold load | Reload after a body edit |
-| --- | --- | --- | --- |
-| 80 files, 14,000 lines | `devtools::load_all()` | 868 ms | 435 ms |
-| | `loadfast::load_fast()` | 282 ms | 10 ms |
-| | ry on GNU R | 82 ms | 6 ms |
-| | ry on its own runtime | 104 ms | 5 ms |
-| 500 files, 326,000 lines | `devtools::load_all()` | 7,385 ms | 6,581 ms |
-| | `loadfast::load_fast()` | 3,064 ms | 81 ms |
-| | ry on GNU R | 1,036 ms | 53 ms |
-| | ry on its own runtime | 932 ms | 58 ms |
-
-The two ry rows of each package were measured together on one machine, and the other loaders on a
-different one, where ry on GNU R took 90 ms and 867 ms cold. Compare the ry rows with each other,
-and the other loaders with those 90 and 867 ms.
+`tools/loader-bench` generates packages of 80 files (14,000 lines) and 500 files (326,000 lines) and
+times `devtools::load_all()`, `loadfast::load_fast()` and ry on both runtimes. On the larger package
+ry loads cold in about a second (`load_fast()` about 3 s, `load_all()` about 7 s) and reloads after
+a body edit in about 50 ms (81 ms and 6.6 s).
 
 Keeping source references, as an interactive session does by default, adds 10 to 20% to a cold
 load.
