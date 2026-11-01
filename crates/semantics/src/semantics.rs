@@ -896,23 +896,24 @@ pub fn file_conditional_writers<'db>(
 ) -> Vec<(Symbol, Item<'db>)> {
     let mut writers = Vec::new();
     for &item in item_tree(db, file) {
-        // `name <- function(...)` binds only its own name at top level, since the body is a
-        // scope of its own, so it needs no naming pass. Most items are functions, and skipping
-        // them keeps the loader's strict-mode classification from naming the whole project.
-        if *item.kind(db) == ItemKind::Function
-            && item_syntax(db, item)
-                .is_some_and(|syntax| syntax.syntax_node().kind() == SyntaxKind::BINARY_EXPR)
-        {
-            continue;
-        }
-        let own_name = item.name(db).clone();
-        for &name in item_top_level_names(db, item) {
-            if own_name.as_deref() != Some(name.as_str()) {
-                writers.push((name, item));
-            }
-        }
+        writers.extend(
+            item_side_names(db, item)
+                .into_iter()
+                .map(|name| (name, item)),
+        );
     }
     writers
+}
+
+/// The top-level names an item binds besides its own, such as the bindings a branch or a loop
+/// leaves behind.
+fn item_side_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Symbol> {
+    let own_name = item.name(db);
+    item_top_level_names(db, item)
+        .iter()
+        .copied()
+        .filter(|name| own_name.as_deref() != Some(name.as_str()))
+        .collect()
 }
 
 /// A per-name projection of the project-wide maps, so a check depends only on the names
@@ -1044,13 +1045,13 @@ pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(String, 
         .collect()
 }
 
-/// The read set of each of [`file_definitions`], in the same order: the file's share of the
-/// edges [`interface_sccs`] walks.
+/// The reads of each item in [`item_tree`] order: the file's share of the edges
+/// [`interface_sccs`] walks.
 #[salsa::tracked(returns(ref))]
-pub fn file_interface_reads(db: &dyn Db, file: SourceFile) -> Vec<Vec<Symbol>> {
-    file_definitions(db, file)
+pub fn file_interface_reads<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<InterfaceReads<'db>> {
+    item_tree(db, file)
         .iter()
-        .map(|&(_, item)| item_interface_reads(db, item).iter().copied().collect())
+        .map(|&item| item_interface_reads(db, item).clone())
         .collect()
 }
 
@@ -1086,14 +1087,13 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     generics
 }
 
-/// Reads the read-set projection so a body edit does not re-derive the set. The
-/// `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
+/// The `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
 #[salsa::tracked(returns(ref))]
 fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
         if let Some(name) = item.name(db).clone()
-            && item_interface_reads(db, item).contains("UseMethod")
+            && *reads_use_method(db, item)
         {
             generics.insert(name);
         }
@@ -1101,40 +1101,163 @@ fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     generics
 }
 
-/// A firewall: whole-project walks depend on this read set rather than the full naming,
-/// so a body edit that only shifts ranges backdates here.
+/// A firewall, so a body edit does not re-derive the file's generics.
+#[salsa::tracked]
+fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    item_naming(db, item)
+        .as_ref()
+        .is_some_and(|naming| naming.non_locals.values().any(|name| *name == "UseMethod"))
+}
+
+/// Where an item's check can read another item's exports, resolved as far as the item's own
+/// file decides. The rest depends on the project's winners, which [`interface_sccs`] looks up.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct InterfaceReads<'db> {
+    /// Binders in the item's own file that a read reaches.
+    pub frame: Vec<Item<'db>>,
+    /// Names whose read may continue past the file into the project's layers.
+    pub layered: BTreeSet<Symbol>,
+    /// Names whose read continues past the file to a definition only (`earlier_binding`).
+    pub earlier: BTreeSet<Symbol>,
+}
+
+/// A firewall: whole-project walks depend on this rather than the full naming, so a body edit
+/// that only shifts ranges backdates here. Every read `SalsaGlobals` can make for a name the
+/// item spells is here, so a cycle through them never closes inside salsa.
 #[salsa::tracked(returns(ref))]
-pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
+pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceReads<'db> {
+    let mut reads = InterfaceReads::default();
     let Some(naming) = item_naming(db, item) else {
-        return BTreeSet::new();
+        return reads;
     };
-    let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
-    reads.extend(naming.namespace_reads.values().filter_map(|read| read.name));
-    // A call head bound locally to a non-function falls through to the project global of its
-    // name, unless the chain already holds the top-level slot, which is that global.
-    reads.extend(
+    let package = *item.file(db).kind(db) == DocumentKind::Package;
+    // `(name, deferred)` reads through the item's frame first, the rest straight from the
+    // layers (`enclosing_scheme`, and `namespace_scheme` outside a package file).
+    let mut lookups: BTreeSet<(Symbol, bool)> = BTreeSet::new();
+    for (id, &name) in naming.non_locals.iter() {
+        lookups.insert((name, naming.deferred_non_locals.contains(id)));
+        if !package {
+            reads.layered.insert(name);
+        }
+    }
+    for (id, &name) in naming.quiet_reads.iter() {
+        lookups.insert((name, naming.deferred_quiet_reads.contains(id)));
+    }
+    for name in naming.namespace_reads.values().filter_map(|read| read.name) {
+        match package {
+            true => lookups.insert((name, false)),
+            false => reads.layered.insert(name),
+        };
+    }
+    let top_level = |slot: &naming::BindingId| {
         naming
-            .callee_fallbacks
+            .bindings
+            .get(slot)
+            .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
+    };
+    for (callee, fallback) in naming.callee_fallbacks.iter() {
+        let Some(slot) = naming.resolutions.get(callee) else {
+            continue;
+        };
+        let Some(binding) = naming.bindings.get(slot) else {
+            continue;
+        };
+        if top_level(slot) || fallback.outer.iter().any(top_level) {
+            if !package {
+                reads.layered.insert(binding.name);
+            }
+        } else {
+            lookups.insert((binding.name, fallback.deferred));
+        }
+    }
+    // A top-level slot read before the item writes it reads the binding that stood before
+    // the item.
+    lookups.extend(
+        naming
+            .used_top_level_names
             .iter()
-            .filter_map(|(callee, fallback)| {
-                let slot = naming.resolutions.get(callee)?;
-                let top_level = |slot: &naming::BindingId| {
-                    naming
-                        .bindings
-                        .get(slot)
-                        .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
-                };
-                if top_level(slot) || fallback.outer.iter().any(top_level) {
-                    return None;
-                }
-                Some(naming.bindings.get(slot)?.name)
-            }),
+            .map(|&name| (name, false)),
     );
+    let globals = SalsaGlobals::for_item(db, item, None);
+    // A side binding a branch or loop may leave unwritten reads the earlier binding.
+    for name in item_side_names(db, item) {
+        match globals.frame_definition(types::Name::new(db, name.as_str()), false) {
+            Some(binder) => push_unique(&mut reads.frame, binder),
+            None => {
+                reads.earlier.insert(name);
+            }
+        }
+    }
+    for (name, deferred) in lookups {
+        let binder = globals.frame_definition(types::Name::new(db, name.as_str()), deferred);
+        match binder.map(|binder| binder_source(db, binder, name.as_str())) {
+            Some(Source::Definition(binder)) => push_unique(&mut reads.frame, binder),
+            Some(Source::Statement(binder)) => {
+                push_unique(&mut reads.frame, binder);
+                reads.layered.insert(name);
+            }
+            Some(Source::Conditional(_)) | None => {
+                reads.layered.insert(name);
+            }
+        }
+    }
     reads
+}
+
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+/// Where a read past the item's own scope takes its scheme from, nearest first.
+#[derive(Clone, Copy)]
+enum Source<'a, 'db> {
+    /// A definition of the name: its scheme always answers, which ends the search.
+    Definition(Item<'db>),
+    /// A statement that binds the name on the side, which answers only when its check
+    /// writes the name.
+    Statement(Item<'db>),
+    /// The writers of a name no definition binds, which answer when any of them writes it.
+    Conditional(&'a [Item<'db>]),
+}
+
+fn binder_source<'a, 'db>(db: &'db dyn Db, binder: Item<'db>, name: &str) -> Source<'a, 'db> {
+    match binder.name(db).as_deref() == Some(name) {
+        true => Source::Definition(binder),
+        false => Source::Statement(binder),
+    }
+}
+
+fn layer_source<'a, 'db>(
+    winner: Option<Item<'db>>,
+    conditional_writers: &'a [Item<'db>],
+) -> Option<Source<'a, 'db>> {
+    match winner {
+        Some(winner) => Some(Source::Definition(winner)),
+        None => {
+            (!conditional_writers.is_empty()).then_some(Source::Conditional(conditional_writers))
+        }
+    }
 }
 
 #[salsa::tracked(returns(ref))]
 pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
+    // `name <- function(...)` binds only its own name at top level, since the body is a scope
+    // of its own, so it needs no naming pass. Most items are functions, and skipping them keeps
+    // whole-project walks, such as the loader's strict-mode classification, from naming
+    // everything.
+    if *item.kind(db) == ItemKind::Function
+        && item_syntax(db, item)
+            .is_some_and(|syntax| syntax.syntax_node().kind() == SyntaxKind::BINARY_EXPR)
+    {
+        return item
+            .name(db)
+            .as_deref()
+            .map(Symbol::new)
+            .into_iter()
+            .collect();
+    }
     let Some(naming) = item_naming(db, item) else {
         return BTreeSet::new();
     };
@@ -1146,7 +1269,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         .collect()
 }
 
-/// Only cyclic groups are recorded: their schemes must resolve through one canonical
+/// Only cyclic groups are recorded: their exports must resolve through one canonical
 /// fixpoint, since iterating from whichever member was queried first would make the
 /// round-cap pins depend on query order.
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
@@ -1156,30 +1279,76 @@ pub struct InterfaceSccs<'db> {
     pub groups: Vec<Vec<Item<'db>>>,
 }
 
+/// The graph's edges are the reads `SalsaGlobals` resolves, layer by layer in the same order,
+/// so every cycle a check can close through them is a group here and never a salsa cycle.
 #[salsa::tracked(returns(ref))]
 pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceSccs<'db> {
-    let winners = package_definitions(db, files);
-    let package_files: Vec<SourceFile> = files
-        .files(db)
-        .iter()
-        .copied()
-        .filter(|file| *file.kind(db) == DocumentKind::Package)
-        .collect();
+    let package_winners = package_definitions(db, files);
+    let package_writers = conditional_slot_items(db, files);
+    let test_winners = test_definitions(db, files);
+    let test_writers = test_conditional_slot_items(db, files);
     let mut nodes: Vec<Item<'db>> = Vec::new();
     let mut position: FxHashMap<Item<'db>, usize> = FxHashMap::default();
-    for &file in &package_files {
-        for &(_, item) in file_definitions(db, file) {
+    for &file in files.files(db) {
+        for &item in item_tree(db, file) {
             position.insert(item, nodes.len());
             nodes.push(item);
         }
     }
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(nodes.len());
-    for &file in &package_files {
+    for &file in files.files(db) {
+        let test = matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        );
         for reads in file_interface_reads(db, file) {
+            let mut targets: Vec<Item<'db>> = reads.frame.clone();
+            for name in &reads.layered {
+                let name = name.as_str();
+                let layer =
+                    |winners: &FxHashMap<String, Item<'db>>,
+                     writers: &'db FxHashMap<String, Vec<Item<'db>>>| {
+                        layer_source(
+                            winners.get(name).copied(),
+                            writers.get(name).map_or(&[][..], Vec::as_slice),
+                        )
+                    };
+                let test_layer = test.then(|| layer(test_winners, test_writers)).flatten();
+                for source in test_layer
+                    .into_iter()
+                    .chain(layer(package_winners, package_writers))
+                {
+                    match source {
+                        Source::Definition(item) | Source::Statement(item) => {
+                            push_unique(&mut targets, item);
+                            if matches!(source, Source::Definition(_)) {
+                                break;
+                            }
+                        }
+                        Source::Conditional(writers)
+                            if writers.len() > CONDITIONAL_SLOT_JOIN_CAP =>
+                        {
+                            break;
+                        }
+                        Source::Conditional(writers) => {
+                            for &writer in writers {
+                                push_unique(&mut targets, writer);
+                            }
+                        }
+                    }
+                }
+            }
+            for name in &reads.earlier {
+                let name = name.as_str();
+                let test_winner = test.then(|| test_winners.get(name)).flatten();
+                if let Some(&winner) = test_winner.or_else(|| package_winners.get(name)) {
+                    push_unique(&mut targets, winner);
+                }
+            }
             edges.push(
-                reads
+                targets
                     .iter()
-                    .filter_map(|name| position.get(winners.get(name.as_str())?).copied())
+                    .filter_map(|target| position.get(target).copied())
                     .collect(),
             );
         }
@@ -1254,72 +1423,74 @@ fn interface_group<'db>(db: &'db dyn Db, files: ProjectFiles, item: Item<'db>) -
     interface_sccs(db, files).membership.get(&item).copied()
 }
 
+/// What a cyclic-group member exports to its readers: the scheme `global_scheme` serves and
+/// the bindings `statement_binding_scheme` serves.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct MemberExports<'db> {
+    pub scheme: types::TypeScheme<'db>,
+    pub top_level_bindings: Vec<(Symbol, types::TypeScheme<'db>)>,
+}
+
 /// Independent of which member was queried first: each round re-checks every member
-/// against the previous round's table, and members still changing at the cap pin to
+/// against the previous round's exports, and members still changing at the cap pin to
 /// `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
-    cycle_fn = scc_schemes_recover,
-    cycle_initial = scc_schemes_initial
+    cycle_fn = scc_exports_recover,
+    cycle_initial = scc_exports_initial
 )]
-pub fn scc_schemes<'db>(
+pub fn scc_exports<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
-    let sccs = interface_sccs(db, files);
-    let Some(members) = sccs.groups.get(group as usize) else {
-        return FxHashMap::default();
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
+    let mut exports = unknown_group_exports(db, files, group);
+    let Some(members) = interface_sccs(db, files).groups.get(group as usize) else {
+        return exports;
     };
-    let winners = package_definitions(db, files);
-    // Only a name's winner is reachable through reads.
-    let member_names: Vec<(String, Item<'db>)> = members
-        .iter()
-        .filter_map(|&item| {
-            let name = item.name(db).clone()?;
-            (winners.get(&name) == Some(&item)).then_some((name, item))
-        })
-        .collect();
-
-    let unknown_scheme = types::TypeScheme::monomorphic(types::unknown(db));
-    let mut table: FxHashMap<String, types::TypeScheme<'db>> = member_names
-        .iter()
-        .map(|(name, _)| (name.clone(), unknown_scheme.clone()))
-        .collect();
-    let mut schemes: FxHashMap<Item<'db>, types::TypeScheme<'db>> = members
-        .iter()
-        .map(|&item| (item, unknown_scheme.clone()))
-        .collect();
     for _round in 0..SCHEME_ROUND_CAP {
-        let mut next_schemes = FxHashMap::default();
-        for &item in members {
-            let scheme =
-                check_member_scheme(db, item, &table).unwrap_or_else(|| unknown_scheme.clone());
-            next_schemes.insert(item, scheme);
-        }
-        let next_table: FxHashMap<String, types::TypeScheme<'db>> = member_names
+        let next_exports: FxHashMap<Item<'db>, MemberExports<'db>> = members
             .iter()
-            .map(|(name, item)| (name.clone(), next_schemes[item].clone()))
+            .map(|&item| {
+                let globals = SalsaGlobals::for_item(db, item, Some(&exports));
+                (
+                    item,
+                    member_exports(db, check_item_against(db, item, &globals)),
+                )
+            })
             .collect();
-        let converged = next_schemes == schemes;
-        schemes = next_schemes;
-        table = next_table;
-        if converged {
-            return schemes;
+        if next_exports == exports {
+            return exports;
         }
+        exports = next_exports;
     }
     // Pinning every member is the only entry-order-free refusal.
-    for scheme in schemes.values_mut() {
-        *scheme = unknown_scheme.clone();
-    }
-    schemes
+    unknown_group_exports(db, files, group)
 }
 
-fn unknown_group_schemes<'db>(
+fn member_exports<'db>(
+    db: &'db dyn Db,
+    check: Option<check::ItemCheck<'db>>,
+) -> MemberExports<'db> {
+    let unknown = || types::TypeScheme::monomorphic(types::unknown(db));
+    match check {
+        Some(check) => MemberExports {
+            scheme: check.scheme.unwrap_or_else(unknown),
+            top_level_bindings: check.top_level_bindings,
+        },
+        None => MemberExports {
+            scheme: unknown(),
+            top_level_bindings: Vec::new(),
+        },
+    }
+}
+
+/// The fixpoint's starting point and its refusal: every surface a member exports is `Unknown`.
+fn unknown_group_exports<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
     let unknown = types::TypeScheme::monomorphic(types::unknown(db));
     interface_sccs(db, files)
         .groups
@@ -1327,50 +1498,47 @@ fn unknown_group_schemes<'db>(
         .map(|members| {
             members
                 .iter()
-                .map(|&item| (item, unknown.clone()))
+                .map(|&item| {
+                    let top_level_bindings = item_top_level_names(db, item)
+                        .iter()
+                        .map(|&name| (name, unknown.clone()))
+                        .collect();
+                    let exports = MemberExports {
+                        scheme: unknown.clone(),
+                        top_level_bindings,
+                    };
+                    (item, exports)
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn scc_schemes_initial<'db>(
+fn scc_exports_initial<'db>(
     db: &'db dyn Db,
     _id: salsa::Id,
     files: ProjectFiles,
     group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
-    unknown_group_schemes(db, files, group)
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
+    unknown_group_exports(db, files, group)
 }
 
 /// Backstop for edges the static graph cannot see (a name the checker constructs, such
 /// as an S3 method), which re-enter this group through `global_scheme`.
-fn scc_schemes_recover<'db>(
+fn scc_exports_recover<'db>(
     db: &'db dyn Db,
     _cycle: &salsa::Cycle,
-    last_provisional: &FxHashMap<Item<'db>, types::TypeScheme<'db>>,
-    value: FxHashMap<Item<'db>, types::TypeScheme<'db>>,
+    last_provisional: &FxHashMap<Item<'db>, MemberExports<'db>>,
+    value: FxHashMap<Item<'db>, MemberExports<'db>>,
     files: ProjectFiles,
     group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
     // Refuse on the first disagreement: salsa iterating this query would multiply the
     // group's own bounded rounds and can exhaust memory.
     if &value == last_provisional {
         return value;
     }
-    unknown_group_schemes(db, files, group)
-}
-
-fn check_member_scheme<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-    table: &FxHashMap<String, types::TypeScheme<'db>>,
-) -> Option<types::TypeScheme<'db>> {
-    let base = SalsaGlobals::for_item(db, item);
-    let globals = SccGlobals {
-        base: &base,
-        members: table,
-    };
-    check_item_against(db, item, &globals)?.scheme
+    unknown_group_exports(db, files, group)
 }
 
 fn check_item_against<'db>(
@@ -1442,29 +1610,35 @@ pub fn item_check<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCh
 }
 
 fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<'db>> {
-    let mut check = check_item_against(db, item, &SalsaGlobals::for_item(db, item))?;
-    // A cyclic-group member exports the group's fixpoint value, not this one-step
-    // re-derivation, which runs one propagation hop ahead of what readers see.
-    if check.scheme.is_some()
-        && let Some(files) = ProjectFiles::try_get(db)
-        && let Some(group) = interface_group(db, files, item)
-    {
-        check.scheme = scc_schemes(db, files, group).get(&item).cloned();
-        // A clean body whose export still carries `Unknown` owes it to the cycle itself, so
-        // strict mode marks the whole binding.
-        if check.errors.is_empty()
-            && check.strict_origins.is_empty()
-            && let Some(scheme) = &check.scheme
-            && types::contains_unknown(db, scheme.body)
-            && let Some(module) = item_hir(db, item)
-            && let Some(root) = module.root
-            && let Some(name) = item.name(db).clone()
-        {
-            check.strict_origins.push(check::StrictOrigin {
-                expression: root,
-                range: module.expression(root).range,
-                kind: check::StrictOriginKind::RecursiveUnknown(name),
-            });
+    // A cyclic-group member reads its fellow members' exports from the group's fixpoint,
+    // never through `global_scheme`: that read would close a salsa cycle, and salsa backdates
+    // a cycle's head but not its other queries, so an edit that breaks the cycle while
+    // keeping a member's value re-executes that member with an older `changed_at` than its
+    // memo holds, which salsa rejects.
+    let group = ProjectFiles::try_get(db)
+        .and_then(|files| Some(scc_exports(db, files, interface_group(db, files, item)?)));
+    let mut check = check_item_against(db, item, &SalsaGlobals::for_item(db, item, group))?;
+    // The exports are the group's fixpoint values, not this check's, which differ once the
+    // round cap pins the group.
+    if let Some(exports) = group.and_then(|group| group.get(&item)) {
+        check.top_level_bindings = exports.top_level_bindings.clone();
+        if check.scheme.is_some() {
+            check.scheme = Some(exports.scheme.clone());
+            // A clean body whose export still carries `Unknown` owes it to the cycle itself,
+            // so strict mode marks the whole binding.
+            if check.errors.is_empty()
+                && check.strict_origins.is_empty()
+                && types::contains_unknown(db, exports.scheme.body)
+                && let Some(module) = item_hir(db, item)
+                && let Some(root) = module.root
+                && let Some(name) = item.name(db).clone()
+            {
+                check.strict_origins.push(check::StrictOrigin {
+                    expression: root,
+                    range: module.expression(root).range,
+                    kind: check::StrictOriginKind::RecursiveUnknown(name),
+                });
+            }
         }
     }
     Some(check)
@@ -1516,9 +1690,12 @@ fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::It
 }
 
 /// Every lookup goes through a per-name query, so a check depends on exactly the names it reads.
-struct SalsaGlobals<'db> {
+struct SalsaGlobals<'db, 'a> {
     db: &'db dyn Db,
     item: Item<'db>,
+    /// The exports of the item's cyclic group, which stand in for the queries that serve a
+    /// member's: reading a member through salsa would re-enter the group.
+    group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
     files: Option<ProjectFiles>,
     file: SourceFile,
     // A body reads the same few globals many times, and each salsa read pays for interning
@@ -1680,11 +1857,16 @@ fn frame_binder_of<'db>(
     visible.last().map(|&(_, item)| item)
 }
 
-impl<'db> SalsaGlobals<'db> {
-    fn for_item(db: &'db dyn Db, item: Item<'db>) -> SalsaGlobals<'db> {
+impl<'db, 'a> SalsaGlobals<'db, 'a> {
+    fn for_item(
+        db: &'db dyn Db,
+        item: Item<'db>,
+        group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
+    ) -> SalsaGlobals<'db, 'a> {
         SalsaGlobals {
             db,
             item,
+            group,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
             schemes: RefCell::default(),
@@ -1693,6 +1875,71 @@ impl<'db> SalsaGlobals<'db> {
             package_names: RefCell::default(),
             test_names: RefCell::default(),
         }
+    }
+
+    fn item_scheme(&self, item: Item<'db>) -> types::TypeScheme<'db> {
+        match self.group.and_then(|group| group.get(&item)) {
+            Some(exports) => exports.scheme.clone(),
+            None => global_scheme(self.db, item),
+        }
+    }
+
+    fn statement_scheme(
+        &self,
+        item: Item<'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        let Some(exports) = self.group.and_then(|group| group.get(&item)) else {
+            return statement_binding_scheme(self.db, item, name);
+        };
+        let name = name.text(self.db);
+        exports
+            .top_level_bindings
+            .iter()
+            .find(|(binding, _)| binding == name)
+            .map(|(_, scheme)| scheme.clone())
+    }
+
+    fn source_scheme(
+        &self,
+        source: Source<'_, 'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        match source {
+            Source::Definition(item) => Some(self.item_scheme(item)),
+            Source::Statement(item) => self.statement_scheme(item, name),
+            Source::Conditional(writers) if writers.len() > CONDITIONAL_SLOT_JOIN_CAP => {
+                Some(types::TypeScheme::monomorphic(types::unknown(self.db)))
+            }
+            Source::Conditional(writers) => {
+                let mut schemes: Vec<types::TypeScheme<'db>> = writers
+                    .iter()
+                    .filter_map(|&item| self.statement_scheme(item, name))
+                    .collect();
+                match schemes.len() {
+                    0 => None,
+                    1 => schemes.pop(),
+                    _ => {
+                        let bodies: Vec<types::Ty<'db>> =
+                            schemes.into_iter().map(|scheme| scheme.body).collect();
+                        Some(types::TypeScheme::monomorphic(types::union_of(
+                            self.db, bodies,
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    fn layer_scheme(
+        &self,
+        layer: &PackageName<'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        self.source_scheme(
+            layer_source(layer.winner, &layer.conditional_writers)?,
+            name,
+        )
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
@@ -1742,41 +1989,12 @@ impl<'db> SalsaGlobals<'db> {
         test.into_iter().chain(package)
     }
 
-    fn conditional_slot_scheme(
-        &self,
-        layer: &PackageName<'db>,
-        name: types::Name<'db>,
-    ) -> Option<types::TypeScheme<'db>> {
-        let writers = &layer.conditional_writers;
-        if writers.len() > CONDITIONAL_SLOT_JOIN_CAP {
-            return Some(types::TypeScheme::monomorphic(types::unknown(self.db)));
-        }
-        let mut schemes: Vec<types::TypeScheme<'db>> = writers
-            .iter()
-            .filter_map(|&item| statement_binding_scheme(self.db, item, name))
-            .collect();
-        match schemes.len() {
-            0 => None,
-            1 => schemes.pop(),
-            _ => {
-                let bodies: Vec<types::Ty<'db>> =
-                    schemes.into_iter().map(|scheme| scheme.body).collect();
-                Some(types::TypeScheme::monomorphic(types::union_of(
-                    self.db, bodies,
-                )))
-            }
-        }
-    }
-
     fn binder_scheme(
         &self,
         item: Item<'db>,
         name: types::Name<'db>,
     ) -> Option<types::TypeScheme<'db>> {
-        if item.name(self.db).as_deref() == Some(name.text(self.db)) {
-            return Some(global_scheme(self.db, item));
-        }
-        statement_binding_scheme(self.db, item, name)
+        self.source_scheme(binder_source(self.db, item, name.text(self.db)), name)
     }
 
     fn lookup_scheme(
@@ -1790,13 +2008,11 @@ impl<'db> SalsaGlobals<'db> {
         {
             return Some(scheme);
         }
-        for layer in self.layers(interned) {
-            if let Some(item) = layer.winner {
-                return Some(global_scheme(self.db, item));
-            }
-            if let Some(scheme) = self.conditional_slot_scheme(layer, interned) {
-                return Some(scheme);
-            }
+        if let Some(scheme) = self
+            .layers(interned)
+            .find_map(|layer| self.layer_scheme(layer, interned))
+        {
+            return Some(scheme);
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
@@ -1809,7 +2025,7 @@ impl<'db> SalsaGlobals<'db> {
     }
 }
 
-impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
+impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
         let interned = types::Name::new(self.db, name);
         if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
@@ -1835,7 +2051,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
-        Some(global_scheme(self.db, self.winner(interned)?))
+        Some(self.item_scheme(self.winner(interned)?))
     }
 
     fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
@@ -1843,16 +2059,12 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return self.scheme(name, false);
         }
         let interned = types::Name::new(self.db, name);
-        if let Some(layer) = self
+        if let Some(scheme) = self
             .files
             .map(|_| package_name(self.db, types::QueryName::new(self.db, interned)))
+            .and_then(|layer| self.layer_scheme(layer, interned))
         {
-            if let Some(item) = layer.winner {
-                return Some(global_scheme(self.db, item));
-            }
-            if let Some(scheme) = self.conditional_slot_scheme(layer, interned) {
-                return Some(scheme);
-            }
+            return Some(scheme);
         }
         stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
     }
@@ -1862,12 +2074,8 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return None;
         }
         let interned = types::Name::new(self.db, name);
-        self.layers(interned).find_map(|layer| {
-            layer
-                .winner
-                .map(|item| global_scheme(self.db, item))
-                .or_else(|| self.conditional_slot_scheme(layer, interned))
-        })
+        self.layers(interned)
+            .find_map(|layer| self.layer_scheme(layer, interned))
     }
 
     fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
@@ -1945,85 +2153,6 @@ fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashS
         }
     }
     classes
-}
-
-/// Member names resolve from the round table, never through `global_scheme`, which would
-/// re-enter the group.
-struct SccGlobals<'db, 'a> {
-    base: &'a SalsaGlobals<'db>,
-    members: &'a FxHashMap<String, types::TypeScheme<'db>>,
-}
-
-impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
-    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        self.members
-            .get(name)
-            .cloned()
-            .or_else(|| self.base.scheme(name, deferred))
-    }
-
-    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        self.members
-            .get(name)
-            .cloned()
-            .or_else(|| self.base.earlier_binding(name))
-    }
-
-    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
-        self.base.library_candidates(name)
-    }
-
-    /// Only a package file's group can hold a namespace member.
-    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        match self.members.get(name) {
-            Some(scheme) if *self.base.file.kind(self.base.db) == DocumentKind::Package => {
-                Some(scheme.clone())
-            }
-            _ => self.base.namespace_scheme(name),
-        }
-    }
-
-    /// A member is read from the round table here too: through the base it would re-enter
-    /// the group.
-    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        match self.members.get(name) {
-            Some(scheme) if *self.base.file.kind(self.base.db) != DocumentKind::Package => {
-                Some(scheme.clone())
-            }
-            _ => self.base.enclosing_scheme(name),
-        }
-    }
-
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
-        if self.members.contains_key(name) {
-            return None;
-        }
-        self.base.overloads(name, deferred)
-    }
-
-    fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        self.members.contains_key(name) || self.base.defined_in_project(name, deferred)
-    }
-
-    fn type_definitions(
-        &self,
-    ) -> &'db FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
-        self.base.type_definitions()
-    }
-
-    /// Must delegate, not default: an empty set makes `Date + 1` in any recursive function
-    /// collapse the whole scheme to `Unknown`.
-    fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
-        self.base.arithmetic_classes()
-    }
-
-    fn has_untracked_arithmetic_class(&self) -> bool {
-        self.base.has_untracked_arithmetic_class()
-    }
-
-    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        self.base.stub_scheme(name)
-    }
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the

@@ -1057,25 +1057,28 @@ were not.
 
 The shape now lives in `crates/semantics/src/semantics.rs` and has three parts.
 
-- `interface_sccs(files)` builds the static interface-reference graph. It draws an edge from each
-  named package definition item to the winner of every global name its body reads, which is
-  `non_locals` plus validated `namespace_reads`. One iterative Tarjan pass condenses it in
-  canonical order, which is project file order and then item order within a file. Only a cyclic
-  group is recorded, meaning one with more than one member or with a self-edge.
-- `scc_schemes(files, group)` is the canonical fixpoint of one group. Every member starts at the
-  tolerant `Unknown` scheme. Each round re-checks every member against the previous round's table,
-  which is Jacobi iteration, so one propagation hop happens per round and within-round order cannot
-  matter either. Convergence is scheme-table equality. A group still changing at the round cap,
-  which is 16 and shared with the backstop, pins all members to `Unknown`. That is the only
-  entry-order-free pin. A member check runs `check_item_with_annotation` directly against an
-  overlay environment called `SccGlobals`, which reads the round table first and falls back to
-  ordinary global resolution, and which suppresses stub overloads for member names. It never runs
-  through `item_check`, so no cycle forms.
-- `item_check` adopts the canonical scheme as a member's exported scheme, which keeps a single
-  source of truth. Export, hover and every downstream reader see the fixpoint value rather than the
-  one-hop-ahead re-derivation the item's own check just computed. `global_scheme` reads `item_check`
-  only. The dynamic cycle recovery stays as a backstop for reference edges the static graph cannot
-  see.
+- `interface_sccs(files)` builds the static interface-reference graph over every item of every
+  file, statements included. Each read is resolved by `item_interface_reads` through the same binder
+  the check uses (the nearest earlier writer in the reading file, or a script's last writer, then the
+  test layer, the package-layer winner, and the conditional writers up to the join cap), so the
+  graph has exactly the edges a check follows. One iterative Tarjan pass condenses it in canonical
+  order (project file order, then item order). Only a cyclic group is recorded, meaning one with
+  more than one member or with a self-edge.
+- `scc_exports(files, group)` is the canonical fixpoint of one group. Every member starts at the
+  tolerant `Unknown` export (its scheme and the schemes of the top-level names it binds). Each round
+  re-checks every member against the previous round's table, which is Jacobi iteration, so one
+  propagation hop happens per round and within-round order cannot matter. Convergence is table
+  equality. A group still changing at the round cap, which is 16 and shared with the backstop, pins
+  all members to `Unknown`. A member check runs through `SalsaGlobals` with the group table, which
+  looks up by resolved item, so the fixpoint and the ordinary check share one code path and no
+  salsa cycle forms.
+- `item_check` adopts the canonical exports as a member's exported scheme, which keeps a single
+  source of truth. `global_scheme` reads `item_check` only. Salsa's cycle recovery stays as a
+  backstop for references the static graph cannot see, and such a reference is a bug: salsa never
+  backdates a cycle member, so an edit that breaks a recovered cycle and restores it panics in its
+  backdating check. That is how a winner-only graph that missed statement items, earlier writers,
+  script and test files and conditional writers surfaced (`test_incremental.rs`,
+  `removing_a_cross_file_cycle_and_restoring_it_revalidates` and its siblings).
 
 Correctness: forward, reverse and phase-pre-forced forcing now render identical diagnostics. The
 regression test is `cyclic_group_answers_are_forcing_order_independent` in
