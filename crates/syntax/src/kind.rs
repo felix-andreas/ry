@@ -119,6 +119,8 @@ pub enum SyntaxKind {
     TAG_EXPR,
     /// `match (value) { arms }`.
     MATCH_EXPR,
+    /// `@Name(value)`, which introduces a nominal type: a [`NEW_TYPE`] then a [`PAREN_EXPR`].
+    NEW_EXPR,
     MATCH_ARM,
     /// `if (condition)` between an arm's pattern and its `=>`.
     MATCH_GUARD,
@@ -163,6 +165,10 @@ pub enum SyntaxKind {
     TYPE_TAG_PAYLOAD,
     /// `..`, the last member of an open tag union.
     TYPE_OTHER_TAGS,
+    /// `type Name<T> = TYPE` or `alias Name = TYPE`, an inline type definition statement.
+    TYPE_DEFINITION,
+    /// The `@Name` or `@Name<Args>` head of a [`NEW_EXPR`].
+    NEW_TYPE,
 
     ERROR,
 }
@@ -314,6 +320,7 @@ impl SyntaxKind {
             RECORD_EXPR => "record",
             TAG_EXPR => "tag",
             MATCH_EXPR => "`match` expression",
+            NEW_EXPR => "nominal constructor",
             MATCH_ARM => "`match` arm",
             MATCH_GUARD => "arm guard",
             PATTERN_WILDCARD => "`_` pattern",
@@ -347,6 +354,8 @@ impl SyntaxKind {
             TYPE_TAG => "tag type",
             TYPE_TAG_PAYLOAD => "tag payload type",
             TYPE_OTHER_TAGS => "`..`",
+            TYPE_DEFINITION => "type definition",
+            NEW_TYPE => "nominal type",
             ERROR => "error",
         }
     }

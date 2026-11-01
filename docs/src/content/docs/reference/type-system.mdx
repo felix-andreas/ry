@@ -62,11 +62,10 @@ is written:
 <TabItem label="Inline">
 
 ```r
-#: @type Person {list{name: character}}
+type Person = list{name: character}
 
 make_person <- function(name: character) -> Person {
-  #: @new Person
-  list(name = name)
+  @Person(list(name = name))
 }
 ```
 
@@ -153,6 +152,14 @@ first <- function(items) items[[1L]]
 - `-> TYPE` between the parameter list and the body declares a function's return type.
 - `<T, U: numeric>` directly after `function` or `\` declares the function's type parameters, with
   the same names and constraints as the compact `<...>` binder.
+- `type Name<T> = TYPE` and `alias Name<T> = TYPE` at the top level of a file define a
+  [named type](#named-types-and-generic-application), like `#: @type Name<T> {TYPE}` and
+  `#: @alias Name<T> {TYPE}`.
+- `name: @trust TYPE <- value`, `name: @if-unknown TYPE <- value` and `name: @new Name <- value`
+  write a binding's [coercion](#unknown-only-coercions) inline.
+- `@Name(value)` and `@Name<ARGS>(value)` introduce a nominal type on a value, like `#: @new Name`
+  on that value. The `(` must follow the type directly, and `value` may be any expression, including
+  a record or tuple: `@Point((x = 1, y = 2))`.
 
 Every `TYPE` is the type grammar of `#:` comments, so anything a `#:` type can say an inline type can
 say, and a type reads the same written either way.
@@ -169,6 +176,10 @@ same annotation:
   [The formal list](#annotations-and-the-formal-list) rules apply unchanged, and an unannotated
   parameter keeps its inferred type.
 - A parameter with a default is optional, so the inline form never needs `[name]`.
+- `type` and `alias` definitions are the `@type` and `@alias` definitions of the same name, in the
+  same project-global namespace.
+- A binding's directive, as in `x: @trust integer <- v`, is the same directive in a `#:` block above
+  the binding. `@Name(value)` is `(value)` with `#: @new Name` on it.
 - A function without `-> TYPE` infers its return type from its body, as an
   [elided return](#elided-return-types) on a definition does. A function type inside an inline
   annotation, such as `f: fn(integer)` or `callback: fn(integer)`, follows the `#:` rule for that
@@ -187,7 +198,26 @@ function and the binding's type is then checked against it like any other value.
 A parameter's type and a function's return type and type parameters can be written on any function
 literal. A binding's type is recognized only where a statement starts, at the top level of a file or
 directly inside `{ }`. Elsewhere, such as in a braceless `if` branch, `y: integer <- 1L` is R's
-reading of `y:integer` as an assignment target, which is reported as a syntax error.
+reading of `y:integer` as an assignment target, which is reported as a syntax error. A binding's type
+continues onto the next line inside an open bracket, after a `|`, and onto a line that starts with
+`|`.
+
+`type` and `alias` start a definition only at the start of a statement and only when a name follows
+them on the same line, so `type <- "x"`, `alias(y)` and every other use of them as ordinary names
+keep their R meaning. A definition inside a function body or any other block parses, but is an
+`annotation` error: definitions belong at the top level of a file. A definition ends at the end of
+its line, and nothing but a comment may follow it there, so `type Id = integer; x <- 1` is a syntax
+error. Its type continues onto the next line after `=`, after a `|`, inside an open bracket, and
+onto a line that starts with `|`. No R statement starts with `|`, so a union may line
+up its members:
+
+```r
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+```
+
+A leading `|` is allowed in any union, in a `#:` comment too.
 
 A return type is read as far as the type grammar reaches, and the body starts after it. A list or
 function type must hug its bracket, as the formatter writes it: `-> list{name: character}` is a
@@ -203,10 +233,19 @@ R's own parser rejects every inline annotation except a binding's, which R reads
 `name:TYPE` through a `` `:<-` `` replacement function that base R does not define. So no working R
 program contains one, and existing R code parses and behaves exactly as before.
 
+`type` and `alias` definitions and `@Name(value)` are not R either: a definition is two names in a
+row, and `@` cannot start an R expression. At the start of a line, `@Name` reads as a constructor
+only when `(` or `<` follows the name, so a slot access broken across lines, `obj` then `@slot`,
+keeps R's own syntax error.
+
 Removing each inline annotation turns an annotated program into the plain R program it means:
-delete a binding's or parameter's `: TYPE`, a function's `<...>`, and its `-> TYPE`. Comments and
-`#:` blocks stay. `count: integer <- 0L` erases to `count <- 0L`, and
-`function<T>(x: T) -> T x` to `function(x) x`.
+delete a binding's or parameter's `: TYPE` (with its directive), a function's `<...>`, its
+`-> TYPE`, and the `@Name` of `@Name(value)`. A type definition becomes its `#:` comment, line for
+line, so the erased program still declares the type, and a definition paired with a `#:` block
+directly above it is removed, because that block already declares it. Comments and `#:` blocks
+stay. `count: integer <- 0L`
+erases to `count <- 0L`, `function<T>(x: T) -> T x` to `function(x) x`, `@UserId(5L)` to `(5L)`,
+and `type UserId = integer` to `#: @type UserId {integer}`.
 
 ### Inline and comment annotations together
 
@@ -215,8 +254,9 @@ where a slot is the binding's value, one parameter, the rest parameter, or the r
 
 - A slot only one of them types takes that type.
 - A slot both type takes the inline type.
-- A `#:` block in a coercion form (`@trust`, `@if-unknown`, `@new`) says how the value gets its type,
-  so it governs the value, and the inline type is only compared against it.
+- A coercion (`@trust`, `@if-unknown`, `@new`) says how the value gets its type, so it governs the
+  value wherever it is written, and the other side's type is only compared against it. When both
+  sides are coercions, the inline one governs.
 
 A slot typed both ways with different types is reported as `annotation-mismatch`, a warning at the
 inline type that points at the comment's type, so the reader always learns which one ry uses.
@@ -225,6 +265,15 @@ with `character | integer`. Type parameters pair by position, so `<T>` in the co
 the code agree, and a binder whose constraint differs is reported the same way, with the inline
 constraint winning. A positional parameter type in a compact `#:` annotation is compared with
 the formal it pairs with.
+
+A type definition pairs the same way. A `#:` definition directly above an inline definition of the
+same name, with nothing but a line break between them, is one definition written twice. It counts
+once, so it is not a duplicate, and the inline definition is the one that applies. When the two
+differ in kind (`@type` against `alias`), in the number of type parameters, in a constraint, or in
+the type itself, ry reports `annotation-mismatch` at the inline definition, pointing at the comment.
+Type parameters pair by position, so `#: @alias Pair<T> {tuple{T, T}}` and
+`alias Pair<U> = tuple{U, U}` agree. A `#:` definition anywhere else in the project with the same
+name is a duplicate, as two `#:` definitions are.
 
 This example deliberately uses both spellings on one function:
 
@@ -244,7 +293,10 @@ apply_discount <- function(price: integer, rate) price * (1 - rate)
 also run under R. An annotation that is off types nothing, and each one is reported once as an
 `inline-annotation` warning, because R cannot run that code. ry also warns once per run, and the
 language server once per load, for as long as the setting stays off. A `#:` block on the same
-statement then applies alone. The setting also governs running code: `ry run` and `ry repl` still
+statement then applies alone, and so does a paired `#:` definition. An inline type definition with
+no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
+`type` stays nominal, so a plain value is still not accepted where it is expected, but its
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry repl` still
 erase the annotations, but ry's runtime registers no checks for them.
 
 ### Inline annotations at run time
@@ -279,6 +331,8 @@ these rules:
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
   run time.
+- **Type definitions and `@Name(value)` do nothing at run time.** A definition is skipped, and
+  `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
   `character`, `raw`, and `NULL` admit values of that type, and each numeric type also admits the
   types below it in the promotion order, as the checker does. A list type admits any list, a
@@ -491,11 +545,14 @@ refused.
 Named types are declared with `@type` and `@alias`, and either may take parameters, as in
 `NAME<T, U>`:
 
-- `#: @type NAME {TYPE}` declares a *nominal type* whose representation is `TYPE`.
-- `#: @alias NAME {TYPE}` declares a *structural alias* for `TYPE`.
+- `type NAME = TYPE`, or `#: @type NAME {TYPE}`, declares a *nominal type* whose representation is
+  `TYPE`.
+- `alias NAME = TYPE`, or `#: @alias NAME {TYPE}`, declares a *structural alias* for `TYPE`.
 
-The two forms share one namespace, so reusing a name under either form is an error. A definition
-block is allowed only at the top level of a file. Definitions are project-global, so a reference need
+The two forms share one namespace, so reusing a name under either form is an error, except for a
+`#:` definition paired with the inline one directly below it
+([inline and comment annotations together](#inline-and-comment-annotations-together)). A definition
+is allowed only at the top level of a file. Definitions are project-global, so a reference need
 not come after the declaration; [type names](#type-names) has the scoping rules.
 
 The declared type parameters are in scope only within `TYPE`, where they shadow any project-global
@@ -527,7 +584,7 @@ is not reported.
 <TabItem label="Inline">
 
 ```r
-#: @alias Box<T> {list{ value: T }}
+alias Box<T> = list{ value: T }
 
 value: Box<integer> <- list(value = 1L)
 ```
@@ -569,11 +626,10 @@ structural value does not satisfy the nominal type:
 <TabItem label="Inline">
 
 ```r
-#: @type Person {list{ name: character, age: double }}
-#: @type Pet {list{ name: character, age: double }}
+type Person = list{ name: character, age: double }
+type Pet = list{ name: character, age: double }
 
-#: @new Person
-person <- list(name = "bob", age = 20)
+person <- @Person(list(name = "bob", age = 20))
 
 shape: list{ name: character, age: double } <- person
 
@@ -1128,15 +1184,34 @@ representation. Use [`@new`](#nominal-introduction) instead.
 already knows the type, `@if-unknown` is an error, even if the requested type matches the known one,
 so it can never override information the checker has.
 
-Coercions have no inline spelling and are written only as `#:` comments:
+Inline, the directive goes between the binding's `:` and its type:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
 
 ```r
-#: @if-unknown integer
-value <- unsupported_value   # valid only if `unsupported_value` is `Unknown`
+frame <- data.frame(a = 1)
+
+gap: @if-unknown integer <- frame$a   # valid: `frame$a` is `Unknown`
+
+value: @if-unknown integer <- 1L      # an error: the type is already known
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+frame <- data.frame(a = 1)
 
 #: @if-unknown integer
-value <- 1L                  # an error: the type is already known
+gap <- frame$a   # valid: `frame$a` is `Unknown`
+
+#: @if-unknown integer
+value <- 1L      # an error: the type is already known
 ```
+
+</TabItem>
+</Tabs>
 
 ### Trusted coercions
 
@@ -1144,10 +1219,27 @@ value <- 1L                  # an error: the type is already known
 the usual compatibility at that site. It has the same effect as coercing the value to `Any` and then
 to `TYPE`, and exists as a shorter way to write that.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
+callback <- function(x) x
+
+render_count: @trust fn(count: integer) -> character <- callback
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+callback <- function(x) x
+
 #: @trust fn(count: integer) -> character
 render_count <- callback
 ```
+
+</TabItem>
+</Tabs>
 
 A trusted coercion silences a real error as readily as a false one, so use it only when you know
 more than the checker does.
@@ -1168,7 +1260,20 @@ expression has the nominal type from then on.
 - `@new` is an annotation form, not a type expression, so it cannot appear inside a compact type or
   an expanded function annotation.
 
-Type definitions and `@new` have no inline spelling and are written only as `#:` comments:
+Inline, `@Person(value)` introduces the nominal type on any expression, and `x: @new Person <- value`
+on a binding:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Person<T> = list{ value: T }
+
+value <- @Person<integer>(list(value = 1L))
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: @type Person<T> {list{ value: T }}
@@ -1176,6 +1281,9 @@ Type definitions and `@new` have no inline spelling and are written only as `#:`
 #: @new Person<integer>
 value <- list(value = 1L)
 ```
+
+</TabItem>
+</Tabs>
 
 ## Operators
 
@@ -2506,13 +2614,12 @@ enough to get slot types, constructor arity, and field access checked on an S4 o
 <TabItem label="Inline">
 
 ```r
-#: @type Point {list{x: double, y: double}}
+type Point = list{x: double, y: double}
 
 setClass("Point", representation(x = "numeric", y = "numeric"))
 
 make_point <- function(x: double, y: double) -> Point {
-  #: @new Point
-  new("Point", x = x, y = y)
+  @Point(new("Point", x = x, y = y))
 }
 
 norm2 <- function(p: Point) -> double sqrt(p$x^2 + p$y^2)
