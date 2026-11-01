@@ -3097,3 +3097,62 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+
+# Decision record: data-oriented design and explicit allocators
+
+Performance comes first (user directive, `AGENTS.md` "Goals"), so hot data is laid out for the
+cache and allocated in bulk. The open audit list is `backlog.md`, "Open: data-oriented layouts and
+explicit allocators".
+
+- **The rule.** Hot data is a set of dense arrays indexed by small `Copy` ids (`u32`), not a graph
+  of individually boxed nodes. Split a record into parallel arrays when a hot loop reads only some
+  of its fields, keep variable-length children in one flat side array addressed by ranges, and use
+  bitsets for per-element flags. Memory that lives exactly as long as one phase (one item check,
+  one parse, one JIT compilation, one query plan) comes from an arena or bump allocator that is
+  reset or dropped as a whole, so the phase pays neither per-node `malloc` nor per-node `free`.
+  Long-lived objects of one shape come from pools of that shape. A new hot structure that holds
+  `Box`, `Vec` or `String` per node needs a reason.
+- **Where it applies first.** The checker's per-item inference (types built mid-check), HIR
+  lowering, the JIT's analysis plan, and the heap's mark and sweep. The table engine already keeps
+  columns in Arrow buffers and accumulators as struct-of-arrays, so it changes only at the edges.
+- **Allocator API status (checked against the Rust docs, the tracking issue and releases.rs).**
+  `std::alloc::Allocator` was nightly-only (`allocator_api`, rust-lang/rust#32838) until
+  rust-lang/rust#156882 stabilized a subset for Rust 1.100.0: the `Allocator` trait, `Global`,
+  `System`, and the allocator parameter of `Box<T, A>` and `Vec<T, A>` with their `new_in` and
+  `with_capacity_in` families. 1.100.0 is scheduled for stable on 12 November 2026. The
+  `Store` API, `StaticAllocator`, and `Box::into_pin` with a custom allocator stay unstable, and
+  std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter. CI builds with
+  `dtolnay/rust-toolchain@stable`, the dev container has rustc 1.97.0 (which rejects
+  `Vec::new_in`), and the nix flake uses the latest nightly. The workspace has no
+  `rust-toolchain` file and no `rust-version`.
+- **The route that works on every toolchain.** `allocator-api2` is the stable polyfill of the
+  trait and of `Vec`/`Box`, and `hashbrown` (already a `heap` dependency) accepts it for its maps.
+  `bumpalo` with its `allocator-api2` feature gives a bump arena those collections can allocate
+  in, so `hashbrown::HashMap::new_in(&bump)` and `allocator_api2::vec::Vec::new_in(&bump)` build and
+  run on stable rustc 1.97.0 (bumpalo 3.20, hashbrown 0.16, allocator-api2 0.2). Move to std's `Vec<T, A>` and
+  `Box<T, A>` once every toolchain the project builds with is 1.100 or newer; maps stay on
+  `hashbrown`. Whether `bumpalo` implements the stabilized std trait without its nightly
+  `allocator_api` feature is unverified.
+- **The global allocator stays mimalloc.** The `ry` binary sets it as `#[global_allocator]`
+  (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
+  own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
+  TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
+  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+- **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
+  by value, because salsa stores them across revisions and backdates by equality. So an arena
+  never leaks into a memoized result: a query does its work in a scratch arena and copies the
+  result out into a compact owned form (boxed slices, dense tables indexed by `ExprId`). Interned
+  ids (`Ty`, `Name`) are already dense indices, but every intern goes through salsa's shared
+  table. Types an item check builds and throws away belong in a per-check store, and only
+  exported schemes and recorded expression types get interned.
+- **R's C API.** Every `SEXP` lives in `heap`'s collector, because native code holds it for an
+  unknown time, through `PROTECT`, preserved objects and external pointers, and R's semantics
+  decide when it dies. A phase arena must never back an R object that can escape to C. The heap's
+  own size-class pages are already per-shape pools, and data-oriented design applies inside it
+  (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
+  pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
+  Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
+  memory. Incremental analysis is unaffected as long as memoized results stay owned and
+  value-compared, which this rule requires. Each audit item is measured before and after, and a
+  layout change that does not pay is reverted.

@@ -390,6 +390,62 @@ only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\
   while the environment still holds the old value; and an allocation failure inside `boxed()`
   (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
 
+## Open: data-oriented layouts and explicit allocators
+
+The rule and its limits are in `decisions.md`, "Data-oriented design and explicit allocators". This
+is the audit list, highest expected win first. The layouts below were read from the code; every
+expected win is unverified until measured, so profile before and after each change, and revert a
+change that does not pay.
+
+1. **The checker's types: a per-item store instead of interning every intermediate type.** `Ty`
+   is a salsa interned struct over `TyKind`, whose composite variants own `Vec<Ty>` children
+   (`crates/semantics/src/types.rs`). Every type `Checker::infer` builds mid-check, including
+   unions, substitutions and resolved variables, allocates a `Vec`, hashes it and goes through
+   salsa's shared intern table. Target: a per-check SoA store (kind tags, one flat child array,
+   `u32` ids, union-find variables in the style of Roc's `Subs`), interning only exported schemes
+   and recorded expression types at the item boundary. Expected win: item checking is about 45% of
+   cold-check CPU at roughly 1.5 µs per expression, and this is the structural cut the 1 s target
+   needs ("Benchmark code bases (measured)").
+2. **HIR as flat arrays.** `ExpressionKind` and `PatternKind` hold `Box<[Argument]>`,
+   `Box<[Parameter]>`, `Box<[ExprId]>` and similar lists, one allocation each
+   (`crates/semantics/src/hir.rs`). Target: per item, a tag array, a fixed-width payload
+   array and one `extra: Vec<u32>` side array for variable-length children, in the style of Zig's
+   AST, so lowering an item makes a handful of allocations instead of one per list. Expected win:
+   lowering is 13% of cold CPU, and HIR is among the largest memo holders at about 1.4 KiB per
+   line.
+3. **The JIT's analysis plan.** `Plan` stores `Inst { operands: Vec<usize> }` per instruction, a
+   full `State` (two `Vec`s) before every instruction and along every edge, liveness as
+   `Vec<Vec<bool>>`, and `block_at` as a hash map keyed by pc (`crates/jit/src/analysis.rs`).
+   Target: operands in one `Vec<u32>` addressed by ranges, states as rows of one flat matrix with
+   stride `registers + slots`, liveness as a bitset, `block_at` as a dense array, all in a bump
+   arena dropped after codegen. Expected win: compile latency, which decides how early and how much
+   code the JIT can afford to compile once it compiles calls.
+4. **Side mark bitmaps in the collector.** The mark bit lives in each object's `Header`
+   (`crates/heap/src/object.rs`); `sweep_all` reads the header of every slot on every page, and
+   `sweep_young` chases the `young: Vec<Sexp>` list in allocation order (`crates/heap/src/heap.rs`).
+   Target: a mark bitmap and a free bitmap per page, so marking writes dense bits and sweeping
+   scans words without touching dead objects. The header layout is private (packages reach it only
+   through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
+   in large-heap sessions such as the data.table groupby workloads.
+5. **The allocation fast path.** `Heap::allocate` searches `SLOT_SIZES` linearly, pops a `Vec`
+   free list, zeroes the whole slot and pushes onto `young` (`crates/heap/src/heap.rs`). Target: a
+   size-to-class lookup table, bump allocation through free runs of a page, and zeroing only what
+   must be initialized (pointer-holding objects; R leaves atomic vector payloads uninitialized).
+   Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
+   2.5 to 3 times slower than GNU R ("Open: the JIT").
+6. **Scratch storage for argument matching.** `match_args` returns a fresh `Vec<Sexp>` on every
+   closure call (`crates/interp/src/eval.rs`). Target: a reusable scratch stack beside the
+   bytecode register file, so a call allocates only what R's semantics require (the frame and its
+   promises). Expected win: call-heavy code such as fib, lapply and `micro/closures`.
+7. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
+   through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
+   re-check. Target: hash the index, and sort by spelling only where output order is visible.
+   Check first which maps rely on string order for deterministic output.
+8. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
+   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
+   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
+   only alongside other work in that file.
+
 ## Open: performance and memory
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
@@ -505,14 +561,6 @@ Format is 113 ms of parse plus about 890 ms of render, so the render is about ei
 at 1.9 MiB/s against about 18 MiB/s for parsing. The actionable part is to fan `fmt` out the way
 `check` already does. The render's factor of eight was not localized and needs its own profile
 before anyone touches it.
-
-### Suspected: `Checker::infer` deep-clones an `Expression` per call
-
-`let expression = self.module.expression(id).clone();` sits on the checker's hottest path. It clones
-a `NameRef(String)`, a `Call{arguments: Vec<Argument>}` and a `Binary{special_name: Option<String>}`
-per node, while most arms then re-extract only `Copy` fields. The clone exists only to release the
-borrow on `self.module`. It appeared in the profile solely as `drop_in_place` and allocator frames,
-so its cost was never isolated. Measure before acting.
 
 ### Open from a fixed entry: the `BTreeMap` choice in `ItemNaming`
 
