@@ -835,6 +835,21 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
     };
     let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
     reads.extend(naming.namespace_reads.values().filter_map(|read| read.name));
+    // A call head bound locally to a non-function falls through to the project global of its
+    // name, unless the chain already holds the top-level slot, which is that global.
+    reads.extend(naming.callee_fallbacks.iter().filter_map(|(callee, fallback)| {
+        let slot = naming.resolutions.get(callee)?;
+        let top_level = |slot: &naming::BindingId| {
+            naming
+                .bindings
+                .get(slot)
+                .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
+        };
+        if top_level(slot) || fallback.outer.iter().any(top_level) {
+            return None;
+        }
+        Some(naming.bindings.get(slot)?.name)
+    }));
     reads
 }
 
@@ -1410,6 +1425,14 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         Some(global_scheme(self.db, self.winner(interned)?))
     }
 
+    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
+        let library = stubs::stubs(self.db)?;
+        match library.schemes.get(name) {
+            Some(candidates) => Some(candidates.clone()),
+            None => library.known_exports.contains(name).then(Vec::new),
+        }
+    }
+
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
         // A project definition shadows the stub set, disabling per-call overload selection.
         let interned = types::Name::new(self.db, name.to_owned());
@@ -1488,6 +1511,10 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
             .get(name)
             .cloned()
             .or_else(|| self.base.earlier_binding(name))
+    }
+
+    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
+        self.base.library_candidates(name)
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {

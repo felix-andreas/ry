@@ -2005,6 +2005,37 @@ A name reference evaluates to the type currently bound to the name. When the nam
 checker reports it as unresolved, and treats the reference as `Unknown` from then on, so checking
 continues without a cascade of follow-on errors.
 
+### Called names
+
+R looks up the name in a call `f(...)` as a function: a binding whose value is not a function is
+skipped, and the lookup continues outward. A called name therefore resolves to the nearest binding
+whose type can be a function, so this is clean:
+
+```r
+upper_names <- function(x) {
+  names <- toupper(names(x))
+  names(x)
+}
+```
+
+- A binding whose type is definitely not a function (`NULL`, an atomic vector, a list, a record, a
+  tuple, a tag or a frame) is skipped. The lookup tries the enclosing frames' slots of the same name,
+  then the package's top-level binding, then the library. A top-level `l10n_info <- NULL` therefore
+  leaves `l10n_info()` calling base's function.
+- A binding typed as a function, `Unknown`, `Any`, a type parameter or a nominal type is used, as
+  before.
+- A binding with no type information yet, such as an unannotated parameter nothing has constrained,
+  may hold anything. When an outer binding of the same name is a function, the call could reach
+  either one, so it types as `Unknown` and constrains neither: `function(x, names) names(x)` does not
+  make `names` a function parameter. With no function of that name further out, the call checks
+  against the binding as usual, so `function(x, callback) callback(x)` still infers `callback` as a
+  function.
+- When no binding of the name is a function, R reports the call, and so does the checker: the error
+  names the nearest binding's type.
+- Hover and go-to-definition on the called name follow the binding the call reaches.
+
+`pkg::name` is never looked up this way: it names one namespace, as described next.
+
 ### Namespace access
 
 `pkg::name` and `pkg:::name` read one name directly from a package's namespace, bypassing lexical
@@ -2018,8 +2049,9 @@ scoping.
   and wins over a stub namespace of the same name. The name itself is not validated, because a
   package exports names its sources never bind: re-exports, S4 generics from `setGeneric`, datasets
   under `data/`, and bindings installed by `.onLoad`.
-- When the stubs declare `name` in `pkg`, the qualified read has the stub's type, exactly like the
-  bare name. A name that only the namespace's [export manifest](#standard-library-exports) lists
+- When the stubs declare `name` in `pkg`, the qualified read has the stub's type. A project binding
+  of the same name does not change it: `base::date()` calls base's `date` even when the package
+  defines its own `date`. A name that only the namespace's [export manifest](#standard-library-exports) lists
   validates the same way, and types as `Unknown`.
 - An unknown namespace warns, and so does a known namespace that neither declares nor lists the name
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
