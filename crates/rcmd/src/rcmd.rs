@@ -245,6 +245,14 @@ exec "$cmd" $extra "$@"
 "#
         ),
     )?;
+    // `install.packages` refuses source packages unless `bin/INSTALL` exists, and scripts call
+    // `bin/SHLIB` and `bin/config` directly, so these forward to ry's `R CMD`.
+    for command in ["INSTALL", "SHLIB", "config"] {
+        write_script(
+            &root.join("bin").join(command),
+            &format!("#!/bin/sh\nexec '{home}/bin/R' CMD {command} \"$@\"\n"),
+        )?;
+    }
     write_script(
         &root.join("bin/Rscript"),
         &format!(
@@ -1357,11 +1365,16 @@ pub fn shlib(
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
-    command
-        .arg("-f")
-        .arg(home.join("etc/Makeconf"))
-        .arg("-f")
-        .arg(home.join("share/make/shlib.mk"));
+    command.arg("-f").arg(home.join("etc/Makeconf"));
+    if let Some(site) = site_makevars(home) {
+        command.arg("-f").arg(site);
+    }
+    command.arg("-f").arg(home.join("share/make/shlib.mk"));
+    // The user's Makevars comes last so it overrides the toolchain, as in GNU R; pkgbuild hides
+    // the compilers by pointing `R_MAKEVARS_USER` at one that sets `CC = test`.
+    if let Some(user) = user_makevars() {
+        command.arg("-f").arg(user);
+    }
     command.arg(format!("SHLIB={output}"));
     if !makevars_text.lines().any(|line| {
         line.split_once('=')
@@ -1405,6 +1418,31 @@ pub fn shlib(
     );
     run_command(&mut command)?;
     Ok(directory.join(output))
+}
+
+/// The site Makevars GNU R reads after `Makeconf`: `R_MAKEVARS_SITE`, else `etc/Makevars.site`.
+fn site_makevars(home: &Path) -> Option<PathBuf> {
+    match std::env::var_os("R_MAKEVARS_SITE") {
+        Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => Some(home.join("etc/Makevars.site")).filter(|path| path.exists()),
+    }
+}
+
+/// The user Makevars GNU R reads last: `R_MAKEVARS_USER`, else `~/.R/Makevars-<platform>`, else
+/// `~/.R/Makevars`.
+fn user_makevars() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("R_MAKEVARS_USER").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    let directory = PathBuf::from(std::env::var_os("HOME")?).join(".R");
+    let platform = std::env::var("R_PLATFORM")
+        .ok()
+        .filter(|platform| !platform.is_empty());
+    platform
+        .map(|platform| directory.join(format!("Makevars-{platform}")))
+        .into_iter()
+        .chain([directory.join("Makevars")])
+        .find(|path| path.is_file())
 }
 
 #[cfg(test)]
