@@ -856,6 +856,7 @@ corpus cache, and an OSS-Fuzz submission.
 
 Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
 
+- **The simulator must model idle preemption once `CancelHandle` lands** (`preempt_idle`/`set_idle` in `server.rs`: a request queued during an idle unit cancels that unit, never a sync or another request). Schedule requests mid-idle-unit and check the preempted unit is redone, including `pending_lowering`.
 - **`R CMD INSTALL` output that `library()` accepts.** `rcmd::install` writes `DESCRIPTION`,
   `NAMESPACE`, `R/*.R` and `libs/`, but no `Meta/package.rds`, `Meta/nsInfo.rds` or lazy-load
   database, so `library(pkg, lib.loc = ...)` fails with "not a valid installed package" under both
