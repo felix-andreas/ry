@@ -2110,6 +2110,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   constant or a symbol is not checked. The `ry run` preflight analyzes the
   script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
   file defines, which `ry check` accepts.
+- **`Tailcall` does not reuse the caller's frame** (`do_tailcall` in `crates/interp/src/eval.rs`), so
+  a deep tail-recursive loop written with it still grows the stack. GNU R 4.6 replaces the frame.
+- **R 4.4 and 4.5 are supported by reading GNU R's sources, not by running them.** Install both and
+  run the oracle and the interp and ry suites under each (`ORACLE_R`, `R_HOME`). Under 4.6.1 seven
+  oracle cases differ, mostly for build reasons (OpenBLAS digits, glibc `mktime` state, a NaN
+  payload), plus one that calls the removed `C_pKS2`; `contributing/corpus-and-oracle.md` lists them.
 - **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.

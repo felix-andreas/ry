@@ -17,7 +17,9 @@ use {
 };
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
-    ("Rmd5", do_md5),
+    ("Rmd5", |call| unsafe { digest(call, md5) }),
+    ("Rsha256", |call| unsafe { digest(call, sha256) }),
+    ("remove_dot_segments_wrapper", do_remove_dot_segments),
     ("check_nonASCII", do_check_non_ascii),
     ("check_nonASCII2", do_check_non_ascii2),
     ("nonASCII", do_non_ascii),
@@ -41,9 +43,20 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     }),
 ];
 
-/// `Rmd5(files)`: the MD5 digest of each file in hexadecimal, `NA` when it cannot be read.
-unsafe fn do_md5(call: &NativeCall<'_>) -> R<Sexp> {
+/// `Rmd5(files)` and `Rsha256(files)`: the digest of each file in hexadecimal, `NA` when it
+/// cannot be read. From R 4.5 on the argument may instead be a raw vector, whose own digest is
+/// the single result.
+unsafe fn digest<const N: usize>(call: &NativeCall<'_>, hash: fn(&[u8]) -> [u8; N]) -> R<Sexp> {
+    let hex = |bytes: &[u8]| -> String {
+        hash(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
     let files = call.arg(0);
+    if files.kind() == SexpType::Raw {
+        return values::scalar_string(&hex(values::raws(files)));
+    }
     if files.kind() != SexpType::String {
         return Err(error("argument 'files' must be character"));
     }
@@ -52,15 +65,128 @@ unsafe fn do_md5(call: &NativeCall<'_>) -> R<Sexp> {
         .map(|file| {
             let path = crate::connections::expand_path(&file?);
             let bytes = std::fs::read(path).ok()?;
-            Some(
-                md5(&bytes)
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
-            )
+            Some(hex(&bytes))
         })
         .collect();
     values::string_vector_na(&digests)
+}
+
+/// R 4.5's `remove_dot_segments_wrapper(paths)`: RFC 3986's "remove dot segments" on each
+/// path, which `R CMD check` uses to resolve relative links in a package's documentation.
+unsafe fn do_remove_dot_segments(call: &NativeCall<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    if paths.kind() != SexpType::String {
+        return Err(error("argument 'x' must be character"));
+    }
+    let resolved: Vec<Option<String>> = values::strings(paths)
+        .into_iter()
+        .map(|path| path.map(|path| remove_dot_segments(&path)))
+        .collect();
+    values::string_vector_na(&resolved)
+}
+
+/// RFC 3986, section 5.2.4.
+fn remove_dot_segments(path: &str) -> String {
+    let mut input = path;
+    let mut output = String::new();
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix("../") {
+            input = rest;
+        } else if let Some(rest) = input.strip_prefix("./") {
+            input = rest;
+        } else if input.starts_with("/./") {
+            input = &input[2..];
+        } else if input == "/." {
+            input = "/";
+        } else if input.starts_with("/../") || input == "/.." {
+            input = if input == "/.." { "/" } else { &input[3..] };
+            match output.rfind('/') {
+                Some(slash) => output.truncate(slash),
+                None => output.clear(),
+            }
+        } else if input == "." || input == ".." {
+            input = "";
+        } else {
+            let start = usize::from(input.starts_with('/'));
+            let end = input[start..]
+                .find('/')
+                .map_or(input.len(), |slash| slash + start);
+            output.push_str(&input[..end]);
+            input = &input[end..];
+        }
+    }
+    output
+}
+
+/// SHA-256 as FIPS 180-4 specifies it.
+fn sha256(message: &[u8]) -> [u8; 32] {
+    let constants: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut padded = message.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&((message.len() as u64).wrapping_mul(8)).to_be_bytes());
+    for block in padded.as_chunks::<64>().0 {
+        let mut schedule = [0u32; 64];
+        for (word, bytes) in schedule.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*bytes);
+        }
+        for index in 16..64 {
+            let early = schedule[index - 15];
+            let late = schedule[index - 2];
+            let sigma0 = early.rotate_right(7) ^ early.rotate_right(18) ^ (early >> 3);
+            let sigma1 = late.rotate_right(17) ^ late.rotate_right(19) ^ (late >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(sigma0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(sigma1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        for index in 0..64 {
+            let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choice = (e & f) ^ (!e & g);
+            let first = h
+                .wrapping_add(sum1)
+                .wrapping_add(choice)
+                .wrapping_add(constants[index])
+                .wrapping_add(schedule[index]);
+            let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let second = sum0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(first);
+            d = c;
+            c = b;
+            b = a;
+            a = first.wrapping_add(second);
+        }
+        for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
+    let mut digest = [0u8; 32];
+    for (bytes, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *bytes = word.to_be_bytes();
+    }
+    digest
 }
 
 /// MD5 as RFC 1321 specifies it.

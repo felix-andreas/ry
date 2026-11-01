@@ -176,6 +176,8 @@ impl ProcessEngine {
 
     /// ry's own runtime, `ry run --runtime ry`. The binary is `$ORACLE_RY`, or the workspace's
     /// debug build.
+    /// It loads base R from the same installation as the GNU R engine ([`gnu_r_home`]), so one
+    /// `ORACLE_R` selects the R version both sides run.
     pub fn ry() -> Self {
         ProcessEngine {
             name: "ry".to_string(),
@@ -183,7 +185,9 @@ impl ProcessEngine {
             arguments: ["run", "--runtime", "ry"].map(String::from).to_vec(),
             driver: Some(Driver::Script),
             erases_annotations: false,
-            environment: Vec::new(),
+            environment: gnu_r_home()
+                .map(|home| vec![("R_HOME".to_string(), home)])
+                .unwrap_or_default(),
             timeout: None,
         }
     }
@@ -431,6 +435,18 @@ impl Drop for Scratch {
 
 fn gnu_r_program() -> String {
     std::env::var("ORACLE_R").unwrap_or_else(|_| "R".to_string())
+}
+
+/// The R home of `ORACLE_R`, as its `R RHOME` prints it, when `ORACLE_R` is set. Without it,
+/// ry finds base R the way it does for a user (`R_HOME`, then the usual places).
+pub fn gnu_r_home() -> Option<String> {
+    std::env::var_os("ORACLE_R")?;
+    let output = Command::new(gnu_r_program()).arg("RHOME").output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|home| !home.is_empty())
 }
 
 pub fn gnu_r_available() -> bool {

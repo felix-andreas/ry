@@ -574,9 +574,23 @@ impl BaseVersion {
         let version = field("Version").ok_or_else(|| {
             Error::Package(format!("{} has no Version field", description.display()))
         })?;
-        let date = field("Last Changed Date").unwrap_or_default();
+        // The revision and release date live in `SVN-REVISION` of the GNU R home the base
+        // package really belongs to; ry's own home links `library/base` there.
+        let svn = description
+            .parent()
+            .and_then(|base| fs::canonicalize(base).ok())
+            .and_then(|base| Some(base.parent()?.parent()?.join("SVN-REVISION")))
+            .and_then(|path| fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        let svn_field = |name: &str| {
+            svn.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let date = svn_field("Last Changed Date").unwrap_or_default();
         let mut date = date.splitn(3, '-').map(str::to_owned);
-        let revision = field("Revision")
+        let revision = svn_field("Revision")
             .and_then(|revision| revision.parse().ok())
             .unwrap_or(0);
         Ok(BaseVersion {

@@ -63,6 +63,12 @@ and `ry load` need a GNU R installation built as a shared library (see the
 R's R sources and the default packages from your GNU R installation instead of shipping them, so
 ry stays independent of R's license.
 
+ry's runtime supports GNU R 4.3 and every later release, and has been checked against R 4.3.3
+and 4.6.1. It emulates the version it finds: `R.version`, `getRversion()` and the check that a
+package was built under a compatible R all report the installation's version, and where R changed
+behavior between releases (how complex numbers print, `is.atomic(NULL)`, and so on), ry behaves
+like that release. An older R stops `ry run` with an error that names the version it found.
+
 ry finds that installation through `R_HOME` when it is set. Otherwise `ry run` looks in the
 usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it runs the R on your
 `PATH`. The usual places are:
