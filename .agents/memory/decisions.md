@@ -29,7 +29,7 @@ format, the overload rules, and the export manifests.
 # Decision record: the beta semantics
 
 This record holds the core type-system decisions. `backlog.md` holds the prioritized work that
-follows from them. The semantics contract is `reference/type-system.md`, and it is updated before
+follows from them. The semantics contract is `reference/type-system.mdx`, and it is updated before
 the behavior it describes ships.
 
 ## The R variable model is mutable slots with union joins
@@ -779,7 +779,7 @@ parameter list, `-> TYPE` between the parameter list and the body, and `function
 (or `\<T>(...)`) for type parameters. Every `TYPE` is the `#:` type grammar, run on R's token stream
 by the same parser functions, so there is one type grammar. A function header reads like the compact
 annotation it means: `function(x: integer) -> integer` is `fn(x: integer) -> integer` with formals.
-Docs: `reference/type-system.md#inline-annotation-syntax`.
+Docs: `reference/type-system.mdx#inline-annotation-syntax`.
 
 **Why this shape.** The record above gives the product reasons. The binding form is recognized only where a statement starts
 (top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` outside every bracket, where only `(`, `[` and `{` carry
