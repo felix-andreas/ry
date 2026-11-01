@@ -121,10 +121,10 @@ list(foo = 1L, bar = "x")[["foo"]]
 #++++
 integer
 
-#---- double_bracket_record_missing_name_reads_null
+#---- double_bracket_record_missing_name_reads_unknown
 list(foo = 1L)[["missing"]]
 #++++
-NULL
+Unknown
 
 #---- double_bracket_array_list
 #: list[integer]
@@ -190,10 +190,10 @@ list(foo = 1L, bar = "x")$foo
 #++++
 integer
 
-#---- dollar_missing_record_field_reads_null
+#---- dollar_missing_record_field_reads_unknown
 list(foo = 1L)$bar
 #++++
-NULL
+Unknown
 
 #---- dollar_near_miss_record_field_rejected
 list(value = 1L)$valeu

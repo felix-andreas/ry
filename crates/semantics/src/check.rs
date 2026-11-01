@@ -9437,7 +9437,8 @@ impl<'db> Checker<'db, '_> {
                     Some(name) => {
                         match fields.iter().find(|field| field.name.text(self.db) == name) {
                             Some(field) => Ok(field.ty),
-                            // `[[` reads an absent name as `NULL`, like `$` without partial matching.
+                            // `[[` reads an absent name as `Unknown`, like `$` without partial
+                            // matching.
                             None => match nearest_name(
                                 &name,
                                 fields.iter().map(|field| field.name.text(self.db)),
@@ -9450,7 +9451,13 @@ impl<'db> Checker<'db, '_> {
                                         container: subject,
                                     },
                                 }),
-                                None => Ok(null(self.db)),
+                                None => {
+                                    self.record_strict_origin(
+                                        origin,
+                                        StrictOriginKind::UnsupportedConstruct,
+                                    );
+                                    Ok(unknown(self.db))
+                                }
                             },
                         }
                     }
@@ -9616,9 +9623,8 @@ impl<'db> Checker<'db, '_> {
         subject: Ty<'db>,
         name: &str,
     ) -> Result<Ty<'db>, TypeError<'db>> {
-        // R answers `NULL` for a name a list lacks (the accumulator idiom), so a member
-        // missing the field makes the read nullable; a field no member carries is a typo,
-        // and `$` on an atomic member is always an error.
+        // A member that lacks the field reads it as `Unknown` (see the record arm); a field
+        // no member carries is a typo, and `$` on an atomic member is always an error.
         if let TyKind::Union(members) = subject.kind(self.db) {
             let mut results = Vec::with_capacity(members.len());
             let mut absent: Option<TypeError<'db>> = None;
@@ -9644,11 +9650,10 @@ impl<'db> Checker<'db, '_> {
                     }
                     Err(widen_error_container(error, subject))
                 }
-                (_, absent) => {
-                    if absent.is_some() {
-                        results.push(null(self.db));
-                    }
-                    Ok(union_of(self.db, results))
+                (_, None) => Ok(union_of(self.db, results)),
+                (_, Some(_)) => {
+                    self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                    Ok(unknown(self.db))
                 }
             };
         }
@@ -9688,8 +9693,10 @@ impl<'db> Checker<'db, '_> {
                 }
             }
             // An R list is open: `$` partially matches a unique prefix (`fit$coef` reads
-            // `coefficients`) and answers `NULL` for a name it lacks, which is how code
-            // fills a list after building it. Only a near miss of a known field reads as a typo.
+            // `coefficients`), and code routinely adds a field after building the list
+            // (`x$total <- ...` in another function), so a name the literal lacks reads as
+            // `Unknown`, not as R's `NULL`: the type records only the fields seen at
+            // construction. Only a near miss of a known field reads as a typo.
             TyKind::Record(fields) => {
                 if let Some(field) = fields.iter().find(|field| field.name.text(self.db) == name) {
                     return Ok(field.ty);
@@ -9709,7 +9716,10 @@ impl<'db> Checker<'db, '_> {
                             container: subject,
                         },
                     }),
-                    None => Ok(null(self.db)),
+                    None => {
+                        self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                        Ok(unknown(self.db))
+                    }
                 }
             }
             TyKind::NativeRecord(fields) => {

@@ -34,10 +34,10 @@ list(foo = 1L, bar = "foo")[["bar"]]
 #++++
 character
 
-#---- record_missing_field_reads_null
+#---- record_missing_field_reads_unknown
 list(foo = 1L)[["bar"]]
 #++++
-NULL
+Unknown
 
 #---- array_like_list_double_bracket_returns_element
 #: list[integer]

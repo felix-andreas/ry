@@ -142,7 +142,7 @@ rec$b
 #++++
 flag: logical
 rec: list{a: integer} | list{b: character}
-character | NULL
+Unknown
 
 #---- subset2_over_union_of_lists
 flag <- TRUE
