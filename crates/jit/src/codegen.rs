@@ -433,7 +433,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             } => {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, forcing)?;
+                    self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.is_unboxed() {
@@ -463,7 +463,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Action::GetFunSlot { dst, slot, load } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, false)?;
+                    self.load_slot(position, &before, slot, ty, false, None)?;
                 }
                 let value = self.load_slot_cell(slot);
                 self.store_register(dst, value);
@@ -1725,11 +1725,32 @@ impl<'p, 'b> Translator<'p, 'b> {
         slot: usize,
         ty: Ty,
         forcing: bool,
+        dst: Option<usize>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         let live = self.plan.live[position].clone();
         let failed = self.deopt(pc, before.clone(), live.clone(), reason::PENDING);
-        let mismatch = self.deopt(pc, before.clone(), live, reason::SPECULATION);
+        // A speculation that fails after the load has already run it, and running it again in
+        // tier 0 would not be the same: a forced promise reads as visible, while forcing it may
+        // have left its value invisible. So the variable's instruction finishes here, with the
+        // value in its register, and tier 0 continues after it.
+        let finish = match dst {
+            Some(dst) => {
+                let resume = self.next_pc(position)?;
+                let resume = self.deopt(resume, before.clone(), live, reason::SPECULATION);
+                Some((self.builder.create_block(), dst, resume))
+            }
+            None => None,
+        };
+        let mismatch = match finish {
+            Some((block, _, _)) => block,
+            None => self.deopt(
+                pc,
+                before.clone(),
+                self.plan.live[position].clone(),
+                reason::SPECULATION,
+            ),
+        };
         let done = self.builder.create_block();
         let load = self.builder.create_block();
         if before.slots[slot].may_be(status::LOADED) {
@@ -1787,6 +1808,13 @@ impl<'p, 'b> Translator<'p, 'b> {
             _ => {}
         }
         self.builder.ins().jump(done, &[]);
+        if let Some((block, dst, resume)) = finish {
+            self.builder.switch_to_block(block);
+            self.builder.set_cold_block(block);
+            let value = self.load_slot_cell(slot);
+            self.store_register(dst, value);
+            self.builder.ins().jump(resume, &[]);
+        }
         self.builder.switch_to_block(done);
         Ok(())
     }
