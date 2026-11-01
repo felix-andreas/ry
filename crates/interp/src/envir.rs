@@ -405,10 +405,12 @@ unsafe fn do_set_parent_env(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
     let env = call.arg(0);
     let target = call.arg(1);
+    // A non-environment falls back to the frame `.Internal(topenv())` runs in, whose top level
+    // is base's namespace, as in GNU R (`topenv(sum)`).
     let env = if env.kind() == SexpType::Environment {
         env
     } else {
-        global_env()
+        call.env
     };
     let mut current = env;
     while current != empty_env() {

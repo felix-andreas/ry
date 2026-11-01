@@ -257,14 +257,20 @@ unsafe fn open_connection(call: &Call<'_>, class: Class) -> R<Sexp> {
         text_lines: Vec::new(),
         partial_line: String::new(),
     };
-    if description.is_empty() && class == Class::File {
-        connection.mode = "w+".into();
+    if is_anonymous(&connection) {
+        // An anonymous file is a scratch buffer opened for both writing and reading: writes
+        // append to the unread input, so a later read sees them, as GNU R's temporary file does.
+        connection.mode = if mode.is_empty() { "w+".into() } else { mode.clone() };
         connection.open = true;
     } else if !mode.is_empty() {
         open(&mut connection)?;
     }
     let index = interp().connections.add(connection);
     connection_object(index)
+}
+
+fn is_anonymous(connection: &Connection) -> bool {
+    connection.class == Class::File && connection.description.is_empty()
 }
 
 fn open(connection: &mut Connection) -> R<()> {
@@ -288,6 +294,9 @@ fn open(connection: &mut Connection) -> R<()> {
 }
 
 fn flush_to_file(connection: &mut Connection) -> R<()> {
+    if is_anonymous(connection) {
+        return Ok(());
+    }
     if connection.mode.starts_with('w') || connection.mode.starts_with('a') {
         let path = expand_path(&connection.description);
         if connection.class == Class::Gzfile {
@@ -415,14 +424,11 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
 
 /// The bytes still to read from a connection, consuming them.
 pub unsafe fn read_all_bytes(file: Sexp) -> R<Vec<u8>> {
-    let index = connection_index(file)?;
-    let connection = interp().connections.get(index)?;
-    if !connection.open {
-        open(connection)?;
-    }
-    let rest = connection.input[connection.position..].to_vec();
-    connection.position = connection.input.len();
-    Ok(rest)
+    with_input(file, |input, position| {
+        let rest = input[*position..].to_vec();
+        *position = input.len();
+        rest
+    })
 }
 
 /// Runs `read` over the unread input of `file`, which advances the position it is given. A
@@ -526,6 +532,8 @@ unsafe fn write_to(index: i32, bytes: &[u8]) -> R<()> {
             let connection = interp().connections.get(index)?;
             if connection.class == Class::Text {
                 text_output(connection, &String::from_utf8_lossy(bytes))?;
+            } else if is_anonymous(connection) {
+                connection.input.extend_from_slice(bytes);
             } else {
                 if !connection.open {
                     if connection.mode.is_empty() {
@@ -622,6 +630,8 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// `readChar(con, nchars, useBytes)`: reads only the characters it returns, so that the rest of
+/// an open connection stays readable, as `load()` relies on after checking a file's magic.
 unsafe fn do_read_char(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
     let counts = call.arg(1);
@@ -1062,4 +1072,8 @@ unsafe fn do_get_all_connections(_call: &Call<'_>) -> R<Sexp> {
         .map(|(index, _)| index as i32)
         .collect();
     values::integer_vector(&indices)
+}
+
+fn truncate(line: &str) -> &str {
+    &line[..line.floor_char_boundary(line.len().min(30))]
 }

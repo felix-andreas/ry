@@ -2611,35 +2611,27 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
 unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let deparse_level = values::as_integer_scalar(call.arg(0));
     let items: Vec<Arg> = call.args[1..].to_vec();
-    // Dispatch: any data frame (or other classed argument with a method) takes over.
+    let expressions = argument_expressions(call.env, items.len())?;
+    // S3 dispatch, as GNU R's `do_bind` does it: the first classed argument with a method
+    // picks it, and the method gets the `...` arguments alone, never `deparse.level`.
     let generic = if by_row { "rbind" } else { "cbind" };
     for arg in &items {
-        if arg.value.is_object() {
-            let classes = crate::dispatch::implicit_class(arg.value)?;
-            for index in 0..length(classes) {
-                let method_name = format!("{generic}.{}", char_str(classes.element(index)));
-                let symbol = values::install(&method_name)?;
-                if let Some(method) =
-                    crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())?
-                {
-                    let mut args = vec![Arg {
-                        tag: values::install("deparse.level")?,
-                        value: call.arg(0),
-                    }];
-                    args.extend(items.iter().copied());
-                    let promised: Vec<Arg> = args
-                        .iter()
-                        .map(|arg| Arg {
-                            tag: arg.tag,
-                            value: arg.value,
-                        })
-                        .collect();
-                    return eval::apply(nil(), method, &promised, call.env);
-                }
+        if !arg.value.is_object() {
+            continue;
+        }
+        let classes = crate::dispatch::implicit_class(arg.value)?;
+        for index in 0..length(classes) {
+            let symbol = values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
+            if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
+                return eval::apply(call.call, method, &items, call.env);
             }
         }
     }
-    let items: Vec<Arg> = items.into_iter().filter(|arg| arg.value != nil()).collect();
+    let (items, expressions): (Vec<Arg>, Vec<Sexp>) = items
+        .into_iter()
+        .zip(expressions)
+        .filter(|(arg, _)| arg.value != nil())
+        .unzip();
     if items.is_empty() {
         return Ok(nil());
     }
@@ -2726,10 +2718,13 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     other_names = dimnames.element(if by_row { 1 } else { 0 });
                 }
             } else {
+                let expression = expressions[position];
                 let name = if arg.tag != nil() {
                     symbol_name(arg.tag).into_owned()
-                } else if deparse_level >= 1 {
-                    String::new()
+                } else if deparse_level >= 1 && expression.kind() == SexpType::Symbol {
+                    symbol_name(expression).into_owned()
+                } else if deparse_level >= 2 && expression != nil() {
+                    crate::deparse::deparse_one_line(expression)
                 } else {
                     String::new()
                 };
@@ -2760,6 +2755,27 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         values::set_attr(result, symbols().dimnames, dimnames)?;
     }
     Ok(result)
+}
+
+/// The unevaluated expressions behind the `...` arguments of the `cbind` or `rbind` closure
+/// whose environment is `env`, which `deparse.level` names untagged vectors after. A position
+/// with no expression to read (the internal called some other way) holds `NULL`.
+unsafe fn argument_expressions(env: Sexp, count: usize) -> R<Vec<Sexp>> {
+    let mut expressions = vec![nil(); count];
+    let dots = eval::find_var(symbols().dots, env)?;
+    if dots.kind() != SexpType::Dots || values::pairlist_length(dots) != count {
+        return Ok(expressions);
+    }
+    let mut cell = dots;
+    for expression in expressions.iter_mut() {
+        let mut value = cell.car();
+        while value.kind() == SexpType::Promise {
+            value = value.cdr();
+        }
+        *expression = value;
+        cell = cell.cdr();
+    }
+    Ok(expressions)
 }
 
 unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {

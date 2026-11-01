@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
 use similar::TextDiff;
 
+pub mod packages;
+
 const DRIVER: &str = include_str!("driver.R");
 
 pub trait Engine {
@@ -108,15 +110,9 @@ impl ProcessEngine {
     /// ry's own runtime, `ry run --runtime ry`. The binary is `$ORACLE_RY`, or the workspace's
     /// debug build.
     pub fn ry() -> Self {
-        let program = std::env::var("ORACLE_RY").unwrap_or_else(|_| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/debug/ry")
-                .display()
-                .to_string()
-        });
         ProcessEngine {
             name: "ry".to_string(),
-            program,
+            program: ry_program(),
             arguments: ["run", "--runtime", "ry"].map(String::from).to_vec(),
             driver: Some(Driver::Script),
             erases_annotations: false,
@@ -135,6 +131,16 @@ impl ProcessEngine {
             erases_annotations: false,
         })
     }
+}
+
+/// The `ry` binary: `$ORACLE_RY`, else the workspace's debug build.
+/// A relative `ORACLE_RY` resolves against the current directory, because the engines run
+/// each case from the case's own directory.
+pub fn ry_program() -> String {
+    let program = std::env::var("ORACLE_RY").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry")
+    });
+    std::fs::canonicalize(&program).unwrap_or(program).display().to_string()
 }
 
 impl Engine for ProcessEngine {

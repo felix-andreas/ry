@@ -23,7 +23,7 @@
 //!   from and the binding cell it found.
 
 use crate::{
-    builtins::{Arg, BuiltinDef, Generic},
+    builtins::{Arg, BuiltinDef, Call, Generic, internal},
     conditions, dispatch,
     eval::{self, as_condition},
     interp,
@@ -36,7 +36,22 @@ use heap::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
-pub const BUILTINS: &[BuiltinDef] = &[];
+/// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
+/// `mkCode` turns it into byte code; ry keeps only the buffer's first constant, the source
+/// expression, exactly as it reads GNU R byte code from a stream, and compiles that itself.
+pub const BUILTINS: &[BuiltinDef] = &[
+    internal("bcVersion", 0, |_| unsafe { values::scalar_integer(GNU_R_BYTECODE_VERSION) }),
+    internal("mkCode", 2, do_mk_code),
+    internal("bcClose", 3, |call| unsafe { eval::make_closure(call.arg(0), call.arg(1), call.arg(2)) }),
+    internal("growconst", 1, do_grow_constants),
+    internal("putconst", 3, do_put_constant),
+    internal("getconst", 2, do_get_constants),
+    internal("enableJIT", 1, |_| unsafe { values::scalar_integer(0) }),
+    internal("compilePKGS", 1, |_| unsafe { values::scalar_logical(0) }),
+];
+
+/// The byte-code version GNU R 4.3 writes, which `compiler` stamps into every code buffer.
+const GNU_R_BYTECODE_VERSION: i32 = 12;
 
 /// The bytecode tier's session state: the register file and the call counts that decide when
 /// a closure compiles.
@@ -890,10 +905,12 @@ unsafe fn step(
             interp().visible = true;
         }
         Op::GetVar => {
+            // Set first: forcing a promise leaves the visibility of its expression, as in
+            // `f <- function(x) { 1; x }; f(invisible(1))`.
+            interp().visible = true;
             let symbol = constants.element(operand(1));
             let value = lookup_variable(symbol, env, constants, caches, operand(2))?;
             set(operand(0), value);
-            interp().visible = true;
         }
         Op::SetVar => {
             let symbol = constants.element(operand(0));
@@ -922,7 +939,9 @@ unsafe fn step(
             let mut cell = call.cdr();
             for index in 0..count {
                 let value = register(first + index);
-                if value == missing_arg() && !definition.keep_missing {
+                // Only an empty argument in the source is an error. An argument that evaluates
+                // to the missing argument, as `quote(expr = )` does, is an ordinary value.
+                if cell.car() == missing_arg() && !definition.keep_missing {
                     return Err(error_in(call, format!("argument {} is empty", index + 1)));
                 }
                 args.push(Arg { tag: cell.tag(), value });
@@ -1280,4 +1299,69 @@ unsafe fn resolve(symbol: Sexp, mut env: Sexp, function: bool) -> R<Option<Sexp>
         env = env.enclosure();
     }
     Ok(None)
+}
+
+// The `compiler` package's internals.
+
+/// `mkCode(code, consts)`: the source expression, which `compiler` stores as the first constant.
+unsafe fn do_mk_code(call: &Call<'_>) -> R<Sexp> {
+    let constants = call.arg(1);
+    if constants.kind() != SexpType::List || length(constants) == 0 {
+        return Err(call.error("constant buffer must be a generic vector"));
+    }
+    Ok(constants.element(0))
+}
+
+/// `growconst(buffer)`: the constant buffer at twice its length.
+unsafe fn do_grow_constants(call: &Call<'_>) -> R<Sexp> {
+    let buffer = constant_buffer(call)?;
+    let count = length(buffer);
+    let grown = values::alloc(SexpType::List, 2 * count.max(1))?;
+    for index in 0..count {
+        values::set_elt(grown, index, buffer.element(index));
+    }
+    Ok(grown)
+}
+
+/// `putconst(buffer, count, x)`: the 0-based index of `x` among the first `count` constants,
+/// adding it at `count` when no identical constant is there yet.
+unsafe fn do_put_constant(call: &Call<'_>) -> R<Sexp> {
+    let buffer = constant_buffer(call)?;
+    let count = values::as_integer_scalar(call.arg(1));
+    if count < 0 || count as usize >= length(buffer) {
+        return Err(call.error("bad constCount value"));
+    }
+    let count = count as usize;
+    let value = call.arg(2);
+    let flags = crate::sort::IdenticalFlags::default();
+    for index in 0..count {
+        let constant = buffer.element(index);
+        if constant == value || crate::sort::identical(constant, value, &flags) {
+            return values::scalar_integer(index as i32);
+        }
+    }
+    values::set_elt(buffer, count, value);
+    values::scalar_integer(count as i32)
+}
+
+/// `getconst(buffer, n)`: the first `n` constants.
+unsafe fn do_get_constants(call: &Call<'_>) -> R<Sexp> {
+    let buffer = constant_buffer(call)?;
+    let count = values::as_integer_scalar(call.arg(1));
+    if count < 0 || count as usize > length(buffer) {
+        return Err(call.error("bad n"));
+    }
+    let constants = values::alloc(SexpType::List, count as usize)?;
+    for index in 0..count as usize {
+        values::set_elt(constants, index, buffer.element(index));
+    }
+    Ok(constants)
+}
+
+unsafe fn constant_buffer(call: &Call<'_>) -> R<Sexp> {
+    let buffer = call.arg(0);
+    if buffer.kind() != SexpType::List {
+        return Err(call.error("constant buffer must be a generic vector"));
+    }
+    Ok(buffer)
 }

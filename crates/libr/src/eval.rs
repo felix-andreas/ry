@@ -44,7 +44,7 @@ struct Interpreter;
 
 impl Evaluator for Interpreter {
     unsafe fn eval(&self, expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
-        interp::eval::eval(expression, env)
+        eval(expression, env)
     }
 
     unsafe fn apply(
@@ -88,6 +88,7 @@ impl Evaluator for Interpreter {
     }
 
     unsafe fn force_and_call(&self, call: Sexp, count: c_int, env: Sexp) -> ApiResult<Sexp> {
+        normalize_argument_cells(call)?;
         let function = call.car();
         let function = if function.kind() == SexpType::Symbol {
             interp::eval::find_fun(function, env)?
@@ -259,7 +260,28 @@ unsafe fn paste(args: &[Arg]) -> ApiResult<String> {
 }
 
 pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
+    normalize_argument_cells(expression)?;
     interp::eval::eval(expression, env)
+}
+
+/// Retypes the argument cells of every call in `expression` to pairlist cells. Native code
+/// often builds a call as `LCONS(fun, LCONS(arg, R_NilValue))`, whose argument cells are
+/// LANGSXP; GNU R walks any cons cell there, while the interpreter walks pairlist cells only,
+/// so it would see no arguments at all.
+unsafe fn normalize_argument_cells(expression: Sexp) -> ApiResult<()> {
+    if expression.kind() != SexpType::Language {
+        return Ok(());
+    }
+    normalize_argument_cells(expression.car())?;
+    let mut cell = expression.cdr();
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        if cell.kind() == SexpType::Language {
+            runtime().heap.retype(cell, SexpType::Pairlist)?;
+        }
+        normalize_argument_cells(cell.car())?;
+        cell = cell.cdr();
+    }
+    Ok(())
 }
 
 pub unsafe fn force_promise(promise: Sexp) -> ApiResult<Sexp> {
@@ -285,7 +307,7 @@ pub unsafe fn deparse_call(call: Sexp) -> Option<String> {
     if call.kind() == SexpType::Nil {
         return None;
     }
-    Some(interp::deparse::deparse_one_line(call))
+    Some(interp::deparse::deparse_first_line(call))
 }
 
 /// An unwind as the condition object R handlers receive.
@@ -327,7 +349,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let restarts = state.restarts.take();
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
-        let result = interp::eval::eval(expression, env);
+        let result = eval(expression, env);
         let state = interp::interp();
         state.handlers = handlers;
         state.restarts = restarts;
@@ -444,26 +466,16 @@ impl crate::boundary::Handout for Option<Sexp> {
 // The builtins the interpreter calls native code through.
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
-    builtin(".Call", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
-    }),
-    builtin(".External", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
-    }),
-    builtin(".External2", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
-    }),
-    builtin(".Call.graphics", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
-    }),
-    builtin(".External.graphics", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
-    }),
+    builtin(".Call", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
+    builtin(".External", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
+    builtin(".Call.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
+    builtin(".External.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
     builtin(".Fortran", -1, |call| unsafe {
         dot_c(call, RoutineKind::Fortran)
     }),
-    internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }),
+    internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
     internal("getRegisteredRoutines", 1, |call| unsafe {
@@ -487,6 +499,15 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
         return Ok(value);
     }
     native_call(call.call, &tagged_values(call), kind)
+}
+
+/// `.External2`: an external routine called as `fun(call, op, args, env)`, where `env` is the
+/// environment `.External2` was called from.
+unsafe fn dot_external2(call: &Call<'_>) -> ApiResult<Sexp> {
+    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+        return Ok(value);
+    }
+    native_call_in(call.call, &tagged_values(call), RoutineKind::External, Some((call.op, call.env)))
 }
 
 /// `.C` and `.Fortran`, routed like [`dot_call`].
@@ -515,6 +536,17 @@ pub unsafe fn native_call(
     call: Sexp,
     arguments: &[(Sexp, Sexp)],
     kind: RoutineKind,
+) -> ApiResult<Sexp> {
+    native_call_in(call, arguments, kind, None)
+}
+
+/// [`native_call`], with `external2` holding the `op` and `env` an `.External2` routine also
+/// receives.
+unsafe fn native_call_in(
+    call: Sexp,
+    arguments: &[(Sexp, Sexp)],
+    kind: RoutineKind,
+    external2: Option<(Sexp, Sexp)>,
 ) -> ApiResult<Sexp> {
     let what = kind.interface();
     let Some(((_, name), rest)) = arguments.split_first() else {
@@ -634,9 +666,12 @@ pub unsafe fn native_call(
             }
             let list = runtime()
                 .heap
-                .alloc_triple(SexpType::Language, *name, list, nil)?;
+                .alloc_triple(SexpType::Pairlist, *name, list, nil)?;
             runtime().heap.root(list);
-            call_native(function, &[list], what)
+            match external2 {
+                Some((op, env)) => call_native(function, &[call, op, list, env], what),
+                None => call_native(function, &[list], what),
+            }
         }
         RoutineKind::C | RoutineKind::Fortran => {
             if values.len() > 65 {
