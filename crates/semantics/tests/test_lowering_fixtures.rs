@@ -5,7 +5,7 @@
 use {
     semantics::{
         DocumentKind,
-        hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind},
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         item_hir, item_tree,
         testing::with_fixture_project,
     },
@@ -50,7 +50,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
     let kind = module.kind(id);
     let label = match kind {
         ExpressionKind::Missing => "Missing".to_owned(),
-        ExpressionKind::Literal(literal) => format!("Literal {literal:?}"),
+        ExpressionKind::Literal(literal) => format!("Literal {}", literal_text(module, literal)),
         ExpressionKind::NameRef(name) => format!("NameRef {name}"),
         ExpressionKind::Assign { spelling, .. } => format!("Assign {spelling:?}"),
         ExpressionKind::Unary { operator, .. } => format!("Unary {operator:?}"),
@@ -163,8 +163,9 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
             output.push_str(&format!("{indent}pattern bind {name}\n"));
         }
         PatternKind::Literal { literal, negative } => output.push_str(&format!(
-            "{indent}pattern literal {}{literal:?}\n",
-            if *negative { "-" } else { "" }
+            "{indent}pattern literal {}{}\n",
+            if *negative { "-" } else { "" },
+            literal_text(module, literal)
         )),
         PatternKind::Tag { name, payload, .. } => {
             output.push_str(&format!("{indent}pattern tag :{name}\n"));
@@ -209,5 +210,16 @@ fn render_arguments(output: &mut String, module: &Module, arguments: &[Argument]
             (None, Some(value)) => render_expression(output, module, value, depth),
             (None, None) => output.push_str(&format!("{indent}<empty>\n")),
         }
+    }
+}
+
+/// Renders a literal with its text resolved, as `Integer("1L")`.
+fn literal_text(module: &Module, literal: &LiteralKind) -> String {
+    match literal {
+        LiteralKind::Integer(text) => format!("Integer({:?})", &module[text]),
+        LiteralKind::Double(text) => format!("Double({:?})", &module[text]),
+        LiteralKind::Complex(text) => format!("Complex({:?})", &module[text]),
+        LiteralKind::String(text) => format!("String({:?})", &module[text]),
+        other => format!("{other:?}"),
     }
 }

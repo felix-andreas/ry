@@ -3460,8 +3460,10 @@ explicit allocators".
 - **Target shape (`crates/semantics/src/hir.rs`).** An `ExprId` indexes separate `kinds` and
   `ranges` arrays, because inference reads kinds and mostly only diagnostics read ranges. Each
   list type has one side array in the module and a kind holds a `Span<T>` (`u32` start and
-  length) into it; `module[span]` is the slice. Literal text is a `Symbol`, so every HIR kind is
-  `Copy`. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
+  length) into it; `module[span]` is the slice. Literal text lives in a per-module text buffer that a
+  `Text` span addresses (`module[text]` is the `&str`), so every HIR kind is `Copy`. It is not a
+  `Symbol`, because the interner leaks by design: interning literals would keep every
+  intermediate spelling of a string literal typed in the editor for the life of the server. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
   per-kind child vector. Lowering reads the green tree through `syntax::GreenNodeAt` (green node
   plus absolute start), collects each list on a scratch stack and seals it into its side array
   once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and

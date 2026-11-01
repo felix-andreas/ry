@@ -2934,9 +2934,9 @@ impl<'db> Checker<'db, '_> {
                         let index = argument.value.map(|value| self.module.kind(value));
                         match index {
                             Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
-                                ReplacementStep::Field(name.to_string())
+                                ReplacementStep::Field(self.module[name].to_string())
                             }
-                            Some(kind) => match integer_literal_position(kind) {
+                            Some(kind) => match integer_literal_position(self.module, kind) {
                                 Some(position) => ReplacementStep::Position(position),
                                 None => ReplacementStep::Element,
                             },
@@ -6895,7 +6895,7 @@ impl<'db> Checker<'db, '_> {
                 None => Some(None),
                 Some(value) => match module.kind(value) {
                     ExpressionKind::Literal(LiteralKind::String(text)) => {
-                        Some(Some(text.to_string()))
+                        Some(Some(module[text].to_string()))
                     }
                     _ => None,
                 },
@@ -6993,7 +6993,7 @@ impl<'db> Checker<'db, '_> {
         let expression = value;
         if let ExpressionKind::Literal(LiteralKind::String(text)) = self.module.kind(expression) {
             return Some(self.column_reference(
-                text,
+                &self.module[text],
                 self.module.range(expression),
                 columns,
                 frame,
@@ -7064,7 +7064,12 @@ impl<'db> Checker<'db, '_> {
                         else {
                             return None;
                         };
-                        Some(self.column_reference(text, module.range(first), columns, frame))
+                        Some(self.column_reference(
+                            &module[text],
+                            module.range(first),
+                            columns,
+                            frame,
+                        ))
                     }
                     "lit" => {
                         let ty = column_type(db, *self.recorded.get(&first?)?);
@@ -7090,7 +7095,7 @@ impl<'db> Checker<'db, '_> {
                             return None;
                         };
                         Some(ComputedColumn {
-                            name: alias.to_string(),
+                            name: module[alias].to_string(),
                             ..column
                         })
                     }
@@ -7323,7 +7328,7 @@ impl<'db> Checker<'db, '_> {
         let matched = match_formals(arguments, &["input", "file", "text", "cmd"]);
         let literal = |position: usize| {
             matched[position].and_then(|value| match module.kind(value) {
-                ExpressionKind::Literal(LiteralKind::String(text)) => decode_escapes(text),
+                ExpressionKind::Literal(LiteralKind::String(text)) => decode_escapes(&module[text]),
                 _ => None,
             })
         };
@@ -7544,7 +7549,7 @@ impl<'db> Checker<'db, '_> {
             let expression = value;
             let name = match module.kind(expression) {
                 ExpressionKind::NameRef(name) => name.to_string(),
-                ExpressionKind::Literal(LiteralKind::String(text)) => text.to_string(),
+                ExpressionKind::Literal(LiteralKind::String(text)) => module[text].to_string(),
                 _ => continue,
             };
             if !columns.iter().any(|column| column.name.text(db) == name) {
@@ -7649,7 +7654,7 @@ impl<'db> Checker<'db, '_> {
                 columns.push((".id".to_owned(), self.list_id_type(&module[items])));
             }
             Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
-                columns.push((name.to_string(), self.list_id_type(&module[items])));
+                columns.push((module[name].to_string(), self.list_id_type(&module[items])));
             }
             Some(_) => return unknown_columns,
         }
@@ -7780,7 +7785,9 @@ impl<'db> Checker<'db, '_> {
         let name_of = |value: Option<ExprId>, default: &str| -> Option<String> {
             match value.map(|value| module.kind(value)) {
                 None => Some(default.to_owned()),
-                Some(ExpressionKind::Literal(LiteralKind::String(text))) => Some(text.to_string()),
+                Some(ExpressionKind::Literal(LiteralKind::String(text))) => {
+                    Some(module[text].to_string())
+                }
                 Some(_) => None,
             }
         };
@@ -8649,7 +8656,7 @@ impl<'db> Checker<'db, '_> {
             let named = match self.module.kind(value) {
                 ExpressionKind::Literal(LiteralKind::String(text)) => self
                     .globals
-                    .and_then(|globals| globals.scheme(text, false))
+                    .and_then(|globals| globals.scheme(&self.module[text], false))
                     .map(|scheme| self.instantiate(&scheme)),
                 _ => None,
             };
@@ -8659,7 +8666,9 @@ impl<'db> Checker<'db, '_> {
 
     fn is_whole_double(&self, value: ExprId) -> bool {
         match self.module.kind(value) {
-            ExpressionKind::Literal(LiteralKind::Double(text)) => is_whole_number_double(text),
+            ExpressionKind::Literal(LiteralKind::Double(text)) => {
+                is_whole_number_double(&self.module[text])
+            }
             _ => false,
         }
     }
@@ -9700,7 +9709,7 @@ impl<'db> Checker<'db, '_> {
                                 ) && !matches!(
                                     module.kind(roll_value),
                                     ExpressionKind::Literal(LiteralKind::Integer(text) | LiteralKind::Double(text))
-                                        if text.trim_end_matches('L').parse::<f64>() == Ok(0.0)
+                                        if module[text].trim_end_matches('L').parse::<f64>() == Ok(0.0)
                                 ) && !(matches!(
                                     module.kind(roll_value),
                                     ExpressionKind::NameRef(name) if name == "F"
@@ -10055,7 +10064,7 @@ impl<'db> Checker<'db, '_> {
                     .map(|field| vec![field])
             }
             ExpressionKind::Literal(LiteralKind::String(text)) => {
-                self.literal_groups(&[(&**text, module.range(value))])
+                self.literal_groups(&[(&module[text], module.range(value))])
             }
             ExpressionKind::Call { callee, arguments } => {
                 match variable_name(module, *callee).as_deref() {
@@ -10065,7 +10074,7 @@ impl<'db> Checker<'db, '_> {
                             .filter_map(|argument| argument.value)
                             .filter_map(|item| match module.kind(item) {
                                 ExpressionKind::Literal(LiteralKind::String(text)) => {
-                                    Some((&**text, module.range(item)))
+                                    Some((&module[text], module.range(item)))
                                 }
                                 _ => None,
                             })
@@ -10161,7 +10170,7 @@ impl<'db> Checker<'db, '_> {
         let position = |checker: &mut Self, item: ExprId| {
             let expression = item;
             let name = match module.kind(expression) {
-                ExpressionKind::Literal(LiteralKind::String(text)) => text.to_string(),
+                ExpressionKind::Literal(LiteralKind::String(text)) => module[text].to_string(),
                 ExpressionKind::NameRef(name) => name.to_string(),
                 _ => return Err(()),
             };
@@ -10940,9 +10949,11 @@ impl<'db> Checker<'db, '_> {
             }
             return Ok(union_of(self.db, results));
         }
-        let literal_position = index.and_then(integer_literal_position);
+        let literal_position = index.and_then(|kind| integer_literal_position(self.module, kind));
         let literal_name = match index {
-            Some(ExpressionKind::Literal(LiteralKind::String(name))) => Some(name.to_string()),
+            Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
+                Some(self.module[name].to_string())
+            }
             _ => None,
         };
         match subject.kind(self.db) {
@@ -11769,7 +11780,7 @@ fn lossy_write<'db>(
             matches!(
                 module.kind(literal),
                 ExpressionKind::Literal(LiteralKind::Double(text))
-                    if text.parse::<f64>().is_ok_and(|number| number.fract() != 0.0)
+                    if module[text].parse::<f64>().is_ok_and(|number| number.fract() != 0.0)
             )
         }
         _ => false,
@@ -11882,7 +11893,7 @@ fn literal_strings(module: &Module, value: ExprId) -> Option<Vec<(String, TextRa
     let expression = value;
     match module.kind(expression) {
         ExpressionKind::Literal(LiteralKind::String(text)) => {
-            Some(vec![(text.to_string(), module.range(expression))])
+            Some(vec![(module[text].to_string(), module.range(expression))])
         }
         ExpressionKind::Call { callee, arguments }
             if variable_name(module, *callee).as_deref() == Some("c") =>
@@ -11894,7 +11905,7 @@ fn literal_strings(module: &Module, value: ExprId) -> Option<Vec<(String, TextRa
                     let expression = item;
                     match module.kind(expression) {
                         ExpressionKind::Literal(LiteralKind::String(text)) => {
-                            Some((text.to_string(), module.range(expression)))
+                            Some((module[text].to_string(), module.range(expression)))
                         }
                         _ => None,
                     }
@@ -12048,7 +12059,7 @@ fn string_literals(module: &Module, arguments: &[Argument]) -> Option<Vec<String
                 Some(ExpressionKind::Literal(LiteralKind::String(text)))
                     if argument.name.is_none() =>
                 {
-                    Some(text.to_string())
+                    Some(module[text].to_string())
                 }
                 _ => None,
             },
@@ -12102,7 +12113,7 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
     let expression = on;
     match module.kind(expression) {
         ExpressionKind::Literal(LiteralKind::String(text)) => {
-            split_join_keys(text, module.range(expression))
+            split_join_keys(&module[text], module.range(expression))
         }
         ExpressionKind::Call { callee, arguments } => {
             let callee_name = variable_name(module, *callee)?;
@@ -12113,6 +12124,7 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                 let x_range = argument.name_range.unwrap_or(value_range);
                 match (callee_name.as_str(), module.kind(value)) {
                     ("c", ExpressionKind::Literal(LiteralKind::String(text))) => {
+                        let text = &module[*text];
                         match &argument.name {
                             Some(_) if !is_join_operator_free(text) => return None,
                             Some(x) => keys.push(JoinKey {

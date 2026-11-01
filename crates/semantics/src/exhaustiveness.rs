@@ -493,7 +493,7 @@ fn lower<'db>(
                 LiteralKind::Integer(text)
                 | LiteralKind::Double(text)
                 | LiteralKind::Complex(text) => {
-                    let value = text.trim_end_matches('L');
+                    let value = module[text].trim_end_matches('L');
                     Constructor::Literal(if *negative {
                         format!("-{value}")
                     } else {

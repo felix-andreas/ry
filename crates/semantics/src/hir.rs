@@ -224,6 +224,7 @@ pub struct Module {
     arms: Vec<MatchArm>,
     pattern_lists: Vec<PatId>,
     pattern_fields: Vec<PatternField>,
+    text: String,
     pub root: Option<ExprId>,
 }
 
@@ -293,6 +294,43 @@ impl<T> fmt::Debug for Span<T> {
     }
 }
 
+/// Literal source text in the module's text buffer: `module[text]` is the string. Unlike a
+/// [`Symbol`], which is interned for the life of the process, it is freed with the module, so
+/// editing a string literal does not keep every spelling it passed through.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Text {
+    start: u32,
+    len: u32,
+}
+
+impl Text {
+    fn range(self) -> ops::Range<usize> {
+        self.start as usize..(self.start + self.len) as usize
+    }
+}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "text {}..{}", self.start, self.start + self.len)
+    }
+}
+
+impl ops::Index<Text> for Module {
+    type Output = str;
+
+    fn index(&self, text: Text) -> &str {
+        &self.text[text.range()]
+    }
+}
+
+impl ops::Index<&Text> for Module {
+    type Output = str;
+
+    fn index(&self, text: &Text) -> &str {
+        &self.text[text.range()]
+    }
+}
+
 macro_rules! side_array {
     ($element:ty, $field:ident) => {
         impl ops::Index<Span<$element>> for Module {
@@ -333,6 +371,7 @@ impl Module {
         self.arms.clear();
         self.pattern_lists.clear();
         self.pattern_fields.clear();
+        self.text.clear();
         self.root = None;
     }
 
@@ -586,11 +625,11 @@ pub enum BinaryOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiteralKind {
     /// Source text is kept for literal index positions and the literal-as-integer courtesy.
-    Integer(Symbol),
-    Double(Symbol),
-    Complex(Symbol),
+    Integer(Text),
+    Double(Text),
+    Complex(Text),
     /// The value without its quotes; escapes are not decoded.
-    String(Symbol),
+    String(Text),
     Logical(bool),
     Null,
     Na(NaAtom),
@@ -793,6 +832,7 @@ pub fn lower_item(root: &SyntaxNode) -> Module {
         arms: scratch.arms.as_slice().into(),
         pattern_lists: scratch.pattern_lists.as_slice().into(),
         pattern_fields: scratch.pattern_fields.as_slice().into(),
+        text: scratch.text.as_str().into(),
         root: Some(root_id),
     };
     scratch.clear();
@@ -859,7 +899,7 @@ impl Lowering {
                 self.allocate(ExpressionKind::NameRef(name), range)
             }
             SyntaxKind::LITERAL => {
-                let kind = literal_kind(node);
+                let kind = literal_kind(node, &mut self.module.text);
                 self.allocate(ExpressionKind::Literal(kind), range)
             }
             // `@Name(value)` is its value in parentheses once the nominal head is erased;
@@ -930,7 +970,8 @@ impl Lowering {
                 if let Some(callee_kind) = self.module.kinds.get_mut(callee.0 as usize)
                     && let ExpressionKind::Literal(LiteralKind::String(name)) = *callee_kind
                 {
-                    *callee_kind = ExpressionKind::NameRef(name);
+                    *callee_kind =
+                        ExpressionKind::NameRef(Symbol::new(&self.module.text[name.range()]));
                 }
                 self.allocate(ExpressionKind::Call { callee, arguments }, range)
             }
@@ -1208,7 +1249,7 @@ impl Lowering {
                     .any(|token| token.kind == SyntaxKind::MINUS);
                 match child_of_kind(node, SyntaxKind::LITERAL) {
                     Some(literal) => PatternKind::Literal {
-                        literal: literal_kind(literal),
+                        literal: literal_kind(literal, &mut self.module.text),
                         negative,
                     },
                     None => PatternKind::Missing,
@@ -1585,16 +1626,24 @@ fn name_symbol(node: GreenNodeAt<'_>) -> Option<Symbol> {
     Some(Symbol::new(&name_text(node.first_token()?.text)))
 }
 
-fn literal_kind(node: GreenNodeAt<'_>) -> LiteralKind {
+fn literal_kind(node: GreenNodeAt<'_>, buffer: &mut String) -> LiteralKind {
+    let mut text = |value: &str| {
+        let start = buffer.len() as u32;
+        buffer.push_str(value);
+        Text {
+            start,
+            len: value.len() as u32,
+        }
+    };
     let Some(token) = node.first_token() else {
         return LiteralKind::Null;
     };
     match token.kind {
-        SyntaxKind::INTEGER => LiteralKind::Integer(Symbol::new(token.text)),
-        SyntaxKind::DOUBLE => LiteralKind::Double(Symbol::new(token.text)),
-        SyntaxKind::COMPLEX => LiteralKind::Complex(Symbol::new(token.text)),
+        SyntaxKind::INTEGER => LiteralKind::Integer(text(token.text)),
+        SyntaxKind::DOUBLE => LiteralKind::Double(text(token.text)),
+        SyntaxKind::COMPLEX => LiteralKind::Complex(text(token.text)),
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
-            LiteralKind::String(Symbol::new(string_value(token.text)))
+            LiteralKind::String(text(string_value(token.text)))
         }
         SyntaxKind::TRUE_KW => LiteralKind::Logical(true),
         SyntaxKind::FALSE_KW => LiteralKind::Logical(false),
@@ -1615,13 +1664,13 @@ pub fn is_whole_number_double(text: &str) -> bool {
 }
 
 /// 0-based. Whole-number doubles count: R indexes `x[[2]]` exactly like `x[[2L]]`.
-pub fn integer_literal_position(kind: &ExpressionKind) -> Option<usize> {
+pub fn integer_literal_position(module: &Module, kind: &ExpressionKind) -> Option<usize> {
     let one_based_index = match kind {
         ExpressionKind::Literal(LiteralKind::Integer(text)) => {
-            text.trim_end_matches('L').parse::<usize>().ok()?
+            module[text].trim_end_matches('L').parse::<usize>().ok()?
         }
         ExpressionKind::Literal(LiteralKind::Double(text)) => {
-            let value = text.parse::<f64>().ok()?;
+            let value = module[text].parse::<f64>().ok()?;
             if value.fract() != 0.0 || value < 1.0 || !value.is_finite() {
                 return None;
             }

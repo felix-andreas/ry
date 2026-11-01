@@ -456,7 +456,7 @@ impl Context<'_> {
                         if let ExpressionKind::Literal(LiteralKind::String(text)) =
                             module.kind(value)
                         {
-                            self.resolve_function_name_string(value, text);
+                            self.resolve_function_name_string(value, &module[text]);
                         }
                     }
                 }
@@ -1129,7 +1129,9 @@ impl Context<'_> {
             ExpressionKind::NameRef(_) | ExpressionKind::Literal(LiteralKind::String(_)) => {
                 let name = &match module.kind(target_expression) {
                     ExpressionKind::NameRef(name) => *name,
-                    ExpressionKind::Literal(LiteralKind::String(text)) => Symbol::new(text),
+                    ExpressionKind::Literal(LiteralKind::String(text)) => {
+                        Symbol::new(&module[text])
+                    }
                     _ => return,
                 };
                 let range = module.range(target_expression);

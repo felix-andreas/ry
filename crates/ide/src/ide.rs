@@ -260,10 +260,9 @@ fn member_at<'db>(
                 });
             }
             ExpressionKind::Literal(LiteralKind::String(name)) => {
+                let name = &hir[name];
                 if let Some(columns) = dataframe_columns_for(db, hir, check, range)
-                    && let Some(column) = columns
-                        .iter()
-                        .find(|column| column.name.text(db) == name.as_str())
+                    && let Some(column) = columns.iter().find(|column| column.name.text(db) == name)
                 {
                     return Some(Member {
                         range,
@@ -356,7 +355,7 @@ fn updated_column_at<'db>(
                 .find(|&value| hir.range(value).contains_inclusive(relative))
                 .and_then(|value| match hir.kind(value) {
                     ExpressionKind::Literal(LiteralKind::String(text)) => {
-                        Some((text.to_string(), hir.range(value)))
+                        Some((hir[text].to_string(), hir.range(value)))
                     }
                     _ => None,
                 })?,

@@ -1741,9 +1741,9 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
         };
         let mut collect = |id| {
             if let ExpressionKind::Literal(LiteralKind::String(value)) = module.kind(id)
-                && !value.is_empty()
+                && !module[value].is_empty()
             {
-                declared.insert(value.to_string());
+                declared.insert(module[value].to_string());
             }
         };
         match module.kind(first) {
