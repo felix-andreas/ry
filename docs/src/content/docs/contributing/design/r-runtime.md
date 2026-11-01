@@ -955,9 +955,11 @@ Each step ends with something real running, and each one is a large, whole chang
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
-   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
-   `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
-   but write no image.
+   implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime
+   with the R_GE_version 17 device API, so base graphics, grid, lattice and device packages such as
+   ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
+   `tiff` devices are engine devices too. On ragg captures, base graphics, grid and lattice match
+   GNU R pixel for pixel.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -1009,9 +1011,6 @@ JIT fits around them.
 
 ## 11. Open questions
 
-- **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
-  alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
-  benchmark's test suites.
 - **Windows runtime.** Designed, not built. The design:
   - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
     so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has

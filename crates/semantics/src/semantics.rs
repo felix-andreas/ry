@@ -729,7 +729,7 @@ fn expression_annotations<'db>(
         if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
             continue;
         }
-        attachments.push((hir::ExprId(index as u32), lowered));
+        attachments.push((hir::ExprId::new(index), lowered));
     }
     attachments
 }
