@@ -128,18 +128,28 @@ impl<T: Copy> Global<T> {
 /// The reference must not be held across a call into native code, which may re-enter the API
 /// and take its own. Functions that call native code take the runtime afresh afterwards.
 #[allow(clippy::mut_from_ref)]
+#[inline]
 pub fn runtime() -> &'static mut Runtime {
     // SAFETY: single-threaded access, see `Global`.
     unsafe {
         let slot = &mut *RUNTIME.as_ptr();
-        if slot.is_none() {
-            *slot = Some(Runtime::start());
-            globals::publish(slot.as_mut().unwrap_or_else(|| unreachable!()));
-            eval::install_interpreter(slot.as_mut().unwrap_or_else(|| unreachable!()));
-            embed::start_frontend();
+        match slot {
+            Some(runtime) => runtime,
+            None => start_runtime(slot),
         }
-        slot.as_mut().unwrap_or_else(|| unreachable!())
     }
+}
+
+/// Starts the runtime on the first API call. Every later call takes the inlined branch above,
+/// which is one load and a compare on the path of every C API function.
+#[cold]
+#[inline(never)]
+unsafe fn start_runtime(slot: &'static mut Option<Runtime>) -> &'static mut Runtime {
+    let runtime = slot.insert(Runtime::start());
+    globals::publish(runtime);
+    eval::install_interpreter(runtime);
+    embed::start_frontend();
+    runtime
 }
 
 impl Runtime {
