@@ -3,21 +3,25 @@
 #@ param SAMPLE int 20 120
 #@ ns importFrom(foreach,"%do%")
 # Bootstrap confidence intervals through foreach.
+#: fn(x: double[], [reps]: integer, [seed]: integer) -> double[]
 bootstrap_means_@ID@ <- function(x, reps = @REPS@L, seed = 41L) {
   set.seed(seed)
   foreach::foreach(i = seq_len(reps), .combine = c) %do% mean(sample(x, replace = TRUE))
 }
 
+#: fn(draws: double[], [level]: double) -> double[]
 percentile_interval_@ID@ <- function(draws, level = 0.95) {
   stats::quantile(draws, c((1 - level) / 2, 1 - (1 - level) / 2), names = FALSE)
 }
 
+#: fn(x: double[]) -> double[]
 jackknife_@ID@ <- function(x) {
   estimates <- vapply(seq_along(x), function(i) mean(x[-i]), numeric(1))
   n <- length(x)
   c(estimate = mean(estimates), se = sqrt((n - 1) / n * sum((estimates - mean(estimates))^2)))
 }
 
+#: fn(treated: double[], control: double[]) -> double
 effect_size_@ID@ <- function(treated, control) {
   pooled <- sqrt(((length(treated) - 1) * stats::var(treated) + (length(control) - 1) * stats::var(control)) / (length(treated) + length(control) - 2))
   (mean(treated) - mean(control)) / pooled

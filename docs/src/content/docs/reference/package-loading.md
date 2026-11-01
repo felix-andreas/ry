@@ -31,6 +31,9 @@ This page is the exact behavior.
   If any has a strict-mode error, it prints the errors and exits with status 1 without loading
   anything. The `R/` files are checked together, so a name one file defines resolves in the others.
   A later `load_all()` in the same session, and the load a console makes, do not check.
+  A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
+  so loading it again without changing its files, configuration, stubs, data files or the ry
+  binary skips the check.
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
 into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an

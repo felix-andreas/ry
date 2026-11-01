@@ -20,8 +20,9 @@ use {
             classify_constants, file_binds, file_items, file_load_index, fnv1a, package_index,
         },
         metadata::{
-            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
-            parse_description_collate,
+            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, PackageMetadata,
+            S3MethodDirective, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_description_package, parse_namespace,
         },
         stubs::install_shipped_stubs,
     },
@@ -448,6 +449,43 @@ impl Loader {
         if !self.stubs_installed {
             install_shipped_stubs(&self.db);
             self.stubs_installed = true;
+        }
+        // Conditional stubs (a `tools::file_ext` purity, say) count only for namespaces the
+        // package imports or depends on, so the metadata must be current before any purity
+        // read.
+        let namespace_file = parse_namespace(sources.namespace(&self.db));
+        let description = sources.description(&self.db);
+        let imports = normalized_imports(&namespace_file.imports);
+        let dependencies = parse_description_dependencies(description);
+        let package = parse_description_package(description);
+        let native_symbols = namespace_file.native_symbols;
+        match PackageMetadata::try_get(&self.db) {
+            Some(metadata) => {
+                if metadata.imports(&self.db) != &imports {
+                    metadata.set_imports(&mut self.db).to(imports);
+                }
+                if metadata.dependencies(&self.db) != &dependencies {
+                    metadata.set_dependencies(&mut self.db).to(dependencies);
+                }
+                if metadata.package(&self.db) != &package {
+                    metadata.set_package(&mut self.db).to(package);
+                }
+                if metadata.native_symbols(&self.db) != &native_symbols {
+                    metadata.set_native_symbols(&mut self.db).to(native_symbols);
+                }
+            }
+            None => {
+                let _: PackageMetadata = PackageMetadata::builder(
+                    imports,
+                    dependencies,
+                    BTreeSet::new(),
+                    package,
+                    native_symbols,
+                )
+                .durability(Durability::HIGH)
+                .attached_durability(Durability::LOW)
+                .new(&self.db);
+            }
         }
         let files: Vec<SourceFile> = sources
             .files(&self.db)

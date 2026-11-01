@@ -4321,6 +4321,28 @@ check` releases its trees once, and memoized records are compact" below).
   and `rep(unknown, 2)` a vector: the unknown argument was the one choosing the candidate. Rejected: taking the union of the fits' results. It is sound, but it
   turns silence into false operand errors downstream (operators do not dispatch per union member),
   against "the checker presumes R code is correct".
+- When the fits still disagree and no unchecked argument is an inferred `Unknown` (each is `Any`,
+  or a forwarded `...`, whose element type is `Any`), the call is `Any`, not `Unknown`, as in mypy:
+  the `Any` is an opt-out, and opting out of a call's argument opts out of the call. Strict mode
+  reports only `Unknown`, so `#: fn(x: Any) -> double` over `sum(x)`, and `utils::head(...)`, are
+  clean, while an `Unknown` argument still makes the call a strict finding. A stub's `Any` result
+  (`nrow`) was already silent when the stub has one signature, so this makes overloaded and plain
+  calls agree. An unannotated parameter is a type parameter, not an inferred `Unknown`, so
+  `t(m)` on an untyped `m` is `Any` too; strict mode already reports the parameter itself.
+- The cost is that an `Any` result hides a mismatch every candidate would share:
+  `#: fn(x: Any) -> character` over `sum(x)` is clean, though each `sum` candidate returns a number.
+  Rejected: joining the disagreeing results (`integer | double`), because the union then fails an
+  honest `-> double` annotation and operators do not dispatch per union member. Picking a common
+  family without a union would be the refinement, if the hidden mismatches turn out to matter.
+
+## A formula is the nominal `formula`, and its operands are not judged
+
+- `~` (unary and binary) types as `formula` (`infer_formula` in `check.rs`). Its operands are
+  inferred for hover and goto-definition, but their errors and strict origins are dropped, because
+  they name model variables (data-frame columns, `.`, `I(x^2)`) that are not bindings in scope.
+  Previously `~` was `Unknown`, so every model call and every `dcast(dt, id ~ n)` was a strict
+  finding that could not even be annotated inline. Rejected: typing operands as ordinary
+  expressions, which would report every column name as unresolved.
 
 ## `$`, `[` and `[[` dispatch to a class's subset method
 
@@ -4490,6 +4512,34 @@ check` releases its trees once, and memoized records are compact" below).
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
 
+## Typed checking costs per name, not per file
+
+- **Before.** Each file built `visible_type_definitions`, a merged map of every stub and project type
+  definition, so typed analysis paid files times types in time and memory: on typed finbench the
+  diagnostics stage took 2.5 s against 0.2 s untyped. Every `#:` block was also lowered again by each
+  diagnostic pass that read it (parse stage, dangling annotations, argument lists, agreement,
+  declaration sites), and the non-local read classification ran twice, once for the ordinary check
+  and once for strict mode.
+- **Now.** `TypeDefinitions` (`semantics.rs`) is a `Copy` view over one file that looks a name up in
+  that file (scripts, or no `ProjectFiles`), then in the tracked per-name projection
+  `project_type_definition(files, name)`, then in the stubs; nothing merges the sets. The unknown-type
+  check tests each reference by name and builds the full known set only to rank suggestions after a
+  miss. `file_comment_annotations` lowers each `#:` block once per file, keyed by start offset, and
+  `comment_annotation` finds one by binary search. `file_unresolved_non_locals` (`diagnostics.rs`)
+  memoizes the classification per item, keeping only reads that do not resolve.
+- **Impact.** Typed `ry check` on finbench went from 2.43 s / 831 MiB to about 1.9 s / 644 MiB
+  (untyped 1.65 s / 533 MiB). The per-name projection also means an edit to one type definition
+  re-verifies only the readers of that name.
+- **`ry load` remembers a clean strict verdict** (`preflight::check_package`). The pre-check cannot
+  share a database with the runtime's loader, which lives in `libR.so`, so instead a clean result is
+  stored in `<cache dir>/ry/strict/<hash of the package root>`, holding a 128-bit fingerprint (two
+  differently seeded SipHashes) of the ry binary's path, size and mtime, the configuration's `Debug`
+  form, every R file the project analysis walks, the override stubs, `DESCRIPTION`, `NAMESPACE` and the
+  data-file layouts. One record per package keeps the cache from growing with edits, and a refusal is
+  never stored, so its errors print every time. A first load still pays the check; running the check
+  inside the runtime loader's own analysis would remove that and was not done, because that loader
+  analyses only what purity needs.
+
 # Decision record: matching GNU R's own tests where its behavior is an artifact
 
 GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its implementation, not from the language. Each is reproduced from observed output (black-box against Rscript), never from GNU R's source.
@@ -4603,6 +4653,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
+
+## Corpus-driven stub and overload fixes
+
+- A name the item writes with `<<-` reads as `Unknown` unless the project defines it (`read_non_local` in `check.rs`, via `top_level::super_assigned_names` over the item's own HIR, so no project-wide map is read). Before, openxlsx's Reference Class field `t <<- t[-inds]` resolved to base `t` and indexing it was a false report.
+- `grepl`, `grep`, `regexpr` and `gregexpr` take `pattern: character[]` as a second overload, not a union: a union parameter makes an untyped caller parameter infer the union, which then fails at `paste0(collapse = p)` (gt). `sub` and `gsub` keep `character` because no corpus code needed more.
+- Overload resolution settles one narrowing disagreement: a scalar narrowing wins over the same atom's vector. A general "most specific by `compatible`" rule was tried and rejected, because it picked list shapes (`list[named: ...]`) that later reads rejected, adding ten corpus false reports.
+- `menu`'s `choices` is one union including `list[Any]`, because a list and a character overload disagree and would make an untyped caller `Unknown`.
+- The cost of the second `grepl` candidate: `grepl(1L, x)` now reports "no overload matches" over the whole call instead of the argument.
 
 ## GNU R's public C API is a checked list, not a measured subset
 
