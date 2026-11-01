@@ -420,51 +420,45 @@ expected win is unverified until measured, so profile before and after each chan
 change that does not pay.
 
 1. **The checker's types: a per-item store instead of interning every intermediate type.** `Ty`
-   is a salsa interned struct over `TyKind`, whose composite variants own `Vec<Ty>` children
-   (`crates/semantics/src/types.rs`). Every type `Checker::infer` builds mid-check, including
-   unions, substitutions and resolved variables, allocates a `Vec`, hashes it and goes through
-   salsa's shared intern table. Target: a per-check SoA store (kind tags, one flat child array,
+   is a pointer into a sharded, process-wide hash-consing table over `TyKind`, whose composite
+   variants own `Vec<Ty>` children (`intern_type` in `crates/semantics/src/types.rs`). Every type
+   `Checker::infer` builds mid-check, including unions, substitutions and resolved variables,
+   allocates a `Vec`, hashes it and takes a shard lock; `intern_type` is about 4% of cold-check
+   CPU exclusive, and a rebuild that changes no child already skips it (`map_child_types`). Target: a per-check SoA store (kind tags, one flat child array,
    `u32` ids, union-find variables in the style of Roc's `Subs`), interning only exported schemes
    and recorded expression types at the item boundary. Expected win: item checking is about 45% of
    cold-check CPU at roughly 1.5 µs per expression, and this is the structural cut the 1 s target
    needs ("Benchmark code bases (measured)").
-2. **HIR as flat arrays.** `ExpressionKind` and `PatternKind` hold `Box<[Argument]>`,
-   `Box<[Parameter]>`, `Box<[ExprId]>` and similar lists, one allocation each
-   (`crates/semantics/src/hir.rs`). Target: per item, a tag array, a fixed-width payload
-   array and one `extra: Vec<u32>` side array for variable-length children, in the style of Zig's
-   AST, so lowering an item makes a handful of allocations instead of one per list. Expected win:
-   lowering is 13% of cold CPU, and HIR is among the largest memo holders at about 1.4 KiB per
-   line.
-3. **The JIT's analysis plan.** `Plan` stores `Inst { operands: Vec<usize> }` per instruction, a
+2. **The JIT's analysis plan.** `Plan` stores `Inst { operands: Vec<usize> }` per instruction, a
    full `State` (two `Vec`s) before every instruction and along every edge, liveness as
    `Vec<Vec<bool>>`, and `block_at` as a hash map keyed by pc (`crates/jit/src/analysis.rs`).
    Target: operands in one `Vec<u32>` addressed by ranges, states as rows of one flat matrix with
    stride `registers + slots`, liveness as a bitset, `block_at` as a dense array, all in a bump
    arena dropped after codegen. Expected win: compile latency, which decides how early and how much
    code the JIT can afford to compile once it compiles calls.
-4. **Side mark bitmaps in the collector.** The mark bit lives in each object's `Header`
+3. **Side mark bitmaps in the collector.** The mark bit lives in each object's `Header`
    (`crates/heap/src/object.rs`); `sweep_all` reads the header of every slot on every page, and
    `sweep_young` chases the `young: Vec<Sexp>` list in allocation order (`crates/heap/src/heap.rs`).
    Target: a mark bitmap and a free bitmap per page, so marking writes dense bits and sweeping
    scans words without touching dead objects. The header layout is private (packages reach it only
    through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
    in large-heap sessions such as the data.table groupby workloads.
-5. **The allocation fast path.** The size-to-class table and partial zeroing are in
+4. **The allocation fast path.** The size-to-class table and partial zeroing are in
    (`SIZE_CLASS_BY_WORDS`, `allocate_with`'s `zeroed`; a triple is not zeroed at all). Left:
    bump allocation through free runs of a page instead of popping a `Vec` free list, and the
    `young` list push (`crates/heap/src/heap.rs`). `allocate_with` is about 4% of a profile of
    the benchmark tests.
    Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
    2.5 to 3 times slower than GNU R ("Open: the JIT").
-6. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
+5. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
-7. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
+6. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
    through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
    re-check. Target: hash the index, and sort by spelling only where output order is visible.
    Check first which maps rely on string order for deterministic output.
-8. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
+7. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
    flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
    less memory per flag. Expected win: small, since the engine is already columnar; worth doing
    only alongside other work in that file.
@@ -2821,11 +2815,11 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 1.45-1.55 s | 422 MiB | 1005 `unused` (genuine), 848 `object-system` | 1 / 44 ms | 2 / 39 ms |
-| data science | 1.55-1.65 s | 421 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
-| biostatistics | 1.5-1.65 s | 432 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
+| finance | 1.36-1.6 s | 406 MiB | 1005 `unused` (genuine), 848 `object-system` | 1 / 44 ms | 2 / 39 ms |
+| data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
+| biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.5-5 s of CPU on four cores, about 3 times its wall time). The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass keeps about 78% of the four cores busy, because the main thread drops evicted trees between batches and the last files of a batch finish alone; the naming and check passes keep about 97%. Levers left toward 1 s: lowering HIR on the green tree (red-node creation is 3 to 4 points of `item_hir`), a cheaper parse, the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Tried without gain: a per-check cache of common scalar types, a thread-local front cache for the type table (no faster than the sharded table), larger syntax batches (+15 MiB for about 0.05 s), and freeing evicted trees on a background thread (mimalloc's cross-thread frees cost what the serial drop saved). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass keeps about 78% of the four cores busy, because the main thread drops evicted trees between batches and the last files of a batch finish alone; the naming and check passes keep about 97%. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Tried without gain: a per-check cache of common scalar types, a thread-local front cache for the type table (no faster than the sharded table), larger syntax batches (+15 MiB for about 0.05 s), and freeing evicted trees on a background thread (mimalloc's cross-thread frees cost what the serial drop saved). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 

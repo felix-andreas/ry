@@ -180,8 +180,17 @@ An item's green subtree lowers to HIR, with spans relative to the item. Its anno
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
 (`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
-in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id), lists are boxed slices, and the arena
-is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity. Naming
+in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id). Literal text is not interned,
+because the interner never frees and an edit inside a string literal would otherwise keep every
+spelling it passed through; it lives in the module's own text buffer, addressed by a `Copy`
+`Text` span. The HIR module is
+struct-of-arrays: an `ExprId` indexes separate kind and range arrays, and every list (arguments,
+parameters, statements, record fields, match arms, pattern lists) lives in one side array per
+element type that the expression addresses with a `Span`, so every HIR kind is `Copy` and a scan
+over kinds never touches ranges. Lowering reads the green tree through `syntax::GreenNodeAt` and
+builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
+items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
+capacity and lowering allocates a handful of arrays per item. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.
