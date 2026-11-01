@@ -88,12 +88,12 @@ usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it r
 If none holds base R, `ry run` and `ry load` stop with exit status 2 and name the places they
 searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
 
-From 0.4.0-beta on, the Linux and macOS release archives hold `ry` and ry's runtime (`libR.so` or
-`libR.dylib`). Keep them in the same directory, or put the runtime in `../lib/ry/` relative to
-`ry`. The Windows archive does not carry the runtime (`R.dll`) yet, so `ry run` and `ry load` are
-Linux and macOS only there, while `ry R` works everywhere. The runtime does build for Windows from source
-(`x86_64-pc-windows-gnu`, linked with lld), but it has only been run under Wine, never on Windows
-itself.
+From 0.4.0-beta on, the release archives hold `ry` and ry's runtime (`libR.so`, `libR.dylib` or
+`R.dll`). Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. The
+Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
+`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
+a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
+it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged. Those binaries
 name GNU R's `libR`, so ry loads a copy of each package library, cached under
