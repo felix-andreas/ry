@@ -198,11 +198,8 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
                         "ry's runtime loads base R from GNU R, which is not installed".to_owned(),
                     );
                 }
-                if !libr_path().is_file() {
-                    return Some(format!(
-                        "{} is not built (cargo build -p libr)",
-                        libr_path().display()
-                    ));
+                if let Err(error) = libr_path() {
+                    return Some(format!("ry's runtime is missing: {error}"));
                 }
             }
             other => return Some(format!("unknown requirement `{other}`")),
@@ -217,11 +214,32 @@ fn which(program: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn libr_path() -> PathBuf {
-    Path::new(env!("CARGO_BIN_EXE_ry"))
-        .parent()
-        .expect("the binary has a directory")
-        .join("libR.so")
+/// ry's `libR.so`, built first: `cargo test` of this package does not build libr, and `ry run`
+/// loads the copy beside the binary, which only `cargo build` refreshes.
+fn libr_path() -> Result<&'static PathBuf, String> {
+    static LIBR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    LIBR.get_or_init(|| {
+        let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
+            .parent()
+            .ok_or("the ry binary has no directory")?;
+        let mut build = Command::new(env!("CARGO"));
+        build.args(["build", "-q", "-p", "libr"]);
+        if profile_directory
+            .file_name()
+            .is_some_and(|name| name == "release")
+        {
+            build.arg("--release");
+        }
+        let status = build
+            .status()
+            .map_err(|error| format!("building libr: {error}"))?;
+        if !status.success() {
+            return Err("building libr failed".to_owned());
+        }
+        Ok(profile_directory.join("libR.so"))
+    })
+    .as_ref()
+    .map_err(Clone::clone)
 }
 
 /// ry's R home, assembled once per test run from this build's `libR` and headers, whose
@@ -258,7 +276,7 @@ fn r_home() -> Result<&'static PathBuf, String> {
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("../libr/include"),
-                libr: &libr_path(),
+                libr: libr_path()?,
                 rcmd: &profile_directory.join("ry-rcmd"),
                 gnu_r_home: &gnu_r_home,
                 toolchain: rcmd::Toolchain::default(),

@@ -28,7 +28,7 @@ use {
         path::{Path, PathBuf},
         process::{Command, Stdio},
         sync::{
-            Mutex,
+            Mutex, OnceLock,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
@@ -756,13 +756,40 @@ fn missing_requirement(config: &Config) -> Option<String> {
     if which("R").is_none() {
         return Some("because GNU R is not installed".to_owned());
     }
-    let libr = Path::new(env!("CARGO_BIN_EXE_ry"))
-        .parent()
-        .map(|directory| directory.join("libR.so"));
-    if runtime == Runtime::Ry && !libr.as_ref().is_some_and(|path| path.is_file()) {
-        return Some("because ry's runtime needs libR.so (cargo build -p libr)".to_owned());
+    if runtime == Runtime::Ry
+        && let Err(error) = libr_path()
+    {
+        return Some(format!("because ry's runtime is missing: {error}"));
     }
     None
+}
+
+/// ry's `libR.so`, built first: `cargo test` of this package does not build libr, and `ry run`
+/// loads the copy beside the binary, which only `cargo build` refreshes.
+fn libr_path() -> Result<&'static PathBuf, String> {
+    static LIBR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    LIBR.get_or_init(|| {
+        let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
+            .parent()
+            .ok_or("the ry binary has no directory")?;
+        let mut build = Command::new(env!("CARGO"));
+        build.args(["build", "-q", "-p", "libr"]);
+        if profile_directory
+            .file_name()
+            .is_some_and(|name| name == "release")
+        {
+            build.arg("--release");
+        }
+        let status = build
+            .status()
+            .map_err(|error| format!("building libr: {error}"))?;
+        if !status.success() {
+            return Err("building libr failed".to_owned());
+        }
+        Ok(profile_directory.join("libR.so"))
+    })
+    .as_ref()
+    .map_err(Clone::clone)
 }
 
 fn which(program: &str) -> Option<PathBuf> {
