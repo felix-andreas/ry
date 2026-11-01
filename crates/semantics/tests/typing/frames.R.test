@@ -1276,3 +1276,99 @@ left: DataFrame{id: integer[]}
 right: DataFrame{id: integer[]}
 joined: Unknown
 100..105 error[type-mismatch] the frame `left` has no column `ids`. Its columns are `id`
+
+#==== dataframe_expression_types
+#---- arithmetic_on_a_string_column_is_reported
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
+wider <- sales |> DataFrame.with_columns(y = col("region") * 2)
+negated <- sales |> DataFrame.select(-col("region"))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+wider: Unknown
+negated: Unknown
+107..120 error[type-mismatch] `*` needs numbers, but the column `region` is `character[]`
+164..177 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
+
+#---- a_number_compared_with_a_string_column_is_reported
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
+kept <- sales |> DataFrame.filter(col("region") > 1L)
+same <- sales |> DataFrame.filter(col("units") == col("region"))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+kept: Unknown
+same: Unknown
+96..114 error[type-mismatch] `>` compares `character[]` with `integer`. An expression compares strings and factors only with strings and factors
+150..179 error[type-mismatch] `==` compares `integer[]` with `character[]`. An expression compares strings and factors only with strings and factors
+
+#---- a_numeric_aggregation_of_strings_is_reported
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
+totals <- sales |> DataFrame.group_by("units") |> GroupBy.agg(col("region") |> Expr.sum(), m = col("region") |> Expr.mean())
+paired <- sales |> DataFrame.select(col("units") |> Expr.cor(col("region")))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+totals: Unknown
+paired: Unknown
+124..137 error[type-mismatch] `Expr.sum` needs numbers, but the column `region` is `character[]`
+157..170 error[type-mismatch] `Expr.mean` needs numbers, but the column `region` is `character[]`
+248..261 error[type-mismatch] `Expr.cor` needs numbers, but the column `region` is `character[]`
+
+#---- a_string_literal_in_arithmetic_is_reported
+sales <- DataFrame(units = c(1L, 2L))
+wider <- sales |> DataFrame.with_columns(y = col("units") * "2")
+#++++
+sales: DataFrame{units: integer[]}
+wider: Unknown
+98..101 error[type-mismatch] `*` needs numbers, but this operand is `character`
+
+#---- logical_operators_and_if_else_tests_check_their_operands
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
+both <- sales |> DataFrame.filter(col("units") > 1L & col("region"))
+labels <- sales |> DataFrame.select(Expr.if_else(col("units"), "big", "small"))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+both: Unknown
+labels: Unknown
+116..129 error[type-mismatch] `&` needs logical values or numbers, but the column `region` is `character[]`
+180..192 error[type-mismatch] `Expr.if_else` needs a `logical` test, but the column `units` is `integer[]`
+
+#---- a_factor_column_compares_with_labels_but_takes_no_arithmetic
+f <- DataFrame(g = factor(c("a", "b")), v = c(1, 2))
+picked <- f |> DataFrame.select(col("g") == "a", shifted = col("g") + 1)
+#++++
+f: DataFrame{g: factor, v: double[]}
+picked: Unknown
+112..120 error[type-mismatch] `+` needs numbers, but the column `g` is `factor`
+
+#---- well_typed_expressions_are_silent
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2), ok = c(TRUE, FALSE))
+picked <- sales |> DataFrame.select(
+  col("region") == "eu",
+  big = col("units") > 1L & col("ok"),
+  flag = !col("units"),
+  bumped = col("units") + TRUE,
+  label = Expr.if_else(col("ok"), "yes", "no")
+)
+totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("ok") |> Expr.sum(), top = col("region") |> Expr.max())
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[], ok: logical[]}
+picked: DataFrame{region: logical[], big: logical[], flag: logical[], bumped: integer[], label: character[]}
+totals: DataFrame{region: character[], ok: integer[], top: character[]}
+
+#---- result_columns_follow_the_expression_types
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2))
+wider <- sales |> DataFrame.with_columns(y = col("units") * 2L, z = col("units") / 2L, big = col("price") > 1)
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[]}
+wider: DataFrame{region: character[], units: integer[], price: double[], y: integer[], z: double[], big: logical[]}
+
+#---- a_frame_with_unknown_columns_is_silent
+doubled <- function(frame) frame |> DataFrame.with_columns(y = col("region") * 2)
+#++++
+doubled: fn(frame: DataFrame) -> DataFrame
+
+#---- min_and_max_of_a_logical_column_are_integers
+flags <- DataFrame(g = c("a", "b"), ok = c(TRUE, FALSE))
+totals <- flags |> DataFrame.group_by("g") |> GroupBy.agg(lo = col("ok") |> Expr.min(), first = col("ok") |> Expr.first())
+#++++
+flags: DataFrame{g: character[], ok: logical[]}
+totals: DataFrame{g: character[], lo: integer[], first: logical[]}

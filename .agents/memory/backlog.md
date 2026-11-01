@@ -2117,9 +2117,13 @@ The end-to-end guard rests on the corpus suites.
   column string to the verb or constructor argument that created it are not implemented; hover and
   completion are.
 - **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
-  unknown, because the refinement reads argument syntax. Typing `Expr` with its column type
-  (`Expr<double>`) would close it. The column-error wording says "the frame `x`" for every table
-  kind.
+  unknown and its operands unchecked, because the refinement reads argument syntax. Typing `Expr`
+  with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
+  `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
+  and the numeric aggregations.
+- **data-table lint:** flags only the constructors (`data.table`, `fread`, `as.data.table`,
+  `setDT`); it offers no fix, because a query rewrite from bracket syntax to verbs is not
+  mechanical in general.
 - **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 

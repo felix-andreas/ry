@@ -6,8 +6,8 @@ use {
             lower_annotation, lower_inline_annotation, statement_inline_site,
         },
         check::{
-            ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError,
-            TypeErrorKind, column_element,
+            ExpressionNeeds, ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind,
+            TypeError, TypeErrorKind, column_element,
         },
         exhaustiveness::{MatchFinding, MatchFindingKind},
         file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
@@ -2836,6 +2836,35 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::HeadInsideExpression { column } => format!(
             "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
+        ),
+        TypeErrorKind::ExpressionOperand {
+            operation,
+            column,
+            needs,
+            found,
+        } => {
+            let needs = match needs {
+                ExpressionNeeds::Numbers => "needs numbers",
+                ExpressionNeeds::LogicalOrNumbers => "needs logical values or numbers",
+                ExpressionNeeds::Logical => "needs a `logical` test",
+            };
+            let subject = match column {
+                Some(column) => format!("the column `{column}`"),
+                None => "this operand".to_owned(),
+            };
+            format!(
+                "`{operation}` {needs}, but {subject} is `{}`",
+                renderer.render(db, *found)
+            )
+        }
+        TypeErrorKind::ExpressionComparison {
+            operator,
+            left,
+            right,
+        } => format!(
+            "`{operator}` compares `{}` with `{}`. An expression compares strings and factors only with strings and factors",
+            renderer.render(db, *left),
+            renderer.render(db, *right)
         ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",

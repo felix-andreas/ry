@@ -26,6 +26,7 @@ shadows-builtin = "off"       # a top-level name that hides a base function
 shadows-namespace = "off"     # a top-level name that hides another export
 # naming-style = "snake_case" # or "camelCase"; unset means not checked
 object-system = "warn"        # a class defined with S4, R6 or Reference Classes
+data-table = "off"            # a call that creates a data.table
 
 [format]
 indent-width = 2

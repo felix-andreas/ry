@@ -127,3 +127,10 @@ setClass("Mine")
 methods::setClass("Theirs")
 #++++
 58..66 warning[object-system] `setClass` defines an S4 class. ry recommends a record or a tagged union instead
+
+#==== data-table
+#---- data_table_is_off_by_default
+library(data.table)
+prices <- fread("prices.csv")
+#++++
+clean
