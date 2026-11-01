@@ -16,6 +16,7 @@ use {
         values::{self, length, nil, symbols},
     },
     heap::object::{Sexp, SexpType},
+    std::sync::OnceLock,
 };
 
 /// A routine's implementation. It receives the arguments after `.NAME`, without `PACKAGE` and
@@ -228,7 +229,7 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
             ),
         ));
     }
-    match implementation(routine.0, routine.2) {
+    match implementation_of(routine) {
         Some(function) => function(&native).map(Some),
         None => Err(native.error(format!(
             "the native routine '{}' of package '{}' is not implemented in ry yet",
@@ -290,6 +291,35 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
         .map(|(_, function)| *function)
 }
 
+/// The implementation of `routine`, resolved once per routine rather than searched by name on
+/// every call, because hot code such as `sd` reaches its routine through `.Call` each time.
+fn implementation_of(routine: &'static Routine) -> Option<NativeFn> {
+    static IMPLEMENTATIONS: OnceLock<Vec<Option<NativeFn>>> = OnceLock::new();
+    let implementations = IMPLEMENTATIONS.get_or_init(|| {
+        routines()
+            .map(|routine| implementation(routine.0, routine.2))
+            .collect()
+    });
+    match routine_index(routine) {
+        Some(index) => implementations.get(index).copied().flatten(),
+        None => implementation(routine.0, routine.2),
+    }
+}
+
+/// The position of `routine` in `routines()`, if it is one of its entries.
+fn routine_index(routine: *const Routine) -> Option<usize> {
+    let mut offset = 0;
+    for table in [ROUTINES, if cfg!(windows) { WINDOWS_ROUTINES } else { &[] }] {
+        let range = table.as_ptr_range();
+        if range.contains(&routine) {
+            // In range of a slice of `Routine`s, so the byte distance is a whole number of them.
+            return Some(offset + (routine as usize - range.start as usize) / size_of::<Routine>());
+        }
+        offset += table.len();
+    }
+    None
+}
+
 fn find(
     name: &str,
     package: Option<&str>,
@@ -324,6 +354,12 @@ unsafe fn routine_of(
     {
         return None;
     }
+    // The address is the routine's table entry, which saves a search by name. A pointer that was
+    // serialized comes back null, and then the names identify the routine.
+    let entry = address.external_address() as *const Routine;
+    if routine_index(entry).is_some() {
+        return Some(&*entry);
+    }
     let identity = address.external_protected();
     if identity.kind() != SexpType::String || length(identity) != 2 {
         return None;
@@ -347,14 +383,11 @@ unsafe fn dll_info(package: &str, path: &str) -> R<Sexp> {
     Ok(info)
 }
 
-unsafe fn native_symbol(
-    routine: &(&str, RoutineKind, &str, i32),
-    dll: Sexp,
-    class: &str,
-) -> R<Sexp> {
+unsafe fn native_symbol(routine: &'static Routine, dll: Sexp, class: &str) -> R<Sexp> {
     let identity = values::string_vector(&[routine.0, routine.2])?;
     let marker = values::install(ROUTINE_MARKER)?;
-    let address = crate::heap().alloc_external_ptr(std::ptr::null_mut(), marker, identity)?;
+    let entry = routine as *const Routine as *mut std::ffi::c_void;
+    let address = crate::heap().alloc_external_ptr(entry, marker, identity)?;
     crate::heap().root(address);
     let address_class = values::scalar_string("RegisteredNativeSymbol")?;
     values::set_attr(address, symbols().class, address_class)?;

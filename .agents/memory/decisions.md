@@ -3791,6 +3791,23 @@ explicit allocators".
 - **Listing a hashed frame replays GNU R's table through flat head and next arrays**, and callers
   that only need the set (`length(env)`, sorted `ls()`, `lockEnvironment`) use
   `Heap::bound_symbols`, which skips the replay.
+- **`step` is inlined into the dispatch loop** and reads the activation through a `Decoded` struct
+  (code, constants, caches, feedback pointer), so a simple instruction costs no call; type
+  feedback writes through a raw pointer that is null when no tier is collecting it. This cut
+  `mean.default` by about a quarter of its instructions.
+- **`GetFun` carries a `probe` operand**: 0 when the compiler knows the frame cannot bind the head
+  symbol (`Compiler::frame_may_bind`), and then the lookup starts in the enclosure's cached cell
+  instead of scanning the local frame. A cached hit that is a forced promise is unwrapped before
+  the function check.
+- **S3 dispatch allocates no implicit class vector**: `Globals::implicit_classes` caches one shared
+  (not-mutable) vector per dimension shape and type, except for calls and records, whose class
+  depends on the value. Method names are built in a stack buffer and interned directly.
+- **A `.Call` routine's external pointer holds the `Routine` entry's address**, so `try_call`
+  finds the implementation by index in a table built once; a pointer that comes back null from
+  serialization falls back to the lookup by name.
+- **`c()` of untagged, unnamed atomic vectors copies slice by slice** into the result
+  (`combine_unnamed_atomic`), because the general path records every element and its name first
+  and was the largest source of Rust allocations in `sd()`.
 
 ## `just ry` builds ry's runtime; ry-lang does not depend on libr
 
