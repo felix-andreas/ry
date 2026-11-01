@@ -149,7 +149,15 @@ impl Slot {
         } else {
             self.ty.join(other.ty)
         };
-        Slot { status: self.status | other.status, ty }
+        // An unboxed local boxed on the way into a join is a fresh object the frame does not
+        // hold, so from there on it is a value to write back, not the frame's own (see
+        // `box_slot` in codegen).
+        let boxed = |side: Slot| side.ty.is_unboxed() && side.may_be(status::LOCAL) && ty != Ty::Bottom && !ty.is_unboxed();
+        let mut status = self.status | other.status;
+        if boxed(self) || boxed(other) {
+            status |= status::DIRTY;
+        }
+        Slot { status, ty }
     }
 
     pub fn may_be(self, bits: u8) -> bool {

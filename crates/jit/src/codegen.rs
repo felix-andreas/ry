@@ -1426,6 +1426,10 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 
     /// Moves a loaded slot's unboxed value into its root cell. A dirty slot owns a reference.
+    ///
+    /// The box is a fresh object, not the one the frame binds, so a local slot becomes dirty:
+    /// an element write into the box edits it in place, and only a write-back makes the frame
+    /// see that. The analysis marks the join it flows into as possibly dirty to match.
     unsafe fn box_slot(&mut self, slot: usize, ty: Ty) {
         let status = self.builder.use_var(self.statuses[slot]);
         let loaded = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
@@ -1436,6 +1440,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         let value = self.use_slot(slot, ty);
         let boxed = self.box_value(ty, value);
         self.store_slot_cell(slot, boxed);
+        let local = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_LOCAL);
+        let dirty_status = self.builder.ins().iconst(I32, status::RUNTIME_DIRTY);
+        let status = self.builder.ins().select(local, dirty_status, status);
+        self.builder.def_var(self.statuses[slot], status);
         let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
         self.increment_if(boxed, dirty);
         self.builder.ins().jump(done, &[]);
