@@ -61,7 +61,13 @@ The editor offers the same fixes as quick fixes.
 ry fmt           # rewrite files in place
 ry fmt --check   # name the files that would change, and exit 1 if any would
 ry fmt --diff    # show the changes without writing them, and exit 1 if any
+ry fmt --range 3-8 R/report.R   # format only lines 3 to 8 of one file
 ```
+
+`--range` takes `LINE`, `START-END`, or `LINE:COLUMN-LINE:COLUMN`, counting from 1. It formats the
+lines the range touches exactly as formatting the whole file would, at the indentation the file
+already uses, and leaves every other line alone. A statement is laid out as one unit, so a line
+just outside the range changes when it belongs to a statement the range reaches into.
 
 `ry fmt` skips `.Rmd`, `.qmd`, and `.Rnw` files, because it rewrites a whole file's layout and must not
 touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
@@ -118,8 +124,8 @@ like `ry run`. `ry load --r-entry` prints the R code that gives a plain R sessio
 and consoles of `ry run` and `ry R`.
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
-`--experimental-features range_formatting` lets the server format a selection instead of the whole
-file.
+No feature is experimental right now, so `--experimental-features` ignores every name with a warning
+(`range_formatting` is always on).
 
 ## debug
 

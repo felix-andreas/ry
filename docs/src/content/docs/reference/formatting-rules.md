@@ -620,7 +620,15 @@ PersonClass <- R6Class(
 
 ### Line endings and indentation
 
-The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`). The indent is `[format] indent-width` spaces, 2 by default.
+The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`), read from the first line break after the first code or comment. The indent is `[format] indent-width` spaces, 2 by default.
+
+### Formatting a selection
+
+Formatting a selection (`ry fmt --range`, or an editor's "Format Selection") lays out the lines the selection touches exactly as formatting the whole file lays them out, and leaves every other line byte for byte as it was. The selection widens to whole lines, and statements are the unit: selecting one line of a long function rewrites only that line's statement, but selecting one argument of a call rewrites the whole call, because how a call breaks depends on all of it. A comment on its own line is a unit of its own.
+
+Selected lines keep the indentation step the file already uses, read from the statements the formatter places (the commonest step wins), so tidying part of a file indented by four spaces or tabs does not move those lines out of line with their neighbours. Formatting the whole file is what re-indents it to `indent-width`. A `# fmt: off` region or `# fmt: skip` exemption inside the selection is respected, and a file that does not parse refuses exactly as whole-file formatting does.
+
+On-type formatting is the same operation on one line: a line break lays out the line it finished (never the new line under the cursor), and `}` lays out the construct it closes.
 
 ## Format Suppression
 

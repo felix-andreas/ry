@@ -172,7 +172,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Parser | generated programs, token soup, byte mutations, edit streams (`syntax` `test_fuzz`); `cargo fuzz` `parse` | lossless round trip, tree invariants, splice reparse equals full parse |
 | Lowering, naming, inference, diagnostics | generated programs and projects (`semantics` `test_fuzz`); `cargo fuzz` `semantics` | no panic, determinism, well-formed ranges, incremental equals fresh |
 | Incrementality and cancellation | the simulator's edits and injected cancellations; `test_incremental` | a fresh server; per-item firewalls |
-| Formatter | seeds, mutations, fixture sources (`format` `test_fuzz`); `cargo fuzz` `format` | preservation, idempotence, determinism |
+| Formatter | seeds, mutations, fixture sources (`format` `test_fuzz`, `test_format_range`); `cargo fuzz` `format` | preservation, idempotence, determinism; for range formatting also convergence, restriction to the whole-file edits, additivity and composition |
 | IDE features | generated documents and positions (`ide` `test_fuzz`); `cargo fuzz` `ide` | no panic, ranges inside the document |
 | Language server | the simulator; scenarios; `cargo fuzz` `lsp` | a fresh server, the push contract, range geometry |
 | Loader | random reload sequences (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load |

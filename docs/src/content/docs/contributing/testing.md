@@ -151,6 +151,11 @@ on purpose.
 - **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
   the expected block, and the runner formats that output again to assert idempotence on every case.
   When the expected result is a refusal, the case renders the structured `FormatError`.
+- **`crates/format/tests/format-range`**: range formatting. The source marks the selection with
+  `$0` markers (two for a selection, one for a bare caret, none for the whole file), and the
+  expectation lists the edits by one-based position and shows the document they leave behind, with
+  each replacement between `«` and `»`. Run it with
+  `cargo test -p format --test test_format_range_fixtures`.
 - **`crates/ide/tests/ide`**: the editor features. The source carries one `$0` cursor marker, which
   is stripped before analysis, and the expectation renders each feature's answer at that position:
   the hover line with its absolute range, the definition's target range, and the reference ranges.
@@ -221,6 +226,20 @@ Comparing kinds alone would miss a miscompile: a stale or off-by-one source rang
 formatter emit the wrong bytes for an identifier, which renames a variable while preserving every
 kind. An injected bug of exactly that shape passed a kind-only comparison and fails the spelling
 comparison.
+
+Every generated input also runs the range battery, `check_range_format_invariants`, over a bounded
+spread of selections (the whole file, carets, whole lines, part-line spans, a range past the end).
+Range edits must be deterministic, refuse exactly when the whole file refuses, cover whole lines in
+order without overlapping, preserve the code, leave a document that still formats to the same
+result, be a subset of the edits formatting the whole file in place makes, reproduce that result
+when the selection is everything, and be stable when re-run on what they produced. On inputs of up
+to 24 lines it also checks additivity (a span of lines makes exactly the union of its lines' edits)
+and composition (formatting line by line until nothing changes reaches the whole-file result, and
+every step still formats to it). Composition is the strongest of these: it found whole-file
+idempotence bugs that no single-pass check sees. `crates/format/tests/test_format_range.rs` runs the
+battery over every fixture source, the program corpus, and re-indented copies of the fixtures (four
+spaces, tabs, mixed steps), and checks every byte selection of a few short sources against an
+independent line oracle.
 
 ### The editor features
 

@@ -11,7 +11,7 @@ ry aims to support the following language server features (some are experimental
 
 - **Formatting**
   - Format entire document
-  - Format selected code range *(🧪 experimental)*
+  - Format selected code range, and format as you type
 
 - **Navigation**
   - Index global variables, S4 and R6 classes/methods
