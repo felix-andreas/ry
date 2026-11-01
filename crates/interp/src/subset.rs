@@ -1677,18 +1677,30 @@ struct Flattener {
     use_names: bool,
 }
 
+/// The names GNU R gives the leaves under one tagged base: a leaf without a name of its own is
+/// the base alone when it is the only such leaf, and otherwise the base followed by its position
+/// among all the leaves under that base.
+struct NameScope {
+    base: String,
+    count: usize,
+    position: usize,
+}
+
 impl Flattener {
     unsafe fn add(&mut self, value: Sexp, tag: &str) -> R<()> {
-        let value = values::materialize(value)?;
-        // A pairlist combines like the list of its elements.
-        let value = if value.kind() == SexpType::Pairlist {
-            values::pairlist_to_list(value)?
-        } else {
-            value
+        let value = flattenable(value)?;
+        let mut scope = NameScope {
+            base: tag.to_owned(),
+            count: if tag.is_empty() { 0 } else { self.unnamed_leaves(value)? },
+            position: 0,
         };
+        self.add_in(value, &mut scope)
+    }
+
+    unsafe fn add_in(&mut self, value: Sexp, scope: &mut NameScope) -> R<()> {
         let count = length(value);
         let element_names = values::names(value);
-        if !tag.is_empty() || element_names != nil() {
+        if !scope.base.is_empty() || element_names != nil() {
             self.any_names = true;
         }
         let is_list = matches!(
@@ -1697,8 +1709,20 @@ impl Flattener {
         );
         if is_list && self.recursive && value.kind() != SexpType::Language {
             for index in 0..count {
-                let name = self.child_name(tag, element_names, index, count);
-                self.add(value.element(index), name.as_deref().unwrap_or("NA"))?;
+                let element = flattenable(value.element(index))?;
+                match own_name(element_names, index) {
+                    Some(name) if name.is_empty() => self.add_in(element, scope)?,
+                    name => {
+                        // A named element starts a new base, so its leaves count afresh.
+                        let name = name.unwrap_or_else(|| "NA".to_owned());
+                        let base = match scope.base.as_str() {
+                            "" => name,
+                            base => format!("{base}.{name}"),
+                        };
+                        let count = self.unnamed_leaves(element)?;
+                        self.add_in(element, &mut NameScope { base, count, position: 0 })?;
+                    }
+                }
             }
             return Ok(());
         }
@@ -1706,44 +1730,55 @@ impl Flattener {
             return Ok(());
         }
         if !value.kind().is_vector() {
+            let name = self.leaf_name(scope, Some(String::new()));
             self.values.push((value, usize::MAX));
-            self.names.push(Some(tag.to_owned()));
+            self.names.push(name);
             return Ok(());
         }
         for index in 0..count {
-            let name = self.child_name(tag, element_names, index, count);
+            let name = self.leaf_name(scope, own_name(element_names, index));
             self.values.push((value, index));
             self.names.push(name);
         }
         Ok(())
     }
 
-    unsafe fn child_name(
-        &self,
-        tag: &str,
-        names: Sexp,
-        index: usize,
-        count: usize,
-    ) -> Option<String> {
+    fn leaf_name(&self, scope: &mut NameScope, own: Option<String>) -> Option<String> {
+        scope.position += 1;
         if !self.use_names {
             return Some(String::new());
         }
-        let inner = if names != nil() && index < length(names) {
-            values::string_at(names, index).map(|text| text.into_owned())
-        } else {
-            Some(String::new())
-        };
-        if tag.is_empty() {
-            return inner;
+        if scope.base.is_empty() {
+            return own;
         }
-        let inner = inner.unwrap_or_else(|| "NA".to_owned());
-        Some(if !inner.is_empty() {
-            format!("{tag}.{inner}")
-        } else if count == 1 {
-            tag.to_owned()
+        let own = own.unwrap_or_else(|| "NA".to_owned());
+        Some(if !own.is_empty() {
+            format!("{}.{own}", scope.base)
+        } else if scope.count == 1 {
+            scope.base.clone()
         } else {
-            format!("{tag}{}", index + 1)
+            format!("{}{}", scope.base, scope.position)
         })
+    }
+
+    /// GNU R's `namesCount`: every element of an atomic vector or of a list that is not
+    /// recursed into, and the leaves of unnamed list elements, stopping once past one.
+    unsafe fn unnamed_leaves(&self, value: Sexp) -> R<usize> {
+        let recursed = matches!(value.kind(), SexpType::List | SexpType::Expression) && self.recursive;
+        if !recursed {
+            return Ok(if value.kind().is_vector() || value == nil() { length(value) } else { 1 });
+        }
+        let names = values::names(value);
+        let mut count = 0;
+        for index in 0..length(value) {
+            if count > 1 {
+                break;
+            }
+            if own_name(names, index).is_some_and(|name| name.is_empty()) {
+                count += self.unnamed_leaves(flattenable(value.element(index))?)?;
+            }
+        }
+        Ok(count)
     }
 
     unsafe fn kind_of(&mut self, value: Sexp) -> R<()> {
@@ -1787,6 +1822,25 @@ impl Flattener {
 }
 
 /// `c()` of already evaluated values, without names.
+/// A pairlist combines like the list of its elements.
+unsafe fn flattenable(value: Sexp) -> R<Sexp> {
+    let value = values::materialize(value)?;
+    if value.kind() == SexpType::Pairlist {
+        values::pairlist_to_list(value)
+    } else {
+        Ok(value)
+    }
+}
+
+/// The element's own name: empty when it has none, and `None` when it is NA.
+unsafe fn own_name(names: Sexp, index: usize) -> Option<String> {
+    if names != nil() && index < length(names) {
+        values::string_at(names, index).map(|text| text.into_owned())
+    } else {
+        Some(String::new())
+    }
+}
+
 pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
     let args: Vec<Arg> = items
         .iter()
