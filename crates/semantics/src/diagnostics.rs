@@ -1711,8 +1711,8 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     }
 }
 
-/// Names written by `<<-` with no enclosing binding anywhere in the file: R
-/// creates them in the global environment, so reads of them resolve.
+/// Names the file's items create in the global environment as a side effect (see
+/// `ItemNaming::super_globals`), so reads of them resolve.
 #[salsa::tracked(returns(ref))]
 fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();

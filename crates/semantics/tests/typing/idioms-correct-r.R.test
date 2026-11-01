@@ -357,3 +357,10 @@ cost: <T: numeric> fn(price: T, rate: T) -> T
 shifted: <T: numeric> fn(x: T) -> double[]
 flagged: fn() -> double
 both: fn() -> double[]
+
+#---- a_top_level_loop_variable_outlives_the_loop
+for (i in 1:3) {}
+last <- function() i
+#++++
+NULL
+last: fn() -> Unknown
