@@ -1606,13 +1606,14 @@ pub fn fmt(
 
     if verbose {
         let global_elapsed = start_global.elapsed();
+        // Files format in parallel, so the summed per-file time is CPU time
+        // and only the global clock measures what the user waited.
         info(&format!(
-            "Formatted {} bytes in {} ms ({}/s) - including I/O: {} ms ({}/s)",
+            "Formatted {} in {} ms ({}/s), of which formatting took {} ms of CPU time",
             human_bytes(bytes_total as f64),
-            elapsed_total.as_millis(),
-            human_bytes(bytes_total as f64 / elapsed_total.as_secs_f64()),
             global_elapsed.as_millis(),
-            human_bytes(bytes_total as f64 / global_elapsed.as_secs_f64())
+            human_bytes(bytes_total as f64 / global_elapsed.as_secs_f64()),
+            elapsed_total.as_millis(),
         ));
     }
 

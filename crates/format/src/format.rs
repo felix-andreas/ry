@@ -164,6 +164,7 @@ fn layout(source: &str, config: Config, indent: &str) -> Result<Layout, FormatEr
         out: String::with_capacity(source.len() * 3 / 2),
         comment_end: None,
         statement_levels: Vec::new(),
+        has_directives: source.contains("fmt:"),
     };
     formatter.source_file(&root);
     Ok(Layout {
@@ -815,6 +816,9 @@ struct Formatter<'a> {
     comment_end: Option<usize>,
     /// See [`Layout::statement_levels`].
     statement_levels: Vec<(TextSize, usize)>,
+    /// Whether any comment could be a `# fmt:` directive, which spares files
+    /// without one the per-node `# fmt: skip` lookaround.
+    has_directives: bool,
 }
 
 impl Formatter<'_> {
@@ -942,6 +946,9 @@ impl Formatter<'_> {
     /// A skip comment alone on the line above, or trailing on the node's last
     /// line, where it may attach inside the node or as its next sibling.
     fn skip_exempt(&self, node: &SyntaxNode) -> bool {
+        if !self.has_directives {
+            return false;
+        }
         let is_skip = |token: &SyntaxToken| {
             token.kind() == COMMENT && parse_directive(token.text()) == Some(Directive::Skip)
         };
@@ -2169,12 +2176,25 @@ fn significant_range(element: &SyntaxElement) -> TextRange {
 
 /// Comments attach deep inside expression nodes, so closer placement must
 /// look at tokens, not siblings.
+///
+/// Walks back from the token at `offset` instead of scanning the subtree, so a
+/// query costs the tree depth plus the blanks skipped, not the node's size:
+/// the formatter asks it about every enclosing node of every statement.
 fn last_token_before(node: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
-    node.descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .take_while(|token| token.text_range().end() <= offset)
-        .filter(|token| !is_blank(token.kind()))
-        .last()
+    let range = node.text_range();
+    let offset = offset.min(range.end());
+    if offset <= range.start() {
+        return None;
+    }
+    let token = if offset == range.end() {
+        node.last_token()?
+    } else {
+        node.token_at_offset(offset - TextSize::from(1))
+            .right_biased()?
+    };
+    successors(Some(token), SyntaxToken::prev_token)
+        .take_while(|token| token.text_range().start() >= range.start())
+        .find(|token| token.text_range().end() <= offset && !is_blank(token.kind()))
 }
 
 /// Sibling checks miss a comment swallowed into the previous sibling's
