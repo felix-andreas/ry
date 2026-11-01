@@ -636,6 +636,25 @@ impl Sexp {
         unsafe { self.payload::<VectorObject>().capacity.get() }
     }
 
+    /// A `CHARSXP`'s intern hash, the high half of its capacity field.
+    pub unsafe fn char_hash(self) -> u32 {
+        unsafe { (self.capacity() as u64 >> 32) as u32 }
+    }
+
+    /// A `CHARSXP`'s `TRUELENGTH`, the low half of its capacity field. data.table's string
+    /// kernels set and read the truelength of every string they meet, so it lives in the string
+    /// itself and costs a load, as in GNU R.
+    pub unsafe fn char_truelength(self) -> i32 {
+        unsafe { self.capacity() as u64 as u32 as i32 }
+    }
+
+    pub unsafe fn set_char_truelength(self, value: i32) {
+        unsafe {
+            let hash = self.capacity() as u64 & !0xFFFF_FFFF;
+            self.set_capacity((hash | u64::from(value as u32)) as isize);
+        }
+    }
+
     pub(crate) unsafe fn set_capacity(self, capacity: isize) {
         unsafe { self.payload::<VectorObject>().capacity.set(capacity) }
     }

@@ -6,7 +6,8 @@
 //! `TRUELENGTH` is the allocated capacity of a vector whose length was shrunk below it, which is
 //! how data.table over-allocates its column lists. Code also uses it as a scratch integer on
 //! strings and on vectors (data.table's grouping marks each `CHARSXP` this way and restores the
-//! marks afterwards); such values live in `Runtime::truelengths`.
+//! marks afterwards). A string keeps its mark in its own header, since those kernels touch every
+//! string; a vector's scratch value lives in `Runtime::truelengths`.
 
 use crate::{
     R_xlen_t, SEXPTYPE,
@@ -30,10 +31,13 @@ unsafe fn vector_or_string(object: Sexp, what: &str) -> ApiResult<Sexp> {
 
 pub unsafe fn truelength(object: Sexp) -> ApiResult<R_xlen_t> {
     let object = vector_or_string(object, "TRUELENGTH")?;
+    if object.kind() == SexpType::Char {
+        return Ok(object.char_truelength() as R_xlen_t);
+    }
     if let Some(&value) = runtime().truelengths.get(&object) {
         return Ok(value);
     }
-    if object.kind() == SexpType::Char || object.is_altrep() {
+    if object.is_altrep() {
         return Ok(0);
     }
     let capacity = object.capacity();
@@ -48,9 +52,14 @@ pub unsafe fn truelength(object: Sexp) -> ApiResult<R_xlen_t> {
 
 pub unsafe fn set_truelength(object: Sexp, value: R_xlen_t) -> ApiResult<()> {
     let object = vector_or_string(object, "SET_TRUELENGTH")?;
+    if object.kind() == SexpType::Char {
+        let value = i32::try_from(value)
+            .map_err(|_| error(format!("SET_TRUELENGTH() on a string takes a 32-bit value, not {value}")))?;
+        object.set_char_truelength(value);
+        return Ok(());
+    }
     let runtime = runtime();
-    let matches_storage = object.kind() != SexpType::Char
-        && !object.is_altrep()
+    let matches_storage = !object.is_altrep()
         && (value == object.capacity() || (value == 0 && object.capacity() == object.length()));
     if value == 0 || matches_storage {
         if runtime.truelengths.remove(&object).is_some() {
@@ -66,6 +75,10 @@ pub unsafe fn set_truelength(object: Sexp, value: R_xlen_t) -> ApiResult<()> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn TRUELENGTH(object: Sexp) -> R_xlen_t {
+    // String kernels read the truelength of every string, so a string skips the boundary.
+    if object.kind() == SexpType::Char {
+        return object.char_truelength() as R_xlen_t;
+    }
     enter(|| truelength(object))
 }
 
@@ -76,6 +89,12 @@ pub unsafe extern "C" fn XTRUELENGTH(object: Sexp) -> R_xlen_t {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_TRUELENGTH(object: Sexp, value: R_xlen_t) {
+    if object.kind() == SexpType::Char
+        && let Ok(value) = i32::try_from(value)
+    {
+        object.set_char_truelength(value);
+        return;
+    }
     enter(|| set_truelength(object, value))
 }
 
