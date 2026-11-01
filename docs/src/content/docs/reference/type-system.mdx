@@ -3,6 +3,8 @@ title: Type system
 description: The precise static-typing semantics contract for ry's R type checker
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Two principles explain most of the rules on this page. First, the checker prefers skipping a check
 to giving a wrong answer: a construct it cannot describe becomes `Unknown`, which is compatible with
 everything, so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode)
@@ -14,7 +16,9 @@ through examples.
 ## Typing comment syntax
 
 Annotations are written in two ways that share one type grammar: in `#:` comments, described here,
-and [inline](#inline-annotation-syntax), in the code itself. A `#:` comment sits directly above the
+and [inline](#inline-annotation-syntax), in the code itself. An example that has both spellings shows
+them in tabs, and the tab you choose is remembered on every page of this site. A form that exists in
+only one spelling shows a single block and says so. A `#:` comment sits directly above the
 binding or expression it describes. Consecutive `#:` lines with no blank line between them form one
 *annotation block*. Each annotation takes one of these forms:
 
@@ -27,6 +31,18 @@ A block is one of three kinds, which cannot be mixed: a single line in one of th
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
 lines, or a definition block of `@type` and `@alias` lines.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+value: integer <- 1L
+
+double_count <- function(count: integer) -> integer count + count
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: integer
 value <- 1L
@@ -35,9 +51,27 @@ value <- 1L
 double_count <- function(count) count + count
 ```
 
+</TabItem>
+</Tabs>
+
 A block can attach at any statement depth. Inside a function body it annotates the assignment or the
 block-final expression that follows it, which is how a function that builds a value of a named type
 is written:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Person {list{name: character}}
+
+make_person <- function(name: character) -> Person {
+  #: @new Person
+  list(name = name)
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: @type Person {list{name: character}}
@@ -48,6 +82,9 @@ make_person <- function(name) {
   list(name = name)
 }
 ```
+
+</TabItem>
+</Tabs>
 
 ### Attachment
 
@@ -78,6 +115,9 @@ already said what was wrong.
 
 An inline annotation writes a type into the code instead of a comment above it:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
 count: integer <- 0L
 
@@ -87,6 +127,25 @@ add <- function(x: integer, y: integer = 1L) -> integer {
 
 first <- function<T>(items: list[T]) -> T items[[1L]]
 ```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: integer
+count <- 0L
+
+#: fn(x: integer, [y]: integer) -> integer
+add <- function(x, y = 1L) {
+  x + y
+}
+
+#: <T> fn(items: list[T]) -> T
+first <- function(items) items[[1L]]
+```
+
+</TabItem>
+</Tabs>
 
 - `name: TYPE <- value` declares a binding's type. The `=` spelling, `name: TYPE = value`, works too.
 - `name: TYPE` in a parameter list declares a parameter's type, before its default if it has one.
@@ -167,6 +226,8 @@ the code agree, and a binder whose constraint differs is reported the same way, 
 constraint winning. A positional parameter type in a compact `#:` annotation is compared with
 the formal it pairs with.
 
+This example deliberately uses both spellings on one function:
+
 ```r
 #: fn(price: double, rate: double) -> double
 apply_discount <- function(price: integer, rate) price * (1 - rate)
@@ -191,7 +252,7 @@ erase the annotations, but ry's runtime registers no checks for them.
 `ry run` and `ry repl` run annotated code on both runtimes. GNU R reads the erasure. ry's runtime
 reads the annotations themselves and checks a function's parameter and return types at its
 boundary, so a function called with the wrong kind of value fails where it was called instead of
-somewhere inside it:
+somewhere inside it. The checks come from the inline spelling, so this example has a single block:
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
@@ -462,12 +523,27 @@ creates no new identity, and may appear anywhere a type may, including inside a 
 an alias that expands in a cycle is an error, reported where it is used; a cycle no annotation uses
 is not reported.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @alias Box<T> {list{ value: T }}
+
+value: Box<integer> <- list(value = 1L)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @alias Box<T> {list{ value: T }}
 
 #: Box<integer>
 value <- list(value = 1L)
 ```
+
+</TabItem>
+</Tabs>
 
 #### Nominal types
 
@@ -489,6 +565,26 @@ In this example, `Person` and `Pet` are distinct and incompatible. The annotatio
 because a nominal value satisfies its representation, and the final call is an error because a
 structural value does not satisfy the nominal type:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Person {list{ name: character, age: double }}
+#: @type Pet {list{ name: character, age: double }}
+
+#: @new Person
+person <- list(name = "bob", age = 20)
+
+shape: list{ name: character, age: double } <- person
+
+get_name <- function(value: Person) -> character value$name
+
+get_name(list(name = "bob", age = 20))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @type Person {list{ name: character, age: double }}
 #: @type Pet {list{ name: character, age: double }}
@@ -504,6 +600,9 @@ get_name <- function(value) value$name
 
 get_name(list(name = "bob", age = 20))
 ```
+
+</TabItem>
+</Tabs>
 
 Projection is what makes field access and arithmetic work on a nominal value. In `get_name`,
 `value$name` is `character` because `$` sees the representation. With `@type Meters {double}`,
@@ -599,6 +698,119 @@ site. When two union-typed contracts share only some members, such as `integer |
 call and `logical | character` at the next, the checker does not compute their intersection; annotate
 the value with the member type you intend.
 
+## Records, tuples and tags
+
+Records, tuples and tags are ry's own values, not R lists. The user guide is
+[Records and tags](/type-checking/records-and-tags/); this section is their typing contract. They are
+inline syntax, so with `[check] inline-annotations = false` each literal, tag or `match` is reported
+as a `ry-syntax` warning. Literals are still typed then, but a `match` gets no coverage check. Their types may be written in `#:` comments
+either way.
+
+### Record and tuple types
+
+| Literal | Type |
+| --- | --- |
+| `(x = 1, y = 2)` | `record{x: double, y: double}` |
+| `(1L, "a")` | `tuple{integer, character}` |
+| `(x = 1,)` | `record{x: double}` |
+| `(1L,)` | `tuple{integer}` |
+| `()` | `tuple{}` |
+
+A one-field record and a one-item tuple need the trailing comma, because `(x = 1)` and `(x)` keep
+their R meaning. A literal is all fields or all items, and a repeated field name is an error.
+
+- A record's fields are all required. Field order is part of neither its identity nor its type, so
+  `record{x: double, y: double}` and `record{y: double, x: double}` are the same type.
+- A record and a list are different types: `record{x: double}` does not fit `list{x: double}`, and
+  the reverse does not fit either.
+- `point$x` and `point[["x"]]` type as the field's type, and a field the record lacks is a
+  `type-mismatch`. `pair[[1L]]` with a literal index types as that item, and an index past the end
+  is a `type-mismatch`. On a record, a position counts the fields in their sorted order. A computed
+  index types as the union of the item or field types.
+- `point$x <- value` and `point[["x"]] <- value` rebind `point` to a copy with that field replaced,
+  and the record keeps its type. The value must be compatible with the field's type, and a field the
+  record lacks is a `type-mismatch`, because a record's fields are fixed.
+
+### Tag types
+
+A tag's type is written the way its value is, with types in place of values: `:None` has type
+`:None`, `:Some(5L)` has type `:Some(integer)`, and `:Rect(width = 2, height = 3)` has type
+`:Rect(width: double, height: double)`. Tags are structural and need no declaration.
+
+A *tag union* is an ordinary [union](#union-types), so the union rules apply unchanged: a tag value
+fits a union that lists a tag of the same name with a compatible payload, and an `if` whose branches
+build different tags types as their union. Normalization merges two members with the same tag name
+and payload shape into one member whose payloads are joined position by position, so joining
+`:Some(1L)` with `:Some("a")` gives `:Some(integer | character)`. Two members with the same name and
+a different payload shape are a `type-mismatch` where they meet.
+
+A union that lists `..` as a member is *open*: it also holds every tag it does not list.
+
+- A tag value fits an open union when the union lists its name with a compatible payload, or does
+  not list its name at all.
+- A closed union fits an open one when each of its members does.
+- An open union never fits a closed union. It fits another open union only when every tag the
+  target lists is also listed by the source, with a compatible payload.
+
+There are no row variables, so a function cannot pass the unlisted tags of an open union through
+with their types. Generic tag unions come from aliases, such as
+`#: @alias Option<T> {:Some(T) | :None}`; none is built in.
+
+### `match`
+
+`match (EXPR) { ARMS }` is a `match` expression only when the `{` is on the line of the closing `)`,
+so every R use of `base::match` keeps its meaning. An arm is `PATTERN => EXPR` or
+`PATTERN if (CONDITION) => EXPR`, separated by newlines, `;` or `,`.
+
+| Pattern | Matches |
+| --- | --- |
+| `_` | anything, binding nothing |
+| `name` | anything, binding it to `name` |
+| `1L`, `"a"`, `TRUE`, `NA`, `NULL`, `-1` | a length-one value equal to the literal |
+| `:Tag`, `:Tag(p1, p2)`, `:Tag(field = p)` | a tag with that name whose payload matches |
+| `(p1, p2)`, `(p,)` | a tuple of that length whose items match |
+| `(name = p, ..)`, `(name = p,)` | a record with those fields; without `..`, exactly those fields |
+| `p1 \| p2` | either pattern; both sides must bind the same names |
+
+The type of a `match` is the join of its arm types, as for `if`. A pattern that cannot match the
+scrutinee's type, such as a tag a closed union does not list or a field the record lacks, is a
+`type-mismatch` at the pattern. A scrutinee whose type is not yet known takes its shape from the
+patterns: the arms' tags form a closed union. A catch-all arm accepts a value of any type, so with
+one the scrutinee is not shaped by the patterns. Pattern
+names are bound in the current environment, so after the `match` a name that only some arms bind
+types like a variable assigned in only some branches of an `if`.
+
+### Exhaustiveness
+
+When the scrutinee's type is known, the arms must cover every value of it. Coverage is computed over
+the cases the type has:
+
+- a closed tag union has one case per tag, and an open union adds an "other tags" case that only a
+  catch-all arm covers;
+- a tuple or a record is one case, with its items or fields checked in turn;
+- a scalar `logical` has three cases, `TRUE`, `FALSE` and `NA`. Coverage trusts the scalar claim,
+  so a value typed scalar that holds several elements, such as `v[-1L]` (see
+  [`[` on vectors](#-on-vectors-1)), matches no literal arm and stops with an error when the code
+  runs;
+- `NULL` is one case, and a union has the cases of each member;
+- every other type has unboundedly many values, so only a binding or `_` covers it.
+
+A guarded arm never counts toward coverage, because its guard can be false. A `match` that misses a
+case is a `non-exhaustive-match` error naming up to three missing cases as patterns, and an arm that
+the arms above it already cover is an `unreachable-pattern` warning.
+
+### Crossing into R
+
+R functions and C code do not know these values. `as.list()` converts a record, tuple or tag to a
+list, and `as.record()`, `as.tuple()` and `as.tag()` convert back.
+
+Passing one to an R function that is not the project's own is a `type-mismatch` at the argument. The
+exceptions are the functions the runtime lets them through: those that understand them (`format`,
+`print`, `identical`, `length`, `[[`, the conversions), those that only ask what a value is
+(`is.null`, `class`, `inherits`), and those that store a value without looking inside it (`list`,
+`lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
+`record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
+
 ## Function types
 
 A function can be annotated in one of two styles, but not both at once:
@@ -616,6 +828,22 @@ The expanded form puts one directive on each line: `@forall` to declare type par
 `@return {TYPE}` or `@returns {TYPE}` for the result. A constrained binder is written
 `@forall T: numeric`, with the same meaning as the compact `<T: numeric>`.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+double_count <- function(count: integer, label: character | NULL = NULL) -> integer {
+  count + count
+}
+
+then_some <- function<T>(condition: logical, value: T) -> T | NULL {
+  if (condition) value
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @param count {integer}
 #: @param [label] {character | NULL}
@@ -630,6 +858,9 @@ then_some <- function(condition, value) {
   if (condition) value
 }
 ```
+
+</TabItem>
+</Tabs>
 
 - Directives come in order: every `@forall` before any `@param`, and every `@param` before `@return`
   or `@returns`.
@@ -661,6 +892,20 @@ at the same range: as a signature mismatch and as a parameter the function does 
 come after the fixed parameters, as in `fn(prefix: TYPE, ...: TYPE) -> RETURN_TYPE`, or before named
 ones, as in `fn(...: TYPE, [option]: TYPE) -> RETURN_TYPE`:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+join <- function(...: character) -> character paste0(...)
+
+wrap <- function(x: character, ...: character) -> character {
+  paste0(x, ": ", paste(...))
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(...: character) -> character
 join <- function(...) paste0(...)
@@ -668,6 +913,9 @@ join <- function(...) paste0(...)
 #: fn(x: character, ...: character) -> character
 wrap <- function(x, ...) paste0(x, ": ", paste(...))
 ```
+
+</TabItem>
+</Tabs>
 
 The position of the rest parameter, counted as the number of parameters declared before it, is part
 of the signature. It must match the position of `...` in the function's formals, and it decides which
@@ -849,10 +1097,23 @@ allows widening wherever the rules on this page define it. When the check succee
 accepted (through a coercion if one is needed), and the annotated binding or expression has the type
 `TYPE` from then on.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+value: list[integer] <- list(1L, 2L, 3L)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: list[integer]
 value <- list(1L, 2L, 3L)
 ```
+
+</TabItem>
+</Tabs>
 
 This is valid, because `list{integer, integer, integer}` is compatible with `list[integer]`.
 
@@ -866,6 +1127,8 @@ representation. Use [`@new`](#nominal-introduction) instead.
 `Unknown`, and it then gives the annotated binding or expression the type `TYPE`. When the checker
 already knows the type, `@if-unknown` is an error, even if the requested type matches the known one,
 so it can never override information the checker has.
+
+Coercions have no inline spelling and are written only as `#:` comments:
 
 ```r
 #: @if-unknown integer
@@ -904,6 +1167,8 @@ expression has the nominal type from then on.
 - When the value already has the nominal type, `@new` is allowed and does nothing further.
 - `@new` is an annotation form, not a type expression, so it cannot appear inside a compact type or
   an expanded function annotation.
+
+Type definitions and `@new` have no inline spelling and are written only as `#:` comments:
 
 ```r
 #: @type Person<T> {list{ value: T }}
@@ -1417,6 +1682,21 @@ a local variable or parameter, the recognized guards are:
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists
 after the `if`, which is the idiomatic early-exit guard:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+f <- function(x: integer | NULL) -> integer {
+  if (is.null(x)) {
+    return(0L)
+  }
+  x + 1L   # x : integer here
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(x: integer | NULL) -> integer
 f <- function(x) {
@@ -1426,6 +1706,9 @@ f <- function(x) {
   x + 1L   # x : integer here
 }
 ```
+
+</TabItem>
+</Tabs>
 
 The details:
 
@@ -1915,10 +2198,23 @@ three.
 A frame is ry's built-in table. Its type is a record of column vectors, written like a `list{...}`
 record with `frame` in front:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+price_of <- function(prices: frame{id: integer[], price: double[]}) -> double[] prices$price
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(prices: frame{id: integer[], price: double[]}) -> double[]
 price_of <- function(prices) prices$price
 ```
+
+</TabItem>
+</Tabs>
 
 A column is always a vector, so a scalar column type broadens: `frame{id: integer}` is
 `frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
@@ -2124,6 +2420,28 @@ out of the parts decided at run time from a value's class attribute:
 A class is a [nominal type](#nominal-types) with a representation. Wrapping the constructor is
 enough to get slot types, constructor arity, and field access checked on an S4 or R6 class:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Point {list{x: double, y: double}}
+
+setClass("Point", representation(x = "numeric", y = "numeric"))
+
+make_point <- function(x: double, y: double) -> Point {
+  #: @new Point
+  new("Point", x = x, y = y)
+}
+
+norm2 <- function(p: Point) -> double sqrt(p$x^2 + p$y^2)
+
+norm2("nope")   # type-mismatch: the argument is not a `Point`
+make_point(1)   # type-mismatch: a required argument is missing
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @type Point {list{x: double, y: double}}
 
@@ -2141,6 +2459,9 @@ norm2 <- function(p) sqrt(p$x^2 + p$y^2)
 norm2("nope")   # type-mismatch: the argument is not a `Point`
 make_point(1)   # type-mismatch: a required argument is missing
 ```
+
+</TabItem>
+</Tabs>
 
 The `setClass` call stays opaque, and the annotation is what the checker reads. Operators on the
 class work the same way: declare `Arith.Point`, and `p1 + p2` is checked. Method dispatch, on the

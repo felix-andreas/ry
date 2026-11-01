@@ -114,6 +114,9 @@ on purpose.
 - **`crates/semantics/tests/stubs`**: `.Rtypes` declarations. Each case renders the declarations it
   loads, with overload candidates in order, and the problems that make the loader drop a line, in
   the wording the editor and the override report show.
+- **`crates/semantics/tests/typing-inline-off`**: the ordinary rendering with
+  `[check] inline-annotations = false`, which pins the `ry-syntax` warning on records, tuples, tags
+  and `match`, and shows that literals are still typed while `match` coverage is not checked.
 - **`crates/semantics/tests/typing-strict`**: the strict stream. After the ordinary rendering, each
   case appends the file's typing mode and its `strict` diagnostics.
 - **`crates/semantics/tests/typing-imports`**: package metadata. A leading `#namespace ` line supplies
@@ -122,10 +125,11 @@ on purpose.
   text as ordinary comments, so expected offsets are honest. Attaching a package needs no directive:
   a `library(data.table)` statement in the source activates the conditional stub namespace through
   the same scan the hosts run.
-- **`crates/semantics/tests/lints`** and **`lints-style`**: `lints::lint_file`, first under the
-  default configuration and then under `naming-style = "snake_case"`, `unused-parameter = "warn"`,
-  `shadows-builtin = "warn"`, and `shadows-namespace = "warn"`, all of which are off by default. Each
-  case renders every finding as `start..end severity[code] message`, or `clean`. Run both with
+- **`crates/semantics/tests/lints`**, **`lints-style`** and **`lints-object-systems-off`**:
+  `lints::lint_file`, first under the default configuration, then under `naming-style = "snake_case"`,
+  `unused-parameter = "warn"`, `shadows-builtin = "warn"`, and `shadows-namespace = "warn"`, all of
+  which are off by default, and last under `[check] object-systems = false`. Each case renders every
+  finding as `start..end severity[code] message`, or `clean`. Run all three with
   `cargo test -p semantics --test test_lint_fixtures`.
 - **`crates/semantics/tests/load_index`**: the package-load index. A case lists `R/` files, and
   optionally `NAMESPACE` and `DESCRIPTION`, with `#~~~~` separators, and renders the package's name,
@@ -297,7 +301,15 @@ the erased text parses cleanly, holds no inline annotation, and erases to itself
 The runtime is tested against models and against GNU R rather than with fixtures. The oracle's
 cases (`crates/oracle/cases/`, [Corpus and oracle](/contributing/corpus-and-oracle)) hold the
 R-level behavior, and `crates/interp/tests/test_fuzz.rs` fuzzes lowering and checks that the
-tier-0 bytecode agrees with the evaluator. `crates/interp/tests/test_linalg.rs` pins base R's linear
+tier-0 bytecode agrees with the evaluator. `crates/jit/tests/test_tiers.rs` does the same one tier
+up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
+forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
+backward jump), and every call must give the same value or error. Most generated programs must run
+to a value, so a generator that drifts into erroring early fails the test instead of passing
+without comparing anything. The test interpreter has no base R closures (`numeric`, `as.list`,
+`withCallingHandlers`), so programs use builtins, and each hand-written seed states whether it is
+meant to fail. Behavior that needs base R, such as a warning handler watching a compiled loop,
+goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, and `test_altrep.rs` there checks the columns as ALTREP
 vectors (feature `runtime`). `crates/heap/tests/test_gc.rs` builds random
@@ -312,6 +324,18 @@ non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`,
 `R_UnwindProtect`, `R_ExecWithCleanup` and a cpp11-style C++ unwind) around values and errors, and
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
+
+### The table engine
+
+`crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
+data.table behavior was read from data.table under GNU R. Its differential fuzz generates random
+tables and queries and checks the native kernels against the Polars plans
+(`query::execute_with_plans_only`), which serve as the reference. `FUZZ_ITERS` raises the
+iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
+fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
+
+`tools/bench/table/run.sh <dir> [rows]` runs the db-benchmark questions under data.table and the
+engine, each printing rows, columns and a checksum, so the answers compare line by line.
 
 ### Coverage-guided fuzzing
 

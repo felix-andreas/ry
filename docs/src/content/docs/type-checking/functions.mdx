@@ -3,24 +3,62 @@ title: Functions
 description: Function signatures, optional parameters, and generic functions
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 ## Signatures
 
 A function annotation lists each parameter with its type, then the return type:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: fn(name: character, [greeting]: character) -> character
 greet <- function(name, greeting = "hello") paste(greeting, name)
 ```
 
-`[greeting]` marks a parameter callers may omit, and the definition must give it a default, so an
-omitted argument always has a value.
+</TabItem>
+</Tabs>
+
+A parameter callers may omit must have a default, so an omitted argument always has a value. Inline,
+the default itself marks the parameter as optional. In a comment you write `[greeting]` and the
+definition must give the default.
 
 Calls are checked for types, names, and the number of arguments. Parameter names are part of the
 type, because R matches arguments by name as often as by position:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
 greet("Ada", greting = "hi")
 ```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+</Tabs>
 
 ```text
 type-mismatch
@@ -50,8 +88,24 @@ increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
 ```
 
 `T` stands for any type, and `T: numeric` for `integer` or `double`, so `increment(2.5)` is a
-`double` and `increment("a")` is an error. You can write the same in an annotation:
+`double` and `increment("a")` is an error. You can write the same yourself:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+pick <- function<T>(condition: logical, value: T) -> T | NULL {
+  if (condition) value else NULL
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: <T> fn(condition: logical, value: T) -> T | NULL
+pick <- function(condition, value) if (condition) value else NULL
 ```
+
+</TabItem>
+</Tabs>

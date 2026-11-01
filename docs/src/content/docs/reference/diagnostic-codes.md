@@ -87,11 +87,35 @@ reassign, unlike `TRUE` and `FALSE`.
 **`trailing-comma`** (error): a comma after a call's last argument. R reads it as an empty argument,
 so `c(1, 2, )` fails when it runs.
 
+**`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
+`setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
+runs, but ry checks [records and tagged unions](/type-checking/records-and-tags) statically and
+cannot see inside these classes, so it recommends those instead:
+
+```text
+! `setClass` defines an S4 class. ry recommends a record or a tagged union instead
+```
+
+With `[check] object-systems = false`, each definition is an error instead, whatever the `[lint]`
+level says:
+
+```text
+x S4 classes are turned off in this project (`[check] object-systems = false`), so `setClass` cannot define an S4 class. Use a record or a tagged union instead
+```
+
 **`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
 declaration is never dropped in silence.
 
 **`inline-annotation`** (warning), while `[check] inline-annotations = false`: an inline annotation,
 which then types nothing, and which R itself cannot run.
+
+**`ry-syntax`** (warning), while `[check] inline-annotations = false`: a record, tuple, tag or
+`match`, which R cannot run either. The value is still typed, but a `match` is not checked for
+missing or unreachable cases.
+
+```text
+! this record is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+```
 
 **`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server
 marks the line in `ry.toml`, and `ry check` prints the finding and exits with status 2 without
@@ -102,6 +126,22 @@ checking any R.
 **`type-mismatch`** (error), with `[check] typing = true` or `# typing: on`: a value of the wrong
 type, a call with the wrong arguments, a field or frame column that does not exist, and every other rule in the
 [type system](/reference/type-system).
+
+**`non-exhaustive-match`** (error), with typing on: a `match` that some value of the scrutinee's
+type reaches without a matching arm. The message names up to three missing cases as patterns, and
+the range covers `match (x)`. An arm with a guard does not count toward coverage, and a scrutinee
+of unknown type is not checked.
+
+```text
+x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+**`unreachable-pattern`** (warning), with typing on: an arm whose pattern the unguarded arms above
+it already cover, so it never runs.
+
+```text
+! this arm is unreachable: the arms above it already match every value its pattern matches
+```
 
 **`strict`** (error), with `[check] strict = true` or `# typing: strict`: each place where a value's
 type could not be determined, each parameter nothing constrains, and each name that resolves only

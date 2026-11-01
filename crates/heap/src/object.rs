@@ -10,7 +10,9 @@
 //! - an environment stores its frame and its enclosure;
 //! - an external pointer stores its address, tag and protected value;
 //! - a weak reference stores its key, value and finalizer;
-//! - a primitive stores its index in the primitive table.
+//! - a primitive stores its index in the primitive table;
+//! - a ry record, tuple or tag stores its interned layout id, its slot count, a mask of the
+//!   slots that hold raw numbers, and then its eight-byte slots.
 //!
 //! The accessors are `unsafe` because a handle is only valid while its object is reachable from a
 //! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
@@ -50,6 +52,9 @@ pub enum SexpType {
     /// An environment binding cell. It is internal to ry and never reaches native code, so it
     /// takes a code GNU R leaves unused.
     Binding = 26,
+    /// A ry record, tuple or tag. GNU R leaves the code unused; the layout says which of the
+    /// three a value is (see [`crate::records`]).
+    Record = 27,
     /// A free heap slot. Seeing it through a handle means the handle outlived its object.
     Free = 31,
 }
@@ -81,6 +86,7 @@ impl SexpType {
             23 => SexpType::WeakRef,
             24 => SexpType::Raw,
             25 => SexpType::Object,
+            27 => SexpType::Record,
             _ => return None,
         })
     }
@@ -117,6 +123,7 @@ impl SexpType {
             SexpType::Raw => "raw",
             SexpType::Object => "S4",
             SexpType::Binding => "binding",
+            SexpType::Record => "record",
             SexpType::Free => "FREESXP",
         }
     }
@@ -149,6 +156,7 @@ impl SexpType {
             SexpType::Raw => "RAWSXP",
             SexpType::Object => "OBJSXP",
             SexpType::Binding => "BINDINGSXP",
+            SexpType::Record => "RECORDSXP",
             SexpType::Free => "FREESXP",
         }
     }
@@ -193,6 +201,7 @@ impl SexpType {
             SexpType::ExternalPtr => Shape::ExternalPtr,
             SexpType::WeakRef => Shape::WeakRef,
             SexpType::Builtin | SexpType::Special => Shape::Primitive,
+            SexpType::Record => Shape::Record,
             _ => Shape::Triple,
         }
     }
@@ -206,6 +215,7 @@ pub enum Shape {
     ExternalPtr,
     WeakRef,
     Primitive,
+    Record,
 }
 
 /// The header every object starts with. Sixteen bytes on a 64-bit target.
@@ -351,11 +361,95 @@ pub(crate) struct PrimitiveObject {
     pub index: Cell<u32>,
 }
 
+#[repr(C)]
+pub(crate) struct RecordObject {
+    pub header: Header,
+    pub layout: Cell<u32>,
+    /// The layout's slot count, kept in the object so the collector and the sweeper size and
+    /// trace it without consulting the layout table. It fills what would otherwise be padding.
+    pub slot_count: Cell<u32>,
+    pub unboxed: Cell<u64>,
+}
+
+/// One slot of a record, tuple or tag, as stored.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Slot {
+    Handle(Sexp),
+    Real(f64),
+    Integer(i32),
+    Logical(i32),
+}
+
+/// Slots past this index are always handles, because the unboxed mask has one bit per slot.
+pub const UNBOXED_SLOTS: usize = 64;
+
+/// A raw slot is eight bytes. A double is stored as its bits, and an integer or logical as its
+/// 32 bits under one of these quiet-NaN prefixes, so the one-bit mask is enough to tell a raw
+/// slot from a handle. A double whose upper word happens to equal a prefix is stored boxed
+/// instead, which keeps every NaN payload (`NA_real_` among them) exact.
+const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
+const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
+
+impl Slot {
+    fn encode(self) -> u64 {
+        match self {
+            Slot::Handle(handle) => handle.as_ptr() as u64,
+            Slot::Real(value) => value.to_bits(),
+            Slot::Integer(value) => (u64::from(INTEGER_PREFIX) << 32) | u64::from(value as u32),
+            Slot::Logical(value) => (u64::from(LOGICAL_PREFIX) << 32) | u64::from(value as u32),
+        }
+    }
+
+    fn decode_raw(bits: u64) -> Slot {
+        let low = bits as u32 as i32;
+        match (bits >> 32) as u32 {
+            INTEGER_PREFIX => Slot::Integer(low),
+            LOGICAL_PREFIX => Slot::Logical(low),
+            _ => Slot::Real(f64::from_bits(bits)),
+        }
+    }
+}
+
+/// How `value` is stored in slot `index`: raw when it is a length-one double, integer or logical
+/// without attributes, and a handle otherwise.
+pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
+    unsafe {
+        if index >= UNBOXED_SLOTS
+            || value.is_altrep()
+            || value.attrib().kind() != SexpType::Nil
+            || !matches!(
+                value.kind(),
+                SexpType::Real | SexpType::Integer | SexpType::Logical
+            )
+            || value.length() != 1
+        {
+            return Slot::Handle(value);
+        }
+        match value.kind() {
+            SexpType::Real => {
+                let number = *(value.data() as *const f64);
+                let upper = (number.to_bits() >> 32) as u32;
+                if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
+                    Slot::Handle(value)
+                } else {
+                    Slot::Real(number)
+                }
+            }
+            SexpType::Integer => Slot::Integer(*(value.data() as *const i32)),
+            _ => Slot::Logical(*(value.data() as *const i32)),
+        }
+    }
+}
+
+/// Where a record's slots start.
+pub const RECORD_DATA_OFFSET: usize = size_of::<RecordObject>();
+
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
 
 const _: () = assert!(size_of::<Header>() == 16);
 const _: () = assert!(VECTOR_DATA_OFFSET == 32);
+const _: () = assert!(RECORD_DATA_OFFSET == 32);
 
 /// The bytes an object of `kind` with `length` elements occupies, header included. `CHARSXP`
 /// keeps a terminating NUL after its bytes, as `R_CHAR` promises.
@@ -379,6 +473,7 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
         Shape::ExternalPtr => Some(size_of::<ExternalPtrObject>()),
         Shape::WeakRef => Some(size_of::<WeakRefObject>()),
         Shape::Primitive => Some(size_of::<PrimitiveObject>()),
+        Shape::Record => length.checked_mul(8)?.checked_add(RECORD_DATA_OFFSET),
     }
 }
 
@@ -674,6 +769,61 @@ impl Sexp {
 
     pub(crate) unsafe fn set_primitive_index(self, index: u32) {
         unsafe { self.payload::<PrimitiveObject>().index.set(index) }
+    }
+
+    // Records, tuples and tags. The caller guarantees the object has the record shape.
+
+    pub unsafe fn record_layout(self) -> u32 {
+        unsafe { self.payload::<RecordObject>().layout.get() }
+    }
+
+    pub unsafe fn record_slot_count(self) -> usize {
+        unsafe { self.payload::<RecordObject>().slot_count.get() as usize }
+    }
+
+    pub(crate) unsafe fn record_unboxed(self) -> u64 {
+        unsafe { self.payload::<RecordObject>().unboxed.get() }
+    }
+
+    /// Slot `index`, which must be below the slot count.
+    pub unsafe fn record_slot(self, index: usize) -> Slot {
+        unsafe {
+            let bits = *(self.record_slots() as *const u64).add(index);
+            if index < UNBOXED_SLOTS && self.record_unboxed() & (1 << index) != 0 {
+                Slot::decode_raw(bits)
+            } else {
+                Slot::Handle(Sexp(NonNull::new_unchecked(bits as *mut Header)))
+            }
+        }
+    }
+
+    /// The handle in slot `index`, if the slot holds one.
+    pub(crate) unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
+        match unsafe { self.record_slot(index) } {
+            Slot::Handle(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
+    unsafe fn record_slots(self) -> *mut u8 {
+        unsafe { (self.0.as_ptr() as *mut u8).add(RECORD_DATA_OFFSET) }
+    }
+
+    /// Fills a fresh record's header fields and slots. Nothing may read the record before.
+    pub(crate) unsafe fn init_record(self, layout: u32, slots: &[Slot]) {
+        unsafe {
+            let payload = self.payload::<RecordObject>();
+            payload.layout.set(layout);
+            payload.slot_count.set(slots.len() as u32);
+            let mut unboxed = 0u64;
+            for (index, slot) in slots.iter().enumerate() {
+                if !matches!(slot, Slot::Handle(_)) {
+                    unboxed |= 1 << index;
+                }
+                *(self.record_slots() as *mut u64).add(index) = slot.encode();
+            }
+            payload.unboxed.set(unboxed);
+        }
     }
 
     /// Initializes a fresh slot's header. The caller fills the payload before anything reads it.

@@ -9,8 +9,8 @@ use table::{
     ffi,
     polars::prelude::{IntoColumn, PlSmallStr},
     query::{
-        Aggregate, BinaryOp, Expr, Join, Output, Query, ResultType, Roll, Rows, Select, SortKey,
-        UnaryOp,
+        Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, ResultType, Roll, Rows, Select,
+        SortKey, UnaryOp,
         build::{aggregate, binary, column},
         execute, plan, result_type,
     },
@@ -604,6 +604,7 @@ fn join(i: &mut Table, on: &[(&str, &str)], drop_unmatched: bool, roll: Roll) ->
             .collect(),
         drop_unmatched,
         roll,
+        mult: Mult::All,
     })
 }
 
@@ -1036,7 +1037,10 @@ fn query(rows: Rows, select: Select) -> Query {
 
 #[test]
 fn a_filtered_assignment_aggregates_over_the_selected_rows_only() {
-    let mut x = frame(vec![("g", strings(&["a", "b", "a"])), ("v", ints(&[1, 2, 3]))]);
+    let mut x = frame(vec![
+        ("g", strings(&["a", "b", "a"])),
+        ("v", ints(&[1, 2, 3])),
+    ]);
     let selected = Rows::Filter(binary(
         BinaryOp::Equal,
         column("g"),
@@ -1058,7 +1062,10 @@ fn a_filtered_assignment_aggregates_over_the_selected_rows_only() {
 
 #[test]
 fn a_keyed_join_without_on_matches_the_leading_columns_of_i() {
-    let mut x = frame(vec![("id", ints(&[1, 2, 3])), ("v", doubles(&[10.0, 20.0, 30.0]))]);
+    let mut x = frame(vec![
+        ("id", ints(&[1, 2, 3])),
+        ("v", doubles(&[10.0, 20.0, 30.0])),
+    ]);
     x.set_key(&["id"]).unwrap_or_else(|error| panic!("{error}"));
     let mut i = frame(vec![("code", ints(&[3, 1])), ("id", ints(&[1, 2]))]);
     let rows = join(&mut i, &[], false, Roll::None);
@@ -1071,7 +1078,10 @@ fn a_keyed_join_without_on_matches_the_leading_columns_of_i() {
 
 #[test]
 fn na_keys_join_each_other() {
-    let mut x = frame(vec![("k", ints(&[1, NA_INTEGER, 3])), ("v", doubles(&[1.0, 2.0, 3.0]))]);
+    let mut x = frame(vec![
+        ("k", ints(&[1, NA_INTEGER, 3])),
+        ("v", doubles(&[1.0, 2.0, 3.0])),
+    ]);
     let mut i = frame(vec![("k", ints(&[NA_INTEGER, 3]))]);
     let rows = join(&mut i, &[("k", "k")], false, Roll::None);
     let mut result = run_table(&mut x, query(rows, Select::All));
@@ -1092,12 +1102,12 @@ fn a_rolling_inner_join_keeps_matches_whose_values_are_na() {
 #[test]
 fn a_join_column_takes_the_type_of_i() {
     let mut x = frame(vec![("id", ints(&[1, 2])), ("v", doubles(&[10.0, 20.0]))]);
-    let mut i = frame(vec![("id", doubles(&[1.5, 2.0])), ("v", doubles(&[1.0, 2.0]))]);
-    let rows = join(&mut i, &[("id", "id")], false, Roll::None);
-    let select = Select::Columns(vec![
-        named("id", column("id")),
-        named("iv", column("i.v")),
+    let mut i = frame(vec![
+        ("id", doubles(&[1.5, 2.0])),
+        ("v", doubles(&[1.0, 2.0])),
     ]);
+    let rows = join(&mut i, &[("id", "id")], false, Roll::None);
+    let select = Select::Columns(vec![named("id", column("id")), named("iv", column("i.v"))]);
     let joined = query(rows, select);
     assert_eq!(
         result_type(&x.schema(), x.key(), &joined).ok(),
@@ -1149,7 +1159,10 @@ fn nan_compares_sorts_and_aggregates_as_in_r() {
         descending: true,
     }]);
     let mut sorted = run_table(&mut x, query(descending, Select::All));
-    assert_eq!(read(&mut sorted, "d"), doubles(&[1.0, -1.0, f64::NAN, NA_REAL]));
+    assert_eq!(
+        read(&mut sorted, "d"),
+        doubles(&[1.0, -1.0, f64::NAN, NA_REAL])
+    );
 
     // `order` keeps `NA` and `NaN` in their original order at the end, in either direction.
     let mut na_first = frame(vec![("d", doubles(&[NA_REAL, f64::NAN, 1.0, -1.0]))]);
@@ -1172,8 +1185,12 @@ fn nan_compares_sorts_and_aggregates_as_in_r() {
         named("mn", aggregate(Aggregate::Min, column("d"))),
     ]);
     let mut extremes = run_table(&mut without_na, query(Rows::All, select));
-    assert!(matches!(get(&mut extremes, "mx"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0])));
-    assert!(matches!(get(&mut extremes, "mn"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0])));
+    assert!(
+        matches!(get(&mut extremes, "mx"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0]))
+    );
+    assert!(
+        matches!(get(&mut extremes, "mn"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0]))
+    );
 }
 
 #[test]
@@ -1182,7 +1199,10 @@ fn a_logical_compares_with_a_string_by_its_r_spelling() {
         ("l", RVector::Logical(vec![1, 0])),
         ("s", strings(&["TRUE", "TRUE"])),
     ]);
-    let select = Select::Columns(vec![named("eq", binary(BinaryOp::Equal, column("l"), column("s")))]);
+    let select = Select::Columns(vec![named(
+        "eq",
+        binary(BinaryOp::Equal, column("l"), column("s")),
+    )]);
     let mut result = run_table(&mut x, query(Rows::All, select));
     assert_eq!(read(&mut result, "eq"), RVector::Logical(vec![1, 0]));
 }
@@ -1204,7 +1224,82 @@ fn an_integer_sum_that_overflows_becomes_double() {
     let small = Rows::Filter(binary(BinaryOp::Equal, column("g"), Expr::Integer(2)));
     let select = Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]);
     let mut result = run_table(&mut x, query(small, select));
-    assert_eq!(read(&mut result, "s"), ints(&[1]), "a sum that fits stays integer");
+    assert_eq!(
+        read(&mut result, "s"),
+        ints(&[1]),
+        "a sum that fits stays integer"
+    );
+
+    let nested = Select::Columns(vec![named(
+        "s",
+        binary(
+            BinaryOp::Subtract,
+            aggregate(Aggregate::Sum, column("v")),
+            Expr::Integer(1),
+        ),
+    )]);
+    let mut result = run_table(&mut x, query(Rows::All, nested));
+    assert_eq!(
+        read(&mut result, "s"),
+        doubles(&[4e9 + 1.0 - 1.0]),
+        "a nested sum that overflows is a double too"
+    );
+
+    let mut updated = x.fork();
+    run(
+        &mut updated,
+        Query {
+            select: Select::Assign(vec![set("s", aggregate(Aggregate::Sum, column("v")))]),
+            by: vec![named("g", column("g"))],
+            ..Query::default()
+        },
+    );
+    assert_eq!(
+        read(&mut updated, "s"),
+        doubles(&[4e9, 4e9, 1.0]),
+        "a new column holding a grouped sum that overflows is a double"
+    );
+}
+
+/// R's integer `sum` returns `NA` as soon as it meets one without `na.rm`, so a group holding an `NA`
+/// never overflows, and only the groups that really overflow make the result a double.
+#[test]
+fn an_na_group_sum_neither_overflows_nor_loses_its_na() {
+    use table::query::execute_with_plans_only;
+    let plus_one = || Query {
+        select: Select::Columns(vec![named(
+            "s",
+            binary(
+                BinaryOp::Add,
+                aggregate(Aggregate::Sum, column("v")),
+                Expr::Integer(1),
+            ),
+        )]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    let cases = [
+        (
+            vec![1, 1, 2, 3],
+            vec![2_000_000_000, 2_000_000_000, 1, NA_INTEGER],
+            doubles(&[4e9 + 1.0, 2.0, NA_REAL]),
+        ),
+        (
+            vec![1, 1, 2],
+            vec![2_000_000_000, NA_INTEGER, 1],
+            ints(&[NA_INTEGER, 2]),
+        ),
+    ];
+    for (g, v, expected) in cases {
+        let x = frame(vec![("g", ints(&g)), ("v", ints(&v))]);
+        let mut kernel = run_table(&mut x.fork(), plus_one());
+        assert_eq!(read(&mut kernel, "s"), expected.clone(), "kernel");
+        let mut planned = match execute_with_plans_only(&mut x.fork(), plus_one()) {
+            Ok(Output::Table(result)) => result,
+            other => panic!("expected a table, got {other:?}"),
+        };
+        assert_eq!(read(&mut planned, "s"), expected, "plan");
+    }
 }
 
 fn factor(codes: &[i32], levels: &[&str]) -> RVector {
@@ -1216,7 +1311,10 @@ fn factor(codes: &[i32], levels: &[&str]) -> RVector {
 
 #[test]
 fn a_keyed_join_without_on_matches_the_key_of_a_keyed_i() {
-    let mut x = frame(vec![("a", ints(&[1, 2, 3])), ("v", doubles(&[10.0, 20.0, 30.0]))]);
+    let mut x = frame(vec![
+        ("a", ints(&[1, 2, 3])),
+        ("v", doubles(&[10.0, 20.0, 30.0])),
+    ]);
     x.set_key(&["a"]).unwrap_or_else(|error| panic!("{error}"));
     let mut i = frame(vec![("z", ints(&[3, 1])), ("a", ints(&[1, 2]))]);
     i.set_key(&["a"]).unwrap_or_else(|error| panic!("{error}"));
@@ -1271,7 +1369,10 @@ fn an_na_ifelse_test_gives_na() {
         Box::new(Expr::Double(1.0)),
         Box::new(Expr::Double(2.0)),
     );
-    let mut result = run_table(&mut x, query(Rows::All, Select::Columns(vec![named("r", choice)])));
+    let mut result = run_table(
+        &mut x,
+        query(Rows::All, Select::Columns(vec![named("r", choice)])),
+    );
     assert_eq!(read(&mut result, "r"), doubles(&[1.0, NA_REAL]));
 }
 
@@ -1312,22 +1413,54 @@ fn assigning_into_an_existing_column_keeps_its_type_unless_the_value_replaces_it
         ("g", ints(&[1, 2])),
     ]);
     let second = || Rows::Filter(binary(BinaryOp::Greater, column("g"), Expr::Integer(1)));
-    run(&mut x, query(second(), Select::Assign(vec![set("i", Expr::Double(1.5))])));
-    assert_eq!(read(&mut x, "i"), ints(&[1, 1]), "a subset truncates into the integer column");
     run(
         &mut x,
-        query(second(), Select::Assign(vec![set("f", Expr::Character("z".into()))])),
+        query(second(), Select::Assign(vec![set("i", Expr::Double(1.5))])),
     );
-    assert_eq!(read(&mut x, "f"), factor(&[1, 3], &["a", "b", "z"]), "a new label adds a level");
-    run(&mut x, query(Rows::All, Select::Assign(vec![set("d", Expr::Integer(1))])));
-    assert_eq!(read(&mut x, "d"), doubles(&[1.0, 1.0]), "one value coerces to the column");
+    assert_eq!(
+        read(&mut x, "i"),
+        ints(&[1, 1]),
+        "a subset truncates into the integer column"
+    );
+    run(
+        &mut x,
+        query(
+            second(),
+            Select::Assign(vec![set("f", Expr::Character("z".into()))]),
+        ),
+    );
+    assert_eq!(
+        read(&mut x, "f"),
+        factor(&[1, 3], &["a", "b", "z"]),
+        "a new label adds a level"
+    );
+    run(
+        &mut x,
+        query(Rows::All, Select::Assign(vec![set("d", Expr::Integer(1))])),
+    );
+    assert_eq!(
+        read(&mut x, "d"),
+        doubles(&[1.0, 1.0]),
+        "one value coerces to the column"
+    );
     run(
         &mut x,
         query(Rows::All, Select::Assign(vec![set("g", column("d"))])),
     );
-    assert_eq!(read(&mut x, "g"), doubles(&[1.0, 1.0]), "a whole column replaces the type");
-    run(&mut x, query(Rows::All, Select::Assign(vec![set("k", column("h"))])));
-    assert_eq!(read(&mut x, "k"), factor(&[2, 1], &["q", "r"]), "a factor stays a factor");
+    assert_eq!(
+        read(&mut x, "g"),
+        doubles(&[1.0, 1.0]),
+        "a whole column replaces the type"
+    );
+    run(
+        &mut x,
+        query(Rows::All, Select::Assign(vec![set("k", column("h"))])),
+    );
+    assert_eq!(
+        read(&mut x, "k"),
+        factor(&[2, 1], &["q", "r"]),
+        "a factor stays a factor"
+    );
 }
 
 #[test]
@@ -1339,4 +1472,689 @@ fn a_failing_update_leaves_the_table_unchanged() {
     ]);
     assert!(execute(&mut x, query(Rows::All, update)).is_err());
     assert_eq!(read(&mut x, "a"), ints(&[1, 2]));
+}
+
+/// A random table for the differential fuzz: grouping columns of every coded type (an integer
+/// that is sometimes wide enough to force the hashed layout, a factor and a logical), and value
+/// columns with `NA`, `NaN` and integers large enough to overflow a sum.
+fn random_table(rng: &mut SplitMix64, rows: usize) -> Table {
+    let key_range = if rng.chance(1, 3) {
+        3_000_000
+    } else {
+        1 + rng.below(20)
+    };
+    let big = rng.chance(1, 5);
+    let maybe_na =
+        |rng: &mut SplitMix64, value: i32| if rng.chance(1, 12) { NA_INTEGER } else { value };
+    let g1: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = rng.below(key_range) as i32 - 2;
+            maybe_na(rng, value)
+        })
+        .collect();
+    let g2: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = 1 + rng.below(4) as i32;
+            maybe_na(rng, value)
+        })
+        .collect();
+    let g3: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = rng.below(2) as i32;
+            maybe_na(rng, value)
+        })
+        .collect();
+    let v: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = if big {
+                2_000_000_000 - rng.below(1000) as i32
+            } else {
+                rng.below(200) as i32 - 100
+            };
+            maybe_na(rng, value)
+        })
+        .collect();
+    let w: Vec<f64> = (0..rows)
+        .map(|_| match rng.below(14) {
+            0 => NA_REAL,
+            1 => f64::NAN,
+            _ => rng.below(4000) as f64 / 16.0 - 50.0,
+        })
+        .collect();
+    let z: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = rng.below(2) as i32;
+            maybe_na(rng, value)
+        })
+        .collect();
+    frame(vec![
+        ("g1", ints(&g1)),
+        ("g2", factor(&g2, &["d", "a", "c", "b"])),
+        ("g3", RVector::Logical(g3)),
+        ("v", ints(&v)),
+        ("w", doubles(&w)),
+        ("z", RVector::Logical(z)),
+    ])
+}
+
+/// A table to join [`random_table`] to: its keys overlap that table's, and its factor has the
+/// levels in another order plus one that table lacks.
+fn random_lookup(rng: &mut SplitMix64, rows: usize) -> Table {
+    let maybe_na =
+        |rng: &mut SplitMix64, value: i32| if rng.chance(1, 10) { NA_INTEGER } else { value };
+    let g1: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = rng.below(30) as i32 - 4;
+            maybe_na(rng, value)
+        })
+        .collect();
+    let g2: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = 1 + rng.below(5) as i32;
+            maybe_na(rng, value)
+        })
+        .collect();
+    let g3: Vec<i32> = (0..rows)
+        .map(|_| {
+            let value = rng.below(2) as i32;
+            maybe_na(rng, value)
+        })
+        .collect();
+    let q: Vec<f64> = (0..rows).map(|_| rng.below(1000) as f64 / 8.0).collect();
+    let v: Vec<i32> = (0..rows).map(|_| rng.below(100) as i32).collect();
+    frame(vec![
+        ("g1", ints(&g1)),
+        ("g2", factor(&g2, &["b", "e", "a", "d", "c"])),
+        ("g3", RVector::Logical(g3)),
+        ("q", doubles(&q)),
+        ("v", ints(&v)),
+    ])
+}
+
+/// Prices keyed on `(g, t)`, with `t` strictly increasing within each `g`, and trades to roll
+/// onto them.
+/// Prices keyed on `(g, t)` and trades to roll onto them. The time is an integer or a double, and
+/// sometimes repeats within a group, which the rolling kernel leaves to the plan.
+fn random_series(rng: &mut SplitMix64, rows: usize) -> (Table, Table) {
+    let groups = 1 + rng.below(6) as i32;
+    let repeats = rng.chance(1, 4);
+    let doubled = rng.chance(1, 3);
+    let column_of = |values: Vec<i32>| {
+        if doubled {
+            doubles(
+                &values
+                    .iter()
+                    .map(|value| f64::from(*value) / 2.0)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            ints(&values)
+        }
+    };
+    let mut g = Vec::with_capacity(rows);
+    let mut t = Vec::with_capacity(rows);
+    let mut price = Vec::with_capacity(rows);
+    for row in 0..rows {
+        g.push(1 + rng.below(groups as usize) as i32);
+        let step = if repeats { row / 2 } else { row };
+        t.push(step as i32 * 3 + rng.below(3) as i32);
+        price.push(rng.below(500) as f64 / 4.0);
+    }
+    let mut prices = frame(vec![
+        ("g", ints(&g)),
+        ("t", column_of(t)),
+        ("price", doubles(&price)),
+    ]);
+    prices
+        .set_key(&["g", "t"])
+        .unwrap_or_else(|error| panic!("cannot key the prices: {error}"));
+    let trades_rows = 1 + rng.below(rows.min(5_000));
+    let span = rows as u64 * 3 + 20;
+    let trade_g: Vec<i32> = (0..trades_rows)
+        .map(|_| rng.below(groups as usize + 1) as i32)
+        .collect();
+    let trade_t: Vec<i32> = (0..trades_rows)
+        .map(|_| rng.below(span as usize) as i32 - 10)
+        .collect();
+    let qty: Vec<i32> = (0..trades_rows).map(|_| rng.below(100) as i32).collect();
+    let trades = frame(vec![
+        ("g", ints(&trade_g)),
+        ("t", column_of(trade_t)),
+        ("qty", ints(&qty)),
+    ]);
+    (prices, trades)
+}
+
+fn random_aggregate(rng: &mut SplitMix64) -> Expr {
+    if rng.chance(1, 8) {
+        return Expr::Count;
+    }
+    let functions = [
+        Aggregate::Sum,
+        Aggregate::Mean,
+        Aggregate::Min,
+        Aggregate::Max,
+        Aggregate::First,
+        Aggregate::Last,
+        Aggregate::Length,
+        Aggregate::Median,
+        Aggregate::Sd,
+        Aggregate::Var,
+    ];
+    let arg = |rng: &mut SplitMix64| match rng.below(4) {
+        0 => column("v"),
+        1 => column("w"),
+        2 => column("z"),
+        _ => binary(BinaryOp::Multiply, column("v"), Expr::Integer(2)),
+    };
+    if rng.chance(1, 10) {
+        let x = arg(rng);
+        return Expr::Correlation(Box::new(x), Box::new(arg(rng)));
+    }
+    Expr::Aggregate {
+        function: functions[rng.below(functions.len())],
+        arg: Box::new(arg(rng)),
+        na_rm: rng.chance(1, 2),
+    }
+}
+
+fn random_row_wise(rng: &mut SplitMix64, depth: usize) -> Expr {
+    if depth == 0 || rng.chance(1, 3) {
+        return match rng.below(7) {
+            0 => column("v"),
+            1 => column("w"),
+            2 => column("z"),
+            3 => column("g1"),
+            4 => Expr::Integer(rng.below(7) as i32 - 3),
+            5 => Expr::Double(rng.below(9) as f64 / 2.0 - 2.0),
+            _ => Expr::Na(ColumnType::Integer),
+        };
+    }
+    let ops = [
+        BinaryOp::Add,
+        BinaryOp::Subtract,
+        BinaryOp::Multiply,
+        BinaryOp::Divide,
+        BinaryOp::Power,
+        BinaryOp::IntegerDivide,
+        BinaryOp::Modulo,
+        BinaryOp::Less,
+        BinaryOp::Equal,
+        BinaryOp::GreaterEqual,
+        BinaryOp::And,
+        BinaryOp::Or,
+    ];
+    match rng.below(8) {
+        0 => Expr::Unary(UnaryOp::Not, Box::new(random_row_wise(rng, depth - 1))),
+        1 => Expr::Unary(UnaryOp::IsNa, Box::new(random_row_wise(rng, depth - 1))),
+        2 => Expr::Unary(UnaryOp::Negate, Box::new(random_row_wise(rng, depth - 1))),
+        3 => Expr::IfElse(
+            Box::new(binary(
+                BinaryOp::Greater,
+                random_row_wise(rng, depth - 1),
+                Expr::Integer(0),
+            )),
+            Box::new(random_row_wise(rng, depth - 1)),
+            Box::new(random_row_wise(rng, depth - 1)),
+        ),
+        _ => binary(
+            ops[rng.below(ops.len())],
+            random_row_wise(rng, depth - 1),
+            random_row_wise(rng, depth - 1),
+        ),
+    }
+}
+
+/// Two results agree when they have the same columns and values, doubles up to rounding, since
+/// the kernels may add a group's values in a different order.
+fn assert_same_output(
+    kernel: Result<Output, table::Error>,
+    plan: Result<Output, table::Error>,
+    what: &str,
+) {
+    let (kernel, plan) = match (kernel, plan) {
+        (Ok(kernel), Ok(plan)) => (kernel, plan),
+        (Err(_), Err(_)) => return,
+        (kernel, plan) => panic!("{what}: one path failed: kernel {kernel:?}, plan {plan:?}"),
+    };
+    match (kernel, plan) {
+        (Output::Table(mut kernel), Output::Table(mut plan)) => {
+            assert_eq!(names(&kernel), names(&plan), "{what}: column names");
+            assert_eq!(kernel.height(), plan.height(), "{what}: rows");
+            for name in names(&plan) {
+                assert_same_vector(
+                    get(&mut kernel, &name),
+                    get(&mut plan, &name),
+                    &format!("{what}, column {name}"),
+                );
+            }
+        }
+        (Output::Updated, Output::Updated) => {}
+        (kernel, plan) => panic!("{what}: different outputs: {kernel:?} and {plan:?}"),
+    }
+}
+
+fn assert_same_vector(kernel: RVector, plan: RVector, what: &str) {
+    match (&kernel, &plan) {
+        (RVector::Double(left), RVector::Double(right)) => {
+            assert_eq!(left.len(), right.len(), "{what}: length");
+            for (row, (left, right)) in left.iter().zip(right).enumerate() {
+                let same = if is_na_real(*left) || is_na_real(*right) {
+                    is_na_real(*left) && is_na_real(*right)
+                } else if left.is_nan() || right.is_nan() {
+                    left.is_nan() && right.is_nan()
+                } else {
+                    // The two sides add in different orders, and `var`, `sd` and `cor` use
+                    // different stable algorithms (Welford against two passes), which part ways
+                    // in the last digits when the spread is small next to the mean.
+                    left == right || (left - right).abs() <= 1e-6 * left.abs().max(right.abs())
+                };
+                assert!(same, "{what}, row {row}: kernel {left} and plan {right}");
+            }
+        }
+        _ => assert_eq!(kernel, plan, "{what}"),
+    }
+}
+
+/// The kernels and the Polars plans give the same answer on random grouped queries and
+/// updates, at sizes that exercise the serial, parallel, dense and hashed paths.
+#[test]
+fn fuzz_kernels_agree_with_the_polars_plans() {
+    use table::query::execute_with_plans_only;
+    let mut rng = SplitMix64(0x6e4e1);
+    for iteration in 0..fuzz_iterations(60) {
+        let rows = if iteration % 10 == 9 {
+            70_000 + rng.below(70_000)
+        } else {
+            1 + rng.below(400)
+        };
+        let table = random_table(&mut rng, rows);
+        let keys = ["g1", "g2", "g3"];
+        let mut by = Vec::new();
+        for key in keys {
+            if rng.chance(1, 2) {
+                by.push(named(key, column(key)));
+            }
+        }
+        if by.is_empty() {
+            by.push(named("g1", column("g1")));
+        }
+        if rng.chance(1, 2) {
+            by.reverse();
+        }
+        let keyed = rng.chance(1, 3);
+        let mut columns = Vec::new();
+        for index in 0..1 + rng.below(3) {
+            let first = random_aggregate(&mut rng);
+            let expr = match rng.below(4) {
+                0 => binary(BinaryOp::Subtract, first, random_aggregate(&mut rng)),
+                1 => binary(BinaryOp::Add, first, Expr::Integer(1)),
+                _ => first,
+            };
+            columns.push(named(&format!("a{index}"), expr));
+        }
+        let grouped = Query {
+            select: Select::Columns(columns),
+            by: by.clone(),
+            keyed,
+            ..Query::default()
+        };
+        let what = format!("iteration {iteration}: {grouped:?}");
+        assert_same_output(
+            execute(&mut table.fork(), grouped.clone()),
+            execute_with_plans_only(&mut table.fork(), grouped),
+            &what,
+        );
+
+        let top = Query {
+            rows: Rows::Order(vec![SortKey {
+                expr: column("v"),
+                descending: rng.chance(1, 2),
+            }]),
+            select: Select::Columns(vec![named(
+                "top",
+                Expr::Head(Box::new(column("w")), 1 + rng.below(3)),
+            )]),
+            by,
+            keyed,
+        };
+        let what = format!("iteration {iteration}: {top:?}");
+        assert_same_output(
+            execute(&mut table.fork(), top.clone()),
+            execute_with_plans_only(&mut table.fork(), top),
+            &what,
+        );
+
+        let target = ["v", "w", "z", "new"][rng.below(4)];
+        let rows_selected = if rng.chance(1, 3) {
+            Rows::All
+        } else {
+            Rows::Filter(match rng.below(3) {
+                0 => binary(BinaryOp::Equal, column("g2"), Expr::Character("a".into())),
+                1 => binary(
+                    BinaryOp::Less,
+                    column("v"),
+                    Expr::Integer(rng.below(50) as i32),
+                ),
+                _ => random_row_wise(&mut rng, 2),
+            })
+        };
+        let update = Query {
+            rows: rows_selected,
+            select: Select::Assign(vec![set(target, random_row_wise(&mut rng, 3))]),
+            ..Query::default()
+        };
+        // A big table joined on a key with few values multiplies its rows, so the lookup stays
+        // small when the table is big.
+        let lookup_rows = if iteration % 10 == 9 {
+            1 + rng.below(8)
+        } else {
+            1 + rng.below(60)
+        };
+        let other = random_lookup(&mut rng, lookup_rows);
+        let mut on = Vec::new();
+        for key in ["g1", "g2", "g3"] {
+            if rng.chance(1, 2) {
+                on.push((PlSmallStr::from(key), PlSmallStr::from(key)));
+            }
+        }
+        if on.is_empty() {
+            on.push(("g2".into(), "g2".into()));
+        }
+        let (subject, other) = if rng.chance(1, 4) {
+            (other, table.fork())
+        } else {
+            (table.fork(), other)
+        };
+        let joined = Query {
+            rows: Rows::Join(Join {
+                other,
+                on,
+                drop_unmatched: rng.chance(1, 2),
+                roll: Roll::None,
+                mult: [Mult::All, Mult::First, Mult::Last][rng.below(3)],
+            }),
+            ..Query::default()
+        };
+        let what = format!("iteration {iteration}: {joined:?}");
+        assert_same_output(
+            execute(&mut subject.fork(), joined.clone()),
+            execute_with_plans_only(&mut subject.fork(), joined),
+            &what,
+        );
+
+        let (prices, trades) = random_series(&mut rng, rows);
+        let rolled = Query {
+            rows: Rows::Join(Join {
+                other: trades,
+                on: vec![("g".into(), "g".into()), ("t".into(), "t".into())],
+                drop_unmatched: rng.chance(1, 3),
+                roll: match rng.below(4) {
+                    0 => Roll::Forward(None),
+                    1 => Roll::Backward(Some(rng.below(20) as f64)),
+                    2 => Roll::Forward(Some(-(rng.below(20) as f64))),
+                    _ => Roll::Backward(None),
+                },
+                mult: Mult::All,
+            }),
+            ..Query::default()
+        };
+        let what = format!("iteration {iteration}: {rolled:?}");
+        assert_same_output(
+            execute(&mut prices.fork(), rolled.clone()),
+            execute_with_plans_only(&mut prices.fork(), rolled),
+            &what,
+        );
+
+        let (mut kernel, mut plan) = (table.fork(), table.fork());
+        let what = format!("iteration {iteration}: {update:?}");
+        assert_same_output(
+            execute(&mut kernel, update.clone()),
+            execute_with_plans_only(&mut plan, update),
+            &what,
+        );
+        assert_eq!(
+            names(&kernel),
+            names(&plan),
+            "{what}: columns after the update"
+        );
+        for name in names(&plan) {
+            assert_same_vector(
+                get(&mut kernel, &name),
+                get(&mut plan, &name),
+                &format!("{what}, column {name}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn mult_keeps_the_first_or_last_match_as_data_table_does() {
+    use table::query::execute_with_plans_only;
+    let x = frame(vec![
+        ("k", ints(&[1, 1, 2, 1])),
+        ("v", ints(&[10, 20, 30, 40])),
+    ]);
+    let i = frame(vec![
+        ("k", ints(&[2, 1, 3])),
+        ("w", doubles(&[5.0, 6.0, 7.0])),
+    ]);
+    let cases = [
+        (Mult::First, false, vec![2, 1, 3], vec![30, 10, NA_INTEGER]),
+        (Mult::Last, false, vec![2, 1, 3], vec![30, 40, NA_INTEGER]),
+        (Mult::Last, true, vec![2, 1], vec![30, 40]),
+    ];
+    for (mult, drop_unmatched, keys, values) in cases {
+        let query = || Query {
+            rows: Rows::Join(Join {
+                other: i.clone(),
+                on: vec![(PlSmallStr::from("k"), PlSmallStr::from("k"))],
+                drop_unmatched,
+                roll: Roll::None,
+                mult,
+            }),
+            ..Query::default()
+        };
+        let kernel = run_table(&mut x.fork(), query());
+        let planned = match execute_with_plans_only(&mut x.fork(), query()) {
+            Ok(Output::Table(result)) => result,
+            other => panic!("expected a table, got {other:?}"),
+        };
+        for mut result in [kernel, planned] {
+            assert_eq!(names(&result), ["k", "v", "w"]);
+            assert_eq!(read(&mut result, "k"), ints(&keys), "{mult:?}");
+            assert_eq!(read(&mut result, "v"), ints(&values), "{mult:?}");
+        }
+    }
+}
+
+/// The fuzz builds small tables, so this one is large enough for the grouped median, sd and `cor`
+/// kernels to split their rows across threads; the Polars plan is the reference.
+#[test]
+fn large_grouped_medians_and_moments_match_the_plan() {
+    use table::query::execute_with_plans_only;
+    let mut rng = SplitMix64(7);
+    let rows = 300_000;
+    let groups: Vec<i32> = (0..rows).map(|_| rng.below(500) as i32).collect();
+    let x: Vec<f64> = (0..rows)
+        .map(|_| {
+            if rng.chance(1, 1000) {
+                NA_REAL
+            } else {
+                rng.below(10_000) as f64 / 7.0
+            }
+        })
+        .collect();
+    let y: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
+    let z: Vec<i32> = y
+        .iter()
+        .map(|y| *y as i32 / 3 + rng.below(100) as i32)
+        .collect();
+    let table = frame(vec![
+        ("g", ints(&groups)),
+        ("x", doubles(&x)),
+        ("y", doubles(&y)),
+        ("z", ints(&z)),
+    ]);
+    let removed = |function| Expr::Aggregate {
+        function,
+        arg: Box::new(column("x")),
+        na_rm: true,
+    };
+    let query = || Query {
+        select: Select::Columns(vec![
+            named("md", removed(Aggregate::Median)),
+            named("md_na", aggregate(Aggregate::Median, column("x"))),
+            named("sd", removed(Aggregate::Sd)),
+            named("var", aggregate(Aggregate::Var, column("y"))),
+            named(
+                "cor",
+                Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
+            ),
+        ]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    let mut kernel = run_table(&mut table.fork(), query());
+    let mut planned = match execute_with_plans_only(&mut table.fork(), query()) {
+        Ok(Output::Table(result)) => result,
+        other => panic!("expected a table, got {other:?}"),
+    };
+    assert_eq!(read(&mut kernel, "g"), get(&mut planned, "g"));
+    for name in ["md", "md_na"] {
+        assert_eq!(read(&mut kernel, name), get(&mut planned, name), "{name}");
+    }
+    for name in ["sd", "var", "cor"] {
+        let (RVector::Double(left), RVector::Double(right)) =
+            (get(&mut kernel, name), get(&mut planned, name))
+        else {
+            panic!("{name} is not a double column");
+        };
+        assert_eq!(left.len(), right.len(), "{name}");
+        for (left, right) in left.iter().zip(&right) {
+            assert_eq!(
+                is_na_real(*left),
+                is_na_real(*right),
+                "{name}: {left} against {right}"
+            );
+            assert!(
+                is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
+                "{name}: {left} against {right}"
+            );
+        }
+    }
+}
+
+/// data.table 1.18 under R 4.3 gives a double column for `s := sum(v) - 1L` when a total
+/// overflows, with or without `by`, because R's `sum` then returns a double.
+#[test]
+fn a_new_column_nesting_an_overflowing_sum_is_a_double() {
+    let x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    let nested = || {
+        binary(
+            BinaryOp::Subtract,
+            aggregate(Aggregate::Sum, column("v")),
+            Expr::Integer(1),
+        )
+    };
+    let update = |rows: Rows, by: &[&str]| {
+        let mut updated = x.fork();
+        run(
+            &mut updated,
+            Query {
+                rows,
+                select: Select::Assign(vec![set("s", nested())]),
+                by: by.iter().map(|name| named(name, column(name))).collect(),
+                ..Query::default()
+            },
+        );
+        get(&mut updated, "s")
+    };
+    assert_eq!(
+        Read(update(Rows::All, &["g"])),
+        doubles(&[3_999_999_999.0, 3_999_999_999.0, 0.0])
+    );
+    assert_eq!(Read(update(Rows::All, &[])), doubles(&[4e9, 4e9, 4e9]));
+    let small = || Rows::Filter(binary(BinaryOp::Equal, column("g"), Expr::Integer(2)));
+    assert_eq!(
+        Read(update(small(), &[])),
+        ints(&[NA_INTEGER, NA_INTEGER, 0]),
+        "a sum that fits stays integer"
+    );
+    let large = Rows::Filter(binary(BinaryOp::Equal, column("g"), Expr::Integer(1)));
+    assert_eq!(
+        Read(update(large, &["g"])),
+        doubles(&[3_999_999_999.0, 3_999_999_999.0, NA_REAL])
+    );
+}
+
+/// A comparison over an overflowing sum keeps its own type: R's `sum(v) > 0L` is a logical `TRUE`
+/// when the sum is a double, and the column must not become a double.
+#[test]
+fn a_new_column_comparing_an_overflowing_sum_stays_logical() {
+    let x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    for by in [vec![], vec![named("g", column("g"))]] {
+        let mut updated = x.fork();
+        run(
+            &mut updated,
+            Query {
+                select: Select::Assign(vec![set(
+                    "big",
+                    binary(
+                        BinaryOp::Greater,
+                        aggregate(Aggregate::Sum, column("v")),
+                        Expr::Integer(0),
+                    ),
+                )]),
+                by,
+                ..Query::default()
+            },
+        );
+        assert_eq!(read(&mut updated, "big"), RVector::Logical(vec![1, 1, 1]));
+    }
+}
+
+/// A join the kernels decline, here on a double key, still stages a nested sum over the joined
+/// rows, so `sum(v) + 1L` is a double when a total overflows, as after the join kernel.
+#[test]
+fn a_nested_sum_after_a_planned_join_widens_on_overflow() {
+    use table::query::execute_with_plans_only;
+    let x = frame(vec![
+        ("k", doubles(&[1.0, 1.0, 2.0])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    let i = frame(vec![("k", doubles(&[1.0, 2.0]))]);
+    let query = || Query {
+        rows: Rows::Join(Join {
+            other: i.clone(),
+            on: vec![(PlSmallStr::from("k"), PlSmallStr::from("k"))],
+            drop_unmatched: false,
+            roll: Roll::None,
+            mult: Mult::All,
+        }),
+        select: Select::Columns(vec![named(
+            "s",
+            binary(
+                BinaryOp::Add,
+                aggregate(Aggregate::Sum, column("v")),
+                Expr::Integer(1),
+            ),
+        )]),
+        by: vec![named("k", column("k"))],
+        ..Query::default()
+    };
+    let kernel = run_table(&mut x.fork(), query());
+    let planned = match execute_with_plans_only(&mut x.fork(), query()) {
+        Ok(Output::Table(result)) => result,
+        other => panic!("expected a table, got {other:?}"),
+    };
+    for mut result in [kernel, planned] {
+        assert_eq!(read(&mut result, "s"), doubles(&[4_000_000_001.0, 2.0]));
+    }
 }

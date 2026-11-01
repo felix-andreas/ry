@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use heap::object::{
-    NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, gp, is_na_real,
+    NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
 };
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::{
@@ -1491,6 +1491,38 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         }
         SexpType::Char => chars_equal(x, y),
         SexpType::Object => true,
+        SexpType::Record => {
+            x.record_layout() == y.record_layout()
+                && (0..x.record_slot_count()).all(|index| match (x.record_slot(index), y.record_slot(index)) {
+                    (Slot::Handle(left), Slot::Handle(right)) => identical(left, right, flags),
+                    (Slot::Real(left), Slot::Real(right)) => reals_identical(left, right, flags),
+                    (Slot::Integer(left), Slot::Integer(right)) | (Slot::Logical(left), Slot::Logical(right)) => {
+                        left == right
+                    }
+                    // A scalar is boxed only when it could not be stored raw (an ALTREP value, or
+                    // a double whose bits collide with the raw encoding), so compare contents.
+                    (Slot::Handle(handle), raw) | (raw, Slot::Handle(handle)) => {
+                        raw_slot_identical(raw, handle, flags)
+                    }
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+unsafe fn raw_slot_identical(raw: Slot, handle: Sexp, flags: &IdenticalFlags) -> bool {
+    if handle.attrib() != nil() || length(handle) != 1 {
+        return false;
+    }
+    let Ok(handle) = values::materialize(handle) else {
+        return false;
+    };
+    match (raw, handle.kind()) {
+        (Slot::Real(value), SexpType::Real) => reals_identical(value, values::reals(handle)[0], flags),
+        (Slot::Integer(value), SexpType::Integer) | (Slot::Logical(value), SexpType::Logical) => {
+            values::ints(handle)[0] == value
+        }
         _ => false,
     }
 }

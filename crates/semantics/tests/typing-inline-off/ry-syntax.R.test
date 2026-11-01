@@ -1,0 +1,39 @@
+#==== ry_syntax
+#---- record_literal_warns_and_still_types
+point <- (x = 1, y = 2)
+#++++
+point: record{x: double, y: double}
+9..23 warning[ry-syntax] this record is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+
+#---- tuple_and_tag_literals_warn
+pair <- (1L, "a")
+some <- :Some(5L)
+#++++
+pair: tuple{integer, character}
+some: :Some(integer)
+8..17 warning[ry-syntax] this tuple is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+26..35 warning[ry-syntax] this tag is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+
+#---- match_warns_once_at_its_head_without_coverage
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+65..74 warning[ry-syntax] this `match` is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+
+#---- comment_types_stay_quiet
+#: fn(o: :Some(integer) | :None) -> logical
+f <- function(o) TRUE
+#++++
+f: fn(o: :Some(integer) | :None) -> logical
+
+#---- plain_r_stays_quiet
+x <- list(a = 1)
+y <- (x)
+#++++
+x: list{a: double}
+y: list{a: double}

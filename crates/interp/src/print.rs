@@ -62,7 +62,13 @@ fn out(text: &str) {
 /// Prints a value at top level: objects and functions go through `print` (or `show` for S4),
 /// everything else through `print.default`'s machinery.
 pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
-    if value.is_object() || values::is_function(value) {
+    // A ry value has an implicit class, so it prints through `print` and a user's
+    // `print.ry_record` method, once base R has defined `print`.
+    let dispatches = value.kind() == SexpType::Record && {
+        let print = values::install("print")?;
+        eval::find_var(print, values::base_namespace())? != values::unbound()
+    };
+    if value.is_object() || values::is_function(value) || dispatches {
         let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil() {
             let show = values::install("show")?;
             eval::find_fun(show, interp().globals.methods_namespace)?
@@ -139,6 +145,11 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
             } else {
                 print_list(value, options, tag)?;
                 return Ok(());
+            }
+        }
+        SexpType::Record => {
+            for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
+                out(&format!("{line}\n"));
             }
         }
         SexpType::ExternalPtr => out("<pointer: 0x0>\n"),

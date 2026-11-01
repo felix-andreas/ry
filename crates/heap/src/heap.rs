@@ -22,14 +22,16 @@
 pub mod arena;
 pub mod env;
 pub mod object;
+pub mod records;
 pub mod strings;
 
 use crate::{
     env::Frame,
     object::{
-        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, VECTOR_DATA_OFFSET, flag_bits, gc_bits,
-        gp, object_size,
+        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, VECTOR_DATA_OFFSET, flag_bits,
+        gc_bits, gp, object_size, slot_for,
     },
+    records::Layouts,
     strings::{Encoding, StringTable},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -53,6 +55,8 @@ pub struct Heap {
     mark_stack: Vec<Sexp>,
     strings: StringTable,
     symbols: FxHashMap<Sexp, Sexp>,
+    /// The tag and layout interners of ry's records, tuples and tags.
+    pub layouts: Layouts,
     pub roots: Roots,
     sources: Vec<(u64, Rc<dyn RootSource>)>,
     next_source_id: u64,
@@ -300,6 +304,7 @@ impl Heap {
             binding_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
+            layouts: Layouts::default(),
             roots: Roots {
                 protect: ProtectStack {
                     stack: Vec::new(),
@@ -585,6 +590,31 @@ impl Heap {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
         let object = self.allocate(kind, size, &[])?;
         object.set_primitive_index(index);
+        Ok(object)
+    }
+
+    /// A record, tuple or tag of the interned `layout`, whose slots hold `values` in layout order.
+    /// Each value is stored raw or as a handle as [`slot_for`] decides, and stays rooted across
+    /// the allocation.
+    pub unsafe fn alloc_record(&mut self, layout: u32, values: &[Sexp]) -> HeapResult<Sexp> {
+        let size = object_size(SexpType::Record, values.len()).ok_or(HeapError::TooLong)?;
+        if values.len() > u32::MAX as usize {
+            return Err(HeapError::TooLong);
+        }
+        let object = self.allocate(SexpType::Record, size, values)?;
+        let slots: Vec<Slot> = values
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| slot_for(value, index))
+            .collect();
+        for slot in &slots {
+            if let Slot::Handle(handle) = slot {
+                handle.increment_refcount();
+            }
+        }
+        object.init_record(layout, &slots);
+        // Immutable: a modification always builds a new value.
+        object.mark_not_mutable();
         Ok(object)
     }
 
@@ -1154,6 +1184,13 @@ impl Heap {
                 self.mark(object.external_tag());
                 self.mark(object.external_protected());
             }
+            Shape::Record => {
+                for index in 0..object.record_slot_count() {
+                    if let Some(handle) = object.record_handle(index) {
+                        self.mark(handle);
+                    }
+                }
+            }
             // Weak references are traced by `process_weak_refs`.
             Shape::WeakRef | Shape::Primitive => {}
         }
@@ -1282,12 +1319,12 @@ impl Heap {
         if class != LARGE_CLASS {
             return SLOT_SIZES[class as usize];
         }
-        let length = if object.kind() == SexpType::Char {
-            object.length()
-        } else {
-            object.capacity()
+        let length = match object.kind() {
+            SexpType::Char => object.length() as usize,
+            SexpType::Record => object.record_slot_count(),
+            _ => object.capacity() as usize,
         };
-        object_size(object.kind(), length as usize).unwrap_or(0)
+        object_size(object.kind(), length).unwrap_or(0)
     }
 
     unsafe fn free(&mut self, object: Sexp) {

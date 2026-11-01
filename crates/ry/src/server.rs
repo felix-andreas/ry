@@ -2163,6 +2163,7 @@ fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::C
         CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
         CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
         CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
+        CompletionKind::Tag => lsp_types::CompletionItemKind::ENUM_MEMBER,
     };
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),

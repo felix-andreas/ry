@@ -16,6 +16,7 @@ ry becomes a full, backwards-compatible reimplementation of R, extended with ry'
 - A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
 - The performance bar is a JIT on the level of Bun.
 - Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data. They are a ry feature on top of R, like the built-in table type, not R data structures, so they need not support R or its quirks; plain R code still runs unchanged.
+- ry ships a standard library modeled on Roc's where it fits (`Result`, `List`, `Str`, `Dict` and so on), using plain qualified names such as `Result.map` rather than static dispatch.
 
 Most of the benchmark dependencies ship compiled C, C++ or Rust code written against R's C API (`SEXP`, memory protection, `.Call`). Full compatibility therefore means implementing that C API, not only R's language semantics. That interface shapes the architecture more than the JIT does, so it is designed first.
 
@@ -58,14 +59,25 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - **Babysit every cloud session.** Each session prompt must tell it to report to the orchestrator with the claude-code-remote `send_message` tool, session_id session_011xBmXWNoPRHsr6SYcwTwtm, when its PR is ready, when it is blocked, and at major milestones. An hourly scheduled check (trig_01LuX97P7ZbAg4TRxYu7c1tu, at minute 11) checks every in-flight session, resumes stalled ones and merges finished PRs; the hourly goal reread is trig_01AqDtgjMPTkniw7hzX4x4d1.
 - **Check a new cloud session's context window.** After creating a cloud session, read its record with `get_session` and check that `external_metadata.context_usage.max_tokens` is 300000 (the repo's `.claude/settings.json` sets `autoCompactWindow`). If it still shows 1000000, ask the user to set `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` in the cloud environment's variables.
 
+## Lessons
+
+- **Verify reports before acting on them.** Agents over-claim completion and miscount tests, so check the diff, the test output, or the merged tree before you call something done or tell the user.
+- **One writer per area of the tree.** Two agents editing the same files in one checkout corrupt each other's diffs; give overlapping work to one agent or to separate cloud sessions.
+- **An agent cut off mid-task commits what it has** with a WIP message and says where it stopped, so the next agent does not start from an unknown tree.
+- **Re-engage a persistent agent with SendMessage.** If a resumed agent keeps looping on a stale premise, stop it and spawn a fresh one with a clean brief.
+- **Check a security flag against the actual diff** before acting on it or dismissing it.
+
 ## In flight
 
 - Runtime step 3 follow-up (session_0111kWqCeajgVo7m8XVxpfDk, Opus): stats natives, review fixes, GNU R `tests/*.R`, connection builtins, stringi, task callbacks.
-- Table performance (session_0111kWqB9LKMquDanx18xVTC, Opus): beat data.table on every db-benchmark query.
+- Table engine follow-up (session_0111kWqB9LKMquDanx18xVTC, Opus): .EACHI, non-equi joins, warning channel, frame() name clash. PR #116 (beats data.table on all 19 db-benchmark queries) merged as 693ee85.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
-- Native records, tuples and tagged unions; S4/R6 discouraged (session_0111kWqDq53tu9KBVLAT5WSn, Opus).
-- Runtime step 7: the Cranelift JIT (session_0111kWqBQdpLjmrdiA5ajbhR, Opus).
+- JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
+- Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
+- Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
+- Standard library in the style of Roc (session_0111kWqD1BjWFRsQLrnpUHXu, Opus).
+- Inline syntax for type definitions: inline forms of `@type`, `@alias`, `@new`, `@trust`, `@if-unknown` (session_0111kWqBAhfBuJKm2r4beMZm, Opus).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -76,3 +88,4 @@ Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
 - Run the next docs pass after the records/tags, JIT and table-in-interpreter PRs land.
+- Merge order: `runtime-packages-tests` (step 4), then `feat/runtime-follow-up` (step 3, resolves 12 conflicts), then `bench-run`.

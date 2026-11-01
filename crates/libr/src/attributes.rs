@@ -138,6 +138,7 @@ pub unsafe fn set_attrib(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<Sex
 
 /// Replaces or appends an attribute without any checks.
 pub unsafe fn install_attribute(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<()> {
+    crate::vectors::refuse_native(object)?;
     let runtime = runtime();
     runtime.heap.root(object);
     let mut cell = object.attrib();
@@ -493,6 +494,7 @@ pub unsafe extern "C" fn ATTRIB(object: Sexp) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_ATTRIB(object: Sexp, value: Sexp) {
     enter(|| {
+        crate::vectors::refuse_native(object)?;
         if !matches!(value.kind(), SexpType::Nil | SexpType::Pairlist) {
             return Err(error(format!(
                 "value of 'SET_ATTRIB' must be a pairlist or NULL, not a '{}'",

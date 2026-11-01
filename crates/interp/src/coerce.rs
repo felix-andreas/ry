@@ -189,6 +189,10 @@ pub unsafe fn coerce_vector_quiet(
             return alloc(kind, 0);
         }
         SexpType::Symbol => return coerce_symbol(object, kind),
+        SexpType::Record => {
+            let native = crate::records::native_kind(object);
+            return Err(error(crate::records::boundary_message("the value", native)));
+        }
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
             return coerce_pairlist(object, kind, warnings);
         }
@@ -671,7 +675,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("as.vector", 2, do_as_vector).generic(Generic::Internal),
     builtin("as.call", 1, do_as_call),
     internal("as.function.default", 2, do_as_function),
-    internal("typeof", 1, |call| unsafe { scalar_string(call.arg(0).kind().name()) }),
+    internal("typeof", 1, |call| unsafe { scalar_string(type_name(call.arg(0))) }),
     internal("vector", 2, do_vector),
     builtin("storage.mode<-", 2, do_set_storage_mode),
     internal("is.vector", 2, do_is_vector),
@@ -929,10 +933,6 @@ pub fn higher_type(left: SexpType, right: SexpType) -> SexpType {
     if rank(left) >= rank(right) { left } else { right }
 }
 
-pub unsafe fn type_name(object: Sexp) -> &'static str {
-    object.kind().name()
-}
-
 pub unsafe fn na_of(kind: SexpType) -> R<Sexp> {
     let result = alloc(kind, 1)?;
     match kind {
@@ -970,4 +970,13 @@ pub unsafe fn as_character_factor(factor: Sexp) -> R<Sexp> {
         values::set_elt(result, index, label);
     }
     Ok(result)
+}
+
+/// `typeof()`: the type's name, with a ry record, tuple or tag reported as itself rather than as
+/// the object kind they share.
+pub unsafe fn type_name(object: Sexp) -> &'static str {
+    match object.kind() {
+        SexpType::Record => crate::records::native_kind(object).type_name(),
+        kind => kind.name(),
+    }
 }

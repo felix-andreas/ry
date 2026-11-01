@@ -56,3 +56,14 @@ fn lint_style_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints-style");
     run_fixture_suite(&suite, &|source| render_with(source, &config));
 }
+
+#[test]
+fn lint_object_systems_off_fixtures() {
+    let config = LintConfig {
+        object_system: LintLevel::Off,
+        object_systems_disabled: true,
+        ..LintConfig::default()
+    };
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints-object-systems-off");
+    run_fixture_suite(&suite, &|source| render_with(source, &config));
+}

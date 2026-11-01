@@ -1,0 +1,23 @@
+[package]
+name = "jit"
+description = "ry's optimizing tier: compiles hot tier-0 bytecode to machine code with Cranelift"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/jit.rs"
+
+[dependencies]
+heap = { path = "../heap" }
+interp = { path = "../interp" }
+rustc-hash.workspace = true
+cranelift-codegen = "0.136"
+cranelift-frontend = "0.136"
+cranelift-jit = "0.136"
+cranelift-module = "0.136"
+cranelift-native = "0.136"
+
+[dev-dependencies]
+syntax = { path = "../syntax" }
