@@ -2,7 +2,7 @@
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
 use crate::cli::{
-    data_file_key, project_order, project_stub_paths, scan_data_files, shares_a_namespace,
+    data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
     sniff_data_file,
 };
 use crate::config::{
@@ -27,8 +27,9 @@ use ide::{
 use salsa::{Durability, Setter};
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::metadata::{
-    PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_imports,
+    NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
+    parse_description_collate, parse_description_dependencies, parse_description_package,
+    parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -288,6 +289,7 @@ struct WorkspaceMetadata {
     dependencies: BTreeSet<String>,
     collate: Vec<String>,
     package: Option<String>,
+    native_symbols: NativeSymbols,
 }
 
 impl Worker {
@@ -398,6 +400,7 @@ impl Worker {
             metadata.dependencies,
             Default::default(),
             metadata.package,
+            metadata.native_symbols,
         );
         DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
         worker.load_workspace_sources();
@@ -439,6 +442,10 @@ impl Worker {
             .as_deref()
             .map(|text| normalized_imports(&parse_namespace_imports(text)))
             .unwrap_or_default();
+        let native_symbols = namespace_text
+            .as_deref()
+            .map(parse_native_symbols)
+            .unwrap_or_default();
         let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
             .as_deref()
@@ -457,6 +464,7 @@ impl Worker {
             dependencies,
             collate,
             package,
+            native_symbols,
         }
     }
 
@@ -512,13 +520,17 @@ impl Worker {
         let metadata = PackageMetadata::get(&self.db);
         let facts_changed = metadata.imports(&self.db) != &current.imports
             || metadata.dependencies(&self.db) != &current.dependencies
-            || metadata.package(&self.db) != &current.package;
+            || metadata.package(&self.db) != &current.package
+            || metadata.native_symbols(&self.db) != &current.native_symbols;
         if facts_changed {
             metadata.set_imports(&mut self.db).to(current.imports);
             metadata
                 .set_dependencies(&mut self.db)
                 .to(current.dependencies);
             metadata.set_package(&mut self.db).to(current.package);
+            metadata
+                .set_native_symbols(&mut self.db)
+                .to(current.native_symbols);
         }
         if facts_changed || collate_changed {
             self.refresh_all_diagnostics();
@@ -676,8 +688,9 @@ impl Worker {
         Some((file, text, offset))
     }
 
-    fn is_package_path(&self, path: &Path) -> bool {
-        shares_a_namespace(path, &self.workspace_root)
+    /// Package and test files are read from disk, so a closed or changed one reloads.
+    fn is_project_path(&self, path: &Path) -> bool {
+        document_kind(path, &self.workspace_root) != DocumentKind::Script
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -843,12 +856,7 @@ impl Worker {
             return;
         }
 
-        let is_package = self.is_package_path(&path);
-        let kind = if is_package {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
             Some(&file) => {
                 file.set_text(&mut self.db).to(params.text_document.text);
@@ -976,7 +984,7 @@ impl Worker {
         self.open_documents.remove(&path);
         self.pending_semantic_publishes.retain(|owed| owed != &path);
 
-        if self.is_package_path(&path) {
+        if self.is_project_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
             match fs::read_to_string(&path) {
                 Ok(text) => {
@@ -1057,7 +1065,7 @@ impl Worker {
                         self.publish_config_diagnostics(Some(&error));
                     }
                 }
-            } else if self.is_package_path(&path)
+            } else if self.is_project_path(&path)
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "R" || extension == "r")
@@ -1072,7 +1080,8 @@ impl Worker {
                             reloaded_documents.push(path.clone());
                         }
                         None => {
-                            let file = SourceFile::builder(text, DocumentKind::Package)
+                            let kind = document_kind(&path, &self.workspace_root);
+                            let file = SourceFile::builder(text, kind)
                                 .durability(Durability::MEDIUM)
                                 .new(&self.db);
                             self.files.insert(path.clone(), file);

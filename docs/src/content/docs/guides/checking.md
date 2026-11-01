@@ -84,10 +84,11 @@ boolean-shorthand
 
 trailing-comma
 
-  x Unexpected comma after last argument
+  ! Unexpected comma after last argument
 ```
 
-The trailing comma is an error rather than a warning, because `c(1, 2, )` fails when it runs.
+The trailing comma is a warning: R passes it as an empty argument, which breaks `c(1, 2, )` when it
+runs but is harmless to a function that never evaluates it.
 [Diagnostic codes](/reference/diagnostic-codes) lists every code with its reason, and
 [configuration](/reference/configuration) shows how to turn each one on or off.
 

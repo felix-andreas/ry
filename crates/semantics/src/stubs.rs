@@ -758,6 +758,7 @@ mod tests {
                 .collect(),
             Default::default(),
             None,
+            Default::default(),
         );
         let sources = StubSources::new(&db, shipped_stub_sources(), Vec::new());
         let library = stub_library(&db, sources);
@@ -844,6 +845,7 @@ mod tests {
             Default::default(),
             ["parallel".to_owned()].into(),
             None,
+            Default::default(),
         );
         assert!(package_scheme_exists(&active, "mclapply"));
     }
@@ -877,6 +879,7 @@ mod tests {
             ["data.table".to_owned()].into(),
             Default::default(),
             None,
+            Default::default(),
         );
         assert!(package_scheme_exists(&active, "alloc.col"));
     }
@@ -917,6 +920,7 @@ mod tests {
             ["data.table".to_owned()].into(),
             Default::default(),
             None,
+            Default::default(),
         );
         let library = stub_library(&db, sources);
         assert!(library.schemes.contains_key("fread"));
@@ -933,6 +937,7 @@ mod tests {
             Default::default(),
             Default::default(),
             None,
+            Default::default(),
         );
         let file = SourceFile::new(
             &db,

@@ -29,7 +29,7 @@ label <- "s"
 setnames(label, "b")
 wrong <- label + 1
 #++++
-setnames: <T, U> fn(x: T, name: U) -> T
+setnames: <T, U> fn(x: T, [name]: U) -> T
 label: character
 character
 wrong: Unknown

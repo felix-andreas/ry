@@ -78,7 +78,7 @@ f <- function(x) {
 }
 #++++
 == R/main.R
-f: <T> fn(x: T) -> fn() -> character
+f: <T> fn([x]: T) -> fn() -> character
 21..22 warning[unused] `g` is assigned but never used.
 
 #---- closure_uses_nearest_shadowing_binding_across_hops

@@ -832,25 +832,125 @@ pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
 
 unsafe fn real_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
     let result = alloc(SexpType::Real, count)?;
-    let left_length = length(left);
-    let right_length = length(right);
+    if count == 0 {
+        return Ok(result);
+    }
     let output = values::reals_mut(result);
-    if left.kind() == SexpType::Real && right.kind() == SexpType::Real {
-        let a = values::reals(left);
-        let b = values::reals(right);
-        for (index, slot) in output.iter_mut().enumerate() {
-            *slot = real_op(op, a[index % left_length], b[index % right_length]);
+    let as_real = |value: i32| {
+        if value == NA_INTEGER {
+            NA_REAL
+        } else {
+            value as f64
         }
-    } else {
-        for (index, slot) in output.iter_mut().enumerate() {
-            *slot = real_op(
-                op,
-                real_at(left, index % left_length),
-                real_at(right, index % right_length),
-            );
-        }
+    };
+    match (
+        left.kind() == SexpType::Real,
+        right.kind() == SexpType::Real,
+    ) {
+        (true, true) => real_kernel(
+            op,
+            output,
+            values::reals(left),
+            values::reals(right),
+            |x| x,
+            |y| y,
+        ),
+        (true, false) => real_kernel(
+            op,
+            output,
+            values::reals(left),
+            values::ints(right),
+            |x| x,
+            as_real,
+        ),
+        (false, true) => real_kernel(
+            op,
+            output,
+            values::ints(left),
+            values::reals(right),
+            as_real,
+            |y| y,
+        ),
+        (false, false) => real_kernel(
+            op,
+            output,
+            values::ints(left),
+            values::ints(right),
+            as_real,
+            as_real,
+        ),
     }
     Ok(result)
+}
+
+/// Matches the operator once, outside the element loop, so each arm compiles to its own loop
+/// that the compiler can vectorize.
+#[inline(always)]
+fn real_kernel<A: Copy, B: Copy>(
+    op: Op,
+    output: &mut [f64],
+    left: &[A],
+    right: &[B],
+    left_real: impl Fn(A) -> f64 + Copy,
+    right_real: impl Fn(B) -> f64 + Copy,
+) {
+    match op {
+        Op::Add => recycle(output, left, right, |x, y| left_real(x) + right_real(y)),
+        Op::Subtract => recycle(output, left, right, |x, y| left_real(x) - right_real(y)),
+        Op::Multiply => recycle(output, left, right, |x, y| left_real(x) * right_real(y)),
+        Op::Divide => recycle(output, left, right, |x, y| left_real(x) / right_real(y)),
+        Op::Power => recycle(output, left, right, |x, y| {
+            power(left_real(x), right_real(y))
+        }),
+        Op::Modulo => recycle(output, left, right, |x, y| {
+            real_modulo(left_real(x), right_real(y))
+        }),
+        Op::IntegerDivide => recycle(output, left, right, |x, y| {
+            (left_real(x) / right_real(y)).floor()
+        }),
+    }
+}
+
+/// Fills `output` with `operation` applied to R's recycled pairs of `left` and `right`. The
+/// common shapes (equal lengths, or one scalar operand) get loops without index arithmetic,
+/// and the general case advances two wrapping indices instead of computing two remainders per
+/// element. Both operands must be non-empty unless `output` is.
+#[inline(always)]
+fn recycle<A: Copy, B: Copy, T>(
+    output: &mut [T],
+    left: &[A],
+    right: &[B],
+    mut operation: impl FnMut(A, B) -> T,
+) {
+    let count = output.len();
+    if left.len() == count && right.len() == count {
+        for ((slot, &x), &y) in output.iter_mut().zip(left).zip(right) {
+            *slot = operation(x, y);
+        }
+    } else if left.len() == count && right.len() == 1 {
+        let y = right[0];
+        for (slot, &x) in output.iter_mut().zip(left) {
+            *slot = operation(x, y);
+        }
+    } else if left.len() == 1 && right.len() == count {
+        let x = left[0];
+        for (slot, &y) in output.iter_mut().zip(right) {
+            *slot = operation(x, y);
+        }
+    } else {
+        let (mut left_index, mut right_index) = (0, 0);
+        for slot in output.iter_mut() {
+            *slot = operation(left[left_index], right[right_index]);
+            left_index += 1;
+            if left_index == left.len() {
+                left_index = 0;
+            }
+            right_index += 1;
+            if right_index == right.len() {
+                right_index = 0;
+            }
+        }
+    }
 }
 
 #[inline]
@@ -933,46 +1033,62 @@ unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count:
     let result = alloc(SexpType::Integer, count)?;
     let a = values::ints(left);
     let b = values::ints(right);
-    let left_length = a.len();
-    let right_length = b.len();
     let mut overflow = false;
+    if count == 0 {
+        return Ok(result);
+    }
     let output = values::ints_mut(result);
-    for (index, slot) in output.iter_mut().enumerate() {
-        let x = a[index % left_length];
-        let y = b[index % right_length];
-        *slot = if x == NA_INTEGER || y == NA_INTEGER {
+    // An overflow is NA with a warning; R's own NA is the one value a checked result may not take.
+    let mut checked = |value: Option<i32>| match value {
+        Some(value) if value != NA_INTEGER => value,
+        _ => {
+            overflow = true;
             NA_INTEGER
-        } else {
-            let value = match op {
-                Op::Add => x.checked_add(y),
-                Op::Subtract => x.checked_sub(y),
-                Op::Multiply => x.checked_mul(y),
-                Op::Modulo => {
-                    if y == 0 {
-                        None
-                    } else {
-                        Some(x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 })
-                    }
-                }
-                Op::IntegerDivide => {
-                    if y == 0 {
-                        None
-                    } else {
-                        Some((x as f64 / y as f64).floor() as i32)
-                    }
-                }
-                Op::Divide | Op::Power => unreachable!(),
-            };
-            match value {
-                Some(value) if value != NA_INTEGER => value,
-                _ => {
-                    if !matches!(op, Op::Modulo | Op::IntegerDivide) {
-                        overflow = true;
-                    }
+        }
+    };
+    let either_na = |x: i32, y: i32| x == NA_INTEGER || y == NA_INTEGER;
+    match op {
+        Op::Add => recycle(output, a, b, |x, y| {
+            if either_na(x, y) {
+                NA_INTEGER
+            } else {
+                checked(x.checked_add(y))
+            }
+        }),
+        Op::Subtract => recycle(output, a, b, |x, y| {
+            if either_na(x, y) {
+                NA_INTEGER
+            } else {
+                checked(x.checked_sub(y))
+            }
+        }),
+        Op::Multiply => recycle(output, a, b, |x, y| {
+            if either_na(x, y) {
+                NA_INTEGER
+            } else {
+                checked(x.checked_mul(y))
+            }
+        }),
+        Op::Modulo => recycle(output, a, b, |x, y| {
+            if either_na(x, y) || y == 0 {
+                NA_INTEGER
+            } else {
+                x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 }
+            }
+        }),
+        Op::IntegerDivide => recycle(output, a, b, |x, y| {
+            if either_na(x, y) || y == 0 {
+                NA_INTEGER
+            } else {
+                let value = (x as f64 / y as f64).floor() as i32;
+                if value == NA_INTEGER {
                     NA_INTEGER
+                } else {
+                    value
                 }
             }
-        };
+        }),
+        Op::Divide | Op::Power => unreachable!(),
     }
     if overflow {
         conditions::warning_call(call, "NAs produced by integer overflow")?;
@@ -2056,18 +2172,22 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             if kind == SexpType::Real {
                 let mut total = CompensatedSum::default();
                 let mut na = false;
-                for &item in &items {
-                    for index in 0..length(item) {
-                        let value = real_at(item, index);
-                        if value.is_nan() {
-                            if na_rm {
-                                continue;
-                            }
-                            if is_na_real(value) {
-                                na = true;
-                            }
+                let mut add = |value: f64| {
+                    if value.is_nan() {
+                        if na_rm {
+                            return;
                         }
-                        total.add(value);
+                        if is_na_real(value) {
+                            na = true;
+                        }
+                    }
+                    total.add(value);
+                };
+                for &item in &items {
+                    if item.kind() == SexpType::Real {
+                        values::reals(item).iter().for_each(|&value| add(value));
+                    } else {
+                        (0..length(item)).for_each(|index| add(real_at(item, index)));
                     }
                 }
                 return scalar_real(if na { NA_REAL } else { total.total() });

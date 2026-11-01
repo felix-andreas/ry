@@ -149,6 +149,6 @@ rows: integer
 fread <- function(path) 1L
 value <- fread("data/prices.csv")
 #++++
-fread: <T> fn(path: T) -> integer
+fread: <T> fn([path]: T) -> integer
 value: integer
 27..32 warning[unused] `value` is assigned but never used.

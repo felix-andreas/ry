@@ -200,6 +200,7 @@ pub fn check_parse_invariants(input: &str) {
     }
 
     check_geometry(&parse.syntax_node(), input);
+    check_green_search(&parse.syntax_node(), input);
 
     // One mistake must not fan out into a storm of errors.
     assert!(
@@ -550,5 +551,47 @@ fn check_geometry(node: &SyntaxNode, input: &str) {
             "children do not cover {:?} for input {input:?}",
             node.kind()
         );
+    }
+}
+
+/// The green-tree searches agree with the red-tree walks they replace, for the whole tree
+/// and for a subtree, and whatever subset of kinds is wanted.
+fn check_green_search(root: &crate::SyntaxNode, input: &str) {
+    let mut text = String::new();
+    crate::for_each_token(root, |_, token| text.push_str(token));
+    assert_eq!(
+        text, input,
+        "green token walk lost text for input {input:?}"
+    );
+    let subtrees = root.children().take(3);
+    for node in std::iter::once(root.clone()).chain(subtrees) {
+        for modulus in [1, 3, 7] {
+            let wanted = |kind: crate::SyntaxKind| (kind as u16) % modulus == 0;
+            let expected: Vec<crate::SyntaxNode> = node
+                .descendants()
+                .filter(|node| wanted(node.kind()))
+                .collect();
+            let mut parents = Vec::new();
+            let found = crate::matching_nodes(&node, |green, parent| {
+                let accepted = wanted(green.kind());
+                if accepted {
+                    parents.push(parent.map(crate::GreenRef::kind));
+                }
+                accepted
+            });
+            let expected_parents: Vec<Option<crate::SyntaxKind>> = expected
+                .iter()
+                .map(|found| {
+                    (*found != node)
+                        .then(|| found.parent().map(|parent| parent.kind()))
+                        .flatten()
+                })
+                .collect();
+            assert_eq!(
+                parents, expected_parents,
+                "green search parents diverged for input {input:?}"
+            );
+            assert_eq!(found, expected, "green search diverged for input {input:?}");
+        }
     }
 }

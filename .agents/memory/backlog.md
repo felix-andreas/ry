@@ -23,12 +23,12 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **`unz` connections** are missing (`.Internal(unz)`), which fails every openxlsx and readxl round trip.
-- **`grepRaw`** is missing, so renv's `.onLoad` fails.
 - **parallel cannot fork or open sockets.** `mc_fork` and the other fork routines error, so `mclapply` and `registerDoParallel(cores = 2)` fail, and `makeCluster` needs `.Internal(serverSocket)` (`decisions.md`, "parallel's natives without fork").
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
+- **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
+- **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Time and scale.** ry's suites run 1.7x to 2.1x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
+- **Per-test time.** At 300,000 lines the test blocks run 1.7x to 2.1x GNU R's time, while whole processes are close to parity because GNU R spends minutes in testthat's per-file `gc()`. The gap is spread across the interpreter core rather than one hot spot: bytecode `step`, environment-chain lookup (`Heap::frame_cell`), `match_args`, and an allocation per binding and promise on every closure call. Basic operations measured alone are 2x to 4x GNU R's (a closure call, `seq`, `tryCatch`, `format`, `rlang::enquo`). Call overhead and cached global lookup belong to the JIT tier's call work (`decisions.md`, "the JIT tier"); vector kernels such as arithmetic and `sum` are already at or ahead of GNU R.
 
 ## Open: the package loader
 
@@ -121,6 +121,10 @@ Smaller gaps:
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
+- A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
+  `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
+  on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
+  the generic argument check to carry which argument fixed the type variable.
 - `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
   friendlier contract.
 - `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the
@@ -2620,11 +2624,11 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 2.7-2.8 s | 566 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
-| data science | 3.5-3.7 s | 572 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
-| biostatistics | 2.8-2.9 s | 575 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
+| finance | 2.4-2.5 s | 515 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
+| data science | 2.5-2.7 s | 520 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
+| biostatistics | 2.5-2.7 s | 528 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (6.3 s on one core, 3.8 times faster on four), so per-file constant costs set its wall time; the remaining profile is item checking (about 3 s of CPU, half of it `infer_call_arguments`), parse, item HIR and lints. Before the green-tree searches, per-check caches and lazy arena commit, main measured 3.3-3.7 s and about 780-795 MiB on finance. Ideas not yet tried: fuse the per-file green walks into one tracked "syntax sites" query, cut type interning in `fresh_ty`, `literal_ty` and `substitute_rigid_memo`, and compute `interface_sccs` and `conditional_slot_items` before the third pass instead of inside its first batch. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
@@ -2684,3 +2688,14 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
   function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
   Position[]`; the second member is the vector view of the same element type and adds noise.
+
+## Open: false errors on real CRAN code
+
+`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 175 after the call-checking, name-resolution and inference fixes (`decisions.md`). What remains, by message shape:
+- 38 "expected X, found Y" and 17 "expected a numeric value": mostly `T | NULL` results of functions that really can return NULL, vector `if` conditions, and parameters pinned by an unconditional write before a test (xts `Ops.xts.R:52`).
+- 26 "exported but this package defines no such top-level object": dynamic exports (cli `pb_*` through `makeActiveBinding`, rlang `ffi_` natives, lgr's `lgr`).
+- 20 "this call leaves out": formals the body does force on some path, worth a second look per site.
+- 17 "not a function": parameters named like a function and called (`log`, `serialize`, `format`, `lag`) where the parameter's own type is open.
+- 15 "expected a list": `$` on a value that is definitely NULL, and R6's metaprogrammed `generator_funs`.
+- 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
+- 5 matrix indexing, a documented limitation.

@@ -14,6 +14,7 @@
 
 use crate::object::Sexp;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells.
 const INDEX_THRESHOLD: usize = 8;
@@ -23,7 +24,9 @@ const HASH_MINIMUM_SIZE: u32 = 29;
 
 #[derive(Default)]
 pub struct Frame {
-    cells: Vec<Sexp>,
+    /// Inline up to the index threshold, because most frames are a call's few arguments and
+    /// locals, and a closure call should not pay for a second allocation beside the frame's own.
+    cells: SmallVec<[Sexp; INDEX_THRESHOLD]>,
     index: Option<FxHashMap<Sexp, u32>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,

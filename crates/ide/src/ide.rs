@@ -3,7 +3,7 @@
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
 use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
-use semantics::check::ItemCheck;
+use semantics::check::{CalleeTarget, ItemCheck};
 use semantics::diagnostics::TypeRenderer;
 use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
 use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
@@ -179,7 +179,15 @@ fn hover_definition<'db>(
     name: &str,
 ) -> Option<HoverDefinition> {
     let naming = item_naming(db, item).as_ref()?;
-    if let Some(binding) = naming.resolutions.get(&expression) {
+    let callee_target =
+        item_check(db, item).and_then(|check| check.callee_targets.get(&expression).copied());
+    let binding = match callee_target {
+        Some(CalleeTarget::Slot(binding)) => Some(binding),
+        Some(CalleeTarget::Project) => return global_hover_definition(db, files, name, None),
+        Some(CalleeTarget::Library) => return stub_hover_definition(db, name),
+        None => naming.resolutions.get(&expression).copied(),
+    };
+    if let Some(binding) = &binding {
         let info = naming.bindings.get(binding)?;
         if info.kind == BindingKind::TopLevel {
             return global_hover_definition(db, files, &info.name, Some(item));
@@ -196,12 +204,14 @@ fn hover_definition<'db>(
     if !naming.non_locals.contains_key(&expression) {
         return None;
     }
-    global_hover_definition(db, files, name, None).or_else(|| {
-        Some(HoverDefinition::Stub {
-            namespace: declaring_namespace(db, name)?.to_owned(),
-            overloads: stubs(db)?.schemes.get(name).map_or(0, Vec::len),
-            declaration: stub_target(db, name),
-        })
+    global_hover_definition(db, files, name, None).or_else(|| stub_hover_definition(db, name))
+}
+
+fn stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
+    Some(HoverDefinition::Stub {
+        namespace: declaring_namespace(db, name)?.to_owned(),
+        overloads: stubs(db)?.schemes.get(name).map_or(0, Vec::len),
+        declaration: stub_target(db, name),
     })
 }
 
@@ -2524,7 +2534,27 @@ fn target_at<'db>(
     let naming = item_naming(db, position.item).as_ref()?;
 
     if let Some(expression) = position.expression_at() {
-        if let Some(binding) = naming.resolutions.get(&expression) {
+        // A call head skips bindings that hold no function, so it navigates where the call goes.
+        let callee_target = item_check(db, position.item)
+            .and_then(|check| check.callee_targets.get(&expression).copied());
+        let binding = match callee_target {
+            Some(CalleeTarget::Slot(binding)) => Some(binding),
+            Some(CalleeTarget::Project | CalleeTarget::Library) => {
+                let ExpressionKind::NameRef(name) = &item_hir(db, position.item)
+                    .as_ref()?
+                    .expression(expression)
+                    .kind
+                else {
+                    return None;
+                };
+                return Some(match callee_target {
+                    Some(CalleeTarget::Project) => Target::Global(name.to_string()),
+                    _ => Target::StubGlobal(name.to_string()),
+                });
+            }
+            None => naming.resolutions.get(&expression).copied(),
+        };
+        if let Some(binding) = &binding {
             let info = naming.bindings.get(binding)?;
             // Cross-item reads resolve to the name, so the item's own top-level binding is the
             // global.
@@ -2643,6 +2673,37 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                                     is_declaration: false,
                                 }),
                         );
+                        // A call head bound locally to a value falls through to the global.
+                        let named_here = |expression: &ExprId| {
+                            naming
+                                .resolutions
+                                .get(expression)
+                                .and_then(|binding| naming.bindings.get(binding))
+                                .is_some_and(|info| info.name == *name)
+                        };
+                        let calls: Vec<ExprId> = naming
+                            .callee_fallbacks
+                            .keys()
+                            .copied()
+                            .filter(named_here)
+                            .collect();
+                        if !calls.is_empty()
+                            && let Some(check) = item_check(db, item)
+                        {
+                            result.extend(
+                                calls
+                                    .into_iter()
+                                    .filter(|expression| {
+                                        check.callee_targets.get(expression)
+                                            == Some(&CalleeTarget::Project)
+                                    })
+                                    .map(|expression| Occurrence {
+                                        file,
+                                        range: name_range(hir, expression, name) + item_offset,
+                                        is_declaration: false,
+                                    }),
+                            );
+                        }
                     }
                 }
             }
@@ -2711,11 +2772,25 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
             _ => Vec::new(),
         })
         .collect();
+    // A call head reaches the binding its function lookup settled on, which may not be the
+    // nearest one.
+    let callee_targets = (!naming.callee_fallbacks.is_empty())
+        .then(|| item_check(db, item))
+        .flatten()
+        .map(|check| check.callee_targets);
+    let reaches = |expression: &ExprId, resolved: BindingId| match callee_targets
+        .as_ref()
+        .and_then(|targets| targets.get(expression))
+    {
+        Some(CalleeTarget::Slot(target)) => *target == binding,
+        Some(CalleeTarget::Project | CalleeTarget::Library) => false,
+        None => resolved == binding,
+    };
     slot.extend(
         naming
             .resolutions
             .iter()
-            .filter(|(_, resolved)| **resolved == binding)
+            .filter(|(expression, resolved)| reaches(expression, **resolved))
             .map(|(expression, _)| Occurrence {
                 file,
                 range: name_range(hir, *expression, &info.name) + item_offset,

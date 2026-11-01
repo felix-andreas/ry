@@ -13,7 +13,7 @@ use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
     parse_description_dependencies, parse_description_package, parse_namespace_exports,
-    parse_namespace_imports,
+    parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -21,6 +21,7 @@ use semantics::stubs::{
 };
 use semantics::{
     AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+    test_document_kind,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -289,6 +290,10 @@ pub(crate) fn analyze_project(
         description_source
             .as_deref()
             .and_then(parse_description_package),
+        namespace_source
+            .as_deref()
+            .map(parse_native_symbols)
+            .unwrap_or_default(),
     );
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
@@ -317,11 +322,7 @@ pub(crate) fn analyze_project(
     let mut project = Vec::with_capacity(checked.len());
     for index in ordered {
         let (path, source) = &mut checked[index];
-        let kind = if shares_a_namespace(path, root) {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
         let file = SourceFile::new(&db, mem::take(source), kind);
         files[index] = Some(file);
@@ -383,13 +384,19 @@ pub(crate) fn analyze_project(
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
             namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
+        // A conditional or chained write (`a <- b <- function() ...`) defines `b` as well.
         let defines = |name: &str| {
-            ProjectFiles::try_get(&db)
-                .is_some_and(|files| semantics::package_definitions(&db, files).contains_key(name))
+            ProjectFiles::try_get(&db).is_some_and(|files| {
+                semantics::package_definitions(&db, files).contains_key(name)
+                    || semantics::conditional_slot_items(&db, files).contains_key(name)
+            })
         };
         problems.extend(namespace::namespace_export_problems(
             &parse_namespace_exports(namespace_source),
+            &namespace_imports,
             &defines,
+            &knows,
+            &exports,
         ));
         problems.extend(namespace::unused_import_diagnostics(
             &namespace_imports,
@@ -536,14 +543,26 @@ pub(crate) fn exclude_matcher(
 /// Vendored dependency infrastructure rather than project code; scopes only the walk.
 const VENDORED_DIRECTORIES: [&str; 5] = ["renv", "packrat", "revdep", ".Rproj.user", ".Rcheck"];
 
-/// `R/` and `tests/testthat/` files each share one environment (testthat sources
-/// helpers first). Every surface assigning a [`DocumentKind`] must call this, or it
-/// analyses a different program. Not the ordering key: that is `R/` membership alone.
-pub(crate) fn shares_a_namespace(path: &Path, root: &Path) -> bool {
-    path.starts_with(root.join("R"))
-        || path
-            .parent()
-            .is_some_and(|parent| parent == root.join("tests").join("testthat"))
+/// `R/` files form the package namespace. Of the files directly in `tests/testthat/`, the
+/// helper and setup files fill the environment testthat runs every test file in, and the rest
+/// are test files, each in its own child of it. Every surface assigning a [`DocumentKind`]
+/// must call this, or it analyses a different program. Not the ordering key: that is `R/`
+/// membership alone.
+pub(crate) fn document_kind(path: &Path, root: &Path) -> DocumentKind {
+    if path.starts_with(root.join("R")) {
+        return DocumentKind::Package;
+    }
+    if path
+        .parent()
+        .is_none_or(|parent| parent != root.join("tests").join("testthat"))
+    {
+        return DocumentKind::Script;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    test_document_kind(file_name)
 }
 
 /// How much of a data file the checker sniffs: enough rows to type the columns, and little

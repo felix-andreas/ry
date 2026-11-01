@@ -15,6 +15,13 @@
 // live, as GNU R requires of the same functions.
 #![allow(clippy::missing_safety_doc)]
 
+// The runtime allocates and frees vectors at a high rate. glibc's malloc returns freed memory
+// above its trim threshold to the kernel and zeroes calloc'd memory by hand, so every fresh large
+// vector paid for page faults and a memset. The binary's allocator does not reach this library,
+// which is a separate shared object, so the library declares its own.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod altrep;
 pub mod applic;
 pub mod arith;

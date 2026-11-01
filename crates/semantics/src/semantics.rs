@@ -15,11 +15,14 @@ pub mod types;
 
 use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
 use syntax::ast::{self, BinaryExpr};
-use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, paired_comment_definition};
+use syntax::{
+    Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, matching_nodes, paired_comment_definition,
+};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
 /// run on threads with this stack rather than `ulimit -s`'s.
@@ -80,8 +83,26 @@ impl Db for RootDatabase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum DocumentKind {
+    /// A file of the package namespace (`R/`).
     Package,
+    /// A testthat test file (`tests/testthat/test-*.R`). testthat runs each one in its own
+    /// environment, so it reads its own bindings, the helpers and the package namespace, and
+    /// contributes to none of them.
+    Test,
+    /// A testthat helper or setup file (`helper-*.R`, `setup-*.R`), which testthat sources
+    /// into the environment every test file runs in.
+    TestHelper,
+    /// A standalone script, which reads the package namespace and its own bindings only.
     Script,
+}
+
+/// The kind of a file directly in `tests/testthat/`, from its name alone.
+pub fn test_document_kind(file_name: &str) -> DocumentKind {
+    if file_name.starts_with("helper") || file_name.starts_with("setup") {
+        DocumentKind::TestHelper
+    } else {
+        DocumentKind::Test
+    }
 }
 
 #[salsa::input(debug)]
@@ -465,10 +486,7 @@ fn expression_annotations<'db>(
     // Each annotated statement once, in source order, with its `#:` block if it has one.
     let mut targets: Vec<(SyntaxNode, Option<SyntaxNode>)> = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -482,10 +500,7 @@ fn expression_annotations<'db>(
             }
         }
     }
-    let inline_sites: Vec<SyntaxNode> = root
-        .descendants()
-        .filter(annotations::is_inline_site)
-        .collect();
+    let inline_sites = matching_nodes(&root, |node, _| annotations::is_green_inline_site(node));
     let inline_enabled = !inline_sites.is_empty() && inline_annotations_enabled(db);
     if inline_enabled {
         for site in inline_sites {
@@ -693,9 +708,26 @@ pub fn conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
 ) -> FxHashMap<String, Vec<Item<'db>>> {
+    conditional_writers_of(db, files, DocumentKind::Package)
+}
+
+/// The helper files' counterpart of [`conditional_slot_items`].
+#[salsa::tracked(returns(ref))]
+pub fn test_conditional_slot_items<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+) -> FxHashMap<String, Vec<Item<'db>>> {
+    conditional_writers_of(db, files, DocumentKind::TestHelper)
+}
+
+fn conditional_writers_of<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    kind: DocumentKind,
+) -> FxHashMap<String, Vec<Item<'db>>> {
     let mut writers: FxHashMap<String, Vec<Item<'db>>> = FxHashMap::default();
     for &file in files.files(db) {
-        if *file.kind(db) != DocumentKind::Package {
+        if *file.kind(db) != kind {
             continue;
         }
         for &item in item_tree(db, file) {
@@ -728,6 +760,23 @@ pub fn package_name<'db>(
     PackageName {
         winner: package_definitions(db, files).get(text).copied(),
         conditional_writers: conditional_slot_items(db, files)
+            .get(text)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// The test files' counterpart of [`package_name`].
+#[salsa::tracked(returns(ref))]
+pub fn test_name<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: types::Name<'db>,
+) -> PackageName<'db> {
+    let text = name.text(db);
+    PackageName {
+        winner: test_definitions(db, files).get(text).copied(),
+        conditional_writers: test_conditional_slot_items(db, files)
             .get(text)
             .cloned()
             .unwrap_or_default(),
@@ -786,9 +835,24 @@ pub fn package_definitions<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
 ) -> FxHashMap<String, Item<'db>> {
+    winners_of(db, files, DocumentKind::Package)
+}
+
+/// The last top-level definition of each name across the helper files, which testthat
+/// sources into the one environment every test file runs in.
+#[salsa::tracked(returns(ref))]
+pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<String, Item<'db>> {
+    winners_of(db, files, DocumentKind::TestHelper)
+}
+
+fn winners_of<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    kind: DocumentKind,
+) -> FxHashMap<String, Item<'db>> {
     let mut winners = FxHashMap::default();
     for &file in files.files(db) {
-        if *file.kind(db) != DocumentKind::Package {
+        if *file.kind(db) != kind {
             continue;
         }
         for &item in item_tree(db, file) {
@@ -858,6 +922,26 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
     };
     let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
     reads.extend(naming.namespace_reads.values().filter_map(|read| read.name));
+    // A call head bound locally to a non-function falls through to the project global of its
+    // name, unless the chain already holds the top-level slot, which is that global.
+    reads.extend(
+        naming
+            .callee_fallbacks
+            .iter()
+            .filter_map(|(callee, fallback)| {
+                let slot = naming.resolutions.get(callee)?;
+                let top_level = |slot: &naming::BindingId| {
+                    naming
+                        .bindings
+                        .get(slot)
+                        .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
+                };
+                if top_level(slot) || fallback.outer.iter().any(top_level) {
+                    return None;
+                }
+                Some(naming.bindings.get(slot)?.name)
+            }),
+    );
     reads
 }
 
@@ -1250,6 +1334,10 @@ struct SalsaGlobals<'db> {
     item: Item<'db>,
     files: Option<ProjectFiles>,
     file: SourceFile,
+    // A body reads the same few globals many times, and each salsa read pays for interning
+    // its key and verifying the memo, so a check looks each one up once.
+    frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
+    package_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
 }
 
 /// A script's own declarations are visible to itself alone and shadow project names.
@@ -1267,7 +1355,7 @@ fn visible_type_definitions<'db>(
             definitions.insert(*name, definition.clone());
         }
     }
-    if *file.kind(db) == DocumentKind::Script {
+    if *file.kind(db) != DocumentKind::Package {
         for definition in file_type_definitions(db, file) {
             definitions.insert(definition.name, definition);
         }
@@ -1315,7 +1403,9 @@ fn file_binders<'db>(
 
 /// An immediate read sees the nearest earlier writer in the file (R sources top-down).
 /// A deferred read (inside a closure) sees the file's last writer in a script; in a
-/// package it sees the project-wide winner instead, so callers skip this query.
+/// package it sees the project-wide winner instead, so callers skip this query. In a test
+/// file it sees the reading statement's own writer first: each `test_that` block runs in its
+/// own environment, so a helper it defines is the one its closures call.
 #[salsa::tracked(returns(copy))]
 fn frame_binder<'db>(
     db: &'db dyn Db,
@@ -1325,6 +1415,15 @@ fn frame_binder<'db>(
 ) -> Option<Item<'db>> {
     let file = *item.file(db);
     let binders = file_binders(db, file).get(name.text(db))?;
+    if deferred
+        && matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+        && binders.iter().any(|&(_, binder)| binder == item)
+    {
+        return Some(item);
+    }
     let visible = match deferred {
         true => &binders[..],
         false => {
@@ -1345,22 +1444,50 @@ impl<'db> SalsaGlobals<'db> {
             item,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            frame_binders: RefCell::default(),
+            package_names: RefCell::default(),
         }
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
-        if deferred && *self.file.kind(self.db) != DocumentKind::Script {
+        if deferred && *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
-        frame_binder(self.db, self.item, name, deferred)
+        *self
+            .frame_binders
+            .borrow_mut()
+            .entry((name, deferred))
+            .or_insert_with(|| frame_binder(self.db, self.item, name, deferred))
     }
 
-    fn package_name(&self, name: types::Name<'db>) -> Option<&'db PackageName<'db>> {
-        Some(package_name(self.db, self.files?, name))
+    /// The namespaces a read of `name` searches past the item's own frame, nearest first: a
+    /// test or helper file sees the helpers' bindings before the package namespace.
+    fn layers(&self, name: types::Name<'db>) -> impl Iterator<Item = &'db PackageName<'db>> {
+        let files = self.files;
+        let test = files
+            .filter(|_| {
+                matches!(
+                    *self.file.kind(self.db),
+                    DocumentKind::Test | DocumentKind::TestHelper
+                )
+            })
+            .map(|files| test_name(self.db, files, name));
+        let package = files.map(|files| {
+            *self
+                .package_names
+                .borrow_mut()
+                .entry(name)
+                .or_insert_with(|| package_name(self.db, files, name))
+        });
+        test.into_iter().chain(package)
     }
 
-    fn conditional_slot_scheme(&self, name: types::Name<'db>) -> Option<types::TypeScheme<'db>> {
-        let writers = &self.package_name(name)?.conditional_writers;
+    fn conditional_slot_scheme(
+        &self,
+        layer: &PackageName<'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        let writers = &layer.conditional_writers;
         if writers.len() > CONDITIONAL_SLOT_JOIN_CAP {
             return Some(types::TypeScheme::monomorphic(types::unknown(self.db)));
         }
@@ -1393,23 +1520,25 @@ impl<'db> SalsaGlobals<'db> {
     }
 
     fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
-        self.package_name(name)?.winner
+        self.layers(name).find_map(|layer| layer.winner)
     }
 }
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, deferred)
             && let Some(scheme) = self.binder_scheme(item, interned)
         {
             return Some(scheme);
         }
-        if let Some(item) = self.winner(interned) {
-            return Some(global_scheme(self.db, item));
-        }
-        if let Some(scheme) = self.conditional_slot_scheme(interned) {
-            return Some(scheme);
+        for layer in self.layers(interned) {
+            if let Some(item) = layer.winner {
+                return Some(global_scheme(self.db, item));
+            }
+            if let Some(scheme) = self.conditional_slot_scheme(layer, interned) {
+                return Some(scheme);
+            }
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
@@ -1418,29 +1547,72 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
-            || self.package_name(interned).is_some_and(|binding| {
-                binding.winner.is_some() || !binding.conditional_writers.is_empty()
-            })
+            || self
+                .layers(interned)
+                .any(|binding| binding.winner.is_some() || !binding.conditional_writers.is_empty())
     }
 
     fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
         Some(global_scheme(self.db, self.winner(interned)?))
     }
 
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
-        // A project definition shadows the stub set, disabling per-call overload selection.
+    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if *self.file.kind(self.db) == DocumentKind::Package {
+            return self.scheme(name, false);
+        }
         let interned = types::Name::new(self.db, name.to_owned());
+        if let Some(layer) = self
+            .files
+            .map(|files| package_name(self.db, files, interned))
+        {
+            if let Some(item) = layer.winner {
+                return Some(global_scheme(self.db, item));
+            }
+            if let Some(scheme) = self.conditional_slot_scheme(layer, interned) {
+                return Some(scheme);
+            }
+        }
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+    }
+
+    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if *self.file.kind(self.db) == DocumentKind::Package {
+            return None;
+        }
+        let interned = types::Name::new(self.db, name.to_owned());
+        self.layers(interned).find_map(|layer| {
+            layer
+                .winner
+                .map(|item| global_scheme(self.db, item))
+                .or_else(|| self.conditional_slot_scheme(layer, interned))
+        })
+    }
+
+    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
+        let library = stubs::stubs(self.db)?;
+        match library.schemes.get(name) {
+            Some(candidates) => Some(candidates.clone()),
+            None => library.known_exports.contains(name).then(Vec::new),
+        }
+    }
+
+    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
+        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
+        if candidates.len() < 2 {
+            return None;
+        }
+        // A project definition shadows the stub set, disabling per-call overload selection.
+        let interned = types::Name::new(self.db, name);
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
-        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
-        (candidates.len() > 1).then(|| candidates.clone())
+        Some(candidates.clone())
     }
 
     fn type_definitions(
@@ -1511,6 +1683,31 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
             .get(name)
             .cloned()
             .or_else(|| self.base.earlier_binding(name))
+    }
+
+    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
+        self.base.library_candidates(name)
+    }
+
+    /// Only a package file's group can hold a namespace member.
+    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        match self.members.get(name) {
+            Some(scheme) if *self.base.file.kind(self.base.db) == DocumentKind::Package => {
+                Some(scheme.clone())
+            }
+            _ => self.base.namespace_scheme(name),
+        }
+    }
+
+    /// A member is read from the round table here too: through the base it would re-enter
+    /// the group.
+    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        match self.members.get(name) {
+            Some(scheme) if *self.base.file.kind(self.base.db) != DocumentKind::Package => {
+                Some(scheme.clone())
+            }
+            _ => self.base.enclosing_scheme(name),
+        }
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
@@ -1685,6 +1882,7 @@ mod tests {
             masked_reads: Default::default(),
             column_misses: Default::default(),
             match_findings: Vec::new(),
+            callee_targets: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
