@@ -1263,6 +1263,61 @@ fn is_type_probe(name: &str) -> bool {
     }
 }
 
+/// rlang's type predicates (`is_string`, `is_function`, `is_bare_list`, `is_scalar_integer`),
+/// which rlang, purrr and the packages that vendor rlang's standalone files define themselves.
+/// They test a type like `is.character` does, whether the project defines them or imports them.
+fn is_tidy_type_predicate(name: &str) -> bool {
+    if matches!(
+        name,
+        "is_condition" | "is_error" | "is_warning" | "is_message"
+    ) {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix("is_") else {
+        return false;
+    };
+    let rest = rest
+        .strip_prefix("scalar_")
+        .or_else(|| rest.strip_prefix("bare_"))
+        .unwrap_or(rest);
+    matches!(
+        rest,
+        "string"
+            | "bool"
+            | "character"
+            | "logical"
+            | "integer"
+            | "integerish"
+            | "double"
+            | "numeric"
+            | "complex"
+            | "raw"
+            | "list"
+            | "vector"
+            | "atomic"
+            | "function"
+            | "closure"
+            | "primitive"
+            | "formula"
+            | "quosure"
+            | "environment"
+            | "symbol"
+            | "call"
+            | "lang"
+            | "expression"
+            | "pairlist"
+            | "node"
+            | "node_list"
+            | "lambda"
+            | "callable"
+            | "symbolic"
+            | "syntactic_literal"
+            | "quosures"
+            | "namespace"
+            | "weakref"
+    )
+}
+
 fn guard_kind(name: &str) -> Option<GuardKind> {
     Some(match name {
         "is.null" => GuardKind::Null,
@@ -4052,7 +4107,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// The names whose runtime type the body inspects (`typeof(x)`, `class(x)`,
-    /// `is.character(x)`, `inherits(x, ...)`). Such a value is dynamically typed by
+    /// `is.character(x)`, `inherits(x, ...)`, rlang's `is_string(x)`). Such a value is dynamically typed by
     /// design: each branch uses it as a different type, so no one type describes it.
     /// `is.null` and `is.na` test a value, not its type, and keep their narrowing.
     fn collect_type_probed(&self, id: ExprId, probed: &mut FxHashSet<Symbol>) {
@@ -4062,8 +4117,8 @@ impl<'db> Checker<'db, '_> {
         }
         if let ExpressionKind::Call { callee, arguments } = kind
             && let ExpressionKind::NameRef(name) = self.module.kind(*callee)
-            && !self.naming.resolutions.contains_key(callee)
-            && is_type_probe(name.as_str())
+            && ((!self.naming.resolutions.contains_key(callee) && is_type_probe(name.as_str()))
+                || is_tidy_type_predicate(name.as_str()))
             && let Some(first) = self.module[arguments].first()
             && first.name.is_none()
             && let Some(value) = first.value

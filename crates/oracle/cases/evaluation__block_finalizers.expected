@@ -1,0 +1,12 @@
+[stdout]
+| NULL
+| finalized
+| after gc
+| finalized in f
+| end of f
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

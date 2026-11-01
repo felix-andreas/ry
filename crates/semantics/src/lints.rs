@@ -110,9 +110,8 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
     diagnostics
 }
 
-/// Memoized so that revalidating an untouched file never needs its tree, which may have
-/// been evicted. It reads only syntax, so a cold check can compute it while the tree is
-/// still in memory, before naming has run.
+/// Memoized so that relinting after an edit elsewhere never walks this file's tree again. It
+/// reads only syntax, so a cold check computes it in its first pass, before naming has run.
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_lints(db: &dyn Db, file: SourceFile, config: LintConfig) -> SyntaxLints {
     let mut lints = SyntaxLints::default();

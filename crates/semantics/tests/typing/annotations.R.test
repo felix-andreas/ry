@@ -120,7 +120,7 @@ frame <- data.frame(a = 1)
 #: @if-unknown integer
 gap <- frame$a
 #++++
-frame: Unknown
+frame: data.frame
 gap: integer
 
 #---- if_unknown_on_a_known_type_is_an_error
@@ -137,7 +137,7 @@ frame <- data.frame(a = 1)
 gap <- frame$a
 label <- gap + 1L
 #++++
-frame: Unknown
+frame: data.frame
 gap: character
 label: Unknown
 77..80 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`

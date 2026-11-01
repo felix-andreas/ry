@@ -306,6 +306,16 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         &makeconf(root, &sources.toolchain),
     )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
+    // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
+    // searches the library, and `sessionInfo()` fails on a loaded namespace it cannot describe.
+    // The version is the one the namespace's `spec` gives (`crates/interp/src/frame.rs`).
+    let ry_package = root.join("library/ry");
+    fs::create_dir_all(&ry_package).map_err(io_error(&ry_package))?;
+    write(
+        &ry_package.join("DESCRIPTION"),
+        "Package: ry\nVersion: 0.0.0\nPriority: base\nTitle: The ry Runtime and Standard Library\n\
+         Description: Built into ry's interpreter.\nLicense: UPL-1.0\n",
+    )?;
 
     let gnu = sources.gnu_r_home;
     let gnu_share = wrapper_directory(gnu, "R_SHARE_DIR").unwrap_or_else(|| gnu.join("share"));
@@ -427,6 +437,14 @@ exec "$cmd" $extra "$@"
 "#
         ),
     )?;
+    // `install.packages` refuses source packages unless `bin/INSTALL` exists, and scripts call
+    // `bin/SHLIB` and `bin/config` directly, so these forward to ry's `R CMD`.
+    for command in ["INSTALL", "SHLIB", "config"] {
+        write_script(
+            &root.join("bin").join(command),
+            &format!("#!/bin/sh\nexec '{home}/bin/R' CMD {command} \"$@\"\n"),
+        )?;
+    }
     write_script(
         &root.join("bin/Rscript"),
         &format!(
@@ -556,9 +574,23 @@ impl BaseVersion {
         let version = field("Version").ok_or_else(|| {
             Error::Package(format!("{} has no Version field", description.display()))
         })?;
-        let date = field("Last Changed Date").unwrap_or_default();
+        // The revision and release date live in `SVN-REVISION` of the GNU R home the base
+        // package really belongs to; ry's own home links `library/base` there.
+        let svn = description
+            .parent()
+            .and_then(|base| fs::canonicalize(base).ok())
+            .and_then(|base| Some(base.parent()?.parent()?.join("SVN-REVISION")))
+            .and_then(|path| fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        let svn_field = |name: &str| {
+            svn.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let date = svn_field("Last Changed Date").unwrap_or_default();
         let mut date = date.splitn(3, '-').map(str::to_owned);
-        let revision = field("Revision")
+        let revision = svn_field("Revision")
             .and_then(|revision| revision.parse().ok())
             .unwrap_or(0);
         Ok(BaseVersion {
@@ -932,6 +964,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
             }
             "INSTALL" => {
                 let mut library = None;
+                let mut build = false;
                 let mut options = InstallOptions::default();
                 let mut packages = Vec::new();
                 let mut rest = rest.iter();
@@ -940,6 +973,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "-l" | "--library" => library = rest.next().map(PathBuf::from),
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
+                        "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
                         "--no-data" | "--no-inst" | "--no-demo" | "--no-exec" | "--no-R" => {
                             options.driver_flags.push(argument.clone());
@@ -949,6 +983,8 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                                 library = Some(PathBuf::from(path));
                             } else if !other.starts_with('-') {
                                 packages.push(PathBuf::from(other));
+                            } else {
+                                eprintln!("Warning: unknown option '{other}'");
                             }
                         }
                     }
@@ -957,6 +993,14 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                 let mut output = String::new();
                 for package in packages {
                     let installed = install(home, &package, &library, &options)?;
+                    if build {
+                        let tarball = package_binary(&installed)?;
+                        output.push_str(&format!(
+                            "packaged installation of '{}' as {}\n",
+                            installed.name,
+                            tarball.display()
+                        ));
+                    }
                     output.push_str(&format!("* DONE ({})\n", installed.name));
                 }
                 Ok(output)
@@ -1162,6 +1206,43 @@ fn tempdir(near: &Path) -> Result<PathBuf> {
         }
     }
     Err(Error::Package("cannot create a staging directory".into()))
+}
+
+/// `R CMD INSTALL --build`: packs the installed package into
+/// `<name>_<version>_R_<platform>.tar.gz` in the working directory, the binary package
+/// `install.packages` and `R CMD INSTALL` take back.
+fn package_binary(installed: &Installed) -> Result<PathBuf> {
+    let description_path = installed.directory.join("DESCRIPTION");
+    let description = Description::parse(
+        &fs::read_to_string(&description_path).map_err(io_error(&description_path))?,
+    );
+    let field = |name: &str| {
+        description.get(name).map(str::to_owned).ok_or_else(|| {
+            Error::Package(format!(
+                "{} has no {name} field",
+                description_path.display()
+            ))
+        })
+    };
+    let version = field("Version")?;
+    let built = field("Built")?;
+    let platform = built.split(';').nth(1).map(str::trim).unwrap_or_default();
+    let tarball = PathBuf::from(format!("{}_{version}_R_{platform}.tar.gz", installed.name));
+    let parent = installed.directory.parent().ok_or_else(|| {
+        Error::Package(format!("{} has no parent", installed.directory.display()))
+    })?;
+    let absolute = std::env::current_dir()
+        .map_err(io_error(Path::new(".")))?
+        .join(&tarball);
+    run_command(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&absolute)
+            .arg("-C")
+            .arg(parent)
+            .arg(&installed.name),
+    )?;
+    Ok(tarball)
 }
 
 /// Unpacks a tarball into `staging` and returns the package directory inside it.
@@ -1555,11 +1636,16 @@ pub fn shlib(
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
-    command
-        .arg("-f")
-        .arg(home.join("etc/Makeconf"))
-        .arg("-f")
-        .arg(home.join("share/make/shlib.mk"));
+    command.arg("-f").arg(home.join("etc/Makeconf"));
+    if let Some(site) = site_makevars(home) {
+        command.arg("-f").arg(site);
+    }
+    command.arg("-f").arg(home.join("share/make/shlib.mk"));
+    // The user's Makevars comes last so it overrides the toolchain, as in GNU R; pkgbuild hides
+    // the compilers by pointing `R_MAKEVARS_USER` at one that sets `CC = test`.
+    if let Some(user) = user_makevars() {
+        command.arg("-f").arg(user);
+    }
     command.arg(format!("SHLIB={output}"));
     if !makevars_text.lines().any(|line| {
         line.split_once('=')
@@ -1603,6 +1689,31 @@ pub fn shlib(
     );
     run_command(&mut command)?;
     Ok(directory.join(output))
+}
+
+/// The site Makevars GNU R reads after `Makeconf`: `R_MAKEVARS_SITE`, else `etc/Makevars.site`.
+fn site_makevars(home: &Path) -> Option<PathBuf> {
+    match std::env::var_os("R_MAKEVARS_SITE") {
+        Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => Some(home.join("etc/Makevars.site")).filter(|path| path.exists()),
+    }
+}
+
+/// The user Makevars GNU R reads last: `R_MAKEVARS_USER`, else `~/.R/Makevars-<platform>`, else
+/// `~/.R/Makevars`.
+fn user_makevars() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("R_MAKEVARS_USER").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    let directory = PathBuf::from(std::env::var_os("HOME")?).join(".R");
+    let platform = std::env::var("R_PLATFORM")
+        .ok()
+        .filter(|platform| !platform.is_empty());
+    platform
+        .map(|platform| directory.join(format!("Makevars-{platform}")))
+        .into_iter()
+        .chain([directory.join("Makevars")])
+        .find(|path| path.is_file())
 }
 
 #[cfg(test)]
