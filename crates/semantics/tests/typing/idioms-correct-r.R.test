@@ -1057,3 +1057,29 @@ none: list{character[], character[]} | list{logical, logical}
 pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
 #++++
 pair: fn(dp: integer) -> list{integer, integer}
+
+#---- unlink_takes_a_vector_as_its_recursive_flag
+remove_paths <- function(paths) unlink(paths, recursive = dir.exists(paths) & rep(TRUE, 2))
+#++++
+remove_paths: <T> fn(paths: T) -> integer
+
+#---- unlink_still_rejects_text_as_its_recursive_flag
+remove_paths <- function(paths) unlink(paths, recursive = "yes")
+#++++
+remove_paths: Unknown
+58..63 error[type-mismatch] expected `logical[]`, found `character`
+
+#---- a_numeric_binding_widens_to_a_union_of_numbers
+span <- function(from, to) to - from
+count_up <- function(fine) span(1L, if (fine) 2.5 else 2L)
+#++++
+span: <T: numeric> fn(from: T, to: T) -> T
+count_up: fn(fine: logical) -> double
+
+#---- a_numeric_binding_still_rejects_a_union_with_text
+span <- function(from, to) to - from
+count_up <- function(fine) span(1L, if (fine) 2.5 else "2")
+#++++
+span: <T: numeric> fn(from: T, to: T) -> T
+count_up: Unknown
+73..95 error[type-mismatch] expected `integer`, found `double | character`

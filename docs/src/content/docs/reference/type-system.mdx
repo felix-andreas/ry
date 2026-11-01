@@ -1738,7 +1738,8 @@ type error.
 
 A `logical` argument satisfies the numeric requirement, because R promotes it, so
 `cost <- function(price, rate) price * rate` accepts `cost(TRUE, 0.5)` and `cost(1L, 0.5)`. Mixed
-arguments widen in R's order, `logical` to `integer` to `double`, so both calls are `double`.
+arguments widen in R's order, `logical` to `integer` to `double`, so both calls are `double`. A
+union of numbers widens to its widest member, so `cost(1L, if (fine) 0.5 else 1L)` is `double` too.
 
 ### Operator methods on a class
 

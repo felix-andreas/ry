@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 120 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 115 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -171,6 +171,11 @@ classes, largest first:
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it; settle which before the list grows.
+- **A union parameter that flows to the return keeps every member at the call** (renv
+  `renv_path_normalize`, about 5 reports): `path: list[T] | T[]` from `map_lgl(path, ...)` is
+  returned, so a `character` argument returns `character | list[character] | character[]`, which an
+  inferred `character` parameter then rejects. Needs a bounded variable (`<P: list[T] | T[]>`) so the
+  return names the argument's own type.
 - **A branch join pins a rebound formal to the other branch's type** (mgcv `Sl.fitChol`:
   `rho <- if (is.null(L)) rho + rho0 else L %*% rho + rho0` exports `rho: matrix`, so
   `rho = lsp[1:n.sp]` is reported). Joining the open `T` of `rho + rho0` with `matrix` unifies the

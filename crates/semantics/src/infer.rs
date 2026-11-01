@@ -605,20 +605,7 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
-        // R's arithmetic promotes `logical` to `integer` and `integer` to `double`.
-        let rank = |ty: Ty<'db>| match ty.kind(db) {
-            TyKind::Scalar(Atomic::Logical) => Some((false, 0)),
-            TyKind::Scalar(Atomic::Integer) => Some((false, 1)),
-            TyKind::Scalar(Atomic::Double) => Some((false, 2)),
-            TyKind::Vector(element) => match element.kind(db) {
-                TyKind::Scalar(Atomic::Logical) => Some((true, 0)),
-                TyKind::Scalar(Atomic::Integer) => Some((true, 1)),
-                TyKind::Scalar(Atomic::Double) => Some((true, 2)),
-                _ => None,
-            },
-            _ => None,
-        };
-        match (rank(bound), rank(actual)) {
+        match (numeric_rank(db, bound), numeric_rank(db, actual)) {
             (Some((bound_vector, bound_rank)), Some((actual_vector, actual_rank)))
                 if actual_rank > bound_rank
                     || (actual_rank == bound_rank && !bound_vector && actual_vector) =>
@@ -1775,5 +1762,27 @@ fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
                 && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
         }
         _ => left == right,
+    }
+}
+
+/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
+/// whether it is a vector. A union of numeric types ranks as its widest member, since every
+/// member coerces to that one (`double | integer` widens a binding to `double`).
+fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
+    let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(0),
+        TyKind::Scalar(Atomic::Integer) => Some(1),
+        TyKind::Scalar(Atomic::Double) => Some(2),
+        _ => None,
+    };
+    match ty.kind(db) {
+        TyKind::Vector(element) => atomic_rank(*element).map(|rank| (true, rank)),
+        TyKind::Union(members) => members
+            .iter()
+            .try_fold((false, 0), |(vector, rank), member| {
+                let (member_vector, member_rank) = numeric_rank(db, *member)?;
+                Some((vector || member_vector, rank.max(member_rank)))
+            }),
+        _ => atomic_rank(ty).map(|rank| (false, rank)),
     }
 }

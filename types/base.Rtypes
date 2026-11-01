@@ -672,7 +672,9 @@ file.copy : fn(from: Any, to: Any, [overwrite]: logical, [recursive]: logical, [
 file.rename : fn(from: Any, to: Any) -> logical
 dir.exists : fn(paths: Any) -> logical
 dir.create : fn(path: Any, [showWarnings]: logical, [recursive]: logical, [mode]: character) -> logical
-unlink : fn(x: Any, [recursive]: logical, [force]: logical, [expand]: logical) -> integer
+# The C code reads the flags with asLogical, which takes the first element, so a vector such as
+# `file.info(paths)$isdir` is a valid flag.
+unlink : fn(x: Any, [recursive]: logical[], [force]: logical[], [expand]: logical[]) -> integer
 basename : @pure fn(path: Any) -> character
 dirname : @pure fn(path: Any) -> character
 normalizePath : fn(path: Any, [winslash]: character, [mustWork]: logical) -> character
