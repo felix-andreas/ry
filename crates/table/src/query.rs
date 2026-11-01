@@ -299,6 +299,10 @@ pub enum Warning {
         value: String,
         stored: String,
     },
+    /// `:=` wrote strings into a logical or numeric column without replacing its type, so they
+    /// were parsed as R's `as.logical`, `as.integer` or `as.double` would. data.table warns on
+    /// every such write, whatever the strings hold.
+    Parsed { column: PlSmallStr, to: ColumnType },
 }
 
 impl fmt::Display for Warning {
@@ -313,20 +317,27 @@ impl fmt::Display for Warning {
                 to,
                 value,
                 stored,
-            } => {
-                let holds = match to {
-                    ColumnType::Logical => "logicals",
-                    ColumnType::Integer => "integers",
-                    ColumnType::Double => "doubles",
-                    ColumnType::Character => "strings",
-                    ColumnType::Factor => "factor levels",
-                };
-                write!(
-                    formatter,
-                    "column `{column}` holds {holds}, so the assigned value {value} became {stored}"
-                )
-            }
+            } => write!(
+                formatter,
+                "column `{column}` holds {}, so the assigned value {value} became {stored}",
+                holds(*to)
+            ),
+            Warning::Parsed { column, to } => write!(
+                formatter,
+                "column `{column}` holds {holds}, so the assigned strings were converted to {holds}",
+                holds = holds(*to)
+            ),
         }
+    }
+}
+
+fn holds(kind: ColumnType) -> &'static str {
+    match kind {
+        ColumnType::Logical => "logicals",
+        ColumnType::Integer => "integers",
+        ColumnType::Double => "doubles",
+        ColumnType::Character => "strings",
+        ColumnType::Factor => "factor levels",
     }
 }
 
@@ -375,7 +386,9 @@ fn grouped_integer_sums(
         return Ok(Vec::new());
     }
     let rows_schema = match &query.rows {
-        Rows::Join(join) => join_schema(schema, &join.other.schema(), &join_columns(join, key)?)?,
+        Rows::Join(join) => {
+            join_rows_schema(schema, &join.other.schema(), &join_columns(join, key)?)?
+        }
         _ => schema.clone(),
     };
     let typer = Typer {
@@ -442,6 +455,17 @@ fn run(
     if let Rows::Join(join) = &query.rows {
         let on = join_columns(join, table.key())?;
         let types = comparison_types(&schema, &join.other.schema(), join, &on)?;
+        if let Some((mut x, i)) = prefixed_copies(table, join, &on, &query)? {
+            let query = Query {
+                rows: Rows::Join(Join {
+                    other: i,
+                    on,
+                    ..join.clone()
+                }),
+                ..query
+            };
+            return run(&mut x, query, kernels, warnings);
+        }
         if join.each_i {
             return each_i(table, on, query, kernels, warnings);
         }
@@ -517,6 +541,93 @@ fn run(
     Ok(Output::Table(result))
 }
 
+/// `j` and `by` can name either side of a join by prefix: `x.t` is `x`'s own `t`, even where the
+/// joined `t` carries `i`'s values, and `i.lo` is `i`'s `lo`, even where a condition consumed it.
+/// A prefixed name the join's layout does not already hold becomes a copy of that column, added
+/// to its side under the prefixed name, so the join carries it like any other column. Returns the
+/// two sides with the copies, or `None` when no copy is needed.
+fn prefixed_copies(
+    table: &Table,
+    join: &Join,
+    on: &[On],
+    query: &Query,
+) -> Result<Option<(Table, Table)>> {
+    let mut referenced = HashSet::new();
+    match &query.select {
+        Select::Columns(columns) => {
+            for (_, expr) in columns {
+                column_references(expr, &mut referenced);
+            }
+        }
+        Select::Value(expr) => column_references(expr, &mut referenced),
+        Select::All | Select::Assign(_) => {}
+    }
+    for (_, expr) in &query.by {
+        column_references(expr, &mut referenced);
+    }
+    let (x_names, i_frame) = (table.frame().get_column_names(), join.other.frame());
+    let i_names = i_frame.get_column_names();
+    let layout = join_layout(&x_names, &i_names, on);
+    let mut x_copies = Vec::new();
+    let mut i_copies = Vec::new();
+    for name in referenced {
+        if layout.iter().any(|column| column.name == name) {
+            continue;
+        }
+        if let Some(source) = name.strip_prefix(X_PREFIX)
+            && x_names.iter().any(|column| column.as_str() == source)
+        {
+            x_copies.push((name.clone(), PlSmallStr::from(source)));
+        } else if let Some(source) = name.strip_prefix(I_PREFIX)
+            && i_names.iter().any(|column| column.as_str() == source)
+        {
+            i_copies.push((name.clone(), PlSmallStr::from(source)));
+        }
+    }
+    if x_copies.is_empty() && i_copies.is_empty() {
+        return Ok(None);
+    }
+    let with_copies = |side: &Table, copies: &[(PlSmallStr, PlSmallStr)]| -> Result<Table> {
+        let mut frame = side.frame().clone();
+        for (name, source) in copies {
+            let column = frame.column(source)?.clone().with_name(name.clone());
+            frame.with_column(column)?;
+        }
+        Ok(Table::from_normalized(frame).with_key(side.key().to_vec()))
+    };
+    Ok(Some((
+        with_copies(table, &x_copies)?,
+        with_copies(&join.other, &i_copies)?,
+    )))
+}
+
+/// Every column name `expr` reads.
+fn column_references(expr: &Expr, names: &mut HashSet<PlSmallStr>) {
+    match expr {
+        Expr::Column(name) => {
+            names.insert(name.clone());
+        }
+        Expr::Unary(_, arg) | Expr::Head(arg, _) | Expr::Aggregate { arg, .. } => {
+            column_references(arg, names);
+        }
+        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+            column_references(left, names);
+            column_references(right, names);
+        }
+        Expr::IfElse(test, yes, no) => {
+            column_references(test, names);
+            column_references(yes, names);
+            column_references(no, names);
+        }
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_)
+        | Expr::Count => {}
+    }
+}
+
 /// `by = .EACHI`: the join runs first, with `i`'s rows numbered and `x`'s rows marked, and then
 /// `j` runs grouped by the row of `i` and the join columns. An unmatched row of `i` joins to a row
 /// of `NA`s without the mark, so counting the marks gives its `.N` of 0.
@@ -566,7 +677,7 @@ fn each_i(
         ..join
     });
     let mut x = Table::from_normalized(x);
-    let Output::Table(mut joined) = run(
+    let Output::Table(joined) = run(
         &mut x,
         Query {
             rows,
@@ -597,9 +708,19 @@ fn each_i(
         .filter(|column| column.side == Side::I && column.condition.is_none())
         .map(|column| &column.name)
         .collect();
+    let x_columns: Vec<&PlSmallStr> = layout
+        .iter()
+        .filter(|column| column.side == Side::X)
+        .map(|column| &column.name)
+        .collect();
     let select = columns
         .iter()
-        .map(|(name, expr)| (name.clone(), per_row_of_i(expr, &i_columns, true)))
+        .map(|(name, expr)| {
+            (
+                name.clone(),
+                per_row_of_i(expr, &x_columns, &i_columns, true),
+            )
+        })
         .collect();
     let grouped = Query {
         rows: Rows::All,
@@ -607,6 +728,25 @@ fn each_i(
         by,
         keyed: false,
     };
+    // The join returns each row of `i`'s matches together, so a change of row number starts one.
+    let rows_of_i = joined
+        .frame()
+        .column(ROW_OF_I)?
+        .as_materialized_series()
+        .i32()?
+        .clone();
+    let mut previous = None;
+    let first: Vec<bool> = rows_of_i
+        .iter()
+        .map(|row| {
+            let starts = row != previous;
+            previous = row;
+            starts
+        })
+        .collect();
+    let mut frame = joined.frame().clone();
+    frame.with_column(Column::new(FIRST_OF_ROW.into(), first))?;
+    let mut joined = Table::from_normalized(frame);
     let Output::Table(result) = run(&mut joined, grouped, kernels, warnings)? else {
         return Err(Error::Query("a grouping gave no table".to_string()));
     };
@@ -618,12 +758,27 @@ fn each_i(
 const MATCHED: &str = "\u{1}matched";
 /// A hidden column numbering the rows of `i` for `by = .EACHI`, apart from the plans' [`I_ROW`].
 const ROW_OF_I: &str = "\u{1}row_of_i";
+/// A hidden logical column marking the first joined row of each row of `i`.
+const FIRST_OF_ROW: &str = "\u{1}first_of_row";
 
-/// `j` rewritten for `by = .EACHI`. `.N` counts the rows of `x` the row of `i` matched, as
-/// `sum(matched, na.rm = TRUE)`, and a column of `i` outside an aggregate is a single value, as in
-/// data.table, so it becomes the group's `first`: every row of a group carries the same row of `i`.
-fn per_row_of_i(expr: &Expr, i_columns: &[&PlSmallStr], outside_aggregate: bool) -> Expr {
-    let rewrite = |arg: &Expr| Box::new(per_row_of_i(arg, i_columns, outside_aggregate));
+/// `j` rewritten for `by = .EACHI`. In data.table `j` runs once per row of `i`, where each column
+/// of `i` is that row's one value, so the rewrite reproduces three things over the joined rows:
+/// `.N` counts the rows of `x` the row matched, as `sum(matched, na.rm = TRUE)`; a column of `i`
+/// outside an aggregate becomes the group's `first`, since every row of a group carries the same
+/// row of `i`; and an aggregate that reads no column of `x` sees one value rather than one per
+/// match (`single_value`).
+fn per_row_of_i(
+    expr: &Expr,
+    x_columns: &[&PlSmallStr],
+    i_columns: &[&PlSmallStr],
+    outside_aggregate: bool,
+) -> Expr {
+    let rewrite = |arg: &Expr| Box::new(per_row_of_i(arg, x_columns, i_columns, outside_aggregate));
+    let reads_x = |arg: &Expr| {
+        let mut names = HashSet::new();
+        column_references(arg, &mut names);
+        x_columns.iter().any(|column| names.contains(*column))
+    };
     match expr {
         Expr::Count => Expr::Aggregate {
             function: Aggregate::Sum,
@@ -639,14 +794,22 @@ fn per_row_of_i(expr: &Expr, i_columns: &[&PlSmallStr], outside_aggregate: bool)
             function,
             arg,
             na_rm,
+        } if !reads_x(arg) => single_value(*function, arg, *na_rm),
+        Expr::Aggregate {
+            function,
+            arg,
+            na_rm,
         } => Expr::Aggregate {
             function: *function,
-            arg: Box::new(per_row_of_i(arg, i_columns, false)),
+            arg: Box::new(per_row_of_i(arg, x_columns, i_columns, false)),
             na_rm: *na_rm,
         },
+        Expr::Correlation(left, right) if !reads_x(left) && !reads_x(right) => {
+            Expr::Na(ColumnType::Double)
+        }
         Expr::Correlation(left, right) => Expr::Correlation(
-            Box::new(per_row_of_i(left, i_columns, false)),
-            Box::new(per_row_of_i(right, i_columns, false)),
+            Box::new(per_row_of_i(left, x_columns, i_columns, false)),
+            Box::new(per_row_of_i(right, x_columns, i_columns, false)),
         ),
         Expr::Unary(op, arg) => Expr::Unary(*op, rewrite(arg)),
         Expr::Head(arg, rows) => Expr::Head(rewrite(arg), *rows),
@@ -658,6 +821,44 @@ fn per_row_of_i(expr: &Expr, i_columns: &[&PlSmallStr], outside_aggregate: bool)
         | Expr::Character(_)
         | Expr::Na(_)
         | Expr::Column(_) => expr.clone(),
+    }
+}
+
+/// An aggregate over one value, the row of `i`'s, computed over a group that repeats it once per
+/// match. With `na.rm` the aggregate keeps only the group's first row, so an `NA` is removed as R
+/// removes it. Without, the group's first value stands in for the aggregate, with R's result type:
+/// a `sum` is at least an integer and a `mean` a double, and the spread of one value is `NA`.
+fn single_value(function: Aggregate, arg: &Expr, na_rm: bool) -> Expr {
+    let first = || Expr::Aggregate {
+        function: Aggregate::First,
+        arg: Box::new(arg.clone()),
+        na_rm: false,
+    };
+    match function {
+        Aggregate::Length => Expr::Integer(1),
+        Aggregate::Sd | Aggregate::Var => Expr::Na(ColumnType::Double),
+        _ if na_rm => Expr::Aggregate {
+            function,
+            arg: Box::new(Expr::IfElse(
+                Box::new(Expr::Column(FIRST_OF_ROW.into())),
+                Box::new(arg.clone()),
+                Box::new(Expr::Na(ColumnType::Logical)),
+            )),
+            na_rm: true,
+        },
+        Aggregate::Sum => {
+            Expr::Binary(BinaryOp::Add, Box::new(first()), Box::new(Expr::Integer(0)))
+        }
+        Aggregate::Mean => Expr::Binary(
+            BinaryOp::Multiply,
+            Box::new(first()),
+            Box::new(Expr::Double(1.0)),
+        ),
+        Aggregate::Min
+        | Aggregate::Max
+        | Aggregate::First
+        | Aggregate::Last
+        | Aggregate::Median => first(),
     }
 }
 
@@ -942,7 +1143,7 @@ pub fn result_type(schema: &Schema, key: &[PlSmallStr], query: &Query) -> Result
             let i_schema = join.other.schema();
             let on = join_columns(join, key)?;
             comparison_types(schema, &i_schema, join, &on)?;
-            join_schema(schema, &i_schema, &on)?
+            join_rows_schema(schema, &i_schema, &on)?
         }
         Rows::Filter(filter) => {
             expect_logical(typer.expr(filter)?, "a row filter")?;
@@ -984,7 +1185,12 @@ pub fn result_type(schema: &Schema, key: &[PlSmallStr], query: &Query) -> Result
         columns.push((name.clone(), typer.expr(expr)?));
     }
     match &query.select {
-        Select::All => Ok(ResultType::Table(rows_schema)),
+        Select::All => Ok(ResultType::Table(match &query.rows {
+            Rows::Join(join) => {
+                join_schema(schema, &join.other.schema(), &join_columns(join, key)?)?
+            }
+            _ => rows_schema,
+        })),
         Select::Value(expr) if query.by.is_empty() && !each_i => {
             Ok(ResultType::Vector(typer.expr(expr)?))
         }
@@ -1265,6 +1471,8 @@ pub(crate) fn join_layout(x: &[&PlSmallStr], i: &[&PlSmallStr], on: &[On]) -> Ve
 
 /// The prefix data.table gives a column of `i` whose name `x` already uses.
 pub(crate) const I_PREFIX: &str = "i.";
+/// The prefix that names `x`'s own column inside a join's `j`.
+const X_PREFIX: &str = "x.";
 /// The suffix Polars gives the clashing column of the right side, chosen so that it cannot
 /// collide with a real column name.
 const CLASH_SUFFIX: &str = "\u{1}x";
@@ -1578,6 +1786,21 @@ fn join_schema(x: &Schema, i: &Schema, on: &[On]) -> Result<Schema> {
     Ok(Schema { columns })
 }
 
+/// The columns `j` and `by` can read after a join: its output, and every column of either side
+/// by prefix, as [`prefixed_copies`] provides them.
+fn join_rows_schema(x: &Schema, i: &Schema, on: &[On]) -> Result<Schema> {
+    let mut schema = join_schema(x, i, on)?;
+    for (prefix, side) in [(X_PREFIX, x), (I_PREFIX, i)] {
+        for (name, kind) in &side.columns {
+            let prefixed = PlSmallStr::from(format!("{prefix}{name}"));
+            if schema.column(&prefixed).is_none() {
+                schema.columns.push((prefixed, *kind));
+            }
+        }
+    }
+    Ok(schema)
+}
+
 fn grouped(
     plan: LazyFrame,
     lower: &Lowering,
@@ -1723,7 +1946,12 @@ fn assign(
         let replaces = whole && !collapses(expr);
         let natural = typer.expr(expr)?;
         let kind = assigned_type(existing, natural, replaces)?;
-        if existing.is_some() && narrows(natural, kind) {
+        if existing.is_some() && parses(natural, kind) {
+            warnings.push(Warning::Parsed {
+                column: name.clone(),
+                to: kind,
+            });
+        } else if existing.is_some() && narrows(natural, kind) {
             conversions.push((targets.len(), expr, natural));
         }
         let levels = match existing {
@@ -1746,6 +1974,7 @@ fn assign(
             name: name.clone(),
             expr,
             kind,
+            natural,
             levels,
             widens,
         });
@@ -1761,6 +1990,7 @@ fn assign(
             name: hidden_name(),
             expr: doubled,
             kind: typer.expr(doubled)?,
+            natural: typer.expr(doubled)?,
             levels: None,
             widens: false,
         });
@@ -1769,6 +1999,7 @@ fn assign(
                 name: hidden_name(),
                 expr: probe,
                 kind: ColumnType::Integer,
+                natural: ColumnType::Integer,
                 levels: None,
                 widens: true,
             });
@@ -1779,6 +2010,7 @@ fn assign(
             name: hidden_name(),
             expr,
             kind: *natural,
+            natural: *natural,
             levels: None,
             widens: false,
         });
@@ -1938,8 +2170,8 @@ fn assign_with_kernels(
             let replaces = selected.is_none() && !collapses(expr);
             let natural = typer.expr(expr)?;
             let kind = assigned_type(existing, natural, replaces)?;
-            // A narrowing write may warn, which the plan's update checks for.
-            if existing.is_some() && narrows(natural, kind) {
+            // A narrowing or parsing write may warn, which the plan's update checks for.
+            if existing.is_some() && (narrows(natural, kind) || parses(natural, kind)) {
                 return Ok(false);
             }
             let Some(value) = evaluator.eval(expr).and_then(|value| value.cast(kind)) else {
@@ -1977,6 +2209,8 @@ struct Target<'a> {
     name: PlSmallStr,
     expr: &'a Expr,
     kind: ColumnType,
+    /// The type the value computes to before it is stored as `kind`.
+    natural: ColumnType,
     /// The levels of an existing factor column that the value is written into by label. A label
     /// the factor lacks becomes a new level, as data.table adds it.
     levels: Option<Vec<String>>,
@@ -1992,12 +2226,47 @@ impl Target<'_> {
             _ if self.widens => value.cast(DataType::Int64),
             (Some(_), _) => value.cast(DataType::String),
             (None, ColumnType::Factor) => value,
+            (None, kind) if parses(self.natural, kind) => parse_strings(value, kind),
             // Polars casts NaN to `true`, where R's `as.logical(NaN)` is `NA`.
             (None, ColumnType::Logical) => when(value.clone().cast(DataType::Float64).is_nan())
                 .then(lit(NULL).cast(DataType::Boolean))
                 .otherwise(value.cast(DataType::Boolean)),
             (None, kind) => value.cast(dtype(kind)),
         }
+    }
+}
+
+/// Whether writing a `natural` value into a `kind` column parses strings.
+fn parses(natural: ColumnType, kind: ColumnType) -> bool {
+    natural == ColumnType::Character
+        && matches!(
+            kind,
+            ColumnType::Logical | ColumnType::Integer | ColumnType::Double
+        )
+}
+
+/// Strings parsed as R parses them into `kind`: `as.logical` knows only the spellings of `TRUE`
+/// and `FALSE`, and `as.integer` truncates the number it reads, so `"3.7"` is 3. Anything else is
+/// `NA`.
+fn parse_strings(value: PolarsExpr, kind: ColumnType) -> PolarsExpr {
+    let number = value.clone().cast(DataType::Float64);
+    match kind {
+        ColumnType::Logical => {
+            let spelled = |spellings: [&str; 4]| {
+                let mut test = lit(false);
+                for spelling in spellings {
+                    test = test.or(value.clone().eq(lit(spelling)));
+                }
+                test
+            };
+            when(spelled(["TRUE", "true", "True", "T"]))
+                .then(lit(true))
+                .when(spelled(["FALSE", "false", "False", "F"]))
+                .then(lit(false))
+                .otherwise(lit(NULL).cast(DataType::Boolean))
+        }
+        ColumnType::Integer => number.cast(DataType::Int32),
+        _ => number,
     }
 }
 

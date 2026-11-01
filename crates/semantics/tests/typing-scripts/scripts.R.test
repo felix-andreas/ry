@@ -723,3 +723,13 @@ eval(expression_to_run)
 value: integer
 expression_to_run: Any
 Any
+
+#---- a_standard_library_name_suggests_its_longer_sibling
+# `Str.split` is nearer to base `strsplit` by edit distance, but a name that starts
+# with a module prefix is a prefix of the intended function.
+pieces <- Str.split("a,b", ",")
+print(pieces)
+#++++
+pieces: Unknown
+T
+155..164 warning[unresolved] I could not resolve `Str.split` in this package, its imports, or builtins. Did you mean `Str.split_on`?

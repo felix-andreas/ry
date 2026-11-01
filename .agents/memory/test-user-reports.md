@@ -494,3 +494,39 @@ trip itself is the problem rather than its timing.
 handles `SIGWINCH` by calling `R_SetOptionWidth`, which R does not export. The console feed is the
 only other way in, and it is the thing that just proved unsafe between prompts. It is worth
 revisiting if someone finds a third route.
+
+## The records, library and frame round
+
+A new R user wrote typed code with records, tags, `match`, the standard library and frames, made
+mistakes on purpose, and read the diagnostics. Four findings were small enough to fix on the spot.
+
+- **A misspelled payload field or tag in a `match` arm said only "can never match".** The message
+  repeated the value's type and left the user to find the difference. It now adds the cause, such as
+  `:Err` has no field `mesage`, with the nearest field, or the value has no tag `:Somee`, with the
+  nearest tag (`pattern_mismatch_hint` in `check.rs`, two fixtures in `records-and-tags.R.test`).
+- **A misspelled library function was matched to an unrelated base function.** `Str.split` suggested
+  `strsplit`, because `Str.split_on` is three edits away. A name that starts
+  with a module prefix and is the start of a longer name now suggests that name (`Str.split_on`;
+  `nearest_name`, one fixture in `scripts.R.test`).
+- **`as.record`, `as.tuple` and `as.tag` were reported `unresolved`** although the runtime binds them
+  and `records-and-tags.mdx` documents them. They are declared in `ry.Rtypes` now.
+- **The docs had no page for the checker's side of frames.** `type-checking/frames.mdx` covers it and
+  links the run-time guide.
+- **A `frame{...}` parameter annotation rejected every frame at run time** (``must be `frame{...}`,
+  not `externalptr` ``), because the boundary check mapped any `{...}` type to list storage. A frame is
+  an external pointer, so `mask_of` now leaves it to the checker (`annotations.rs`, one test in
+  `test_repl_e2e.rs`).
+
+## The developer-workflow round
+
+Driven on a three-file package with a record type, a tag alias, `match`, stdlib calls and a
+`tests/` script.
+
+- Verified clean: `ry check` across files, `ry fmt`, strict mode on a package (`ry check` and
+  `ry load` both refuse), `ry load` on both runtimes, console reload after an edit, and the LSP's
+  hover, goto-definition, references, rename across files, workspace symbols, completion of
+  library names and record fields, and inlay hints.
+- The loading guide did not say that a package using ry syntax (tags, `match`, records) cannot load
+  on GNU R. It does now.
+- The console needs a terminal that answers the cursor-position query (`ESC [6n`); piped stdin
+  prints nothing, so scripted driving needs a pty.

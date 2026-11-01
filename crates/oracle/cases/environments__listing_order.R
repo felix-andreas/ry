@@ -1,0 +1,18 @@
+e <- new.env(hash = FALSE)
+for (n in c("b", "a", "c", "zz", "m")) assign(n, 1, envir = e)
+print(names(as.list(e)))
+print(ls(e, sorted = FALSE))
+print(names(as.list(e, all.names = TRUE, sorted = TRUE)))
+print(names(mget(c("a", "b"), envir = e)))
+h <- new.env(hash = TRUE)
+for (n in c("b", "a", "c", "zz", "m")) assign(n, 1, envir = h)
+print(names(as.list(h)))
+f <- function() { x <- 1; y <- 2; aa <- 3; names(as.list(environment())) }
+print(f())
+l <- list2env(list(p = 1, q = 2, r = 3), envir = new.env(hash = FALSE))
+print(ls(l, sorted = FALSE))
+print(names(eapply(e, identity)))
+g <- function(a, b, ...) { z <- 1; q <- 2; ls(environment(), sorted = FALSE) }
+print(g(1, 2))
+rm("c", envir = e)
+print(ls(e, sorted = FALSE))

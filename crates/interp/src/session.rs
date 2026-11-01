@@ -52,6 +52,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     }
     eval_text(".OptRequireMethods()", global_env())?;
     eval_text(".First.sys()", global_env())?;
+    crate::frame::attach_package()?;
     conditions::print_warnings();
     Ok(())
 }
@@ -69,7 +70,7 @@ pub unsafe fn source_file(path: &str, env: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn eval_text(text: &str, env: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn eval_text(text: &str, env: Sexp) -> R<Sexp> {
     let expressions = crate::lower::parse_text(text, "<startup>")?;
     let mut value = nil();
     for index in 0..length(expressions) {

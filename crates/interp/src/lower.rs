@@ -311,7 +311,11 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 }
                 _ => return Err(error("malformed call")),
             };
-            let function = lower(function, source)?;
+            let mut function = lower(function, source)?;
+            // R's parser turns a string in function position into a symbol: `"f<-"(x)`.
+            if function.kind() == SexpType::String && values::length(function) == 1 {
+                function = values::install_bytes(function.element(0).bytes())?;
+            }
             let mut items = vec![(nil(), function)];
             items.extend(argument_list(arguments, source)?);
             values::pairlist(&items, SexpType::Language)

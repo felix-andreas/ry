@@ -712,7 +712,9 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
         return Ok(());
     }
     for (array, dims, other) in [(left, left_dims, right), (right, right_dims, left)] {
-        if dims != nil() && length(array) != 1 && length(other) > length(array) {
+        // A zero-length operand makes the result zero-length, so a zero-length array is never
+        // too short.
+        if dims != nil() && length(array) > 1 && length(other) > length(array) {
             return Err(crate::unwind::error_in(
                 call,
                 format!(
@@ -884,8 +886,9 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     }
     if base.is_nan() || exponent.is_nan() {
         // GNU R's result carries the exponent's payload when both are NaN, so `NA^NaN` is
-        // `NaN` and `NaN^NA` is `NA`; x86 addition keeps its first operand's payload.
-        return exponent + base;
+        // `NaN` and `NaN^NA` is `NA`. Choosing explicitly keeps that independent of which
+        // payload the compiled addition happens to propagate.
+        return if exponent.is_nan() { exponent } else { base };
     }
     if base.is_infinite() {
         if base > 0.0 {
@@ -2029,13 +2032,11 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             )));
         }
     }
-    let kind = items.iter().fold(SexpType::Logical, |kind, item| {
-        if *item == nil() {
-            kind
-        } else {
-            coerce::higher_type(kind, item.kind())
-        }
-    });
+    // `NULL` contributes nothing, and it has no elements to read.
+    let items: Vec<Sexp> = items.into_iter().filter(|item| *item != nil()).collect();
+    let kind = items
+        .iter()
+        .fold(SexpType::Logical, |kind, item| coerce::higher_type(kind, item.kind()));
     match function {
         Summary::Sum => {
             if kind == SexpType::Complex {
@@ -2266,7 +2267,8 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
     let (items, na_rm) = summary_args(call)?;
     let mut saw_na = false;
     for item in items {
-        if item == nil() {
+        // GNU R skips an empty list as it skips `NULL`.
+        if item == nil() || (item.kind() == SexpType::List && length(item) == 0) {
             continue;
         }
         if !matches!(
@@ -2761,6 +2763,17 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .max(0) as usize;
     let object = values::materialize(object)?;
     let count = length(object);
+    // An empty `x` returns before `times` is checked, as in GNU R, so `rep(NULL, c(1, 1))` is
+    // NULL; only `length.out` can lengthen a non-NULL empty vector, with NAs.
+    if object == nil() {
+        if length_out.is_some_and(|out| out > 0.0) {
+            crate::conditions::warning_call(call.call, "'x' is NULL so the result will be NULL")?;
+        }
+        return Ok(nil());
+    }
+    if count == 0 && length_out.is_none() {
+        return values::duplicate(object);
+    }
     // Expand `each` first.
     let mut indices: Vec<usize> = Vec::with_capacity(count * each);
     for index in 0..count {

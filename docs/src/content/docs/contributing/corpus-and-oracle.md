@@ -106,6 +106,25 @@ first if you rebuild while a long run is going.
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
 measures the container, not ry. `MEMORY.md` records the current rate.
 
+## Running against another GNU R
+
+The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,
+which is how to compare against a newer R installed beside the system one, for example with
+[rig](https://github.com/r-lib/rig) (`rig add 4.6` installs under `/opt/R/<version>`):
+
+```sh
+ORACLE_R=/opt/R/4.6.2/bin/R just oracle verify            # the single-file cases
+ORACLE_RSCRIPT=/opt/R/4.6.2/bin/Rscript just oracle packages   # the package corpus
+```
+
+`ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
+The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs: `verify` under
+4.6.2 passes 90 of 105 cases against 102 of 105 under 4.3.3, mostly in `stats`, `s4` and printing.
+Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing rig puts its
+`R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in `/usr/local/bin` to keep
+the system R as the default. Whether ry's own runtime can load the newer R's base library through
+`R_HOME` is untested.
+
 ## The benchmark generator
 
 ```sh
@@ -127,3 +146,27 @@ so the tests never touch a network. `just bench-test` runs a package's tests aga
 Because `polars` and `Rblpapi` cannot be installed, it tests a copy whose `Imports` omit the
 missing packages; the code reaches them only inside guarded or injectable branches. The three
 10,000-line packages pass all of their roughly 340 tests each under GNU R 4.3.3.
+
+## Benchmark pass rate
+
+```sh
+just bench-compare .bench/finbench .bench/dsbench .bench/biobench
+just bench-compare .bench/finbench --filter portfolio --verbose
+```
+
+`oracle bench` runs a generated package's testthat suite under GNU R and under ry's runtime and
+compares the two test by test. Both runs go through `ry load <package> --file bench.R`, once with
+`--runtime gnu-r` and once with `--runtime ry`, so the same loader plan loads the package on both
+sides and only evaluation differs. The driver (`crates/oracle/src/bench.R`) records every
+`test_that()` block: its status, the failed expectations, errors, warnings and skips it reported,
+a deparse of its value, and its run time. A test matches when everything but the time agrees.
+
+GNU R runs the suite twice. A test whose value or problems differ between those two runs (a
+fresh UUID, a timestamp in a message) is compared by status alone, so only what GNU R reproduces
+counts against ry. The table prints,
+per package, the matching tests, the rate, the tests that differ or that ry never reported, the
+tests ry passes, and both suites' run times; process wall time, which adds startup and loading
+the package, follows it. `--json` writes every comparison, and `--keep` keeps each runtime's
+report and stderr. Pass `--ry target/release/ry` for timings, with `libR.so` built beside it
+(`cargo build --release -p ry-lang -p libr`). `MEMORY.md` records the current rates.
+

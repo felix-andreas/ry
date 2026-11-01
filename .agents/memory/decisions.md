@@ -2204,7 +2204,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   thousands of times), the setup phase was single-threaded, and the drop walked every
   allocation only to exit. Peak memory was about 1 GiB and the cold pass 6 s.
 - **Target shape.**
-  - `hir::Symbol` is a process-wide interned name: `Copy`, two words, leaked `&'static str`. HIR,
+  - `hir::Symbol` is a process-wide interned name: a `Copy` 4-byte index into a sharded table. HIR,
     naming and the check output carry `Symbol`. Project-level maps stay keyed by `String` so their
     lookups keep borrowing `str`, converting at the boundary.
   - HIR lists are boxed slices and `lower_item` shrinks the arena, so a memoized item holds no
@@ -2220,6 +2220,42 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   (the new types compare structurally, so backdating still applies), and edit latency fell from
   3 to 5 ms / 95 to 120 ms to 2 ms / 45 to 55 ms (measured, cause not isolated: the allocator and smaller
   memos both touch the incremental path).
+
+## Syntax trees are evicted, and only small syntax facts are memoized
+
+- **Previous shape.** Every file's rowan tree stayed memoized for the whole process, beside the
+  splice cache's own copy of the previous tree, and `AnalyzedFile` kept a second copy of each
+  file's source. Diagnostics and lints walked the tree directly (error ranges, annotation
+  references, inline-versus-comment agreement, the syntax lints), so dropping a tree meant
+  re-parsing it.
+- **Weakness.** The trees were the largest holder after compaction, retained only for queries that
+  reduce them to a few small facts, and the same text lived twice.
+- **Target shape.**
+  - `parse` (LRU 128), `item_syntax` and `item_annotation_syntax` (LRU 4096) are evictable. Every
+    tree reader is a memoized query with a small result: `file_error_ranges`,
+    `file_annotation_references`, `agreement_candidates`, `lints::file_syntax_lints`, and
+    `item_annotations` (the root and expression annotations of an item, boxed).
+  - A fact that also needs naming or project declarations is split: the memoized syntax half has
+    no such dependency, and a cheap join adds it (`SyntaxLints.unless_redefined`, `SlotPair`'s
+    `same_type` step). Keeping the syntax half naming-free is what lets the cold pass compute it
+    before naming, while the tree is resident.
+  - `ry check` uses `RootDatabase::one_shot` (no splice cache) and runs three passes in batches of
+    16 files per core, calling `trigger_lru_eviction` between batches, which needs no new revision.
+    `diagnostics::derive_from_syntax` lists every tree-derived fact a later pass reads; a new tree
+    reader must be added there, or the cold check re-parses (the one-parse test in
+    `test_incremental.rs` catches it).
+  - Source text lives once, in `SourceFile`; the CLI reads it back with `ProjectAnalysis::source`.
+  - The capacities are set per host, through `limit_resident_trees` (declared `lru = 0`, which is
+    unbounded with no per-fetch bookkeeping). Only `RootDatabase::one_shot` sets them. The server
+    keeps every tree, because eviction measured about 10 ms slower per settled re-check.
+  - The server enters workspace files at `Durability::MEDIUM` and lowers a file to `LOW` on its
+    first edit (restored on close). Settled-wave time was two thirds salsa memo verification;
+    with durability, memos over untouched files verify without walking their dependencies.
+- **Impact.** Peak 795, 789, 813 MiB to 566, 568, 577 MiB on the benchmark code bases, cold check
+  unchanged to slightly faster, JSON findings byte-identical. An evicted memo keeps its dependency
+  edges, so an untouched file revalidates without re-parsing, and the LSP keeps its incremental
+  behavior; only the edited file parses again. Settled LSP re-check went from 48, 63, 47 ms to
+  39, 52, 40 ms (finance, data science, biostatistics), mostly from durability.
 
 # Decision record: the built-in frame
 
@@ -2275,11 +2311,13 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   column is cast back to `i`'s type.
 - **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
   `group_by_stable` and a sort.
-- **ALTREP lives in the `table` crate behind the `runtime` feature**, which links `libr` and `heap`.
-  The dependency points from the engine to the runtime so that `libr`, which every native package
-  loads, never compiles Polars. An exposed column's `data1` owns the Arrow array and `data2` holds
-  R's layout once something needs it; a column that R never materialized comes back from
-  `import_column` as the same buffer.
+- **ALTREP column exposure lives in `libr` (`crates/libr/src/frame_altrep.rs`), and `libr` links
+  Polars.** Frames are interpreter values, so `interp` depends on `table`, and `libr` (which
+  depends on `interp`) links Polars either way; keeping ALTREP in `table` behind a feature would
+  only make the engine depend on the runtime. The dependency points from the runtime to the
+  engine, and `libR.so` grows by the engine's size. An exposed column's `data1` owns the Arrow
+  array and `data2` holds R's layout once something needs it; a column that R never materialized
+  comes back from `import_column` as the same buffer.
 - **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
   layouts, which is what makes the zero-copy paths possible.
 
@@ -2355,7 +2393,46 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   NaN becomes NA silently, as in R. In a grouped join, `j` is typed against the joined rows, whose
   join columns carry `i`'s types.
   The wording is ry's. A narrowing `:=` skips the kernel, because detecting the loss needs the
-  value before the conversion; it is not a db-benchmark shape.
+  value before the conversion; it is not a db-benchmark shape. A third warning, `Parsed`, marks
+  strings written into a logical or numeric column: data.table warns on every such write, whatever
+  the strings hold, so the warning is decided from the types alone, and the strings are parsed as
+  `as.logical`, `as.integer` (through a double, so `"3.7"` is 3) or `as.double` would.
+- **Prefixed join columns are copies, not a second layout.** `x.t` and `i.lo` in `j` or `by` are
+  resolved before the join runs (`prefixed_copies` in `query.rs`): each side gains a copy of the
+  named column under the prefixed name, so the copy survives the join as an ordinary column and
+  every later stage (kernels, plans, `.EACHI`) needs no knowledge of prefixes. `join_layout` stays
+  the only description of the visible output; `result_type` drops the copies from `j = .SD`-like
+  results.
+- **Under `.EACHI`, an aggregate over a column of `i` alone sees the row's one value.** data.table
+  evaluates `j` with `i`'s columns of length one, so `sum(k)` is `k` and `mean(k)` is `k` as a
+  double even for an unmatched row. The rewrite (`single_value`) replaces such an aggregate with
+  the group's first value, using a hidden `FIRST_OF_ROW` mask where `na.rm` must see exactly one
+  value; an aggregate that also reads a column of `x` is left alone.
+- **The checker mirrors `join_layout`; it does not call it.** `semantics` must not depend on Polars,
+  so `join_columns` in `check.rs` reimplements the layout (names, order, `t.1` suffixes, `i.`
+  prefixes, `make.unique`), with the engine as the authority and the typing fixtures
+  (`frame_joins`) pinning both against data.table. Condition compatibility follows the engine's
+  `comparison_types`: numbers with numbers, strings with strings, logicals with logicals, and an
+  ordering never on strings. A factor column is `Any` to the checker, so it is not checked.
+- **Under `.EACHI` the checker types `i`'s columns as scalars inside `j`.** Each row of `i` runs
+  `j` once, so a column carrying `i`'s values (a compared column or an unused column of `i`) is its
+  element type in the scope, while `x`'s columns stay vectors. The groups are the compared columns
+  in condition order, matching `each_i` in the engine.
+- **A lossy `:=` is a type error, though data.table only warns.** Strings into a logical or numeric
+  column, or a fractional literal into an integer column, when the column keeps its type (partial,
+  grouped or literal write). The runtime result is almost always a bug (NA or a truncated value),
+  and an explicit `as.*()` call states the intent. A number into a string column converts without
+  loss and stays accepted, as R code relies on it.
+- **`lapply(.SD, f)` is typed once per column, not through `lapply`'s signature.** Typed through
+  `lapply`, `.SD` is a list of the union of its column types, so `f` is checked against that union
+  (a false error for any `f` that fits each column) and the result has one element type. Instead
+  `subset_apply` in `check.rs` types the call once per column with `.SD` read as a one-column list;
+  an overloaded `f` passed by name is called directly on each column through `overloaded_call`,
+  because an overload set has no single function type for `lapply` to use. A finding every column
+  causes is reported once; one only some columns cause names the column.
+- **A query result that repeats a column name has unknown columns.** data.table keeps both columns
+  (`.SDcols` naming a group column, or `.(g = x)` under `by = g`), but a `frame{...}` type cannot
+  hold two fields of one name, and annotations must round-trip.
 
 ## Records, tuples and tags are ry values, not R lists
 
@@ -2462,6 +2539,54 @@ or raised with only trivia left), which the parser knows and a range check canno
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
 
+## Frames as runtime values
+
+- **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`
+  and classed `"frame"` alone** (`crates/interp/src/frame.rs`). A weak reference with a C
+  finalizer drops the box. The table is the only copy of the data: a column becomes an R vector
+  when R code reads it (`$`, `[[`, `as.list`, a data mask). It is no longer a `data.frame` (the
+  class was `c("frame", "data.frame")`), because nothing about a data.frame's list layout or row
+  names holds for it, and the checker agrees: a frame fails a `data.frame` parameter but passes a
+  `list` one, because `as.list` gives its columns.
+- **`x[i, j, by]` on a frame never reaches the `[` primitive.** `[` is a `DispatchOrEval`
+  special, so `dispatch::dispatch_or_eval` evaluates only the subject, and when it is a frame
+  hands the unevaluated call to `frame::run`. Dispatching through `[.frame` would be too late,
+  because `i`, `j` and `by` name columns. `[.frame` still exists for calls that arrive with
+  evaluated arguments (`do.call`, `Map`). The bytecode compiles `[` as a generic call, so loops
+  that subset run the same path.
+- **Any other object subject of `[` dispatches lazily, as GNU R's `DispatchOrEval` does.** The
+  method receives the remaining arguments as promises, so `DT[, sum(x), by = g]` reaches
+  `[.data.table` with expressions instead of failing with "object 'x' not found".
+- **libr's option reads (`Rf_GetOption1`, `Rf_GetOptionWidth`, `Rf_GetOptionDigits`) go to the
+  interpreter's `options()` when the interpreter is installed.** The `.Options` pairlist in base
+  is the one source of truth; libr's own options environment serves only standalone use without
+  the interpreter. With two stores, C code sees no option R code set, and data.table's `alloccol`
+  fails with "Has getOption('datatable.alloccol') somehow become unset?".
+- **Lowering first, R second.** `Lowering` turns `i`, `j` and `by` into the engine's IR; any part
+  that returns `None` runs as R in a data mask that binds only the columns the expression
+  mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
+  for the grouping (row indices per group) and evaluates once per group.
+- **Copy-on-modify, not by-reference.** `:=` updates in place when the frame's refcount is at most
+  one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
+  call named, searching enclosing scopes, so a global updated inside a function is rebound where
+  it lives. An alias taken before the update keeps the old columns, as the checker models.
+  `setkey` always forks and rebinds.
+- **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
+  `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
+  so `ry::setkey` and `ry::List.map` work after another package masks the bare name. It is the one
+  home of the standard library and the frame functions: the builtins bind the standard library in
+  a `package:ry` just above base, and session startup moves those bindings into the namespace and
+  replaces that environment with the full package in front of the default packages, so `frame`
+  masks `graphics::frame`. It holds the user-facing functions;
+  `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
+  delegate to data.table for anything that is not a frame. S3 methods for other packages' generics
+  are registered in the generic's methods table, as an installed package's `S3method()`
+  directives are; `as.data.table.frame` is registered from a data.table `onLoad` hook, because
+  data.table is not loaded at startup. The checker's stubs are `types/ry.Rtypes`
+  and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
+  `test_standard_library.rs` keeps both equal to what the runtime binds.
+
+
 # Decision record: the JIT tier
 
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
@@ -2516,7 +2641,9 @@ first lines R had already read, leaving R mid-command.
   for R's own packages (the first record in this file), so every project re-declared `Result` and
   wrote its own helpers over plain lists.
 - **Names:** plain qualified names such as `List.map` are ordinary R symbols with a dot, bound in a
-  `package:ry` environment attached just above `package:base` (`standard_library::attach`). There
+  `package:ry` environment attached just above `package:base` (`standard_library::attach`); session
+  startup moves them into the `ry` namespace, attached in front of the default packages beside the
+  frame functions (see "Frames as runtime values"). There
   is no static dispatch, so a call is a symbol lookup and the checker reads one stub per name. A
   definition in the user's code shadows a library name like any R binding, and
   `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so
@@ -2538,6 +2665,27 @@ first lines R had already read, leaving R mid-command.
   checker, hover, completion and goto-definition read the stub file like any other, so incremental
   analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
   the draft with open questions is `contributing/design/standard-library.md`.
+
+## The benchmark harness compares test by test through `ry load`
+
+- **Shape.** `oracle bench` (`crates/oracle/src/bench.rs`) runs a generated package's testthat suite as `ry load <package> --file bench.R`, once with `--runtime gnu-r` and once with `--runtime ry`. The loader plan is the same on both sides, so a difference is an evaluation difference, not a loading one. The driver (`bench.R`) writes one JSON line per `test_that()` block with its status, problems, a deparse of its value and its time.
+- **Why per test, not per file.** A whole-file pass rate hides progress: one missing native fails a file of 30 tests. Per-test results also give the failure messages that the tally groups into fix classes.
+- **GNU R runs twice.** A test whose value or problems GNU R does not reproduce (a UUID, a timestamp, a temp path) is compared by status alone, so only what GNU R itself reproduces counts against ry, and no hand-maintained ignore list is needed.
+
+## `[`, `[[`, `[<-` and `[[<-` dispatch before evaluating their other arguments
+
+- **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
+- **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
+
+## libr reads options from base's `.Options`
+
+- **Previous shape.** libr's `Runtime` held its own options environment that nothing wrote, so `Rf_GetOption1` always returned `NULL` and packages (data.table's `datatable.*` options) saw defaults only.
+- **Target shape.** `Rf_GetOption1` walks `interp::envir::options()`, the interpreter's `.Options` pairlist, which is the single store `options()` writes.
+
+## parallel's natives without fork
+
+- `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.
 
 # Decision record: one Rmath, one codec stack, and the clean-room numerical routines
 

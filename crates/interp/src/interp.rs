@@ -36,6 +36,7 @@ pub mod dispatch;
 pub mod envir;
 pub mod eval;
 pub mod format;
+pub mod frame;
 pub mod linalg;
 pub mod graphics;
 pub mod graphics_render;
@@ -64,6 +65,7 @@ pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
+pub mod parallel;
 pub mod tools;
 pub mod unwind;
 pub mod utils;
@@ -155,6 +157,11 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The innermost complex assignment running: its replacement call, the whole assignment,
+    /// and the frame depth it runs at. GNU R evaluates the replacement inside a context for the
+    /// assignment, so a builtin replacement function reports its errors and warnings against
+    /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
+    pub assignment_call: Option<(Sexp, Sexp, usize)>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// The text `geterrmessage()` returns.
@@ -263,6 +270,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         primitive_formals: FxHashMap::default(),
         symbols,
         visible: true,
+        assignment_call: None,
         warnings: Vec::new(),
         error_message: String::new(),
         show_error_messages: true,
