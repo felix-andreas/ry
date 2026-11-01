@@ -1211,7 +1211,8 @@ Inside a wrapper, a call that forwards its own `...` to a function parameter, as
 because the forwarded `...` may be empty. So `dedup(basename, paths)` is accepted even though
 `basename` takes a single argument. A call that passes nothing but the forwarded `...`, as in
 `function(callback) function(...) callback(...)`, gives the parameter the type `fn(...: Any) -> T`,
-which any function satisfies.
+which any function satisfies, including one with required parameters such as
+`function(path) paste0(path, "/cache")`. An annotation `fn(...: Any) -> T` means the same.
 
 ### Higher-order function types
 
@@ -1408,6 +1409,11 @@ scalar condition admits:
   unannotated formal with a default is the exception: an option flag such
   as `function(x, which = FALSE) if (which) ...` is called with `1` as often as with `TRUE`, so the
   condition leaves its type to its other uses. The same holds for `!` on such a formal.
+- A union is accepted when every member other than `NULL` is. The `NULL` member is the "not
+  supplied" path of an optional value, which code tests only once it holds one, so
+  `if (config_flag(pkg))` on a `logical | NULL` is not reported. An undetermined member, such as a
+  parameter rebound on one path (`T | logical`), becomes `logical` as a lone one would. A bare `NULL`
+  condition is still a type error, as `if (NULL)` is in R.
 
 ### Indexing
 
@@ -1589,6 +1595,12 @@ a shipped stub does. That is also how the class satisfies the numeric requiremen
 to `function(x) x + 1L` is accepted when the project defines `+.Money`, and refused when it defines
 no arithmetic method.
 
+R also dispatches on a class that `class(x) <- "string"` sets on a plain list, and no type tracks
+that attribute. So when the project defines an arithmetic or `Ops` method for a class that no type
+declares, arithmetic with a list operand is left to that method: `result + "text"` on such a list,
+and the rest of a chain `result + a + b`, give `Unknown` and report nothing. Without such a method,
+`list(a = 1) + 1` is a type error, as it is in R.
+
 `c()` dispatches the same way. A class that declares a `c.Class` method keeps its class through
 concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. A nominal with no such method loses
 its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
@@ -1608,7 +1620,10 @@ operands, mixed freely. R coerces both operands to a common type before comparin
 operands are not supported, so `1i < 2` is a type error. A map-like vector takes part through its
 compatibility with an array-like vector. A `NULL` operand, or a `NULL` member of a union, is
 accepted, because R answers an empty `logical` vector instead of failing, as
-[union operands](#operators-over-union-operands) describe.
+[union operands](#operators-over-union-operands) describe. A list compared with an atomic value
+is accepted, because R compares it element by element when each element is a length-one atomic,
+so `parts[parts != "null"]` on a parsed list and `lapply(xs, anyDuplicated) > 0` are not reported.
+Two lists never compare, so `list(1L) == list(1L)` is a type error, as it is in R.
 
 An unannotated operand is left unconstrained, whatever the other operand is, so
 `function(x) x > 0` is `<T> fn(x: T) -> logical` and `function(a, b) a < b` is
@@ -2255,7 +2270,8 @@ upper_names <- function(x) {
   function parameter, and `dir <- path; dir(dir)` calls base's `dir` unchecked. A function that a
   default-attached package exports counts as such an outer binding even when no stub types it, so in
   `function(range, pretty = TRUE) if (pretty) pretty(range) else range` the call reaches base's
-  `pretty` and is `Unknown`.
+  `pretty` and is `Unknown`. A package import that ry has no export list for counts too, so under
+  `import(fs)`, `path <- path(path, "DESCRIPTION")` calls fs's `path` and is `Unknown`.
 - When no binding of the name is a function, R reports the call, and so does the checker: the error
   names the nearest binding's type. A `NULL` binding is the exception, because it is usually a
   placeholder that a package fills in later, from `.onLoad` or with `<<-`. A call on a callee whose
@@ -2421,7 +2437,10 @@ when one path rebinds it. A union would let a later use of the rebound value con
 parameter that the other path still holds, so the joined variable is `Unknown` instead, and the
 parameter stays open: `function(x, flag) { if (flag) x <- 1L; x + 1L }` is
 `<T> fn(x: T, flag: logical) -> Unknown`. The default idiom `if (is.null(x)) x <- 0L` joins the
-same way, so `x` reads as `Unknown` after the `if`.
+same way, so `x` reads as `Unknown` after the `if`. A parameter that only carries a bound such as
+`numeric` still counts as untyped, so `if (flag) omega <- omega + m %*% m` leaves `omega` a
+`T: numeric` that a caller may fill with a plain vector, and a loop's `x <- n` does not make two
+parameters one type.
 
 A variable with exactly one reaching write keeps that write's generalized type, so
 `f <- function(x) x` inside a body stays `<T> fn(x: T) -> T`, and so does an alias of it: after

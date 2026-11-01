@@ -12,7 +12,7 @@ use crate::hir::{
 use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
 };
-use crate::metadata::is_own_package;
+use crate::metadata::{imported_by_name, imports_every_name, is_own_package};
 use crate::naming::{
     BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable, is_column_update,
     query_index_arguments,
@@ -407,6 +407,10 @@ pub trait GlobalEnv<'db> {
     fn type_definitions(&self) -> &'db FxHashMap<Name<'db>, NamedDefinition<'db>>;
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
+
+    /// Whether the project defines an arithmetic or `Ops` method for a class that no type
+    /// declares, so a plain list operand may carry that class.
+    fn has_untracked_arithmetic_class(&self) -> bool;
 
     /// The shipped declaration alone, which a call reaches when R's function lookup skips a
     /// project binding whose value is not a function.
@@ -1097,7 +1101,9 @@ enum GuardFamily {
 
 fn is_type_probe(name: &str) -> bool {
     match name {
-        "typeof" | "class" | "mode" | "storage.mode" | "inherits" | "is.object" | "oldClass" => true,
+        "typeof" | "class" | "mode" | "storage.mode" | "inherits" | "is.object" | "oldClass" => {
+            true
+        }
         "is.null" | "is.na" | "is.nan" | "is.finite" | "is.infinite" | "is.element"
         | "is.unsorted" | "is.loaded" => false,
         _ => name.starts_with("is."),
@@ -1334,8 +1340,21 @@ fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Operand
             TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => {
                 Some(OperandShape::Vector)
             }
+            TyKind::Union(members) => members
+                .iter()
+                .all(|&member| {
+                    matches!(member.kind(db), TyKind::Null)
+                        || comparison_operand_shape(db, member).is_some()
+                })
+                .then_some(OperandShape::Vector),
             _ => None,
         },
+        // R compares a list with an atomic value element by element once each element is a
+        // length-one atomic, which is how code tests a parsed config or a `lapply()` result.
+        // Two lists never compare; `infer_compare` reports that pair.
+        TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_) => {
+            Some(OperandShape::Vector)
+        }
         _ => None,
     }
 }
@@ -3007,9 +3026,10 @@ impl<'db> Checker<'db, '_> {
         let mut then_writes = self.environment.writes_since(mark);
         // A refinement the branch never overwrote is the value it narrowed, not a new one.
         for (slot, entry) in &mut then_writes {
-            if let Some(&(_, _, before)) = pre_guard.iter().find(|(narrowed, ty, _)| {
-                narrowed == slot && *entry == Some(EnvEntry::Mono(*ty))
-            }) {
+            if let Some(&(_, _, before)) = pre_guard
+                .iter()
+                .find(|(narrowed, ty, _)| narrowed == slot && *entry == Some(EnvEntry::Mono(*ty)))
+            {
                 *entry = before;
             }
         }
@@ -3939,7 +3959,9 @@ impl<'db> Checker<'db, '_> {
                     _ => false,
                 };
                 for argument in arguments {
-                    let Some(value) = argument.value else { continue };
+                    let Some(value) = argument.value else {
+                        continue;
+                    };
                     if forwards
                         && let Some(name) = argument.name
                         && let ExpressionKind::NameRef(value_name) =
@@ -4519,7 +4541,9 @@ impl<'db> Checker<'db, '_> {
         let class = name.text(self.db);
         ["-", "Arith", "Ops"].iter().any(|prefix| {
             let method = format!("{prefix}.{class}");
-            globals.overloads(&method, false).is_some_and(|candidates| !candidates.is_empty())
+            globals
+                .overloads(&method, false)
+                .is_some_and(|candidates| !candidates.is_empty())
                 || globals.scheme(&method, false).is_some()
         })
     }
@@ -4748,17 +4772,18 @@ impl<'db> Checker<'db, '_> {
         let spelling = operator_spelling(operator)?;
         let group = operator_group(operator)?;
         // A generic bounded `numeric` probes as the `double` it may be.
-        let probe_operand = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
-            TyKind::Rigid(name)
-                if matches!(
-                    self.table.rigid_constraints.get(name),
-                    Some(Constraint::Numeric | Constraint::ScalarNumeric)
-                ) =>
-            {
-                scalar(self.db, Atomic::Double)
-            }
-            _ => ty,
-        };
+        let probe_operand =
+            |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+                TyKind::Rigid(name)
+                    if matches!(
+                        self.table.rigid_constraints.get(name),
+                        Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                    ) =>
+                {
+                    scalar(self.db, Atomic::Double)
+                }
+                _ => ty,
+            };
         let arguments = [
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
@@ -4776,7 +4801,12 @@ impl<'db> Checker<'db, '_> {
         // only required to be numeric, and the call types when every fit agrees.
         let flexible: Vec<(TextRange, Ty<'db>)> = [(lhs, left), (rhs, right)]
             .into_iter()
-            .map(|(operand, ty)| (self.blame_range(operand), self.table.shallow_resolve(self.db, ty)))
+            .map(|(operand, ty)| {
+                (
+                    self.blame_range(operand),
+                    self.table.shallow_resolve(self.db, ty),
+                )
+            })
             .filter(|(_, ty)| matches!(ty.kind(self.db), TyKind::Var(_)))
             .collect();
         let mut fitting_returns: Vec<Ty<'db>> = Vec::new();
@@ -4857,6 +4887,34 @@ impl<'db> Checker<'db, '_> {
             || self.reads_open_defaulted_formal(condition, resolved)
         {
             return;
+        }
+        // A `NULL` member is the "not supplied" path of an optional value, and R code tests such
+        // a value once it holds one, so a union is a condition when its other members are. Its
+        // open members (a parameter rebound on one path) are bound to `logical` as a lone open
+        // value would be.
+        if let TyKind::Union(members) = resolved.kind(self.db) {
+            let members = members.clone();
+            let values: Vec<_> = members
+                .iter()
+                .copied()
+                .filter(|&member| !matches!(member.kind(self.db), TyKind::Null))
+                .collect();
+            if !values.is_empty()
+                && values
+                    .iter()
+                    .all(|&member| self.condition_coerces(member) || self.is_open_parameter(member))
+            {
+                for member in values {
+                    if !self.condition_coerces(member) {
+                        self.unify_or_report(
+                            condition_range,
+                            scalar(self.db, Atomic::Logical),
+                            member,
+                        );
+                    }
+                }
+                return;
+            }
         }
         // A value already required to be numeric (`if (n %% 2L)`) coerces like a number, so the
         // condition must not pin it to `logical`.
@@ -4955,6 +5013,26 @@ impl<'db> Checker<'db, '_> {
         let rhs_range = self.blame_range(rhs);
         let resolved_left = self.operand_view(lhs_ty);
         let resolved_right = self.operand_view(rhs_ty);
+        // A list operand is an error in R unless it carries a class with an operator method,
+        // and a chain `s + a + b` passes the method's result on, so either kind of operand
+        // leaves the expression to that method.
+        let may_dispatch = |ty: Ty<'db>| {
+            matches!(
+                ty.kind(self.db),
+                TyKind::List(_)
+                    | TyKind::NamedList(_)
+                    | TyKind::Tuple(_)
+                    | TyKind::Record(_)
+                    | TyKind::Unknown
+            )
+        };
+        if (may_dispatch(resolved_left) || may_dispatch(resolved_right))
+            && self
+                .globals
+                .is_some_and(|globals| globals.has_untracked_arithmetic_class())
+        {
+            return unknown(self.db);
+        }
         let left = self.classify_numeric_operand(resolved_left);
         let right = self.classify_numeric_operand(resolved_right);
 
@@ -5204,9 +5282,17 @@ impl<'db> Checker<'db, '_> {
             return unknown(self.db);
         }
 
+        let is_list = |ty: Ty<'db>| {
+            matches!(
+                ty.kind(self.db),
+                TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_)
+            )
+        };
+        let both_lists = is_list(resolved_left) && is_list(resolved_right);
         let mut operand_shapes = Vec::with_capacity(2);
         for (resolved, operand_range) in [(resolved_left, lhs_range), (resolved_right, rhs_range)] {
-            let Some(shapes) = comparison_operand_shapes(self.db, resolved) else {
+            let shapes = comparison_operand_shapes(self.db, resolved).filter(|_| !both_lists);
+            let Some(shapes) = shapes else {
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -5895,6 +5981,13 @@ impl<'db> Checker<'db, '_> {
             Some(_) if ambiguous => FunctionLookup::Undetermined,
             Some(_) if nearest_callable == Callable::Untyped => FunctionLookup::Found(nearest),
             Some(candidates) => FunctionLookup::Library(name, candidates),
+            // A package ry has no export list for may export the function R finds
+            // (`path(path, "R")` under `import(fs)`).
+            None if ambiguous
+                && (imported_by_name(self.db, &name) || imports_every_name(self.db)) =>
+            {
+                FunctionLookup::Undetermined
+            }
             // Nothing else is a function either: R reports the call, and so does the checker.
             None => FunctionLookup::Found(nearest),
         }
@@ -10402,7 +10495,9 @@ impl<'db> Checker<'db, '_> {
             if members.iter().all(|&member| lacks_field(member))
                 && let Some(suggestion) = nearest_name(
                     name,
-                    union_field_names(self.db, subject).iter().map(String::as_str),
+                    union_field_names(self.db, subject)
+                        .iter()
+                        .map(String::as_str),
                 )
             {
                 return Err(TypeError {
@@ -10587,28 +10682,30 @@ impl<'db> Checker<'db, '_> {
         self.join_types(left, right)
     }
 
-    /// A path that rebinds an untyped value (`if (is.null(repo)) repo <- getwd()`) must not
+    /// A path that rebinds an open value (`if (is.null(repo)) repo <- getwd()`) must not
     /// pin the value the other path still holds, which is usually a parameter. Neither may
     /// a union keep that variable, since a later use of the rebound value (`repo + 1`)
     /// would then constrain the parameter, so the joined value is unchecked.
     fn join_written_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
-        // An unconstrained rigid is the same open parameter written back as an annotation,
-        // so it joins the same way.
+        // A rigid is the same open parameter written back as an annotation, so it joins the
+        // same way. A bound such as `numeric` (from `omega + x` before the rebinding) does not
+        // make the other path's value the parameter's type: `omega <- omega + m %*% m` on one
+        // path must leave a caller free to pass a plain vector.
         let open_parameter = |ty: Ty<'db>| match ty.kind(self.db) {
-            TyKind::Var(_) => {
-                self.table.open_constraint(self.db, ty) == Some(Constraint::Unconstrained)
-            }
-            TyKind::Rigid(name) => matches!(
-                self.table.rigid_constraints.get(name),
-                None | Some(Constraint::Unconstrained)
-            ),
+            TyKind::Var(_) => self.table.open_constraint(self.db, ty).is_some(),
+            TyKind::Rigid(_) => true,
             _ => false,
         };
-        let (open, other) = match (open_parameter(left_resolved), open_parameter(right_resolved)) {
+        let (open, other) = match (
+            open_parameter(left_resolved),
+            open_parameter(right_resolved),
+        ) {
             (true, false) => (left_resolved, right_resolved),
             (false, true) => (right_resolved, left_resolved),
+            // Two different parameters (`x <- n` in a loop) stay independent.
+            (true, true) if left_resolved != right_resolved => return unknown(self.db),
             _ => return self.join_types(left, right),
         };
         // A guard's own narrowing (`T` against `T | NULL`) and a `NULL` path keep the
@@ -12063,8 +12160,10 @@ mod tests {
             "{:?}",
             out_of_range.errors
         );
-        let missing_field =
-            check_source(&db, "f <- function() {\n  p <- list(value = 1L)\n  p$valeu\n}");
+        let missing_field = check_source(
+            &db,
+            "f <- function() {\n  p <- list(value = 1L)\n  p$valeu\n}",
+        );
         assert!(
             missing_field.errors.iter().any(|error| matches!(
                 &error.kind,

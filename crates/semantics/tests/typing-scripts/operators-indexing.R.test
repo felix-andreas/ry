@@ -394,11 +394,10 @@ v <- c(TRUE, FALSE)
 v: logical[]
 logical
 
-#---- or_with_nullable_operand_rejected
+#---- or_with_nullable_operand_accepted
 c(a = TRUE)[["a"]] || FALSE
 #++++
 logical
-0..18 error[type-mismatch] expected `logical`, found `logical | NULL`
 
 #---- nominal_comparison_character_projects
 #: @type Name {character}

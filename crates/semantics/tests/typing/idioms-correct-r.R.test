@@ -387,3 +387,103 @@ flip <- function(phi, flag, m) {
 }
 #++++
 flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
+
+#---- a_condition_accepts_an_optional_logical
+pluck <- function(config, key) {
+  if (is.null(config)) NULL else isTRUE(config[[key]])
+}
+if (pluck(list(a = TRUE), "a")) print("yes")
+#++++
+pluck: <T, U> fn(config: T | NULL, [key]: U) -> logical | NULL
+character | NULL
+
+#---- a_condition_accepts_a_parameter_rebound_on_one_path
+fifo <- function(read = NULL, write = NULL) {
+  if (is.null(read)) read <- !isTRUE(write)
+  if (is.null(write)) write <- !read
+  if (read && write) stop("not both")
+  read
+}
+#++++
+fifo: <T, U> fn([read]: T | NULL, [write]: U | NULL) -> Unknown
+
+#---- a_condition_rejects_a_bare_null
+if (NULL) print("never")
+#++++
+character | NULL
+4..8 error[type-mismatch] expected `logical`, found `NULL`
+
+#---- a_condition_accepts_an_optional_value_of_open_type
+get_flag <- function(config, default = NULL) {
+  if (is.null(config)) default else config
+}
+use <- function(config) if (get_flag(config, default = FALSE)) "on" else "off"
+#++++
+get_flag: <T> fn(config: T | NULL, [default]: T) -> T
+use: fn(config: logical) -> character
+
+#---- arithmetic_on_a_list_may_dispatch_to_a_project_method
+"+.string" <- function(x, y) {
+  x$text <- paste(x$text, as.character(y), sep = "")
+  x
+}
+string <- function(text) {
+  x <- list(text = text)
+  class(x) <- "string"
+  x
+}
+render <- function(label) {
+  result <- string("")
+  result <- result + label + " and " + "more"
+  result$text
+}
+#++++
++.string: <T, U> fn(x: T, y: U) -> T
+string: <T> fn(text: T) -> list{text: T}
+render: <T> fn(label: T) -> Unknown
+
+#---- arithmetic_on_a_list_without_a_project_method_is_an_error
+total <- function() list(a = 1) + 1
+#++++
+total: Unknown
+20..31 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{a: double}`
+
+#---- a_list_compares_with_an_atomic_value
+drop_nulls <- function(parts) {
+  parts <- as.list(parts)
+  parts[parts != "null"]
+}
+any_duplicated <- function(columns) any(lapply(columns, anyDuplicated) > 0)
+#++++
+drop_nulls: <T> fn(parts: T) -> list[Any]
+any_duplicated: fn(columns: Unknown) -> logical
+
+#---- a_callback_called_with_forwarded_dots_takes_required_parameters
+with_progress <- function(callback) function(...) callback(...)
+cache_path <- function(path) paste0(path, "/cache")
+run <- function(paths) vapply(paths, with_progress(cache_path), "")
+#++++
+with_progress: <T> fn(callback: fn(...: Any) -> T) -> fn(...: Any) -> T
+cache_path: <T> fn(path: T) -> character
+run: <T> fn(paths: list[T] | T[]) -> character[]
+
+#---- a_rebinding_on_one_path_leaves_a_numeric_parameter_open
+forecast <- function(omega, regressors, flag) {
+  if (flag) {
+    omega <- omega + regressors %*% regressors
+  }
+  omega
+}
+run <- function(m) forecast(c(1, 2), m, TRUE)
+#++++
+forecast: <T: numeric, U> fn(omega: T, [regressors]: U, flag: logical) -> Unknown
+run: <T> fn(m: T) -> Unknown
+
+#---- a_matrix_scales_by_a_vector
+scale_rows <- function(m, weights) {
+  s <- m %*% m
+  w <- c(0.5, 2)
+  w * s
+}
+#++++
+scale_rows: <T, U> fn(m: T, [weights]: U) -> matrix
