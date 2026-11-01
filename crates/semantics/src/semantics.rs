@@ -402,6 +402,7 @@ fn is_ry_syntax(kind: SyntaxKind) -> bool {
         kind,
         SyntaxKind::RECORD_EXPR
             | SyntaxKind::TUPLE_EXPR
+            | SyntaxKind::ARRAY_EXPR
             | SyntaxKind::TAG_EXPR
             | SyntaxKind::MATCH_EXPR
     )

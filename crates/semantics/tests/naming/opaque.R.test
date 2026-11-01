@@ -298,14 +298,15 @@ f <- function(dt) dt[[undefined_column]]
 
 #==== opaque_operators
 #---- the_operands_of_an_unmodelled_operator_read_quietly
-f <- function(a) a & undefined_flag
+f <- function(a) a %o% undefined_flag
 #++++
 # f
   b0 a parameter 14..15
   b1 f top-level 0..1
   0..1 f <- b1
   17..18 a -> b0
-  21..35 undefined_flag -> quiet deferred
+  23..37 undefined_flag -> quiet deferred
+  operator reads: %o%
 
 #---- a_special_operator_use_records_the_operator_name
 f <- function(a) a %||% 1L

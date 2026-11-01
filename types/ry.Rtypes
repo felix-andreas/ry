@@ -8,7 +8,8 @@
 # `docs/src/content/docs/reference/standard-library.mdx`.
 #
 # Conventions shared by every module:
-# - A collection is an R list (`list[T]`); `List.from_vector` converts an atomic vector.
+# - A collection is an R list (`list[T]`); `List.from_vector` converts an atomic vector. Every
+#   `List` function also takes an Array, declared first, and then returns an Array.
 # - A position is a 1-based `integer`.
 # - A function that can fail returns a `Result` whose error is a descriptive tag.
 # - Equality is `identical()`.
@@ -16,6 +17,7 @@
 @alias Result<T, E> {:Ok(T) | :Err(E)}
 @type Dict<K, V>
 @type Set<T>
+@type Array<T>
 
 # Conversions from a list to ry's own values. They are base builtins on ry's runtime, not part
 # of `package:ry`, so the test that keeps this file and the runtime's table equal skips them.
@@ -23,6 +25,16 @@
 as.record : fn(x: list[Any]) -> Any
 as.tuple : fn(x: list[Any]) -> Any
 as.tag : fn(x: list[Any]) -> Any
+
+# Arrays. `as.Array` checks every item: it refuses `NA`, a classed object and a ragged list, and
+# drops names. An Array passes to R code as the plain vector it is, so the reverse needs no call.
+as.Array : <T> fn(x: Array<T>) -> Array<T>
+as.Array : fn(x: logical[]) -> Array<logical>
+as.Array : fn(x: integer[]) -> Array<integer>
+as.Array : fn(x: double[]) -> Array<double>
+as.Array : fn(x: character[]) -> Array<character>
+as.Array : <T> fn(x: list[T]) -> Array<T>
+is.Array : fn(x: Any) -> logical
 
 # Result
 
@@ -39,55 +51,103 @@ Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> 
 
 List.from_vector : <T> fn(vector: T[]) -> list[T]
 List.to_vector : <T> fn(list: list[T]) -> T[]
+List.len : <T> fn(list: Array<T>) -> integer
 List.len : <T> fn(list: list[T]) -> integer
+List.is_empty : <T> fn(list: Array<T>) -> logical
 List.is_empty : <T> fn(list: list[T]) -> logical
+List.get : <T> fn(list: Array<T>, index: integer) -> Result<T, :OutOfBounds>
 List.get : <T> fn(list: list[T], index: integer) -> Result<T, :OutOfBounds>
+List.set : <T> fn(list: Array<T>, index: integer, value: T) -> Array<T>
 List.set : <T> fn(list: list[T], index: integer, value: T) -> list[T]
+List.update : <T> fn(list: Array<T>, index: integer, f: fn(T) -> T) -> Array<T>
 List.update : <T> fn(list: list[T], index: integer, f: fn(T) -> T) -> list[T]
+List.append : <T> fn(list: Array<T>, value: T) -> Array<T>
 List.append : <T> fn(list: list[T], value: T) -> list[T]
+List.prepend : <T> fn(list: Array<T>, value: T) -> Array<T>
 List.prepend : <T> fn(list: list[T], value: T) -> list[T]
+List.concat : <T> fn(first: Array<T>, second: Array<T>) -> Array<T>
 List.concat : <T> fn(first: list[T], second: list[T]) -> list[T]
 List.single : <T> fn(value: T) -> list[T]
 List.repeat : <T> fn(value: T, count: integer) -> list[T]
+List.reverse : <T> fn(list: Array<T>) -> Array<T>
 List.reverse : <T> fn(list: list[T]) -> list[T]
+List.join : <T> fn(lists: Array<Array<T>>) -> Array<T>
 List.join : <T> fn(lists: list[list[T]]) -> list[T]
+List.map : <A, B> fn(list: Array<A>, f: fn(A) -> B) -> Array<B>
 List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
+List.map_with_index : <A, B> fn(list: Array<A>, f: fn(A, integer) -> B) -> Array<B>
 List.map_with_index : <A, B> fn(list: list[A], f: fn(A, integer) -> B) -> list[B]
+List.map2 : <A, B, C> fn(first: Array<A>, second: Array<B>, f: fn(A, B) -> C) -> Array<C>
 List.map2 : <A, B, C> fn(first: list[A], second: list[B], f: fn(A, B) -> C) -> list[C]
+List.join_map : <A, B> fn(list: Array<A>, f: fn(A) -> Array<B>) -> Array<B>
 List.join_map : <A, B> fn(list: list[A], f: fn(A) -> list[B]) -> list[B]
+List.keep_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.keep_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+List.drop_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.drop_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+List.keep_oks : <A, B, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<B>
 List.keep_oks : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[B]
+List.keep_errs : <A, B, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<E>
 List.keep_errs : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[E]
+List.map_try : <A, B, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Result<Array<B>, E>
 List.map_try : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> Result<list[B], E>
+List.walk : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> S) -> S
 List.walk : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
+List.walk_backwards : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> S) -> S
 List.walk_backwards : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
+List.walk_until : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 List.walk_until : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+List.any : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> logical
 List.any : <T> fn(list: list[T], predicate: fn(T) -> logical) -> logical
+List.all : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> logical
 List.all : <T> fn(list: list[T], predicate: fn(T) -> logical) -> logical
+List.contains : <T> fn(list: Array<T>, value: T) -> logical
 List.contains : <T> fn(list: list[T], value: T) -> logical
+List.count_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> integer
 List.count_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> integer
+List.find_first : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<T, :NotFound>
 List.find_first : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<T, :NotFound>
+List.find_last : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<T, :NotFound>
 List.find_last : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<T, :NotFound>
+List.find_first_index : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<integer, :NotFound>
 List.find_first_index : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+List.find_last_index : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<integer, :NotFound>
 List.find_last_index : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+List.first : <T> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
 List.first : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.last : <T> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
 List.last : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.take_first : <T> fn(list: Array<T>, count: integer) -> Array<T>
 List.take_first : <T> fn(list: list[T], count: integer) -> list[T]
+List.take_last : <T> fn(list: Array<T>, count: integer) -> Array<T>
 List.take_last : <T> fn(list: list[T], count: integer) -> list[T]
+List.drop_first : <T> fn(list: Array<T>, count: integer) -> Array<T>
 List.drop_first : <T> fn(list: list[T], count: integer) -> list[T]
+List.drop_last : <T> fn(list: Array<T>, count: integer) -> Array<T>
 List.drop_last : <T> fn(list: list[T], count: integer) -> list[T]
+List.drop_at : <T> fn(list: Array<T>, index: integer) -> Array<T>
 List.drop_at : <T> fn(list: list[T], index: integer) -> list[T]
+List.sublist : <T> fn(list: Array<T>, start: integer, count: integer) -> Array<T>
 List.sublist : <T> fn(list: list[T], start: integer, count: integer) -> list[T]
+List.split_at : <T> fn(list: Array<T>, count: integer) -> Record{before: Array<T>, others: Array<T>}
 List.split_at : <T> fn(list: list[T], count: integer) -> Record{before: list[T], others: list[T]}
+List.chunks_of : <T> fn(list: Array<T>, size: integer) -> Array<Array<T>>
 List.chunks_of : <T> fn(list: list[T], size: integer) -> list[list[T]]
+List.intersperse : <T> fn(list: Array<T>, separator: T) -> Array<T>
 List.intersperse : <T> fn(list: list[T], separator: T) -> list[T]
+List.sort_with : <T> fn(list: Array<T>, compare: fn(T, T) -> :LT | :EQ | :GT) -> Array<T>
 List.sort_with : <T> fn(list: list[T], compare: fn(T, T) -> :LT | :EQ | :GT) -> list[T]
+List.sum : <T: scalar numeric> fn(list: Array<T>) -> T
 List.sum : <T: scalar numeric> fn(list: list[T]) -> T
+List.product : <T: scalar numeric> fn(list: Array<T>) -> T
 List.product : <T: scalar numeric> fn(list: list[T]) -> T
+List.min : <T: scalar numeric> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
 List.min : <T: scalar numeric> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.max : <T: scalar numeric> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
 List.max : <T: scalar numeric> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.starts_with : <T> fn(list: Array<T>, prefix: Array<T>) -> logical
 List.starts_with : <T> fn(list: list[T], prefix: list[T]) -> logical
+List.ends_with : <T> fn(list: Array<T>, suffix: Array<T>) -> logical
 List.ends_with : <T> fn(list: list[T], suffix: list[T]) -> logical
 
 # Str

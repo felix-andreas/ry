@@ -66,7 +66,10 @@ pub enum FrameKind {
     LazyFrame,
     /// `DataFrame.group_by` or `LazyFrame.group_by`. The first `keys` columns are the group keys,
     /// rendered before a `;`, and the rest are the columns `GroupBy.agg` aggregates.
-    GroupBy { lazy: bool, keys: u32 },
+    GroupBy {
+        lazy: bool,
+        keys: u32,
+    },
     /// A data.table whose columns are known, from `fread` and the rest of data.table's readers.
     DataTable,
 }
@@ -87,8 +90,14 @@ impl FrameKind {
         Some(match head {
             "DataFrame" => FrameKind::DataFrame,
             "LazyFrame" => FrameKind::LazyFrame,
-            "GroupBy" => FrameKind::GroupBy { lazy: false, keys: 0 },
-            "LazyGroupBy" => FrameKind::GroupBy { lazy: true, keys: 0 },
+            "GroupBy" => FrameKind::GroupBy {
+                lazy: false,
+                keys: 0,
+            },
+            "LazyGroupBy" => FrameKind::GroupBy {
+                lazy: true,
+                keys: 0,
+            },
             "data.table" => FrameKind::DataTable,
             _ => return None,
         })
@@ -248,6 +257,53 @@ pub fn null(db: &dyn Db) -> Ty<'_> {
 
 pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
+}
+
+/// `Array<element>`, ry's strict typed vector.
+pub fn array<'db>(db: &'db dyn Db, element: Ty<'db>) -> Ty<'db> {
+    Ty::new(db, TyKind::Named(Name::new(db, "Array"), vec![element]))
+}
+
+/// The item type of the standard library's `Array<T>`, and `None` for any other type, including a
+/// project's own type that happens to be called `Array`.
+pub fn array_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    match ty.kind(db) {
+        TyKind::Named(name, arguments)
+            if arguments.len() == 1
+                && name.text(db) == "Array"
+                && crate::stubs::is_ry_type(db, "Array") =>
+        {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+/// Whether every value of `ty` is a tag, so that two such types join into one tag union.
+pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Tag(..) | TyKind::OtherTags => true,
+        TyKind::Union(members) => members.iter().all(|&member| is_tag_type(db, member)),
+        _ => false,
+    }
+}
+
+/// Whether every value of `ty` is one of ry's own values (a record, tuple, tag, or a standard
+/// library collection), which an Array stores boxed in a list rather than unboxed.
+pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::NativeRecord(_) | TyKind::NativeTuple(_) | TyKind::Tag(..) | TyKind::OtherTags => {
+            true
+        }
+        TyKind::Named(name, _) => {
+            matches!(name.text(db), "Array" | "Dict" | "Set")
+                && crate::stubs::is_ry_type(db, name.text(db))
+        }
+        TyKind::Union(members) => {
+            !members.is_empty() && members.iter().all(|&member| is_ry_value_type(db, member))
+        }
+        _ => false,
+    }
 }
 
 /// Sorts by name in byte order, the one order a record's fields are stored and printed in.
@@ -485,15 +541,18 @@ fn mapped_kind<'db>(
         )),
         TyKind::Tag(name, payload) => Some(TyKind::Tag(*name, payload.map(&mut *map))),
         TyKind::Frame(_, None) => None,
-        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(*kind, Some(
-            columns
-                .iter()
-                .map(|column| RecordField {
-                    ty: map(column.ty),
-                    ..column.clone()
-                })
-                .collect(),
-        ))),
+        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(
+            *kind,
+            Some(
+                columns
+                    .iter()
+                    .map(|column| RecordField {
+                        ty: map(column.ty),
+                        ..column.clone()
+                    })
+                    .collect(),
+            ),
+        )),
         TyKind::Function(function) => Some(TyKind::Function(FunctionType {
             positional: function.positional.iter().map(|&ty| map(ty)).collect(),
             named: function

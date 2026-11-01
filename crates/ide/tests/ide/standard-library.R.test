@@ -3,11 +3,13 @@
 doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
 #++++
 hover 11..19: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package ry (1 declaration(s), declared in stub source 11 at `List.map`)
+hover-definition: package ry (2 declaration(s), declared in stub source 11 at `List.map`)
 definition: stub source 11 at `List.map`
 references: none
 rename: none
-signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
+signature: <T, U> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
+parameters: [list: Array<T>] | f: fn(T) -> U
+signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
 parameters: [list: list[integer]] | f: fn(integer) -> integer
 action: Add inferred type annotation for `doubled`
   edit 0..0 -> "#: list[integer]\n"

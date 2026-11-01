@@ -421,10 +421,10 @@ fn declarations_and_runtime_bind_the_same_names() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.exports");
     let manifest = fs::read_to_string(&manifest)
         .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", manifest.display()));
-    // The list conversions are base builtins, listed in the manifest only for the checker.
+    // The list and Array conversions are base builtins, listed in the manifest only for the checker.
     let exported: BTreeSet<String> = manifest
         .lines()
-        .filter(|line| !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag"))
+        .filter(|line| !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag" | "as.Array" | "is.Array"))
         .map(str::to_owned)
         .collect();
     let declared: BTreeSet<String> = declarations().into_iter().map(|(name, _)| name).collect();
