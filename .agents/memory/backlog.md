@@ -482,20 +482,6 @@ An independent review profiled before it proposed. Every number below was taken 
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
 
-### Project-wide aggregates verify every item after each keystroke (unverified here, reported by the IDE responsiveness work)
-
-- On the finance benchmark, any editor request right after a keystroke costs about 45 ms at p50,
-  against 0.5 to 1 ms settled, and edited-file diagnostics cost about 56 ms with no item rechecked.
-  The time is salsa deep verification under `item_check`.
-- Cause: `conditional_slot_items`, `interface_sccs`, `package_definitions` and
-  `project_arithmetic_classes` read per-item memos across all files directly. The edited file's
-  items make each aggregate `LOW`, so verifying it walks about 56K edges.
-- Fix shape: fold per-file tracked memos (for example `file_conditional_writers`,
-  `file_definitions`, `file_interface_reads`, `file_arithmetic_classes`), so an aggregate reads
-  about 500 file memos that verify at `MEDIUM` by durability and only the edited file's memo
-  re-verifies. Pin it in `test_incremental.rs` by counting edges re-verified after an edit. Keep
-  `ry check`'s naming pass warming these per item in parallel.
-
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
 This was framed as the interface fixpoint being superlinear in the size of the cyclic definition
@@ -614,15 +600,6 @@ ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycl
 `utils.R`. The fix is to make conditional writers nodes of the static graph, with an edge from a
 reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
 any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
-
-### A read waits for the idle job in flight
-
-Only a notification (an open, edit, save or watched-file change) cancels in-flight work; a request
-never does (`ServerState::notify` against `ServerState::read` in `crates/ry/src/server.rs`). A hover
-or completion that arrives while the worker warms a file therefore waits for that one file's
-analysis to finish, because idle work runs one file per job. Measure the
-worst single-file warm-up on a large package before adding read preemption; if it is well under the
-keystroke budget, delete this entry.
 
 ### Judged fast enough, so do not invent work here
 
@@ -2887,14 +2864,17 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
-## Open: editor gaps on ry's own syntax
+## Open: editor latency at 300,000 lines
 
-- **Hover still shows impossible vector members.** The inlay hint and the "add annotation" action
-  drop `Position[]` from `list[Position] | Position[]` (`without_impossible_vectors` in
-  `crates/ide/src/ide.rs`), but hover prints the full inferred union.
-- **Completion of a field name inside a record literal** offers R globals; it should offer the
-  expected record's missing fields.
-- **No payload-field completion in a tag constructor** such as `:Circle(ra|)`; patterns have it.
+Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .bench/finbench
+--quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
+table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
+about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
+
+- **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
+  lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
+  lints when the project is still cold, but that changes the two-wave contract on the architecture
+  page, so weigh it against making the cold naming pass faster.
 
 ## Open: false errors on real CRAN code
 

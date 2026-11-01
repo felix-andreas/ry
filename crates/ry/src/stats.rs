@@ -4,6 +4,7 @@
 use crate::cli::{self, CommandError};
 use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
+use salsa::{Durability, Setter};
 use semantics::check::CHECK_EXECUTIONS;
 use semantics::diagnostics::file_diagnostics;
 use semantics::infer::resolve_calls;
@@ -20,6 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+use syntax::TextSize;
 
 const SLOWEST_FILES: usize = 10;
 const TYPING_BURST: usize = 10;
@@ -75,10 +77,15 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
 
     let rss_baseline = proc_status_field("VmRSS:");
     let mut db = RootDatabase::default();
-    StubSources::new(&db, stub_sources, shipped_export_manifests());
-    AnalysisSettings::new(&db, config.check.inline_annotations);
-    let metadata = PackageMetadata::new(
-        &db,
+    // Every input is MEDIUM, as in the server, so the request timings below pay what the
+    // server pays to verify memos after a keystroke.
+    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
+        .durability(Durability::MEDIUM)
+        .new(&db);
+    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
+        .durability(Durability::MEDIUM)
+        .new(&db);
+    let metadata = PackageMetadata::builder(
         normalized_imports(&namespace_file.imports),
         description_source
             .as_deref()
@@ -87,7 +94,9 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         BTreeSet::new(),
         None,
         namespace_file.native_symbols,
-    );
+    )
+    .durability(Durability::MEDIUM)
+    .new(&db);
     let mut records: Vec<FileRecord> = Vec::with_capacity(paths.len());
     let mut package_count = 0usize;
     let mut load_total = Duration::ZERO;
@@ -104,7 +113,11 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         let is_package = kind == DocumentKind::Package;
         package_count += usize::from(is_package);
         let start = Instant::now();
-        let file = SourceFile::new(&db, source.clone(), kind);
+        // As in the server: files change at MEDIUM until the user edits one, and an edit
+        // writes LOW, so the request timings below see the server's revalidation cost.
+        let file = SourceFile::builder(source.clone(), kind)
+            .durability(Durability::MEDIUM)
+            .new(&db);
         load_total += start.elapsed();
         records.push(FileRecord {
             file,
@@ -114,7 +127,11 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             typecheck: Duration::ZERO,
         });
     }
-    ProjectFiles::new(&db, records.iter().map(|record| record.file).collect());
+    // A singleton that queries reach through `ProjectFiles::get`. LOW, as in the server, so a
+    // file's first edit does not re-execute the project.
+    let _project = ProjectFiles::builder(records.iter().map(|record| record.file).collect())
+        .durability(Durability::LOW)
+        .new(&db);
     let rss_after_load = proc_status_field("VmRSS:");
 
     // Memoization makes each stage's wall time its own marginal cost; package-wide
@@ -131,7 +148,6 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     // hosts see them.
     let attached = attached_union(&db, records.iter().map(|record| record.file));
     if !attached.is_empty() {
-        use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
     }
     let mut lower_total = Duration::ZERO;
@@ -285,8 +301,164 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     for (position, &index) in probe_indexes.iter().enumerate() {
         typing_burst(&mut db, &records, index, &config, &root, position == 0);
     }
+    if let Some(&median) = by_loc.get(by_loc.len() / 2) {
+        editor_requests(&mut db, &records, median, &config);
+    }
 
     Ok(())
+}
+
+/// Editor requests at identifiers sampled across the package files, on a settled database and
+/// right after a keystroke in another file, the moment a request pays for revalidation.
+fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize, config: &Config) {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return;
+    };
+    let positions: Vec<(SourceFile, TextSize)> = records
+        .iter()
+        .enumerate()
+        .filter(|(index, record)| {
+            *index != edited
+                && record.file.kind(db) == &DocumentKind::Package
+                && index % REQUEST_FILE_STRIDE == 0
+        })
+        .flat_map(|(_, record)| {
+            identifier_offsets(&record.source)
+                .into_iter()
+                .step_by(REQUEST_POSITION_STRIDE)
+                .map(move |offset| (record.file, offset))
+        })
+        .take(REQUEST_SAMPLES)
+        .collect();
+    let Some(edited) = records.get(edited) else {
+        return;
+    };
+    let mut text = edited.source.clone();
+    text.push('\n');
+    println!();
+    println!(
+        "editor requests ({} positions; after a keystroke in another file):",
+        positions.len()
+    );
+    for kind in RequestKind::ALL {
+        let mut settled = Vec::with_capacity(positions.len());
+        let mut after_edit = Vec::with_capacity(positions.len());
+        for &(file, offset) in &positions {
+            settled.push(time_request(db, files, kind, file, offset));
+            text.push('#');
+            edited
+                .file
+                .set_text(db)
+                .with_durability(Durability::LOW)
+                .to(text.clone());
+            after_edit.push(time_request(db, files, kind, file, offset));
+        }
+        settled.sort();
+        after_edit.sort();
+        println!(
+            "  {:<12} settled {:>7.1} ms p50 {:>7.1} ms p99   after edit {:>7.1} ms p50 {:>7.1} ms p99",
+            kind.label(),
+            percentile(&settled, 50),
+            percentile(&settled, 99),
+            percentile(&after_edit, 50),
+            percentile(&after_edit, 99),
+        );
+    }
+    edited
+        .file
+        .set_text(db)
+        .with_durability(Durability::LOW)
+        .to(edited.source.clone());
+    let _ = document_diagnostics(db, edited.file, config);
+}
+
+const REQUEST_SAMPLES: usize = 200;
+const REQUEST_FILE_STRIDE: usize = 7;
+const REQUEST_POSITION_STRIDE: usize = 37;
+
+#[derive(Clone, Copy)]
+enum RequestKind {
+    Parse,
+    Hover,
+    Completion,
+    Definition,
+    References,
+    Rename,
+}
+
+impl RequestKind {
+    const ALL: [RequestKind; 6] = [
+        RequestKind::Parse,
+        RequestKind::Hover,
+        RequestKind::Completion,
+        RequestKind::Definition,
+        RequestKind::References,
+        RequestKind::Rename,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            RequestKind::Parse => "parse (floor)",
+            RequestKind::Hover => "hover",
+            RequestKind::Completion => "completion",
+            RequestKind::Definition => "definition",
+            RequestKind::References => "references",
+            RequestKind::Rename => "rename",
+        }
+    }
+}
+
+fn time_request(
+    db: &RootDatabase,
+    files: ProjectFiles,
+    kind: RequestKind,
+    file: SourceFile,
+    offset: TextSize,
+) -> Duration {
+    let start = Instant::now();
+    match kind {
+        RequestKind::Parse => drop(semantics::parse(db, file)),
+        RequestKind::Hover => drop(ide::hover(db, files, file, offset)),
+        // Mid-identifier, as while typing.
+        RequestKind::Completion => {
+            drop(ide::completion(db, files, file, offset + TextSize::from(1)))
+        }
+        RequestKind::Definition => drop(ide::definition(db, files, file, offset)),
+        RequestKind::References => drop(ide::references(db, files, file, offset, true)),
+        RequestKind::Rename => drop(ide::rename(db, files, file, offset)),
+    }
+    start.elapsed()
+}
+
+fn percentile(sorted: &[Duration], percent: usize) -> f64 {
+    let index = (sorted.len() * percent / 100).min(sorted.len().saturating_sub(1));
+    sorted
+        .get(index)
+        .map_or(0.0, |duration| duration.as_secs_f64() * 1e3)
+}
+
+/// Byte offsets of identifiers outside comments and strings, line by line.
+fn identifier_offsets(source: &str) -> Vec<TextSize> {
+    let mut offsets = Vec::new();
+    let mut line_start = 0;
+    for line in source.split_inclusive('\n') {
+        let code = line.split('#').next().unwrap_or("");
+        if !code.contains('"') && !code.contains('\'') {
+            let bytes = code.as_bytes();
+            for (index, &byte) in bytes.iter().enumerate() {
+                let previous = index.checked_sub(1).and_then(|before| bytes.get(before));
+                let starts_word = byte.is_ascii_alphabetic()
+                    && previous.is_none_or(|&before| {
+                        !(before.is_ascii_alphanumeric() || before == b'_' || before == b'.')
+                    });
+                if starts_word {
+                    offsets.push(TextSize::from((line_start + index) as u32));
+                }
+            }
+        }
+        line_start += line.len();
+    }
+    offsets
 }
 
 /// Salsa's own census: how many memos each query holds and their inline size plus
@@ -335,7 +507,6 @@ fn typing_burst(
     root: &Path,
     detailed: bool,
 ) {
-    use salsa::Setter;
     let record = &records[index];
     let mut text = record.source.clone();
     text.push('\n');
@@ -345,7 +516,11 @@ fn typing_burst(
     for _ in 0..TYPING_BURST {
         text.push('#');
         let start = Instant::now();
-        record.file.set_text(db).to(text.clone());
+        record
+            .file
+            .set_text(db)
+            .with_durability(Durability::LOW)
+            .to(text.clone());
         let _ = document_diagnostics(db, record.file, config);
         keystroke_times.push(start.elapsed());
     }
@@ -405,7 +580,11 @@ fn typing_burst(
             parse_start.elapsed().as_secs_f64() * 1e3 / parses as f64
         );
     }
-    record.file.set_text(db).to(record.source.clone());
+    record
+        .file
+        .set_text(db)
+        .with_durability(Durability::LOW)
+        .to(record.source.clone());
     let _ = document_diagnostics(db, record.file, config);
 }
 

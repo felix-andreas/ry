@@ -3145,6 +3145,45 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+# Decision record: editor responsiveness at 300,000 lines
+
+- **Previous shape.** Completion walked every item in the project per request, reading each item's
+  salsa fields, re-walked every file's syntax tree for untyped `$` fields, resolved a scheme (and
+  so possibly a type check) for every matching global, and sorted every candidate with an
+  allocated key before keeping 128. References for a global named and lowered every item in the
+  project. On finbench that was 30 ms p50 for completion and 300 ms p99 for references.
+- **Target shape.** Two per-file tracked indexes in `crates/ide/src/ide.rs`: `global_names` (the
+  top-level names a file writes, with their item) and `spelled_names` (the names spelled after
+  `$`, `@` and `::`). They are derived from the item tree and the syntax, so they cannot drift, and
+  an edit recomputes only the edited file's entry. Ranking selects the top results with
+  `select_nth_unstable_by` and compares labels case-insensitively without allocating, and call
+  shapes are resolved only for the results returned. References and rename skip a file, then an
+  item, whose source text does not contain the name, because every occurrence spells it.
+- **Requests preempt idle work.** A request cancels the idle unit in flight once the request is
+  queued (`CancelHandle::preempt_idle` in `crates/ry/src/server.rs`); it never cancels a sync.
+- **Durability.** A setter that names no durability keeps the field's current one, so the old
+  `didOpen` rewrote every opened file at `MEDIUM` and invalidated every memo in the project. It now
+  skips text that matches the disk and lowers the file to `LOW` in idle time, because salsa never
+  backdates a memo whose durability drops, and the first `LOW` write therefore re-derives the
+  file's dependents once.
+- **Project-wide maps fold per-file memos.** `package_definitions`, `conditional_slot_items`,
+  `interface_sccs` and their test-file twins read every item's projections directly. Once the
+  edited file was `LOW`, each map was too, and confirming it after a keystroke checked about 56,000
+  item memos, about 35 ms before any request could answer. They now read `file_definitions`,
+  `file_interface_reads` and `file_conditional_writers` (`crates/semantics/src/semantics.rs`), so
+  the check touches about 500 file memos and every untouched one passes on durability.
+  `project_arithmetic_classes` needed no change: it reads only `package_definitions`.
+- **Every host input but the open documents and the file list is `MEDIUM`.** The server and
+  `analysis-stats` created the stubs, settings, metadata and data files at the default `LOW`, and
+  nearly every memo reads the stubs, so no memo was ever `MEDIUM` and the file durabilities had no
+  effect. With those inputs at `MEDIUM`, the maps must be `LOW` before any file's first edit, since
+  a memo whose durability drops cannot backdate and the drop would re-execute every item check
+  (about 2 s on finbench). `ProjectFiles` is therefore `LOW`, which keeps the maps `LOW`.
+  `test_incremental.rs` pins both: an edit verifies only the edited file's items, and a file's
+  first edit re-checks only its own.
+- **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
+  right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
+  finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
 
 # Decision record: data-oriented design and explicit allocators
 
