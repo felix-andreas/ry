@@ -72,3 +72,7 @@
   expressions <- .ry_parse(state, path, plan$run_line[[i]], plan$run_column[[i]], text, keep)
   for (expression in expressions) eval(expression, state$ns)
 }
+
+# GNU R's methods package looks classes and generics up in C that offers no hook to run held
+# back definitions from, so they always run at load.
+.ry_may_defer_s4 <- function(state, deferred) FALSE

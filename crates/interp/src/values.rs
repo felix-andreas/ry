@@ -224,6 +224,8 @@ pub struct Globals {
     /// `.cache_class`: each S4 class's S3 class vector (the class and what it extends), which
     /// the methods package keeps current as it defines and removes classes.
     pub s4_extends: rustc_hash::FxHashMap<Box<[u8]>, Sexp>,
+    /// S4 definitions a package loader holds back until a lookup needs them.
+    pub deferred_definitions: Vec<crate::methods::DeferredDefinitions>,
 }
 
 impl Globals {
@@ -235,6 +237,7 @@ impl Globals {
             primitive_methods: rustc_hash::FxHashMap::default(),
             keep: Vec::new(),
             s4_extends: rustc_hash::FxHashMap::default(),
+            deferred_definitions: Vec::new(),
         }
     }
 
@@ -255,6 +258,9 @@ impl Globals {
         }
         for &extends in self.s4_extends.values() {
             marker.mark(extends);
+        }
+        for definitions in &self.deferred_definitions {
+            marker.mark(definitions.force);
         }
     }
 }

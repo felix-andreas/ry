@@ -17,7 +17,8 @@ use {
         file_conditional_writers, file_definitions, file_typing_mode,
         load_index::{
             IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-            classify_constants, file_binds, file_items, file_load_index, fnv1a, package_index,
+            S4Definition, classify_constants, file_binds, file_items, file_load_index, fnv1a,
+            package_index,
         },
         metadata::{
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
@@ -122,6 +123,8 @@ pub struct Plan {
     pub bind: Vec<Code>,
     /// Top-level code to run, in collation order.
     pub run: Vec<Code>,
+    /// Statements of `run` that a backend may hold back until first use instead.
+    pub deferred_s4: Option<DeferredS4>,
     pub sysdata: SysdataChange,
     /// `S3method()` registrations to (re)make.
     pub s3_register: Vec<S3MethodDirective>,
@@ -141,6 +144,37 @@ pub struct Plan {
     pub run_on_load: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
+}
+
+/// A package's S4 definitions when all of them can wait for first use: running them later,
+/// all together and in order, defines the same classes, generics and methods as running them
+/// at load, provided nothing reaches one of them in between. A backend that defers them binds
+/// [`DeferredS4::names`] to promises that run them, and runs them too when code looks up one of
+/// the classes or generics by name, which is how every other route to them starts: `new()`,
+/// `is()` and `validObject()` look up the class, and `getMethod()`, `existsMethod()` and
+/// `showMethods()` look up the generic. Every name the definitions read is written once,
+/// before them, so a later run reads the same values.
+///
+/// Only a fresh load defers, and only when every S4 definition qualifies:
+///
+/// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod` and
+///   `setValidity`, each with literal names, as [`S4Definition`] describes. Any other S4
+///   registration (`setRefClass`, or `setClassUnion`, which changes the classes it unites)
+///   keeps them all eager.
+/// - Each method belongs to a generic the package defines, so nothing reaches it except
+///   through that generic. A method for another package's generic, such as `show`, is found
+///   through that generic's own tables, which the methods package reads without a lookup the
+///   backend can see.
+/// - Each validity method is for a class the package defines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredS4 {
+    /// Positions in [`Plan::run`], in collation order.
+    pub run: Vec<usize>,
+    pub classes: Vec<String>,
+    /// The generics the definitions create.
+    pub generics: Vec<String>,
+    /// Every namespace binding the definitions make.
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1029,6 +1063,8 @@ pub fn diff<'text>(
         .filter(|(_, rerun)| **rerun)
         .map(|((path, item, _), _)| eager_code(path, item))
         .collect();
+    // A fresh load runs every eager statement, so positions in `eager` are positions in `run`.
+    let deferred_s4 = if full { deferred_s4(index) } else { None };
     // Another statement may make the same registration, which then stays.
     let registered: BTreeSet<&Registration> = eager
         .iter()
@@ -1141,6 +1177,7 @@ pub fn diff<'text>(
         bind,
         run_on_load: full || changed.contains(".onLoad"),
         run,
+        deferred_s4,
         sysdata,
         s3_register,
         s3_unregister,
@@ -1153,6 +1190,98 @@ pub fn diff<'text>(
         namespace: index.namespace.clone(),
         warnings,
     }
+}
+
+/// The package's [`DeferredS4`], positioned in its eager statements, when every S4 definition
+/// qualifies.
+fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
+    // Each name's writer count and the collation position of its first writer.
+    let mut writers: FxHashMap<&str, (u32, usize)> = FxHashMap::default();
+    let mut positions: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+    let mut position = 0;
+    for (file_position, file) in index.files.iter().enumerate() {
+        for (item_position, item) in file.items.items.iter().enumerate() {
+            for name in &item.binds {
+                writers.entry(name.as_str()).or_insert((0, position)).0 += 1;
+            }
+            positions.insert((file_position as u32, item_position as u32), position);
+            position += 1;
+        }
+    }
+    for item in index.files.iter().flat_map(|file| &file.items.items) {
+        for name in &item.load_writes {
+            writers.entry(name.as_str()).or_insert((0, usize::MAX)).0 += 1;
+        }
+    }
+    let mut definitions = Vec::new();
+    for (eager_position, &at) in index.bindings.eager.iter().enumerate() {
+        let Some((_, item)) = index.item_at(at) else {
+            continue;
+        };
+        let registers = item.registrations.iter().any(|registration| {
+            matches!(
+                registration,
+                Registration::S4Class { .. }
+                    | Registration::S4Generic { .. }
+                    | Registration::S4Method { .. }
+            )
+        });
+        match &item.s4 {
+            Some(definition) => {
+                definitions.push((eager_position, *positions.get(&at)?, item, definition))
+            }
+            None if registers => return None,
+            None => {}
+        }
+    }
+    if definitions.is_empty() {
+        return None;
+    }
+    let mut classes = Vec::new();
+    let mut generics = Vec::new();
+    for (_, _, _, definition) in &definitions {
+        match definition {
+            S4Definition::Class { class } => classes.push(class.clone()),
+            S4Definition::Generic { generic } => generics.push(generic.clone()),
+            S4Definition::Method { .. } | S4Definition::Validity { .. } => {}
+        }
+    }
+    let mut names = Vec::new();
+    for (_, position, item, definition) in &definitions {
+        let reaches_own = match definition {
+            S4Definition::Class { .. } | S4Definition::Generic { .. } => true,
+            S4Definition::Method { generic, .. } => generics.contains(generic),
+            S4Definition::Validity { class } => classes.contains(class),
+        };
+        let reads_settled = item.reads.iter().all(|name| {
+            writers
+                .get(name.as_str())
+                .is_none_or(|&(count, first)| count == 1 && first < *position)
+        });
+        let writes_alone = item.binds.iter().all(|name| {
+            writers
+                .get(name.as_str())
+                .is_some_and(|&(count, _)| count == 1)
+        });
+        if !reaches_own || !reads_settled || !writes_alone {
+            return None;
+        }
+        names.extend(item.binds.iter().cloned());
+    }
+    names.extend(classes.iter().map(|class| format!(".__C__{class}")));
+    names.extend(
+        generics
+            .iter()
+            .map(|generic| format!(".__T__{generic}:{}", index.package)),
+    );
+    names.sort_unstable();
+    names.dedup();
+    Some(DeferredS4 {
+        run: definitions.iter().map(|(position, ..)| *position).collect(),
+        classes,
+        generics,
+        names,
+    })
 }
 
 /// The names among `roots` whose call may read a changed binding, through any chain of lazy
@@ -1287,6 +1416,7 @@ impl Plan {
             unregister: Vec::new(),
             bind: Vec::new(),
             run: Vec::new(),
+            deferred_s4: None,
             sysdata: SysdataChange::Keep,
             s3_register: Vec::new(),
             s3_unregister: Vec::new(),
