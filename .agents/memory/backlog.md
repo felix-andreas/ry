@@ -2145,21 +2145,10 @@ The end-to-end guard rests on the corpus suites.
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
   root only, because `SourceFile` carries no path.
-- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `CJ(id3, id4)`
-  (10,000 by 100) takes 0.013 s against 0.007 s at best of 10. The first two `dcast` calls of a
-  session take 0.06 to 0.07 s against about 0.045 s, and later ones 0.018 s against 0.027 s, so
-  `tools/bench/table/ops.R`, which times two runs, still shows `dcast` behind at 1e6 (0.048 s
-  against 0.026 s) and at parity at 1e7 (0.197 s against 0.196 s). Profile the warm-up.
 - **Uninitialized vector payloads are read through `&mut [T]`.** `alloc_vector_uninit` (and
   `Rf_allocVector`, which uses it) hands out numeric payloads that callers such as
   `crates/libr/src/frame_altrep.rs` and `crates/interp/src/values.rs` fill through `slice_mut`,
   which forms a reference to uninitialized memory. Fill through raw pointers or `MaybeUninit`.
-- **`rbindlist` and `fwrite` trail GNU R by 10 to 25% inside `tools/bench/table/ops.R`.** At 1e7
-  rows the best of two ops.R runs has `rbindlist` at 1.07 s against 0.85 s and `fwrite` at 0.99 s
-  against 0.76 s, while run alone after `fread` (best of 8) ry is faster: 0.76 s against 0.87 s
-  and 0.76 s against 0.94 s. The difference is the heap the earlier questions leave behind, so
-  profile with them in place. `fwrite` varies by 2x between runs on both engines. `unique`,
-  `uniqueN`, `between` and `chin` are at parity within noise.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
@@ -2168,7 +2157,9 @@ The end-to-end guard rests on the corpus suites.
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
-- **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
+- **The 5 GB (1e8 rows) run has not been done.** Its CSVs need about 16 GB of disk, and
+  `tools/bench/table/ops.R` needs more than 15 GB of memory, since `rbindlist(list(x, x))` holds
+  the 5 GB table and a 10 GB result at once.
 
 ## Open: the runtime
 

@@ -1815,6 +1815,7 @@ dependencies = [
  "jpeg-encoder",
  "libc",
  "lzma-rust2",
+ "memchr",
  "regex",
  "regex-automata",
  "regex-syntax",

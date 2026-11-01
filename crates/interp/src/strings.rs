@@ -27,6 +27,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
+    memchr::memmem,
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{borrow::Cow, cell::RefCell, rc::Rc},
@@ -430,35 +431,42 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     let mut matchers: Vec<Option<Matcher>> = (0..splits.len()).map(|_| None).collect();
     let count = length(x);
     let result = alloc(SexpType::List, count)?;
+    let mut pieces: Vec<(usize, usize)> = Vec::new();
     for index in 0..count {
         let Some(text) = subject_at(x, index, use_bytes) else {
             set_elt(result, index, values::scalar_string_charsxp(na_string())?);
             continue;
         };
         let position = index % splits.len().max(1);
-        let pieces: Vec<&str> = match splits.get(position) {
-            None => split_chars(&text),
-            Some(None) => vec![&text],
-            Some(Some(separator)) if separator.is_empty() => split_chars(&text),
+        pieces.clear();
+        match splits.get(position) {
+            None => split_chars(&text, &mut pieces),
+            Some(None) => pieces.push((0, text.len())),
+            Some(Some(separator)) if separator.is_empty() => split_chars(&text, &mut pieces),
             Some(Some(separator)) => {
                 if matchers[position].is_none() {
                     matchers[position] =
                         Some(Matcher::compile(separator, options, CompileErrors::Quoted)?);
                 }
                 match &matchers[position] {
-                    Some(matcher) => split_text(matcher, &text)?,
-                    None => vec![&text],
+                    Some(matcher) => split_text(matcher, &text, &mut pieces)?,
+                    None => pieces.push((0, text.len())),
                 }
             }
-        };
+        }
         // Each piece vector is stored in `result` before its strings are made, so neither needs
         // a handle; rooting them would grow the handle stack with the input, and every
         // collection scans that stack.
         let heap = crate::heap();
         let vector = heap.alloc_vector(SexpType::String, pieces.len() as isize)?;
         heap.set_element(result, index, vector);
-        for (position, piece) in pieces.iter().enumerate() {
-            heap.set_element(vector, position, regex_result(piece, forced_bytes)?);
+        for (position, &(start, end)) in pieces.iter().enumerate() {
+            let charsxp = if forced_bytes {
+                regex_result(&text[start..end], true)?
+            } else {
+                heap.mk_char(&text.as_bytes()[start..end], Encoding::Utf8)?
+            };
+            heap.set_element(vector, position, charsxp);
         }
     }
     let names = get_attr(x, symbols().names);
@@ -468,35 +476,38 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-fn split_chars(text: &str) -> Vec<&str> {
-    text.char_indices()
-        .map(|(offset, character)| &text[offset..offset + character.len_utf8()])
-        .collect()
+/// Pushes the byte range of each character of `text` onto `pieces`.
+fn split_chars(text: &str, pieces: &mut Vec<(usize, usize)>) {
+    pieces.extend(
+        text.char_indices()
+            .map(|(offset, character)| (offset, offset + character.len_utf8())),
+    );
 }
 
 /// Splits as GNU R does: each search runs on what is left of the text, so `^` matches at every
-/// piece, and an empty match at the start of the rest splits off one character.
-fn split_text<'a>(matcher: &Matcher, text: &'a str) -> R<Vec<&'a str>> {
-    let mut pieces = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
+/// piece, and an empty match at the start of the rest splits off one character. Pushes the byte
+/// range of each piece onto `pieces`.
+fn split_text(matcher: &Matcher, text: &str, pieces: &mut Vec<(usize, usize)>) -> R<()> {
+    let mut offset = 0;
+    while offset < text.len() {
+        let rest = &text[offset..];
         match matcher.find_at(rest, 0)? {
             Some((_, 0)) => {
                 let next = next_boundary(rest, 0);
-                pieces.push(&rest[..next]);
-                rest = &rest[next..];
+                pieces.push((offset, offset + next));
+                offset += next;
             }
             Some((start, end)) => {
-                pieces.push(&rest[..start]);
-                rest = &rest[end..];
+                pieces.push((offset, offset + start));
+                offset += end;
             }
             None => {
-                pieces.push(rest);
-                rest = "";
+                pieces.push((offset, text.len()));
+                offset = text.len();
             }
         }
     }
-    Ok(pieces)
+    Ok(())
 }
 
 /// One `%` conversion of a format string.
@@ -2554,7 +2565,8 @@ impl CompileErrors {
 
 #[derive(Clone)]
 enum Matcher {
-    Literal(String),
+    /// A fixed pattern, with its searcher built once rather than on every search.
+    Literal(memmem::Finder<'static>),
     Pattern(Rc<Regex>),
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
     /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
@@ -2581,7 +2593,7 @@ thread_local! {
 impl Matcher {
     unsafe fn compile(pattern: &str, options: PatternOptions, errors: CompileErrors) -> R<Matcher> {
         if options.fixed {
-            return Ok(Matcher::Literal(pattern.to_owned()));
+            return Ok(Matcher::Literal(memmem::Finder::new(pattern).into_owned()));
         }
         let key = (pattern.to_owned(), options.ignore_case, options.perl);
         if let Some(matcher) = PATTERN_CACHE.with_borrow(|cache| cache.get(&key).cloned()) {
@@ -2670,9 +2682,9 @@ impl Matcher {
     /// The first match at or after byte `from`, as a byte range.
     fn find_at(&self, text: &str, from: usize) -> R<Option<(usize, usize)>> {
         match self {
-            Matcher::Literal(needle) => Ok(text[from..]
-                .find(needle.as_str())
-                .map(|start| (from + start, from + start + needle.len()))),
+            Matcher::Literal(finder) => Ok(finder
+                .find(&text.as_bytes()[from..])
+                .map(|start| (from + start, from + start + finder.needle().len()))),
             Matcher::Pattern(regex) => regex
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
