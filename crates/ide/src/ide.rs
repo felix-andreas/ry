@@ -5,14 +5,17 @@
 use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
 use semantics::check::{CalleeTarget, ItemCheck};
 use semantics::diagnostics::TypeRenderer;
-use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
+use semantics::hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind};
 use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
-use semantics::stubs::{declaring_namespace, stub_declaration, stubs};
-use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_var};
+use semantics::infer::apply_definition;
+use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
+use semantics::types::{
+    Constraint, FunctionType, Name, Ty, TyKind, TypeScheme, contains_inference_var,
+};
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
     item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range, item_naming,
-    item_node, item_tree, package_definitions, project_type_definitions,
+    item_node, item_tree, package_definitions, project_type_definitions, visible_type_definitions,
 };
 use std::collections::BTreeSet;
 use std::iter::once;
@@ -84,6 +87,13 @@ pub fn hover(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<Hover> {
+    if let Some(cursor) = type_parameter_at(db, file, offset) {
+        return Some(Hover {
+            range: cursor.range,
+            lines: vec![format!("type parameter {}", cursor.name)],
+            definition: None,
+        });
+    }
     if let Some(cursor) = annotation_type_at(db, file, offset) {
         return Some(annotation_type_hover(db, file, &cursor));
     }
@@ -94,6 +104,18 @@ pub fn hover(
     let position = position_in_item(db, file, offset)?;
     let check = item_check(db, position.item)?;
     let hir = item_hir(db, position.item).as_ref()?;
+    if let Some(member) = member_at(db, hir, &check, position.relative) {
+        let mut renderer = TypeRenderer::default();
+        let line = match &member.label {
+            Some(name) => format!("{name}: {}", renderer.render(db, member.ty)),
+            None => renderer.render(db, member.ty),
+        };
+        return Some(Hover {
+            range: member.range + position.item_offset,
+            lines: vec![line],
+            definition: None,
+        });
+    }
     // Write targets and operators record no type, so the hover widens to the enclosing typed
     // expression.
     let (expression, ty) = position
@@ -138,6 +160,191 @@ pub fn hover(
         lines,
         definition,
     })
+}
+
+/// A name inside one of ry's own constructs that is not an expression of its own, so the
+/// expression-based hover would widen past it: a tag or a field in a `match` pattern, a field
+/// name in a record literal or tag payload, the field after `$`, and the column a `:=` writes.
+struct Member<'db> {
+    /// Item-relative; a tag's range starts at its `:`.
+    range: TextRange,
+    /// `Some` for a field or column, which hovers as `name: type`; a tag hovers as its type.
+    label: Option<String>,
+    ty: Ty<'db>,
+}
+
+fn member_at<'db>(
+    db: &'db dyn Db,
+    hir: &Module,
+    check: &ItemCheck<'db>,
+    relative: TextSize,
+) -> Option<Member<'db>> {
+    let tag_range = |name_range: TextRange| {
+        let start = name_range.start().checked_sub(TextSize::from(1))?;
+        Some(TextRange::new(start, name_range.end()))
+    };
+    for (index, pattern) in hir.patterns.iter().enumerate() {
+        if !pattern.range.contains_inclusive(relative) {
+            continue;
+        }
+        match &pattern.kind {
+            PatternKind::Tag { name_range, .. } => {
+                let range: TextRange = tag_range(*name_range)?;
+                if range.contains_inclusive(relative) {
+                    let ty = check.pattern_types.get(PatId(index as u32))?;
+                    return Some(Member {
+                        range,
+                        label: None,
+                        ty,
+                    });
+                }
+            }
+            PatternKind::Record { fields, .. } => {
+                if let Some(field) = fields
+                    .iter()
+                    .find(|field| field.name_range.contains_inclusive(relative))
+                {
+                    return Some(Member {
+                        range: field.name_range,
+                        label: Some(field.name.to_string()),
+                        ty: check.pattern_types.get(field.pattern)?,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    for (index, expression) in hir.expressions.iter().enumerate() {
+        if !expression.range.contains_inclusive(relative) {
+            continue;
+        }
+        match &expression.kind {
+            ExpressionKind::Record(fields) => {
+                if let Some(field) = fields
+                    .iter()
+                    .find(|field| field.name_range.contains_inclusive(relative))
+                {
+                    return Some(Member {
+                        range: field.name_range,
+                        label: Some(field.name.to_string()),
+                        ty: *check.expression_types.get(&field.value)?,
+                    });
+                }
+            }
+            ExpressionKind::Field {
+                target,
+                name: Some(name),
+                name_range: Some(name_range),
+                ..
+            } if name_range.contains_inclusive(relative) => {
+                // An assignment target records no type of its own, but its record still says
+                // what the field holds.
+                let ty = check
+                    .expression_types
+                    .get(&ExprId(index as u32))
+                    .copied()
+                    .or_else(|| field_type(db, *check.expression_types.get(target)?, name))?;
+                return Some(Member {
+                    range: *name_range,
+                    label: Some(name.to_string()),
+                    ty,
+                });
+            }
+            ExpressionKind::Index {
+                double: false,
+                arguments,
+                ..
+            } => {
+                if let Some(member) =
+                    updated_column_at(db, hir, check, ExprId(index as u32), arguments, relative)
+                {
+                    return Some(member);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn field_type<'db>(db: &'db dyn Db, ty: Ty<'db>, name: &str) -> Option<Ty<'db>> {
+    match ty.kind(db) {
+        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+            .iter()
+            .find(|field| field.name.text(db) == name)
+            .map(|field| field.ty),
+        TyKind::NativeRecord(fields) => fields
+            .iter()
+            .find(|field| field.name.text(db) == name)
+            .map(|field| field.ty),
+        _ => None,
+    }
+}
+
+/// `x[, name := value]` and `x[, c("a", "b") := ...]` name the columns they write; the query's
+/// result frame says what each now holds.
+fn updated_column_at<'db>(
+    db: &'db dyn Db,
+    hir: &Module,
+    check: &ItemCheck<'db>,
+    query: ExprId,
+    arguments: &[Argument],
+    relative: TextSize,
+) -> Option<Member<'db>> {
+    let TyKind::Frame(Some(columns)) = check.expression_types.get(&query)?.kind(db) else {
+        return None;
+    };
+    let column_ty = |name: &str| {
+        columns
+            .iter()
+            .find(|column| column.name.text(db) == name)
+            .map(|column| column.ty)
+    };
+    for argument in arguments {
+        let Some(value) = argument.value else {
+            continue;
+        };
+        let ExpressionKind::Call {
+            callee,
+            arguments: update,
+        } = &hir.expression(value).kind
+        else {
+            continue;
+        };
+        if !matches!(&hir.expression(*callee).kind, ExpressionKind::NameRef(name) if name.as_str() == ":=")
+        {
+            continue;
+        }
+        let Some(target) = update.first().and_then(|argument| argument.value) else {
+            continue;
+        };
+        let target = hir.expression(target);
+        if !target.range.contains_inclusive(relative) {
+            continue;
+        }
+        let (name, range) = match &target.kind {
+            ExpressionKind::NameRef(name) => (name.to_string(), target.range),
+            // `c("a", "b") := ...`: the string under the cursor names the column.
+            ExpressionKind::Call { arguments, .. } => arguments
+                .iter()
+                .filter_map(|argument| argument.value)
+                .map(|value| hir.expression(value))
+                .find(|value| value.range.contains_inclusive(relative))
+                .and_then(|value| match &value.kind {
+                    ExpressionKind::Literal(LiteralKind::String(text)) => {
+                        Some((text.to_string(), value.range))
+                    }
+                    _ => None,
+                })?,
+            _ => return None,
+        };
+        return Some(Member {
+            ty: column_ty(&name)?,
+            label: Some(name),
+            range,
+        });
+    }
+    None
 }
 
 fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> {
@@ -349,6 +556,15 @@ pub fn definition(
         }
         Target::TypeName(name) => type_name_definition(db, files, &name),
         Target::StubGlobal(name) => stub_target(db, &name).map(DefinitionTarget::Stub),
+        Target::TypeParameter(occurrences) => occurrences
+            .into_iter()
+            .find(|occurrence| occurrence.is_declaration)
+            .map(declaration_target),
+        Target::Tag(name) => tag_occurrences(db, files, &name)
+            .into_iter()
+            .find(|occurrence| occurrence.is_declaration)
+            .map(declaration_target)
+            .or_else(|| stub_tag_target(db, &name).map(DefinitionTarget::Stub)),
         target @ (Target::Global(_) | Target::S4 { .. }) => {
             if let Target::Global(name) = &target
                 && let Some(winner) = package_definitions(db, files).get(name)
@@ -402,7 +618,20 @@ pub fn rename(
     offset: TextSize,
 ) -> Option<Vec<Occurrence>> {
     let target = target_at(db, files, file, offset)?;
+    // The library fixes the names it declares: renaming the project's uses of a library tag or
+    // type would leave them pointing at nothing.
+    match &target {
+        Target::Tag(name) if stub_mentions_tag(db, name) => return None,
+        _ => {}
+    }
     let occurrences = occurrences(db, files, &target);
+    if matches!(target, Target::TypeName(_))
+        && !occurrences
+            .iter()
+            .any(|occurrence| occurrence.is_declaration)
+    {
+        return None;
+    }
     (!occurrences.is_empty()).then_some(occurrences)
 }
 
@@ -456,7 +685,10 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             }
             let id = ExprId(index as u32);
             let is_root = hir.root == Some(id);
-            if (is_root && annotated) || annotated_expressions.contains(&id) {
+            if (is_root && annotated)
+                || annotated_expressions.contains(&id)
+                || spells_its_type(hir, &node, *value)
+            {
                 continue;
             }
             let Some(label) = assignment_label(db, &check, id, *value, is_root) else {
@@ -470,6 +702,132 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
     }
     hints.sort_by_key(|hint| hint.offset);
     hints
+}
+
+/// A value that already names its own type: a nominal constructor `@Money(1)`, whose hint would
+/// repeat `Money`, and a payload-free tag such as `:None`, whose hint would repeat the tag.
+fn spells_its_type(hir: &Module, item_node: &SyntaxNode, value: ExprId) -> bool {
+    let expression = hir.expression(value);
+    if matches!(expression.kind, ExpressionKind::Tag { payload: None, .. }) {
+        return true;
+    }
+    let range = expression.range + item_node.text_range().start();
+    item_node.text_range().contains_range(range)
+        && matches!(
+            item_node.covering_element(range),
+            SyntaxElement::Node(node) if node.kind() == NEW_EXPR
+        )
+}
+
+/// What a highlighted token is. R grammars already color R, so only ry's own syntax gets a class:
+/// annotation and type-definition bodies, tags, `match` and its arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticClass {
+    Type,
+    TypeParameter,
+    /// A field or parameter name inside a type.
+    Parameter,
+    Operator,
+    /// An `@` directive or the `@` of a nominal constructor.
+    Decorator,
+    Keyword,
+    Tag,
+}
+
+pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, SemanticClass)> {
+    let root = semantics::parse(db, file).syntax_node();
+    let mut spans = Vec::new();
+    // Tokens arrive in order, so one region's binders serve all of its tokens.
+    let mut current_region: Option<(SyntaxNode, Vec<String>)> = None;
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+    {
+        if token.text_range().is_empty() {
+            continue;
+        }
+        let region = token
+            .parent_ancestors()
+            .find(|node| node.kind() == ANNOTATION || is_inline_annotation(node));
+        let class = match region {
+            Some(region) => {
+                if current_region
+                    .as_ref()
+                    .is_none_or(|(node, _)| *node != region)
+                {
+                    let names = binder_names(&region);
+                    current_region = Some((region.clone(), names));
+                }
+                let binders = current_region.as_ref().map_or(&[][..], |(_, names)| names);
+                if region.kind() == TYPE_DEFINITION && region.first_token().as_ref() == Some(&token)
+                {
+                    Some(SemanticClass::Keyword)
+                } else if tag_node_of(&token).is_some() {
+                    Some(SemanticClass::Tag)
+                } else {
+                    classify_type_token(&token).map(|class| {
+                        let names_binder = class == SemanticClass::Type
+                            && is_type_parameter_token(&token)
+                            && binders.iter().any(|name| name == token.text());
+                        if names_binder {
+                            SemanticClass::TypeParameter
+                        } else {
+                            class
+                        }
+                    })
+                }
+            }
+            None => classify_ry_token(&token),
+        };
+        if let Some(class) = class {
+            spans.push((token.text_range(), class));
+        }
+    }
+    spans
+}
+
+/// A token of type syntax, classified from its place in the tree alone; stub files, which have no
+/// project tree, use this directly.
+pub fn classify_type_token(token: &SyntaxToken) -> Option<SemanticClass> {
+    if tag_node_of(token).is_some() {
+        return Some(SemanticClass::Tag);
+    }
+    // A name may sit in its own `NAME` node; what it names is decided one level up.
+    let owner_kind = token.parent().and_then(|parent| {
+        if parent.kind() == NAME {
+            parent.parent().map(|grandparent| grandparent.kind())
+        } else {
+            Some(parent.kind())
+        }
+    });
+    match token.kind() {
+        IDENT => match owner_kind {
+            Some(TYPE_BINDER) => Some(SemanticClass::TypeParameter),
+            Some(TYPE_FIELD | TYPE_FUNCTION) => Some(SemanticClass::Parameter),
+            Some(ANNOTATION_DIRECTIVE) => Some(SemanticClass::Decorator),
+            _ => Some(SemanticClass::Type),
+        },
+        COMMA | PIPE | COLON | L_BRACKET | R_BRACKET | L_PAREN | R_PAREN | L_BRACE | R_BRACE
+        | LESS | GREATER | DOTS | MINUS_GREATER | FAT_ARROW => Some(SemanticClass::Operator),
+        AT => Some(SemanticClass::Decorator),
+        NULL_KW => Some(SemanticClass::Type),
+        _ => None,
+    }
+}
+
+/// ry's own syntax outside a type: `match`, its `=>`, and tags in values and patterns.
+fn classify_ry_token(token: &SyntaxToken) -> Option<SemanticClass> {
+    if tag_node_of(token).is_some() {
+        return Some(SemanticClass::Tag);
+    }
+    let parent = token.parent()?;
+    match token.kind() {
+        FAT_ARROW => Some(SemanticClass::Operator),
+        IDENT if parent.kind() == MATCH_EXPR && parent.first_token().as_ref() == Some(token) => {
+            Some(SemanticClass::Keyword)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,7 +1050,10 @@ pub fn completion(
         return string_subscript_completion(db, file, offset, &string_token);
     }
 
-    if let Some(items) = tag_completions(db, file, offset, &query) {
+    if let Some(items) = tag_completions(db, files, file, offset, &query) {
+        return finish_completions(items, &query);
+    }
+    if let Some(items) = pattern_completions(db, file, offset, &query) {
         return finish_completions(items, &query);
     }
 
@@ -719,6 +1080,7 @@ pub fn completion(
                     )
                 })
                 .collect();
+            items.extend(frame_query_completions(db, file, offset, &query));
             if let Some(position) = position_in_item(db, file, offset)
                 && let Some(naming) = item_naming(db, position.item)
                 && let Some(node) = item_node(db, position.item)
@@ -953,7 +1315,10 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             };
             let id = ExprId(index as u32);
             let is_root = hir.root == Some(id);
-            if (is_root && annotated) || annotated_expressions.contains(&id) {
+            if (is_root && annotated)
+                || annotated_expressions.contains(&id)
+                || spells_its_type(hir, &node, *value)
+            {
                 continue;
             }
             let start = usize::from(expression.range.start() + item_offset);
@@ -1553,21 +1918,13 @@ fn is_type_directive(directive: &SyntaxNode) -> bool {
 /// The type parameters a region's types may name: a `#:` block's or a type definition's
 /// own binders, or the `<...>` of the function an inline parameter or return type belongs to.
 fn binder_names(region: &SyntaxNode) -> Vec<String> {
-    // A binding's type and the type of `@Name(value)` see no enclosing function's binders, as
-    // in the checker.
-    let binders = if matches!(region.kind(), ANNOTATION | TYPE_DEFINITION) {
-        Some(region.clone())
-    } else if region.kind() == NEW_TYPE
-        || region
-            .parent()
-            .is_some_and(|parent| parent.kind() == BINARY_EXPR)
-    {
-        None
+    let Some(scope) = binder_scope(region) else {
+        return Vec::new();
+    };
+    let binders = if matches!(scope.kind(), ANNOTATION | TYPE_DEFINITION) {
+        Some(scope)
     } else {
-        region
-            .ancestors()
-            .find(|node| node.kind() == FUNCTION_DEF)
-            .and_then(|function| child_node(&function, TYPE_BINDER_LIST))
+        child_node(&scope, TYPE_BINDER_LIST)
     };
     let Some(binders) = binders else {
         return Vec::new();
@@ -1583,6 +1940,223 @@ fn binder_names(region: &SyntaxNode) -> Vec<String> {
                 .map(|token| token.text().to_string())
         })
         .collect()
+}
+
+/// The node whose `<...>` binders a region's types see: the region itself for a `#:` block or
+/// a type definition, otherwise the function an inline parameter or return type belongs to.
+fn binder_scope(region: &SyntaxNode) -> Option<SyntaxNode> {
+    if matches!(region.kind(), ANNOTATION | TYPE_DEFINITION) {
+        return Some(region.clone());
+    }
+    // A binding's type and the type of `@Name(value)` see no enclosing function's binders, as
+    // in the checker.
+    if region.kind() == NEW_TYPE
+        || region
+            .parent()
+            .is_some_and(|parent| parent.kind() == BINARY_EXPR)
+    {
+        return None;
+    }
+    region.ancestors().find(|node| node.kind() == FUNCTION_DEF)
+}
+
+struct TypeParameterCursor {
+    name: String,
+    range: TextRange,
+    scope: SyntaxNode,
+}
+
+/// A `<T>` binder, or a type that names one in scope.
+fn type_parameter_at(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<TypeParameterCursor> {
+    let root = semantics::parse(db, file).syntax_node();
+    let region = annotation_at(&root, offset)?;
+    let token = region
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find(|token| token.kind() == IDENT && token.text_range().contains_inclusive(offset))?;
+    if !is_type_parameter_token(&token) {
+        return None;
+    }
+    let name = token.text().to_owned();
+    if !binder_names(&region).contains(&name) {
+        return None;
+    }
+    Some(TypeParameterCursor {
+        name,
+        range: token.text_range(),
+        scope: binder_scope(&region)?,
+    })
+}
+
+fn is_type_parameter_token(token: &SyntaxToken) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    parent.kind() == TYPE_REF
+        || (parent.kind() == NAME
+            && parent
+                .parent()
+                .is_some_and(|grandparent| grandparent.kind() == TYPE_BINDER))
+}
+
+fn type_parameter_occurrences(file: SourceFile, cursor: &TypeParameterCursor) -> Vec<Occurrence> {
+    let mut result = Vec::new();
+    for region in cursor.scope.descendants().filter(is_type_region) {
+        if binder_scope(&region).as_ref() != Some(&cursor.scope) {
+            continue;
+        }
+        result.extend(
+            region
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .filter(|token| {
+                    token.kind() == IDENT
+                        && token.text() == cursor.name
+                        && is_type_parameter_token(token)
+                })
+                .map(|token| Occurrence {
+                    file,
+                    range: token.text_range(),
+                    is_declaration: token.parent().is_some_and(|parent| parent.kind() == NAME),
+                }),
+        );
+    }
+    result.sort_by_key(|occurrence| occurrence.range.start());
+    result.dedup_by_key(|occurrence| occurrence.range);
+    result
+}
+
+/// A tag's name: `:Some` in a value, a pattern, or a type. Tags are structural, so every tag of
+/// the same name in the project is one symbol.
+fn tag_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<(String, TextRange)> {
+    let root = semantics::parse(db, file).syntax_node();
+    let token = root.token_at_offset(offset).find_map(|token| {
+        let node = tag_node_of(&token)?;
+        let name = child_node(&node, NAME)?;
+        Some(name.text().to_string()).zip(Some(name.text_range()))
+    })?;
+    Some(token)
+}
+
+/// The tag node a token spells: its `:` or its name.
+fn tag_node_of(token: &SyntaxToken) -> Option<SyntaxNode> {
+    let parent = token.parent()?;
+    let node = match token.kind() {
+        COLON => parent,
+        IDENT if parent.kind() == NAME => parent.parent()?,
+        _ => return None,
+    };
+    is_tag_node(node.kind()).then_some(node)
+}
+
+fn is_tag_node(kind: SyntaxKind) -> bool {
+    matches!(kind, TAG_EXPR | PATTERN_TAG | TYPE_TAG)
+}
+
+fn tag_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Occurrence> {
+    let mut result = Vec::new();
+    for &file in files.files(db) {
+        let root = semantics::parse(db, file).syntax_node();
+        for node in root.descendants().filter(|node| is_tag_node(node.kind())) {
+            let Some(tag_name) = child_node(&node, NAME) else {
+                continue;
+            };
+            if tag_name.text() != name {
+                continue;
+            }
+            // Listing a tag in a named type definition is the closest thing a structural tag has
+            // to a declaration.
+            let is_declaration = node.kind() == TYPE_TAG
+                && node.ancestors().any(|ancestor| {
+                    ancestor.kind() == TYPE_DEFINITION
+                        || (ancestor.kind() == ANNOTATION_DIRECTIVE && is_type_directive(&ancestor))
+                });
+            result.push(Occurrence {
+                file,
+                range: tag_name.text_range(),
+                is_declaration,
+            });
+        }
+    }
+    result
+}
+
+/// Where the stubs list a tag in a `@type` or `@alias` declaration, such as `:Ok` in the
+/// standard library's `Result`.
+fn stub_tag_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
+    let sources = StubSources::try_get(db)?;
+    sources
+        .sources(db)
+        .iter()
+        .enumerate()
+        .find_map(|(source_index, (_, text))| {
+            let mut line_start = 0;
+            for line in text.split_inclusive('\n') {
+                let trimmed = line.trim_start();
+                if (trimmed.starts_with("@alias") || trimmed.starts_with("@type"))
+                    && let Some(at) = tag_spelling(line, name)
+                {
+                    let start = TextSize::from((line_start + at) as u32);
+                    return Some(StubTarget {
+                        source_index,
+                        range: TextRange::at(start, TextSize::from(name.len() as u32)),
+                    });
+                }
+                line_start += line.len();
+            }
+            None
+        })
+        .or_else(|| {
+            sources
+                .sources(db)
+                .iter()
+                .enumerate()
+                .find_map(|(source_index, (_, text))| {
+                    let at = tag_spelling(text, name)?;
+                    Some(StubTarget {
+                        source_index,
+                        range: TextRange::at(
+                            TextSize::from(at as u32),
+                            TextSize::from(name.len() as u32),
+                        ),
+                    })
+                })
+        })
+}
+
+/// Whether any stub mentions the tag, which fixes its name: renaming it in the project would
+/// break every call into the library that produces or expects it.
+fn stub_mentions_tag(db: &dyn Db, name: &str) -> bool {
+    StubSources::try_get(db).is_some_and(|sources| {
+        sources
+            .sources(db)
+            .iter()
+            .any(|(_, text)| tag_spelling(text, name).is_some())
+    })
+}
+
+/// The offset of `name` in a `:name` spelling inside `text`, matched as a whole word.
+fn tag_spelling(text: &str, name: &str) -> Option<usize> {
+    let needle = format!(":{name}");
+    let mut from = 0;
+    while let Some(found) = text.get(from..)?.find(&needle) {
+        let at = from + found;
+        let end = at + needle.len();
+        let continues = text[end..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_alphanumeric() || next == '_' || next == '.');
+        let preceded = text[..at].ends_with(':');
+        if !continues && !preceded {
+            return Some(at + 1);
+        }
+        from = end;
+    }
+    None
 }
 
 /// The type region holding `offset`: a `#:` block, or an inline annotation.
@@ -1652,19 +2226,30 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
     } else {
         None
     };
-    let line = match &declared {
+    // A project definition shadows the library's, as in the checker.
+    let library_definition = || {
+        let library = stubs(db)?;
+        library
+            .type_definitions
+            .values()
+            .find(|definition| definition.name.text(db) == cursor.name)
+            .cloned()
+    };
+    let line = match declared
+        .clone()
+        .or_else(|| cursor.navigable.then(library_definition).flatten())
+    {
         Some(definition) => {
-            let parameters = if definition.parameters.is_empty() {
-                String::new()
-            } else {
-                let names: Vec<&str> = definition
-                    .parameters
-                    .iter()
-                    .map(|parameter| parameter.text(db))
-                    .collect();
-                format!("<{}>", names.join(", "))
-            };
-            let body = TypeRenderer::default().render(db, definition.body);
+            // The renderer names the parameters in order, so the body must be rendered through
+            // the same renderer for its references to agree with the `<...>` list.
+            let mut renderer = TypeRenderer::default();
+            let binders: Vec<(Name<'_>, Constraint)> = definition
+                .parameters
+                .iter()
+                .map(|parameter| (*parameter, Constraint::Unconstrained))
+                .collect();
+            let parameters = renderer.render_binder_prefix(&binders).unwrap_or_default();
+            let body = renderer.render(db, definition.body);
             match (definition.inline, definition.alias) {
                 (true, true) => format!("alias {}{parameters} = {body}", cursor.name),
                 (true, false) => format!("type {}{parameters} = {body}", cursor.name),
@@ -2023,7 +2608,8 @@ fn dollar_completions(
                 _ => None,
             })
             .min_by_key(|(range, _)| range.len())?;
-        let fields: Vec<(&str, Ty<'_>)> = match check.expression_types.get(&target)?.kind(db) {
+        let target_ty = representation(db, file, *check.expression_types.get(&target)?);
+        let fields: Vec<(&str, Ty<'_>)> = match target_ty.kind(db) {
             TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
                 .iter()
                 .map(|field| (field.name.text(db), field.ty))
@@ -2032,6 +2618,12 @@ fn dollar_completions(
                 .iter()
                 .map(|field| (field.name.text(db), field.ty))
                 .collect(),
+            // A value whose type says it has no `$` fields completes nothing; only an untyped one
+            // falls back to the field names the project spells.
+            TyKind::NativeTuple(_) | TyKind::Tag(..) => Vec::new(),
+            TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::Function(_) | TyKind::Null => {
+                Vec::new()
+            }
             _ => return None,
         };
         let mut renderer = TypeRenderer::default();
@@ -2051,66 +2643,425 @@ fn dollar_completions(
         )
     })();
     match typed {
-        Some(items) if !items.is_empty() => items,
-        _ => spelled_completions(db, files, query, DOLLAR_EXPR, CompletionSource::Field),
+        Some(items) => items,
+        None => spelled_completions(db, files, query, DOLLAR_EXPR, CompletionSource::Field),
     }
 }
 
-/// After a lone `:` inside a `match`, the tags the scrutinee's type lists: the cases an arm can
-/// still name. `::` is a namespace, and `1:n` has no `match` around it to supply tags.
+/// What `$` reads on a nominal value: its definition's body, as the checker projects it.
+fn representation<'db>(db: &'db dyn Db, file: SourceFile, ty: Ty<'db>) -> Ty<'db> {
+    let mut current = ty;
+    // Bounded, because a definition may name another definition as its whole body.
+    for _ in 0..16 {
+        let TyKind::Named(name, arguments) = current.kind(db) else {
+            break;
+        };
+        let Some(definition) = visible_type_definitions(db, file).get(name) else {
+            break;
+        };
+        if definition.parameters.len() != arguments.len() {
+            break;
+        }
+        current = apply_definition(db, definition, arguments);
+    }
+    current
+}
+
+/// After a lone `:` that starts a tag. Inside a `match` pattern it offers the tags the value at
+/// that position can hold, nested payloads included; elsewhere it offers every tag the project
+/// and the standard library spell. `::` is a namespace and `1:n` is a range, so neither
+/// completes tags.
 fn tag_completions(
     db: &dyn Db,
+    files: ProjectFiles,
     file: SourceFile,
     offset: TextSize,
     query: &str,
 ) -> Option<Vec<CompletionItem>> {
     let text = file.text(db);
     let before = text.get(..usize::from(offset).checked_sub(query.len())?)?;
-    if !before.ends_with(':') || before.ends_with("::") {
+    let operand = before.strip_suffix(':')?;
+    if operand
+        .chars()
+        .next_back()
+        .is_some_and(|previous| previous.is_alphanumeric() || "_.:)]'\"`".contains(previous))
+    {
         return None;
     }
-    let position = position_in_item(db, file, offset)?;
+    let word_start = TextSize::from(before.len() as u32);
+    if let Some(subject) = pattern_subject(db, file, word_start) {
+        let mut renderer = TypeRenderer::default();
+        let items: Vec<CompletionItem> = subject
+            .types
+            .into_iter()
+            .filter_map(|member| {
+                let TyKind::Tag(name, _) = member.kind(db) else {
+                    return None;
+                };
+                Some(CompletionItem {
+                    detail: Some(renderer.render(db, member)),
+                    ..CompletionItem::new(
+                        name.text(db).to_owned(),
+                        CompletionKind::Tag,
+                        CompletionSource::Field,
+                    )
+                })
+            })
+            .filter(|item| search_match(&item.label, query).is_some())
+            .collect();
+        if !items.is_empty() {
+            return Some(items);
+        }
+    }
+    let mut names = BTreeSet::new();
+    for &project_file in files.files(db) {
+        let root = semantics::parse(db, project_file).syntax_node();
+        names.extend(
+            root.descendants()
+                .filter(|node| is_tag_node(node.kind()))
+                .filter_map(|node| child_node(&node, NAME))
+                // The half-typed tag under the cursor is not a suggestion for itself.
+                .filter(|name| project_file != file || name.text_range().start() != word_start)
+                .map(|name| name.text().to_string()),
+        );
+    }
+    if let Some(sources) = StubSources::try_get(db) {
+        for (_, source) in sources.sources(db).iter() {
+            names.extend(spelled_tags(source));
+        }
+    }
+    Some(
+        names
+            .into_iter()
+            .filter(|name| search_match(name, query).is_some())
+            .map(|name| CompletionItem::new(name, CompletionKind::Tag, CompletionSource::Field))
+            .collect(),
+    )
+}
+
+/// Tag names a stub spells as `:Name` in a type: after a space or an opening bracket, so a
+/// method name such as `-:base` is not mistaken for one.
+fn spelled_tags(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.match_indices(':').filter_map(|(at, _)| {
+        let preceding = text[..at].chars().next_back()?;
+        if !(preceding.is_whitespace() || "({[|,<".contains(preceding)) {
+            return None;
+        }
+        let name: String = text[at + 1..]
+            .chars()
+            .take_while(|next| next.is_alphanumeric() || *next == '_')
+            .collect();
+        name.chars()
+            .next()
+            .is_some_and(char::is_alphabetic)
+            .then_some(name)
+    })
+}
+
+/// Inside a `match` pattern, completion offers only what the pattern can name: field names of the
+/// record a payload or record pattern matches. A binding introduces a fresh name, so it offers
+/// nothing at all rather than the R names in scope.
+fn pattern_completions(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    query: &str,
+) -> Option<Vec<CompletionItem>> {
+    let word_start = offset.checked_sub(TextSize::from(query.len() as u32))?;
+    let root = semantics::parse(db, file).syntax_node();
+    let anchor = pattern_anchor(&root, word_start, query)?;
+    pattern_arm(&anchor, word_start)?;
+    let Some(list) = anchor
+        .parent_ancestors()
+        .take_while(|ancestor| ancestor.kind() != MATCH_ARM)
+        .find(|ancestor| ancestor.kind() == PATTERN_LIST)
+    else {
+        return Some(Vec::new());
+    };
+    let item = list
+        .children()
+        .find(|child| child.text_range().contains_inclusive(word_start));
+    let at_name = match item.as_ref().map(SyntaxNode::kind) {
+        None | Some(PATTERN_BIND) => true,
+        Some(PATTERN_FIELD) => item
+            .as_ref()
+            .and_then(|field| child_token(field, EQ))
+            .is_none_or(|equals| word_start <= equals.text_range().start()),
+        _ => false,
+    };
+    if !at_name {
+        return Some(Vec::new());
+    }
+    let Some(subject) = pattern_subject_of_list(db, file, &list, word_start) else {
+        return Some(Vec::new());
+    };
+    let named: Vec<String> = list
+        .children()
+        .filter(|child| child.kind() == PATTERN_FIELD && Some(child) != item.as_ref())
+        .filter_map(|field| child_node(&field, NAME))
+        .map(|name| name.text().to_string())
+        .collect();
+    let mut renderer = TypeRenderer::default();
+    let mut items = Vec::new();
+    for member in subject.types {
+        let TyKind::NativeRecord(fields) = member.kind(db) else {
+            continue;
+        };
+        for field in fields {
+            let name = field.name.text(db);
+            if named.iter().any(|used| used == name) {
+                continue;
+            }
+            items.push(CompletionItem {
+                detail: Some(renderer.render(db, field.ty)),
+                ..CompletionItem::new(
+                    insertable_name(name),
+                    CompletionKind::Field,
+                    CompletionSource::Field,
+                )
+            });
+        }
+    }
+    Some(
+        items
+            .into_iter()
+            .filter(|item| search_match(&item.label, query).is_some())
+            .collect(),
+    )
+}
+
+/// The token completion is anchored on: the word being typed, or the token just before an empty
+/// one.
+fn pattern_anchor(root: &SyntaxNode, word_start: TextSize, query: &str) -> Option<SyntaxToken> {
+    let at = root.token_at_offset(word_start);
+    if query.is_empty() {
+        at.left_biased()
+    } else {
+        at.right_biased()
+    }
+}
+
+/// The `match` arm whose pattern holds the position: before its `=>`, or anywhere in an arm that
+/// does not have one yet.
+fn pattern_arm(anchor: &SyntaxToken, word_start: TextSize) -> Option<SyntaxNode> {
+    let arm = anchor
+        .parent_ancestors()
+        .take_while(|ancestor| !matches!(ancestor.kind(), MATCH_EXPR | FUNCTION_DEF))
+        .find(|ancestor| ancestor.kind() == MATCH_ARM)?;
+    child_token(&arm, FAT_ARROW)
+        .is_none_or(|arrow| word_start <= arrow.text_range().start())
+        .then_some(arm)
+}
+
+/// The possible types of the value a pattern position matches, as union members.
+struct PatternSubject<'db> {
+    types: Vec<Ty<'db>>,
+}
+
+/// One step from a pattern down to a position nested inside it.
+enum PatternStep {
+    Payload(String),
+    Item(usize),
+    Field(String),
+}
+
+/// The value a tag typed at `word_start` would match, followed from the scrutinee's type down
+/// the pattern's syntax. Following the syntax rather than the checked pattern keeps this working
+/// in the half-typed patterns completion runs on, which the checker cannot match.
+fn pattern_subject(
+    db: &dyn Db,
+    file: SourceFile,
+    word_start: TextSize,
+) -> Option<PatternSubject<'_>> {
+    let root = semantics::parse(db, file).syntax_node();
+    let anchor = root.token_at_offset(word_start).left_biased()?;
+    let arm = pattern_arm(&anchor, word_start)?;
+    let mut steps = Vec::new();
+    for list in anchor
+        .parent_ancestors()
+        .take_while(|ancestor| ancestor != &arm)
+        .filter(|ancestor| ancestor.kind() == PATTERN_LIST)
+    {
+        steps.push(list_item_step(&list, word_start));
+        steps.extend(list_payload_step(&list));
+    }
+    steps.reverse();
+    subject_along(db, file, &arm, &steps)
+}
+
+/// The value a pattern list as a whole matches: the record whose fields its names may spell.
+fn pattern_subject_of_list<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    list: &SyntaxNode,
+    word_start: TextSize,
+) -> Option<PatternSubject<'db>> {
+    let arm = list
+        .ancestors()
+        .find(|ancestor| ancestor.kind() == MATCH_ARM)?;
+    let mut steps: Vec<PatternStep> = list_payload_step(list).into_iter().collect();
+    for outer in list
+        .ancestors()
+        .skip(1)
+        .take_while(|ancestor| ancestor != &arm)
+        .filter(|ancestor| ancestor.kind() == PATTERN_LIST)
+    {
+        steps.push(list_item_step(&outer, word_start));
+        steps.extend(list_payload_step(&outer));
+    }
+    steps.reverse();
+    subject_along(db, file, &arm, &steps)
+}
+
+fn list_item_step(list: &SyntaxNode, word_start: TextSize) -> PatternStep {
+    let field = list.children().find(|child| {
+        child.kind() == PATTERN_FIELD && child.text_range().contains_inclusive(word_start)
+    });
+    if let Some(name) = field.and_then(|field| child_node(&field, NAME)) {
+        return PatternStep::Field(name.text().to_string());
+    }
+    let index = list
+        .children_with_tokens()
+        .filter(|element| element.kind() == COMMA && element.text_range().end() <= word_start)
+        .count();
+    PatternStep::Item(index)
+}
+
+fn list_payload_step(list: &SyntaxNode) -> Option<PatternStep> {
+    let tag = list
+        .parent()
+        .filter(|parent| parent.kind() == PATTERN_TAG)?;
+    Some(PatternStep::Payload(
+        child_node(&tag, NAME)?.text().to_string(),
+    ))
+}
+
+fn subject_along<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    arm: &SyntaxNode,
+    steps: &[PatternStep],
+) -> Option<PatternSubject<'db>> {
+    let match_node = arm
+        .ancestors()
+        .find(|ancestor| ancestor.kind() == MATCH_EXPR)?;
+    let position = position_in_item(db, file, match_node.text_range().start())?;
     let hir = item_hir(db, position.item).as_ref()?;
     let check = item_check(db, position.item)?;
+    let match_range = match_node.text_range() - position.item_offset;
     let scrutinee = hir
         .expressions
         .iter()
-        .filter_map(|expression| match &expression.kind {
-            ExpressionKind::Match { scrutinee, .. }
-                if expression.range.contains_inclusive(position.relative)
-                    && hir.expression(*scrutinee).range.end() < position.relative =>
-            {
-                Some((expression.range.len(), *scrutinee))
+        .find_map(|expression| match &expression.kind {
+            ExpressionKind::Match { scrutinee, .. } if expression.range == match_range => {
+                Some(*scrutinee)
             }
             _ => None,
-        })
-        .min_by_key(|(length, _)| *length)
-        .map(|(_, scrutinee)| scrutinee)?;
-    let ty = *check.expression_types.get(&scrutinee)?;
-    let members = match ty.kind(db) {
+        })?;
+    let mut types = union_members(db, *check.expression_types.get(&scrutinee)?);
+    for step in steps {
+        types = types
+            .into_iter()
+            .filter_map(|member| match (step, member.kind(db)) {
+                (PatternStep::Payload(name), TyKind::Tag(tag, payload)) if tag.text(db) == name => {
+                    *payload
+                }
+                (PatternStep::Item(index), TyKind::NativeTuple(items)) => {
+                    items.get(*index).copied()
+                }
+                (PatternStep::Field(name), TyKind::NativeRecord(fields)) => fields
+                    .iter()
+                    .find(|field| field.name.text(db) == name)
+                    .map(|field| field.ty),
+                _ => None,
+            })
+            .flat_map(|ty| union_members(db, ty))
+            .collect();
+    }
+    Some(PatternSubject { types })
+}
+
+fn union_members<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Vec<Ty<'db>> {
+    match ty.kind(db) {
         TyKind::Union(members) => members.clone(),
         _ => vec![ty],
-    };
-    let mut renderer = TypeRenderer::default();
-    let items: Vec<CompletionItem> = members
-        .into_iter()
-        .filter_map(|member| {
-            let TyKind::Tag(name, _) = member.kind(db) else {
-                return None;
-            };
-            Some(CompletionItem {
-                detail: Some(renderer.render(db, member)),
-                ..CompletionItem::new(
-                    name.text(db).to_owned(),
-                    CompletionKind::Tag,
-                    CompletionSource::Field,
-                )
-            })
-        })
-        .filter(|item| search_match(&item.label, query).is_some())
-        .collect();
-    (!items.is_empty()).then_some(items)
+    }
 }
+
+/// Inside the brackets of a frame query, `x[i, j, by]`, column names are in scope as variables,
+/// and so are the query's own symbols such as `.N` and `.SD`.
+fn frame_query_completions(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    query: &str,
+) -> Vec<CompletionItem> {
+    let columns = (|| {
+        let position = position_in_item(db, file, offset)?;
+        let hir = item_hir(db, position.item).as_ref()?;
+        let check = item_check(db, position.item)?;
+        let target = hir
+            .expressions
+            .iter()
+            .filter_map(|expression| match &expression.kind {
+                ExpressionKind::Index {
+                    double: false,
+                    target,
+                    ..
+                } if expression.range.contains(position.relative)
+                    && hir.expression(*target).range.end() < position.relative =>
+                {
+                    Some((expression.range.len(), *target))
+                }
+                _ => None,
+            })
+            .min_by_key(|(length, _)| *length)
+            .map(|(_, target)| target)?;
+        let TyKind::Frame(Some(columns)) = check.expression_types.get(&target)?.kind(db) else {
+            return None;
+        };
+        let mut renderer = TypeRenderer::default();
+        Some(
+            columns
+                .iter()
+                .map(|column| CompletionItem {
+                    detail: Some(renderer.render(db, column.ty)),
+                    ..CompletionItem::new(
+                        insertable_name(column.name.text(db)),
+                        CompletionKind::Field,
+                        CompletionSource::Local,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    })();
+    let Some(mut items) = columns else {
+        return Vec::new();
+    };
+    items.extend(
+        FRAME_QUERY_SYMBOLS
+            .iter()
+            .map(|(name, detail)| CompletionItem {
+                detail: Some((*detail).to_owned()),
+                ..CompletionItem::new(
+                    (*name).to_owned(),
+                    CompletionKind::Variable,
+                    CompletionSource::Local,
+                )
+            }),
+    );
+    items.retain(|item| search_match(&item.label, query).is_some());
+    items
+}
+
+const FRAME_QUERY_SYMBOLS: &[(&str, &str)] = &[
+    (".N", "the number of rows in the group"),
+    (".SD", "the group's rows, as a frame"),
+    (".I", "the group's row numbers in the whole frame"),
+    (".GRP", "the group's number"),
+    (".NGRP", "the number of groups"),
+    (".BY", "the group's `by` values"),
+];
 
 fn namespace_completions(
     db: &dyn Db,
@@ -2437,23 +3388,84 @@ fn assignment_label(
     value: ExprId,
     is_root: bool,
 ) -> Option<String> {
-    let monomorphic;
-    let scheme = if is_root {
-        check.scheme.as_ref()?
+    let mut scheme = if is_root {
+        check.scheme.clone()?
     } else {
         let ty = check
             .expression_types
             .get(&id)
             .or_else(|| check.expression_types.get(&value))?;
-        monomorphic = TypeScheme::monomorphic(*ty);
-        &monomorphic
+        TypeScheme::monomorphic(*ty)
     };
+    scheme.body = without_impossible_vectors(db, scheme.body);
     is_hintable(
         db,
         scheme.body,
         matches!(scheme.body.kind(db), TyKind::Function(_)),
     )
-    .then(|| TypeRenderer::default().render_scheme(db, scheme))
+    .then(|| TypeRenderer::default().render_scheme(db, &scheme))
+}
+
+/// Drops the union members that name an atomic vector of non-atomic elements, such as the
+/// `Position[]` in `list[Position] | Position[]` that instantiating `vapply`'s `list[T] | T[]`
+/// with a record leaves behind. No value has that type, so the hint reads shorter and means
+/// the same.
+fn without_impossible_vectors<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+    match ty.kind(db) {
+        TyKind::Union(members) => {
+            let kept: Vec<Ty<'db>> = members
+                .iter()
+                .filter(|member| !is_impossible_vector(db, **member))
+                .map(|&member| without_impossible_vectors(db, member))
+                .collect();
+            match kept.as_slice() {
+                [] => ty,
+                [single] => *single,
+                _ => Ty::new(db, TyKind::Union(kept)),
+            }
+        }
+        TyKind::Function(function) => {
+            let mut function = function.clone();
+            for positional in &mut function.positional {
+                *positional = without_impossible_vectors(db, *positional);
+            }
+            for parameter in &mut function.named {
+                parameter.ty = without_impossible_vectors(db, parameter.ty);
+            }
+            function.ret = without_impossible_vectors(db, function.ret);
+            Ty::new(db, TyKind::Function(function))
+        }
+        _ => ty,
+    }
+}
+
+fn is_impossible_vector(db: &dyn Db, ty: Ty<'_>) -> bool {
+    let (TyKind::Vector(element) | TyKind::NamedVector(element)) = ty.kind(db) else {
+        return false;
+    };
+    let is_structured = |ty: Ty<'_>| {
+        matches!(
+            ty.kind(db),
+            TyKind::NativeRecord(_)
+                | TyKind::NativeTuple(_)
+                | TyKind::Tag(..)
+                | TyKind::Record(_)
+                | TyKind::Tuple(_)
+                | TyKind::List(_)
+                | TyKind::NamedList(_)
+                | TyKind::Frame(_)
+                | TyKind::Function(_)
+        )
+    };
+    match element.kind(db) {
+        // A nominal is impossible as an element only when its representation is.
+        TyKind::Named(name, _) => ProjectFiles::try_get(db).is_some_and(|files| {
+            project_type_definitions(db, files)
+                .get(name)
+                .is_some_and(|definition| is_structured(definition.body))
+        }),
+        _ => is_structured(*element),
+    }
 }
 
 fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
@@ -2508,11 +3520,20 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
 /// `StubGlobal` names are declared only by the stubs: navigable, but references stay empty and
 /// rename refuses.
 enum Target<'db> {
-    Slot { item: Item<'db>, binding: BindingId },
+    Slot {
+        item: Item<'db>,
+        binding: BindingId,
+    },
+    /// A `<T>` binder's occurrences, which never leave the function or definition binding it.
+    TypeParameter(Vec<Occurrence>),
+    Tag(String),
     Global(String),
     TypeName(String),
     StubGlobal(String),
-    S4 { name: String, kind: S4Kind },
+    S4 {
+        name: String,
+        kind: S4Kind,
+    },
 }
 
 fn target_at<'db>(
@@ -2521,6 +3542,14 @@ fn target_at<'db>(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<Target<'db>> {
+    if let Some(cursor) = type_parameter_at(db, file, offset) {
+        return Some(Target::TypeParameter(type_parameter_occurrences(
+            file, &cursor,
+        )));
+    }
+    if let Some((name, _)) = tag_at(db, file, offset) {
+        return Some(Target::Tag(name));
+    }
     if let Some(cursor) = annotation_type_at(db, file, offset) {
         let declared = cursor.navigable
             && (type_name_occurrences(db, files, &cursor.name)
@@ -2639,6 +3668,8 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     let mut result = Vec::new();
     match target {
         Target::StubGlobal(_) => {}
+        Target::TypeParameter(occurrences) => result = occurrences.clone(),
+        Target::Tag(name) => result = tag_occurrences(db, files, name),
         Target::Slot { item, binding } => slot_occurrences(db, *item, *binding, &mut result),
         Target::TypeName(name) => result = type_name_occurrences(db, files, name),
         Target::S4 { name, kind } => {

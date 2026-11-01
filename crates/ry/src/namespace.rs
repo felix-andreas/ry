@@ -37,13 +37,17 @@ pub fn namespace_import_problems(
 /// `R CMD check`'s "undefined exports". `defines` is the package's whole
 /// top-level name set, so a name bound by any file counts. An imported name is in the
 /// namespace too, so a package may re-export it: an `importFrom(pkg, name)`, or an
-/// `import(pkg)` whose namespace exports the name or has no known export set.
+/// `import(pkg)` whose namespace exports the name or has no known export set. A package that
+/// creates bindings at run time (`assign(name, ...)`, `makeActiveBinding("name", ...)`, a loop
+/// over a list of styles) can export a name it never writes as a definition, so a name the
+/// sources mention while they call such a definer is not reported either.
 pub fn namespace_export_problems(
     exports: &[(String, TextRange)],
     imports: &[NamespaceImport],
     defines: &dyn Fn(&str) -> bool,
     knows_namespace: &dyn Fn(&str) -> bool,
     namespace_exports: &dyn Fn(&str, &str) -> bool,
+    used_tokens: &BTreeSet<String>,
 ) -> Vec<Diagnostic> {
     let imported = |name: &str| {
         imports.iter().any(|import| match &import.name {
@@ -53,9 +57,16 @@ pub fn namespace_export_problems(
             }
         })
     };
+    let defines_at_run_time = RUNTIME_DEFINERS
+        .iter()
+        .any(|definer| used_tokens.contains(*definer));
     exports
         .iter()
-        .filter(|(name, _)| !defines(name) && !imported(name))
+        .filter(|(name, _)| {
+            !defines(name)
+                && !imported(name)
+                && !(defines_at_run_time && used_tokens.contains(name))
+        })
         .map(|(name, range)| {
             Diagnostic::new(
                 *range,
@@ -67,9 +78,20 @@ pub fn namespace_export_problems(
         .collect()
 }
 
-/// `used_tokens` holds the imported names that appear as a token anywhere in the
-/// package's sources: a conservative scan that under-reports rather than risk a false
-/// positive. Whole-namespace
+const RUNTIME_DEFINERS: &[&str] = &[
+    "assign",
+    "makeActiveBinding",
+    "delayedAssign",
+    "list2env",
+    "setGeneric",
+    "setClass",
+    "setRefClass",
+    "sys.source",
+];
+
+/// `used_tokens` holds the scanned names (see `token_scan_names`) that appear as a token
+/// anywhere in the package's sources: a conservative scan that under-reports rather than risk
+/// a false positive. Whole-namespace
 /// `import(pkg)` directives are not checked.
 pub fn unused_import_diagnostics(
     imports: &[NamespaceImport],
@@ -99,24 +121,33 @@ pub fn unused_import_diagnostics(
         .collect()
 }
 
-/// The imported names that `unused_import_diagnostics` may ask about, so a token scan
-/// records only those instead of every token text in the package.
-pub fn imported_names(imports: &[NamespaceImport]) -> FxHashSet<&str> {
-    imports
+/// The names the NAMESPACE checks may look up in `used_tokens` (imported names, exported
+/// names and the run-time definers), so a token scan records only those instead of every
+/// token text in the package. Empty when no check would ask.
+pub fn token_scan_names<'a>(
+    imports: &'a [NamespaceImport],
+    exports: &'a [(String, TextRange)],
+) -> FxHashSet<&'a str> {
+    let mut names: FxHashSet<&str> = imports
         .iter()
         .filter_map(|import| import.name.as_deref())
-        .collect()
+        .chain(exports.iter().map(|(name, _)| name.as_str()))
+        .collect();
+    if !names.is_empty() {
+        names.extend(RUNTIME_DEFINERS.iter().copied());
+    }
+    names
 }
 
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
 /// string tokens contribute their unquoted content.
 pub fn collect_used_tokens(
     root: &SyntaxNode,
-    imported: &FxHashSet<&str>,
+    scanned: &FxHashSet<&str>,
     out: &mut BTreeSet<String>,
 ) {
     let mut insert = |text: &str| {
-        if imported.contains(text) && !out.contains(text) {
+        if scanned.contains(text) && !out.contains(text) {
             out.insert(text.to_owned());
         }
     };
@@ -214,13 +245,13 @@ mod tests {
     }
 
     fn unused_for(namespace: &str, sources: &[&str], level: LintLevel) -> Vec<String> {
-        let imports = parse_namespace(namespace).imports;
-        let imported = imported_names(&imports);
+        let namespace = parse_namespace(namespace);
+        let scanned = token_scan_names(&namespace.imports, &namespace.exports);
         let mut used = BTreeSet::new();
         for source in sources {
-            collect_used_tokens(&syntax::parse(source).syntax_node(), &imported, &mut used);
+            collect_used_tokens(&syntax::parse(source).syntax_node(), &scanned, &mut used);
         }
-        unused_import_diagnostics(&imports, &used, level)
+        unused_import_diagnostics(&namespace.imports, &used, level)
             .into_iter()
             .map(|diagnostic| diagnostic.message)
             .collect()

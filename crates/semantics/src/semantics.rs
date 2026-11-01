@@ -474,10 +474,7 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db).is_some_and(|files| {
-        package_definitions(db, files).contains_key(name)
-            || conditional_slot_items(db, files).contains_key(name)
-    }) {
+    if ProjectFiles::try_get(db).is_some_and(|files| package_binds(db, files, name)) {
         return true;
     }
     stubs::stubs(db).is_some_and(|library| {
@@ -839,6 +836,13 @@ pub fn project_type_definitions<'db>(
         }
     }
     definitions
+}
+
+/// Whether any package file binds `name` at top level, including the inner targets of
+/// `a <- b <- value` and conditional writes.
+pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
+    package_definitions(db, files).contains_key(name)
+        || conditional_slot_items(db, files).contains_key(name)
 }
 
 /// Items writing a top-level name other than their own (conditionally, or nested as in
@@ -1485,7 +1489,7 @@ struct SalsaGlobals<'db> {
 /// A script's own declarations are visible to itself alone and shadow project names.
 /// Memoized per file so the merge runs once per file, not once per checked item.
 #[salsa::tracked(returns(ref))]
-fn visible_type_definitions<'db>(
+pub fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
@@ -1844,6 +1848,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         visible_arithmetic_classes(self.db, self.file)
     }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+    }
 }
 
 #[salsa::tracked(returns(clone))]
@@ -1951,6 +1959,10 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
     /// collapse the whole scheme to `Unknown`.
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         self.base.arithmetic_classes()
+    }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        self.base.stub_scheme(name)
     }
 }
 
@@ -2095,6 +2107,7 @@ mod tests {
         let integer = types::scalar(&db, types::Atomic::Integer);
         let check = check::ItemCheck {
             expression_types: Default::default(),
+            pattern_types: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),

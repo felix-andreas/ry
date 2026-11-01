@@ -22,7 +22,8 @@ use async_lsp::{ClientSocket, ErrorCode, LanguageClient, LanguageServer, Respons
 use futures::future::BoxFuture;
 use ide::{
     CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
-    HoverDefinition, NavigationTarget, SignatureData, StubTarget,
+    HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
+    classify_type_token,
 };
 use salsa::{Durability, Setter};
 use semantics::diagnostics::{Diagnostic, Severity};
@@ -46,10 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{env, fs, panic, process, thread};
-use syntax::{
-    SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_inline_annotation,
-    is_syntactic_name,
-};
+use syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
@@ -1485,14 +1483,16 @@ fn initialize_result(
                 lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                     lsp_types::SemanticTokensOptions {
                         legend: lsp_types::SemanticTokensLegend {
-                            // In index order. Only `#:` annotation bodies are colored:
-                            // R grammars cannot see type syntax.
+                            // In `semantic_class_index` order. Only ry's own syntax is
+                            // colored, because R grammars already color R.
                             token_types: vec![
                                 lsp_types::SemanticTokenType::TYPE,
                                 lsp_types::SemanticTokenType::TYPE_PARAMETER,
                                 lsp_types::SemanticTokenType::PARAMETER,
                                 lsp_types::SemanticTokenType::OPERATOR,
                                 lsp_types::SemanticTokenType::DECORATOR,
+                                lsp_types::SemanticTokenType::KEYWORD,
+                                lsp_types::SemanticTokenType::ENUM_MEMBER,
                             ],
                             token_modifiers: Vec::new(),
                         },
@@ -2108,7 +2108,7 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            let tokens = annotation_semantic_tokens(&worker.db, file, &text, worker.encoding);
+            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding);
             Ok(Some(lsp_types::SemanticTokensResult::Tokens(
                 lsp_types::SemanticTokens {
                     result_id: None,
@@ -2396,59 +2396,29 @@ fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_ty
     ranges
 }
 
-fn annotation_semantic_tokens(
+fn ry_semantic_tokens(
     db: &RootDatabase,
     file: SourceFile,
     text: &str,
     encoding: PositionEncoding,
 ) -> Vec<lsp_types::SemanticToken> {
-    let parse = semantics::parse(db, file);
-    let mut spans: Vec<(TextRange, u32)> = Vec::new();
-    for annotation in parse
-        .syntax_node()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node))
-    {
-        for element in annotation.descendants_with_tokens() {
-            let SyntaxElement::Token(token) = element else {
-                continue;
-            };
-            if let Some(token_type) = classify_annotation_token(&token)
-                && !token.text_range().is_empty()
-            {
-                spans.push((token.text_range(), token_type));
-            }
-        }
-    }
+    let spans = ide::semantic_tokens(db, file)
+        .into_iter()
+        .map(|(range, class)| (range, semantic_class_index(class)))
+        .collect();
     delta_encode_tokens(spans, text, encoding)
 }
 
-/// Indices into the advertised legend: type names 0, `<T>` binders 1,
-/// field/parameter names 2, punctuation 3, `@` directives 4.
-fn classify_annotation_token(token: &SyntaxToken) -> Option<u32> {
-    let parent_kind = token.parent().map(|parent| parent.kind());
-    match token.kind() {
-        SyntaxKind::IDENT => match parent_kind {
-            Some(SyntaxKind::TYPE_BINDER) => Some(1),
-            Some(SyntaxKind::TYPE_FIELD) | Some(SyntaxKind::TYPE_FUNCTION) => Some(2),
-            Some(SyntaxKind::ANNOTATION_DIRECTIVE) => Some(4),
-            _ => Some(0),
-        },
-        SyntaxKind::COMMA
-        | SyntaxKind::PIPE
-        | SyntaxKind::COLON
-        | SyntaxKind::L_BRACKET
-        | SyntaxKind::R_BRACKET
-        | SyntaxKind::L_PAREN
-        | SyntaxKind::R_PAREN
-        | SyntaxKind::L_BRACE
-        | SyntaxKind::R_BRACE
-        | SyntaxKind::LESS
-        | SyntaxKind::GREATER
-        | SyntaxKind::DOTS => Some(3),
-        SyntaxKind::AT => Some(4),
-        SyntaxKind::NULL_KW => Some(0),
-        _ => None,
+/// The class's index in the advertised legend.
+fn semantic_class_index(class: SemanticClass) -> u32 {
+    match class {
+        SemanticClass::Type => 0,
+        SemanticClass::TypeParameter => 1,
+        SemanticClass::Parameter => 2,
+        SemanticClass::Operator => 3,
+        SemanticClass::Decorator => 4,
+        SemanticClass::Keyword => 5,
+        SemanticClass::Tag => 6,
     }
 }
 
@@ -2512,7 +2482,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             if u32::from(range.start()) < 3 || range.is_empty() {
                 continue;
             }
-            if let Some(class) = classify_annotation_token(&token) {
+            if let Some(class) = classify_type_token(&token).map(semantic_class_index) {
                 let start = usize::from(range.start()) - 3;
                 let length = usize::from(range.len());
                 if start + length <= type_text.len() + 1 {

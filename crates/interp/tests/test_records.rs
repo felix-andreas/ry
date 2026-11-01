@@ -33,6 +33,17 @@ pair <- (1L, "a")
 circle <- :Circle(radius = 2)
 type UserId = integer
 alias Shape = :Circle(radius: double) | :Empty
+type Point = record{x: double, y: double}
+type OrderId = record{id: integer}
+type Pair = tuple{integer, character}
+type Figure = :Circle(radius: double) | :Empty
+type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)
+size <- function(t: Tree<integer>) -> integer {
+  match (t) {
+    :Leaf => 0L
+    :Node(left = l, value = _, right = r) => size(l) + 1L + size(r)
+  }
+}
 "#;
 
 /// Each case's code and what printing its value shows.
@@ -106,6 +117,22 @@ const PRINTS: &[(&str, &str)] = &[
     ("deparse(quote(@UserId(7L)))", "[1] \"(7L)\"\n"),
     ("@Shape(:Circle(radius = 1))", ":Circle(radius = 1)\n"),
     ("{ id: @new UserId <- 5L; id }", "[1] 5\n"),
+    // A nominal record, tuple or tag union is its representation at run time: `@Name(...)`'s
+    // parentheses are the value's own.
+    ("@Point(y = 2, x = 1)", "(x = 1, y = 2)\n"),
+    ("@OrderId(id = 3L,)", "(id = 3L,)\n"),
+    ("@Pair(1L, \"a\")", "(1L, \"a\")\n"),
+    ("@Point(x = 1, y = 2)$y", "[1] 2\n"),
+    ("{ p <- @Point(x = 1, y = 2); p$x <- 5; p }", "(x = 5, y = 2)\n"),
+    (
+        "match (@Figure(:Circle(radius = 2))) { :Circle(radius = r) => r; :Empty => 0 }",
+        "[1] 2\n",
+    ),
+    (
+        "size(@Tree(:Node(left = @Tree(:Leaf), value = 1L, right = @Tree(:Node(left = :Leaf, value = 2L, right = :Leaf)))))",
+        "[1] 2\n",
+    ),
+    ("as.list(@Point(x = 1, y = 2))$y", "[1] 2\n"),
     ("{ type <- 3; alias <- 4; type + alias }", "[1] 7\n"),
     ("deparse(quote((x = 1, y = 2)))", "[1] \"(x = 1, y = 2)\"\n"),
     ("deparse(quote((b = 1, a = 2)))", "[1] \"(b = 1, a = 2)\"\n"),
