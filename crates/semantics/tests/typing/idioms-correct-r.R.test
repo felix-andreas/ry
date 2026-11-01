@@ -333,3 +333,16 @@ temps <- function(n) tempfile(rep("file", n))
 headers: <T, U> fn(fmt: T, names: U) -> character
 pieces: <T> fn(x: T) -> list[character[]]
 temps: <T> fn(n: T) -> character
+
+#---- an_empty_list_reads_any_element_as_unknown
+refspec <- function(spec, opts = list()) {
+  if (isTRUE(opts$force)) spec <- paste0("+", spec)
+  spec
+}
+first <- function() {
+  out <- list()
+  out[[1]]
+}
+#++++
+refspec: <T, U> fn(spec: T, [opts]: U) -> Unknown
+first: fn() -> Unknown

@@ -281,7 +281,7 @@ build <- function(escape) {
   args$escape
 }
 #++++
-build: fn(escape: logical) -> Unknown
+build: fn(escape: logical) -> logical | NULL
 
 #---- a_field_no_shape_carries_is_still_a_typo
 # The same union, misspelled: absent from every shape stays an error, which is

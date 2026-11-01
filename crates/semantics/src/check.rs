@@ -1145,6 +1145,10 @@ fn join_assigned(
         .unwrap_or(before)
 }
 
+fn is_empty_list(db: &dyn Db, ty: Ty<'_>) -> bool {
+    matches!(ty.kind(db), TyKind::Tuple(items) if items.is_empty())
+}
+
 /// The names every branch forces, diverging branches included: R reports a missing
 /// argument only on the path that reads it, so a formal one branch never touches is
 /// optional.
@@ -9312,7 +9316,13 @@ impl<'db> Checker<'db, '_> {
     ) -> Result<Ty<'db>, TypeError<'db>> {
         if let TyKind::Union(members) = subject.kind(self.db) {
             let mut results = Vec::with_capacity(members.len());
+            // An empty `list()` member is the accumulator on a path that never filled it,
+            // where R reads `NULL`.
             for &member in members {
+                if is_empty_list(self.db, member) {
+                    results.push(null(self.db));
+                    continue;
+                }
                 let result = self
                     .extract_result(origin, range, key_range, member, index)
                     .map_err(|error| widen_error_container(error, subject))?;
@@ -9384,6 +9394,12 @@ impl<'db> Checker<'db, '_> {
                     None => Ok(union_of(self.db, fields.iter().map(|field| field.ty))),
                 },
             },
+            // `list()` is the accumulator idiom: code fills it after building it, often in
+            // another function, so its type knows none of the elements read later.
+            TyKind::Tuple(items) if items.is_empty() => {
+                self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                Ok(unknown(self.db))
+            }
             TyKind::Tuple(items) => match literal_position {
                 Some(position) => match items.get(position) {
                     Some(&item) => Ok(item),
@@ -9633,7 +9649,14 @@ impl<'db> Checker<'db, '_> {
         if let TyKind::Union(members) = subject.kind(self.db) {
             let mut results = Vec::with_capacity(members.len());
             let mut absent: Option<TypeError<'db>> = None;
+            let mut unfilled = false;
             for &member in members {
+                // An empty `list()` member is the accumulator on a path that never filled
+                // it, where R reads `NULL`.
+                if is_empty_list(self.db, member) {
+                    unfilled = true;
+                    continue;
+                }
                 match self.dollar_result(origin, range, name_range, member, name) {
                     Ok(result) => results.push(result),
                     Err(error) if matches!(error.kind, TypeErrorKind::FieldDoesNotExist { .. }) => {
@@ -9641,6 +9664,13 @@ impl<'db> Checker<'db, '_> {
                     }
                     Err(error) => return Err(widen_error_container(error, subject)),
                 }
+            }
+            if unfilled && !results.is_empty() {
+                results.push(null(self.db));
+            }
+            if results.is_empty() && absent.is_none() {
+                self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                return Ok(unknown(self.db));
             }
             return match (results.is_empty(), absent) {
                 (true, Some(mut error)) => {
@@ -9742,6 +9772,10 @@ impl<'db> Checker<'db, '_> {
                         },
                     }),
                 }
+            }
+            TyKind::Tuple(items) if items.is_empty() => {
+                self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                Ok(unknown(self.db))
             }
             TyKind::Tuple(_) | TyKind::NativeTuple(_) => Err(TypeError {
                 range: name_range,
