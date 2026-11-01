@@ -2221,6 +2221,12 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     (every bitmap device) otherwise gets negative string heights, which shifted rotated grid text.
   - Base text hands both adjustments to `GEText`, so an unspecified vertical adjustment centres
     the label on its glyphs' extent from the device's metric callback, as GNU R does.
+  - Base graphics hands rasters to `GERaster` and X-splines to the engine's `xspline`, as GNU R
+    does, so a device package draws them itself. The X-spline is written from Blanc and
+    Schlick's paper; its sampling (one point for a segment between two corners, otherwise a step
+    of `2 / sqrt(length in 1/1200 inch)`, at most 0.2) reproduces GNU R's open splines exactly.
+  - `plot.new` marks the device dirty, because grid starts a page of its own on its first
+    drawing unless another system already drew.
   - Text widths are Helvetica's AFM widths plus its ASCII kerning pairs (tables generated from
     GNU R's `afm/Helvetica*.afm`), which makes `strwidth` on pdf match GNU R exactly. Bitmap
     devices in GNU R measure with cairo's font instead, so their widths differ slightly.
