@@ -1366,7 +1366,8 @@ the difference. At a call to a variadic function, a function-typed argument that
 interface check is therefore checked again, as that forwarded call:
 
 - Forwarded named arguments fill the callback's formals of the same name first, each checked against
-  its formal's type.
+  its formal's type exactly as a direct call checks it. So a `logical[]` forwarded to a formal whose
+  inferred type is `logical` is accepted, as `show(tab, fade = fade)` would be.
 - The interface's own parameter types then fill the remaining formals in order, followed by the
   forwarded positional arguments.
 - Any formal left unfilled must have a default.

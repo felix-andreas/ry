@@ -50,7 +50,9 @@ as.formula : @pure Any
 aggregate : Any
 optim : Any
 optimize : Any
-uniroot : fn(f: fn(double) -> double, [interval]: double[], ...: Any, [lower]: double, [upper]: double, [f.lower]: double, [f.upper]: double, [extendInt]: character, [check.conv]: logical, [tol]: double, [maxiter]: integer, [trace]: integer) -> list{root: double, f.root: double, iter: integer, init.it: integer, estim.prec: double}
+# `f` must return one number, which R checks at run time. A length the checker cannot see, as in
+# `function(x, p) pgig(x) - p`, types as a vector, so the callback's result is `double[]`.
+uniroot : fn(f: fn(double) -> double[], [interval]: double[], ...: Any, [lower]: double, [upper]: double, [f.lower]: double, [f.upper]: double, [extendInt]: character, [check.conv]: logical, [tol]: double, [maxiter]: integer, [trace]: integer) -> list{root: double, f.root: double, iter: integer, init.it: integer, estim.prec: double}
 integrate : Any
 approx : Any
 density : Any

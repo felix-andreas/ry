@@ -10557,7 +10557,7 @@ impl<'db> Checker<'db, '_> {
                         None => break 'probe false,
                     },
                 };
-                if let Some(ty) = argument.ty
+                if let Some(ty) = self.argument_type_for(target, argument, actual_callback.inferred)
                     && self
                         .check_argument(target, ty, argument.range, argument.whole_double, None)
                         .is_err()
@@ -10573,12 +10573,18 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .copied()
                 .chain(expected_callback.named.iter().map(|field| field.ty))
-                .map(|element| (Some(element), callback_range, false));
+                .map(|element| (Some(element), callback_range, false, None));
             let forwarded = forwarded_positionals.iter().map(|&index| {
                 let argument = &arguments[index];
-                (argument.ty, argument.range, argument.whole_double)
+                (
+                    argument.ty,
+                    argument.range,
+                    argument.whole_double,
+                    Some(argument),
+                )
             });
-            for (argument_ty, blame_range, whole_double) in elements.chain(forwarded) {
+            let inputs: Vec<_> = elements.chain(forwarded).collect();
+            for (argument_ty, blame_range, whole_double, argument) in inputs {
                 let target = if !open_positionals.is_empty() {
                     open_positionals.remove(0)
                 } else if pre_rest_open > 0 {
@@ -10588,6 +10594,12 @@ impl<'db> Checker<'db, '_> {
                     element
                 } else {
                     break 'probe false;
+                };
+                let argument_ty = match argument {
+                    Some(argument) => {
+                        self.argument_type_for(target, argument, actual_callback.inferred)
+                    }
+                    None => argument_ty,
                 };
                 if let Some(argument_ty) = argument_ty
                     && self

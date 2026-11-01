@@ -1319,3 +1319,37 @@ report: fn(message: character[]) -> NULL
 relay: fn([value]: character[] | NULL) -> NULL
 NULL
 133..137 error[type-mismatch] expected `character[]`, found `NULL`
+
+#---- a_vector_forwarded_to_a_callback_fits_its_inferred_scalar_parameter
+# pkgdown's `purrr::walk(tabs, tablist_content, fade = fade)`, where `fade` holds `map_lgl()`'s result.
+#: fn(x: character) -> logical[]
+has <- function(x) c(TRUE, FALSE)
+show <- function(tab, fade) c(if (fade && TRUE) "show", "x")
+render <- function(x, tabs) {
+  fade <- has(x)
+  lapply(tabs, show, fade = fade)
+}
+#++++
+has: fn(x: character) -> logical[]
+show: <T> fn([tab]: T, fade: logical) -> character[]
+render: fn(x: character, tabs: Unknown) -> Unknown
+
+#---- a_string_forwarded_to_a_callback_logical_parameter_is_reported
+show <- function(tab, fade) c(if (fade && TRUE) "show", "x")
+render <- function(tabs) lapply(tabs, show, fade = "yes")
+#++++
+show: <T> fn([tab]: T, fade: logical) -> character[]
+render: Unknown
+99..103 error[type-mismatch] expected `fn(T) -> U`, found `fn([tab]: V, fade: logical) -> character[]`
+
+#---- a_root_finder_callback_may_return_a_vector
+# GeneralizedHyperbolic's `uniroot(zeroFnLess, param = param, p = p[i], interval = xRange)`.
+#: fn(x: double) -> double[]
+cdf <- function(x) c(x, x)
+quantile_of <- function(p) {
+  gap <- function(x, p) cdf(x) - p
+  uniroot(gap, p = p, interval = c(0, 1))$root
+}
+#++++
+cdf: fn(x: double) -> double[]
+quantile_of: <T: numeric> fn(p: T) -> double
