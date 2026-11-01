@@ -337,6 +337,20 @@ An independent review profiled before it proposed. Every number below was taken 
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
 
+### Project-wide aggregates verify every item after each keystroke (unverified here, reported by the IDE responsiveness work)
+
+- On the finance benchmark, any editor request right after a keystroke costs about 45 ms at p50,
+  against 0.5 to 1 ms settled, and edited-file diagnostics cost about 56 ms with no item rechecked.
+  The time is salsa deep verification under `item_check`.
+- Cause: `conditional_slot_items`, `interface_sccs`, `package_definitions` and
+  `project_arithmetic_classes` read per-item memos across all files directly. The edited file's
+  items make each aggregate `LOW`, so verifying it walks about 56K edges.
+- Fix shape: fold per-file tracked memos (for example `file_conditional_writers`,
+  `file_definitions`, `file_interface_reads`, `file_arithmetic_classes`), so an aggregate reads
+  about 500 file memos that verify at `MEDIUM` by durability and only the edited file's memo
+  re-verifies. Pin it in `test_incremental.rs` by counting edges re-verified after an edit. Keep
+  `ry check`'s naming pass warming these per item in parallel.
+
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
 This was framed as the interface fixpoint being superlinear in the size of the cyclic definition
@@ -2664,11 +2678,11 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 2.4-2.5 s | 515 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
-| data science | 2.5-2.7 s | 520 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
-| biostatistics | 2.5-2.7 s | 528 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
+| finance | 1.6-1.7 s | 438 MiB | 1005 `unused` (genuine), 848 `object-system` | 1 / 44 ms | 2 / 39 ms |
+| data science | 1.7-1.85 s | 435 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
+| biostatistics | 1.7-1.8 s | 447 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (6.3 s on one core, 3.8 times faster on four), so per-file constant costs set its wall time; the remaining profile is item checking (about 3 s of CPU, half of it `infer_call_arguments`), parse, item HIR and lints. Before the green-tree searches, per-check caches and lazy arena commit, main measured 3.3-3.7 s and about 780-795 MiB on finance. Ideas not yet tried: fuse the per-file green walks into one tracked "syntax sites" query, cut type interning in `fresh_ty`, `literal_ty` and `substitute_rigid_memo`, and compute `interface_sccs` and `conditional_slot_items` before the third pass instead of inside its first batch. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.8 s of CPU on four cores, 2.9 times its wall time). The profile is now flat: item checking is about 45% of CPU at roughly 1.5 µs per expression, with no expression inferred twice, and the rest is HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries. No single query or helper is above 5% exclusive. Reaching the 1 s target needs the checker's per-expression cost cut structurally, most likely a type representation that does not go through salsa interning (`Ty::intern_id` alone is 4% of samples, allocation 12%). Smaller measured levers: lowering HIR on the green tree (red-node creation is 3 to 4 points of `item_hir`) and the serial `parse_namespace` at start (about 0.1 s). Tried without gain: a per-check cache of common scalar types, larger syntax batches (+15 MiB for about 0.05 s), and freeing evicted trees on a background thread (mimalloc's cross-thread frees cost what the serial drop saved). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 

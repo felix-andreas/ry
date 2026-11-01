@@ -12,7 +12,7 @@ f(5L)
 #++++
 f: fn(id: UserId) -> UserId
 UserId
-63..65 error[type-mismatch] expected `UserId`, found `integer`
+63..65 error[type-mismatch] expected `UserId`, found `integer`. The value has the right shape, but `UserId` is a nominal type, so only `@UserId(...)` or `#: @new UserId` creates one
 
 #---- alias_is_structural
 alias Count = integer
@@ -60,7 +60,7 @@ area(:Circle(1))
 area: fn(s: Shape) -> double
 double
 double
-184..194 error[type-mismatch] expected `Shape`, found `:Circle(double)`
+184..194 error[type-mismatch] expected `Shape`, found `:Circle(double)`. The value has the right shape, but `Shape` is a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
 
 #---- constrained_binder
 alias Numeric<T: numeric> = T[]

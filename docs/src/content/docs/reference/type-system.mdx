@@ -825,6 +825,26 @@ with their types. Generic tag unions come from aliases, such as
 [standard library](/reference/standard-library/) defines `Result<T, E>` as `{:Ok(T) | :Err(E)}`, and a
 project's own `Result` alias shadows it.
 
+### Nominal records, tuples and tags
+
+A record, tuple or tag union may be the representation of a [nominal type](#nominal-types), as in
+`type Shape = :Circle(radius: double) | :Square(side: double)`. The nominal rules apply unchanged, so
+a structural value with the right shape, such as a bare `:Circle(radius = 1)`, does not fit `Shape`,
+and only [`@Shape(...)`](#nominal-introduction) or `#: @new Shape` creates one. Wherever a rule of
+this section needs the value's shape, the nominal value projects to its representation:
+
+- `$`, `[[` and field writes follow the record and tuple rules above. A field write keeps the
+  nominal type, its value must fit the field's type, and a field the representation lacks is a
+  `type-mismatch`.
+- A `match` checks its patterns and its [coverage](#exhaustiveness) against the representation, so a
+  nominal tag union, including a recursive generic one such as
+  `type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`, must be matched
+  exhaustively.
+- A binding pattern binds the value with its nominal type, and a payload binding has the payload's
+  declared type, so `:Node(left = l, ..)` on a `Tree<integer>` binds `l` as a `Tree<integer>`.
+- A nominal value whose representation is a record, tuple or tag is still a ry value when it
+  [crosses into R](#crossing-into-r).
+
 ### `match`
 
 `match (EXPR) { ARMS }` is a `match` expression only when the `{` is on the line of the closing `)`,
@@ -862,6 +882,7 @@ the cases the type has:
   [`[` on vectors](#-on-vectors-1)), matches no literal arm and stops with an error when the code
   runs;
 - `NULL` is one case, and a union has the cases of each member;
+- a nominal type has the cases of its representation;
 - every other type has unboundedly many values, so only a binding or `_` covers it.
 
 A guarded arm never counts toward coverage, because its guard can be false. A `match` that misses a
@@ -1312,6 +1333,11 @@ expression has the nominal type from then on.
   arguments from the representation check, so a value `list(value = 1L)` becomes a
   `Person<integer>`.
 - When the value already has the nominal type, `@new` is allowed and does nothing further.
+- The parentheses of `@Name(...)` are the value's own, so they follow the record and tuple literal
+  rules: `@Point(x = 1, y = 2)` is a record, `@Pair(1L, "a")` a tuple, and `@UserId(id = 1L,)` a
+  one-field record. `@UserId(id = 1L)` is an R assignment wrapped in the constructor, and when the
+  representation is a one-field record with that field, the `type-mismatch` suggests the trailing
+  comma.
 - `@new` is an annotation form, not a type expression, so it cannot appear inside a compact type or
   an expanded function annotation.
 

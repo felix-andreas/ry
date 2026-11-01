@@ -6,9 +6,12 @@
 //! witnesses of a catch-all's usefulness are the missing cases.
 
 use crate::Db;
+use crate::annotations::NamedDefinition;
 use crate::check::ExpressionTypes;
 use crate::hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind};
-use crate::types::{Atomic, Ty, TyKind, unknown};
+use crate::infer::apply_definition;
+use crate::types::{Atomic, Name, Ty, TyKind, union_of, unknown};
+use rustc_hash::FxHashMap;
 use syntax::TextRange;
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -30,22 +33,28 @@ pub enum MatchFindingKind {
 
 pub const WITNESS_LIMIT: usize = 3;
 
+/// The project's `type` and `alias` definitions, through which a named scrutinee shows
+/// its cases.
+pub type Definitions<'db> = Option<&'db FxHashMap<Name<'db>, NamedDefinition<'db>>>;
+
 /// Every `match` of an item, in expression order. Ranges are item-relative.
 pub fn match_findings<'db>(
     db: &'db dyn Db,
+    definitions: Definitions<'db>,
     module: &Module,
     types: &ExpressionTypes<'db>,
 ) -> Vec<MatchFinding> {
     let mut findings = Vec::new();
+    let checker = Coverage { db, definitions };
     for expression in &module.expressions {
         let ExpressionKind::Match { scrutinee, arms } = &expression.kind else {
             continue;
         };
         let subject = types.get(scrutinee).copied().unwrap_or_else(|| unknown(db));
-        let checker = Coverage { db };
+        let subject = structural(db, definitions, subject);
         let mut rows: Vec<Vec<Pat>> = Vec::with_capacity(arms.len());
         for arm in arms.iter() {
-            let row = vec![lower(db, module, arm.pattern, subject)];
+            let row = vec![lower(db, definitions, module, arm.pattern, subject)];
             if checker.useful(&rows, &row, &[subject], 1).is_empty() {
                 findings.push(MatchFinding {
                     range: module.pattern(arm.pattern).range,
@@ -79,8 +88,45 @@ pub fn match_findings<'db>(
     findings
 }
 
-/// A scrutinee whose type makes no claim (an unknown, an unsolved variable, a nominal
-/// whose values ry cannot enumerate) has no cases to count.
+/// A named type's cases are its definition's, so a nominal tag union is checked like the
+/// union it wraps. Only the head and a union's members unfold, which keeps a recursive
+/// definition such as `Tree<T>` from unfolding forever; deeper positions unfold when the
+/// search reaches them. An opaque nominal, which has no definition body, stays named.
+fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) -> Ty<'db> {
+    let unfold = |ty: Ty<'db>| {
+        let mut current = ty;
+        // Bounded, because a definition may name another definition as its whole body.
+        for _ in 0..16 {
+            let TyKind::Named(name, arguments) = current.kind(db) else {
+                break;
+            };
+            let Some(definition) = definitions.and_then(|table| table.get(name)) else {
+                break;
+            };
+            if matches!(definition.body.kind(db), TyKind::Unknown)
+                || definition.parameters.len() != arguments.len()
+            {
+                break;
+            }
+            current = apply_definition(db, definition, arguments);
+        }
+        current
+    };
+    let ty = unfold(ty);
+    match ty.kind(db) {
+        TyKind::Union(members)
+            if members
+                .iter()
+                .any(|member| matches!(member.kind(db), TyKind::Named(..))) =>
+        {
+            union_of(db, members.iter().map(|&member| unfold(member)))
+        }
+        _ => ty,
+    }
+}
+
+/// A scrutinee whose type makes no claim (an unknown, an unsolved variable, an opaque
+/// nominal whose values ry cannot enumerate) has no cases to count.
 fn opaque(db: &dyn Db, subject: Ty<'_>) -> bool {
     matches!(
         subject.kind(db),
@@ -126,6 +172,7 @@ impl Constructor {
 
 struct Coverage<'db> {
     db: &'db dyn Db,
+    definitions: Definitions<'db>,
 }
 
 impl<'db> Coverage<'db> {
@@ -146,6 +193,7 @@ impl<'db> Coverage<'db> {
             };
         };
         let head_type = types.first().copied().unwrap_or_else(|| unknown(self.db));
+        let head_type = structural(self.db, self.definitions, head_type);
         let rest_types = types.get(1..).unwrap_or_default();
         let rows = expand_or_rows(rows);
         match head {
@@ -186,8 +234,9 @@ impl<'db> Coverage<'db> {
                     .collect();
                 // A finite set splits on every constructor, in the type's order, so the
                 // witnesses list every missing case rather than only those under a
-                // constructor no row names.
-                if complete && !constructors.is_empty() {
+                // constructor no row names. With no row naming one there is nothing to
+                // split for, and splitting anyway would unfold a recursive type forever.
+                if complete && !constructors.is_empty() && !heads.is_empty() {
                     let mut witnesses = Vec::new();
                     for constructor in &constructors {
                         let fields = vec![Pat::Wild; constructor.arity()];
@@ -226,7 +275,9 @@ impl<'db> Coverage<'db> {
                         Pat::Constructed((*constructor).clone(), fields)
                     })
                     .collect();
-                firsts.push(Pat::Wild);
+                if !complete || constructors.is_empty() {
+                    firsts.push(Pat::Wild);
+                }
                 let mut witnesses = Vec::new();
                 'outer: for first in firsts {
                     for tail in &tails {
@@ -410,13 +461,20 @@ fn constructor_field_types<'db>(
     found.unwrap_or_else(|| vec![unknown(db); constructor.arity()])
 }
 
-fn lower<'db>(db: &'db dyn Db, module: &Module, pattern: PatId, ty: Ty<'db>) -> Pat {
+fn lower<'db>(
+    db: &'db dyn Db,
+    definitions: Definitions<'db>,
+    module: &Module,
+    pattern: PatId,
+    ty: Ty<'db>,
+) -> Pat {
+    let ty = structural(db, definitions, ty);
     match &module.pattern(pattern).kind {
         PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => Pat::Wild,
         PatternKind::Or(alternatives) => Pat::Or(
             alternatives
                 .iter()
-                .map(|&alternative| lower(db, module, alternative, ty))
+                .map(|&alternative| lower(db, definitions, module, alternative, ty))
                 .collect(),
         ),
         PatternKind::Literal { literal, negative } => {
@@ -468,7 +526,7 @@ fn lower<'db>(db: &'db dyn Db, module: &Module, pattern: PatId, ty: Ty<'db>) -> 
                         .first()
                         .copied()
                         .unwrap_or_else(|| unknown(db));
-                    vec![lower(db, module, *payload, payload_type)]
+                    vec![lower(db, definitions, module, *payload, payload_type)]
                 }
                 None => Vec::new(),
             };
@@ -480,7 +538,7 @@ fn lower<'db>(db: &'db dyn Db, module: &Module, pattern: PatId, ty: Ty<'db>) -> 
             let fields = items
                 .iter()
                 .zip(item_types)
-                .map(|(&item, item_type)| lower(db, module, item, item_type))
+                .map(|(&item, item_type)| lower(db, definitions, module, item, item_type))
                 .collect();
             Pat::Constructed(constructor, fields)
         }
@@ -520,7 +578,7 @@ fn lower<'db>(db: &'db dyn Db, module: &Module, pattern: PatId, ty: Ty<'db>) -> 
                 .iter()
                 .map(|(name, field_type)| {
                     match fields.iter().find(|field| field.name.as_str() == name) {
-                        Some(field) => lower(db, module, field.pattern, *field_type),
+                        Some(field) => lower(db, definitions, module, field.pattern, *field_type),
                         None => Pat::Wild,
                     }
                 })

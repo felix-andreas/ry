@@ -2241,8 +2241,11 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     no such dependency, and a cheap join adds it (`SyntaxLints.unless_redefined`, `SlotPair`'s
     `same_type` step). Keeping the syntax half naming-free is what lets the cold pass compute it
     before naming, while the tree is resident.
-  - `ry check` uses `RootDatabase::one_shot` (no splice cache) and runs three passes in batches of
-    16 files per core, calling `trigger_lru_eviction` between batches, which needs no new revision.
+  - `ry check` uses `RootDatabase::one_shot` (no splice cache) and runs three passes. Only the
+    syntax pass works in batches of 16 files per core with `trigger_lru_eviction` between them
+    (which needs no new revision). The naming and diagnostics passes read no tree. Naming runs
+    as one batch; diagnostics evicts between batches of 64 files per core, because one batch
+    raised peak memory from about 750 to 870 MB on a 3000-file corpus with many findings.
     `diagnostics::derive_from_syntax` lists every tree-derived fact a later pass reads; a new tree
     reader must be added there, or the cold check re-parses (the one-parse test in
     `test_incremental.rs` catches it).
@@ -2837,6 +2840,34 @@ first lines R had already read, leaving R mid-command.
 - **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
   code that libR and the interpreter both run. No effect on static analysis.
 
+## Cold-check constant costs: one green walk per file, immortal interning, high durability
+
+- **Previous shape.** Each per-file syntax collector and the syntax lints walked the red tree
+  separately. `annotation_rule_diagnostics` rebuilt the project's duplicate-type map for every
+  annotation. An item check looked up each frame binder through a tracked query keyed on
+  `(item, name, deferred)`, and `package_name`/`test_name` took the project file list as an
+  argument. `Name` and `Ty` were interned with salsa's default revision tracking, and the CLI
+  created inputs at low durability.
+- **Weakness.** All of this was per-file or per-name constant work: red nodes built only to be
+  discarded, an interned multi-argument key and a memo verification per name read, last-use
+  atomics shared across cores on every type intern, and a deep verification of every syntax-pass
+  memo once the attached namespaces were set.
+- **Target shape.**
+  - `file_syntax_sites` collects every per-file site in one `syntax::walk_green` pass, and
+    `lints::syntax_lints` walks the green tree, building a red node only where `may_lint` says a
+    lint can fire.
+  - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
+    binders in one query, cached in `SalsaGlobals`.
+  - `Name` and `Ty` are interned with `revisions = usize::MAX`. They are never garbage-collected.
+    That costs nothing in a one-shot check. In the server the tables grow with the distinct types
+    and names ever seen, which repeat heavily because types are structural.
+  - The CLI creates every input at `Durability::HIGH` except `PackageMetadata.attached`, the one
+    input it sets after analysis starts.
+- **Impact.** About 26% less CPU, 30% less wall time and 70 MiB less peak memory on the
+  benchmark code bases, with byte-identical findings. Invalidation is unchanged, because every new
+  query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
+  tables never shrink.
+
 
 ## The checker presumes R code is correct where R's semantics leave the question open
 
@@ -2971,3 +3002,30 @@ first lines R had already read, leaving R mid-command.
 - **Rationale for the user's framing being kept:** the user proposed this structure. It was kept
   because each step maps to a real, shipped feature with real output, and because R++/R-- is a
   compact way to say "a superset you can opt into, and a safe subset you can enforce".
+
+## Nominal and structural types cover both product and sum types
+
+- **Shape:** every record, tuple or tag union is structural by default (`alias` only names it), and
+  `type Name = ...` (or `#: @type`) wraps it in a nominal type. That gives a 2x2 grid, structural or
+  nominal for product and for sum types, with one mechanism instead of a separate "declared record"
+  or "declared union" concept. The user guide teaches it as a table in
+  `type-checking/records-and-tags.mdx`; the contract is the reference section "Nominal records,
+  tuples and tags".
+- **Construction:** `@Name(...)` is the only constructor, and its parentheses are the value's own,
+  so `@Point(x = 1, y = 2)` is a record and `@UserId(id = 1L,)` a one-field record. A bare value of
+  the right shape is refused, which keeps construction in one checked place, like Roc's opaque
+  `@Name`. A separate constructor syntax (`Point(x = 1)`) was rejected because it collides with R
+  calls. `@Point((x = 1, y = 2))` still works, because the inner parentheses are only R grouping, but the docs never write it.
+- **Previous weakness:** the checker handled the nominal wrapper only at assignment. `match`
+  exhaustiveness, pattern checks, field writes, `$` completion and the native-value-to-R check all
+  looked at the nominal head and saw no shape, so a nominal union was never checked for coverage,
+  bindings lost their nominal type, and field writes went unchecked.
+- **Target:** each of those reads projects the nominal value to its representation through the
+  visible type definitions (`exhaustiveness::structural`, `Checker::structural`, `ide::representation`),
+  so the definition stays the single source of truth for the shape. Binding patterns keep the
+  nominal type. Exhaustiveness splits on constructors only while a row has a constructor head, which
+  is what lets a recursive `type Tree<T>` terminate.
+- **Impact:** no new stored state, and the projection reads per-name definitions that each item
+  already depends on, so incremental analysis is unchanged. The `nominal_grid` typing group, the
+  nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
+  pin the behavior.

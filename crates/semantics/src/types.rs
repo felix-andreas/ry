@@ -3,13 +3,13 @@ use std::iter;
 
 use crate::Db;
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, revisions = usize::MAX)]
 pub struct Name<'db> {
     #[returns(deref)]
     pub text: String,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, revisions = usize::MAX)]
 pub struct Ty<'db> {
     #[returns(ref)]
     pub kind: TyKind<'db>,
@@ -31,7 +31,7 @@ pub enum TyKind<'db> {
     Tuple(Vec<Ty<'db>>),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(Vec<RecordField<'db>>),
-    /// `tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
+    /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(Vec<Ty<'db>>),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
     /// fields are kept sorted by name and every field is required.

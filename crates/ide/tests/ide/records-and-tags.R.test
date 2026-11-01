@@ -338,3 +338,95 @@ action: Add inferred type annotations for the whole file
   edit 17..17 -> "#: :Some(integer)\n"
 completion (6): nothing, nobs, noquote, norm, normalizePath, nottem
 hint @21: :Some(integer)
+
+#---- nominal_record_field_completion
+type Point = Record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+p$$0
+#++++
+hover 68..70: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (2): x, y
+
+#---- nominal_record_field_hover
+type Point = Record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+p$y$0
+#++++
+hover 70..71: y: double
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): y
+
+#---- nominal_tag_union_hover_on_the_name
+type Sha$0pe = :Circle(radius: double) | :Empty
+#++++
+hover 5..10: type Shape = :Circle(radius: double) | :Empty
+definition 5..10
+references: 5..10*
+rename: 1 edit(s)
+signature: none
+completion (1): Shape
+
+#---- nominal_tag_union_rename_from_a_constructor
+type Shape = :Circle(radius: double) | :Empty
+s <- @Sha$0pe(:Empty)
+area <- function(s: Shape) -> double 0
+#++++
+hover 52..57: type Shape = :Circle(radius: double) | :Empty
+definition 5..10
+references: 5..10*, 52..57, 86..91
+rename: 3 edit(s)
+type-definition 5..10
+signature: none
+completion (1): Shape
+
+#---- nominal_payload_binding_keeps_its_type
+type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)
+size <- function(t: Tree<integer>) -> integer {
+  match (t) {
+    :Leaf => 0L
+    :Node(left = le$0ft, value = v, right = r) => size(left) + v + size(r)
+  }
+}
+#++++
+hover 165..169: left: Tree<integer>
+hover-definition: local 165..169
+definition 165..169
+references: 165..169*, 201..205
+rename: 2 edit(s)
+type-definition 5..9
+signature: none
+completion: none
+
+#---- nominal_comment_definition_goto
+#: @type Shape {:Circle(radius: double) | :Empty}
+
+#: fn(s: Sha$0pe) -> double
+area <- function(s) 0
+#++++
+hover 60..65: @type Shape {:Circle(radius: double) | :Empty}
+definition 9..14
+references: 9..14*, 60..65
+rename: 2 edit(s)
+signature: none
+completion (1): Shape
+
+#---- structural_record_field_completion
+point <- (x = 1, y = 2)
+point$$0
+#++++
+hover 24..30: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Record{x: double, y: double}\n"
+completion (2): x, y
+hint @5: Record{x: double, y: double}

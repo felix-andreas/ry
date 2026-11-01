@@ -1,5 +1,6 @@
 //! NAMESPACE problem diagnostics; parsing lives in `semantics::metadata`.
 
+use rustc_hash::FxHashSet;
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
 use semantics::metadata::NamespaceImport;
@@ -88,8 +89,9 @@ const RUNTIME_DEFINERS: &[&str] = &[
     "sys.source",
 ];
 
-/// `used_tokens` is every token text across the package's sources: a conservative
-/// scan that under-reports rather than risk a false positive. Whole-namespace
+/// `used_tokens` holds the [`tracked_names`] that appear as a token anywhere in the
+/// package's sources: a conservative scan that under-reports rather than risk a false
+/// positive. Whole-namespace
 /// `import(pkg)` directives are not checked.
 pub fn unused_import_diagnostics(
     imports: &[NamespaceImport],
@@ -119,12 +121,31 @@ pub fn unused_import_diagnostics(
         .collect()
 }
 
+/// The names the checks over the package's sources may ask about: the imported names for
+/// `unused_import_diagnostics`, and the exported names plus the run-time definers for
+/// `namespace_export_problems`. A token scan records only these instead of every token text in
+/// the package.
+pub fn tracked_names<'a>(
+    imports: &'a [NamespaceImport],
+    exports: &'a [(String, TextRange)],
+) -> FxHashSet<&'a str> {
+    imports
+        .iter()
+        .filter_map(|import| import.name.as_deref())
+        .chain(exports.iter().map(|(name, _)| name.as_str()))
+        .chain(RUNTIME_DEFINERS.iter().copied())
+        .collect()
+}
+
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
 /// string tokens contribute their unquoted content.
-pub fn collect_used_tokens(root: &SyntaxNode, out: &mut BTreeSet<String>) {
+pub fn collect_used_tokens(
+    root: &SyntaxNode,
+    imported: &FxHashSet<&str>,
+    out: &mut BTreeSet<String>,
+) {
     let mut insert = |text: &str| {
-        // Most tokens repeat, so look before allocating.
-        if !out.contains(text) {
+        if imported.contains(text) && !out.contains(text) {
             out.insert(text.to_owned());
         }
     };
@@ -148,7 +169,7 @@ pub fn collect_used_tokens(root: &SyntaxNode, out: &mut BTreeSet<String>) {
 mod tests {
     use super::*;
     use semantics::RootDatabase;
-    use semantics::metadata::parse_namespace_imports;
+    use semantics::metadata::parse_namespace;
     use semantics::stubs::{install_shipped_stubs, namespace_exports, namespace_known};
 
     fn stub_backed<'db>(
@@ -167,7 +188,7 @@ mod tests {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         let (knows, exports) = stub_backed(&db);
-        namespace_import_problems(&parse_namespace_imports(source), &knows, &exports)
+        namespace_import_problems(&parse_namespace(source).imports, &knows, &exports)
             .into_iter()
             .map(|diagnostic| diagnostic.message)
             .collect()
@@ -185,7 +206,7 @@ mod tests {
         install_shipped_stubs(&db);
         let (knows, exports) = stub_backed(&db);
         let problems = namespace_import_problems(
-            &parse_namespace_imports("importFrom(stats, sd, medain)\n"),
+            &parse_namespace("importFrom(stats, sd, medain)\n").imports,
             &knows,
             &exports,
         );
@@ -222,10 +243,11 @@ mod tests {
     }
 
     fn unused_for(namespace: &str, sources: &[&str], level: LintLevel) -> Vec<String> {
-        let imports = parse_namespace_imports(namespace);
+        let imports = parse_namespace(namespace).imports;
+        let imported = tracked_names(&imports, &[]);
         let mut used = BTreeSet::new();
         for source in sources {
-            collect_used_tokens(&syntax::parse(source).syntax_node(), &mut used);
+            collect_used_tokens(&syntax::parse(source).syntax_node(), &imported, &mut used);
         }
         unused_import_diagnostics(&imports, &used, level)
             .into_iter()

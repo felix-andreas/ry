@@ -138,7 +138,7 @@ get_name(list(name = "bob"))
 #++++
 get_name: fn(value: Person) -> character
 character
-124..142 error[type-mismatch] expected `Person`, found `list{name: character}`
+124..142 error[type-mismatch] expected `Person`, found `list{name: character}`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- two_nominals_with_same_representation_are_incompatible
 #: @type Cat {list{name: character}}

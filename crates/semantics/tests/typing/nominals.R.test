@@ -56,7 +56,7 @@ imposter <- function() name_of(list(name = "eve", age = 1L))
 #++++
 name_of: fn(p: Person) -> character
 imposter: Unknown
-146..174 error[type-mismatch] expected `Person`, found `list{name: character, age: integer}`
+146..174 error[type-mismatch] expected `Person`, found `list{name: character, age: integer}`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- new_checks_the_representation
 #: @type Person {list{name: character, age: integer}}
@@ -102,7 +102,7 @@ mixed: Unknown
 double_it <- function(m) m * 2
 #++++
 double_it: fn(m: Meters) -> Meters
-78..83 error[type-mismatch] expected `Meters`, found `double`
+78..83 error[type-mismatch] expected `Meters`, found `double`. The value has the right shape, but `Meters` is a nominal type, so only `@Meters(...)` or `#: @new Meters` creates one
 
 #==== unknown_names
 #---- a_refused_alias_still_declares_its_name
@@ -140,7 +140,7 @@ origin <- list(v = 1)
 #: @type Point {list{v: double}}
 #++++
 origin: Point
-19..30 error[type-mismatch] expected `Point`, found `list{v: double}`
+19..30 error[type-mismatch] expected `Point`, found `list{v: double}`. The value has the right shape, but `Point` is a nominal type, so only `@Point(...)` or `#: @new Point` creates one
 
 #---- unknown_generic_application
 #: Pair<integer>

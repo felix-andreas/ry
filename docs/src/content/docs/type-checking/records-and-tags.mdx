@@ -53,6 +53,80 @@ Only the annotations around them, including the definition of `Shape`, come in t
 These are ry values, not R lists. R cannot run code that uses them, so they belong in code that only
 ry runs.
 
+## Structural or nominal
+
+Records and tuples combine values (product types), and tag unions choose between cases (sum types).
+Each kind comes in two flavors. A *structural* type matches any value of the same shape, and `alias`
+only gives that shape a name. A *nominal* type, declared with `type`, is distinct by name, so a value
+with the right shape is not one until its constructor `@Name(...)` creates it:
+
+| | Records and tuples | Tag unions |
+| --- | --- | --- |
+| **Structural** | `alias Point = Record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
+| **Nominal** | `type Celsius = Record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
+
+The comment spellings are `#: @alias Point {...}` and `#: @type Celsius {...}`. Structural is the
+default and usually right. Choose nominal when values have the same shape but must not mix, such as
+Celsius and Fahrenheit, or a user ID and an order ID, or when every value should come from one
+constructor that checks it:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+type Shape = :Circle(radius: double) | :Square(side: double)
+
+boiling <- function() -> Celsius @Celsius(degrees = 100,)
+
+wrong: Fahrenheit <- boiling()
+bare: Shape <- :Circle(radius = 1)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Celsius {Record{degrees: double}}
+
+#: @type Fahrenheit {Record{degrees: double}}
+
+#: @type Shape {:Circle(radius: double) | :Square(side: double)}
+
+#: fn() -> Celsius
+boiling <- function() {
+  #: @new Celsius
+  (degrees = 100,)
+}
+
+#: Fahrenheit
+wrong <- boiling()
+#: Shape
+bare <- :Circle(radius = 1)
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `Fahrenheit`, found `Celsius`
+
+type-mismatch
+
+  x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is
+    a nominal type, so only `@Shape(...)` (or `#: @new Shape`) creates one
+```
+
+The parentheses of `@Name(...)` belong to the value inside, so `@Celsius(degrees = 100,)` is a
+one-field record, `@Pair(1L, "a")` a tuple, and `@Shape(:Circle(radius = 1))` a tag. Everything else
+works as it does for the structural form: `$` reads a field, `match` checks every case of a nominal
+union, a pattern binding keeps the nominal type, and a type can take parameters, as in
+`type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`. At run time `@Name(x)` is
+just `x`.
+
 ## Records and tuples
 
 A record is written in parentheses with named fields, and a tuple with unnamed items. A one-item
