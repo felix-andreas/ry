@@ -721,7 +721,9 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
         return Ok(());
     }
     for (array, dims, other) in [(left, left_dims, right), (right, right_dims, left)] {
-        if dims != nil() && length(array) != 1 && length(other) > length(array) {
+        // A zero-length operand makes the result zero-length, so a zero-length array is never
+        // too short.
+        if dims != nil() && length(array) > 1 && length(other) > length(array) {
             return Err(crate::unwind::error_in(
                 call,
                 format!(
@@ -2032,13 +2034,11 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             )));
         }
     }
-    let kind = items.iter().fold(SexpType::Logical, |kind, item| {
-        if *item == nil() {
-            kind
-        } else {
-            coerce::higher_type(kind, item.kind())
-        }
-    });
+    // `NULL` contributes nothing, and it has no elements to read.
+    let items: Vec<Sexp> = items.into_iter().filter(|item| *item != nil()).collect();
+    let kind = items
+        .iter()
+        .fold(SexpType::Logical, |kind, item| coerce::higher_type(kind, item.kind()));
     match function {
         Summary::Sum => {
             if kind == SexpType::Complex {
