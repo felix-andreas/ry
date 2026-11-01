@@ -2269,7 +2269,8 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
     let (items, na_rm) = summary_args(call)?;
     let mut saw_na = false;
     for item in items {
-        if item == nil() {
+        // GNU R skips an empty list as it skips `NULL`.
+        if item == nil() || (item.kind() == SexpType::List && length(item) == 0) {
             continue;
         }
         if !matches!(

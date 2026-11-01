@@ -454,14 +454,12 @@ pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
-            let value = match expression.kind() {
-                SexpType::Symbol | SexpType::Language | SexpType::Promise
-                    if expression != missing_arg() =>
-                {
-                    make_promise(expression, env)?
-                }
-                SexpType::Bytecode => make_promise(expression, env)?,
-                _ => expression,
+            // A constant gets a promise too, as in GNU R: native code such as lazyeval reads a
+            // promise's environment to tell whether it was forced.
+            let value = if expression == missing_arg() {
+                expression
+            } else {
+                make_promise(expression, env)?
             };
             args.push(Arg {
                 tag: arguments.tag(),

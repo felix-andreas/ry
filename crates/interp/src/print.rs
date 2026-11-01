@@ -655,9 +655,17 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     let args = call.arg(1);
     let mut options = PrintOptions::defaults(call.env);
+    let missings = call.arg(2);
     let mut call_args = Vec::new();
-    for (tag, argument) in values::pairlist_items(args) {
+    for (position, (tag, argument)) in values::pairlist_items(args).into_iter().enumerate() {
         let argument = value_of(argument)?;
+        // Nested `print()` calls get the arguments the caller supplied, as in GNU R, so a method
+        // that does not take `quote` never sees the default.
+        let supplied = missings.kind() != SexpType::Logical
+            || values::ints(missings).get(position).is_none_or(|missing| *missing == 0);
+        if supplied {
+            call_args.push((tag, argument));
+        }
         let name = if tag == nil() { String::new() } else { symbol_name(tag).into_owned() };
         match name.as_str() {
             "digits" => {
@@ -667,12 +675,10 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                         return Err(call.error("invalid digits parameter (1 <= digits <= 22)"));
                     }
                     options.settings.digits = digits as usize;
-                    call_args.push((tag, argument));
                 }
             }
             "quote" => {
                 options.quote = values::as_logical_scalar(argument) != 0;
-                call_args.push((tag, argument));
             }
             "na.print" => {
                 if argument != nil() {
@@ -698,7 +704,7 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                 }
             }
             "useSource" => options.use_source = values::as_logical_scalar(argument) != 0,
-            _ => call_args.push((tag, argument)),
+            _ => {}
         }
     }
     options.call_args = call_args;

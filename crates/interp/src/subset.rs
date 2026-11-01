@@ -1473,9 +1473,6 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if is_list || object == nil() || !value.kind().is_atomic() || length(value) != 1 {
         // Whole-element assignment into a list.
         let list = if object == nil() {
-            if value.kind().is_atomic() && length(value) == 1 {
-                return subassign(object, indices, value, call);
-            }
             alloc(SexpType::List, 0)?
         } else if is_list {
             modifiable(object)?
@@ -1596,10 +1593,6 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
             subassign2(object, &[index], value, call)
         }
         _ if object.kind().is_atomic() => {
-            if length(object) == 0 {
-                let index = values::scalar_string_charsxp(name)?;
-                return subassign2(nil(), &[index], value, call);
-            }
             conditions::warning_call(call, "Coercing LHS to a list")?;
             let list = coerce_vector(object, SexpType::List)?;
             let index = values::scalar_string_charsxp(name)?;

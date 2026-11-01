@@ -126,7 +126,11 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
                 }
                 _ => return Err(error("malformed call")),
             };
-            let function = lower(function)?;
+            let mut function = lower(function)?;
+            // R's parser turns a string in function position into a symbol: `"f<-"(x)`.
+            if function.kind() == SexpType::String && values::length(function) == 1 {
+                function = values::install_bytes(function.element(0).bytes())?;
+            }
             let mut items = vec![(nil(), function)];
             items.extend(argument_list(arguments)?);
             values::pairlist(&items, SexpType::Language)
