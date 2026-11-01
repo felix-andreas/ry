@@ -54,15 +54,22 @@ with_timeout() {
 	fi
 }
 
-# A minimal LSP session: initialize, shutdown, exit. The reply must announce capabilities.
+# A minimal LSP session: initialize, then (as LSP requires) only after its reply, initialized,
+# shutdown and exit. The reply must announce capabilities. Polling the output file instead of using
+# coproc keeps this working on macOS's bash 3.2, and `cat` writes it because the server's stdout
+# must be a pipe.
 lsp_message() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
-reply=$({
+{
 	lsp_message '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}'
+	for _ in $(seq 1 150); do
+		grep -q '"capabilities"' lsp.out 2>/dev/null && break
+		sleep 0.2
+	done
 	lsp_message '{"jsonrpc":"2.0","method":"initialized","params":{}}'
 	lsp_message '{"jsonrpc":"2.0","id":2,"method":"shutdown"}'
 	lsp_message '{"jsonrpc":"2.0","method":"exit"}'
-} | with_timeout 30 "$ry" server 2>/dev/null) || true
-if grep -q '"capabilities"' <<<"$reply"; then pass "ry server answers initialize"; else fail "ry server: $reply"; fi
+} | with_timeout 60 "$ry" server 2>/dev/null | cat >lsp.out || true
+if grep -q '"capabilities"' lsp.out; then pass "ry server answers initialize"; else fail "ry server: $(cat lsp.out)"; fi
 
 if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 	printf 'cat(sum(1:10), "\\n")\n' >sum.R
