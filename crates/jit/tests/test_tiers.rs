@@ -312,6 +312,19 @@ fn native_functions_agree_across_tiers() {
             false,
         ),
         (
+            // Closure arguments are promises: `b` is forced first and finds the global `y`.
+            "y <- 100L\nlz2 <- function(a, b) b + a\nlz <- function(x) lz2(y <- x, y)",
+            "s <- 0L\nfor (i in 1:n) s <- s + lz(1L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "lz1 <- function(a) 1L\nlzr <- function(x) { lz1(return(5L)); x }",
+            "s <- 0L\nfor (i in 1:n) s <- s + lzr(1L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
             "half <- function(a: double) -> double if (a > 0) a / 2 else 0",
             "s <- 0\nfor (i in 1:n) s <- s + half(i)\ns",
             "(n = 600L)",

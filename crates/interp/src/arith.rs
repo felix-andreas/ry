@@ -2067,9 +2067,9 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     let count = length(operand);
     match operand.kind() {
-        SexpType::Integer | SexpType::Logical
-            if matches!(function, Math::Abs) && operand.kind() == SexpType::Integer =>
-        {
+        // GNU R's `abs` keeps integers and turns logicals into integers, unlike the other math
+        // functions, which give doubles.
+        SexpType::Integer | SexpType::Logical if matches!(function, Math::Abs) => {
             let result = alloc(SexpType::Integer, count)?;
             for index in 0..count {
                 let value = values::ints(operand)[index];

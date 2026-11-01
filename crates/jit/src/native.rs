@@ -41,7 +41,10 @@ use {
     interp::{annotations, bytecode, values},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::{cell::RefCell, sync::atomic::AtomicBool},
+    std::{
+        cell::{Cell, RefCell},
+        sync::atomic::AtomicBool,
+    },
 };
 
 /// The status a native function returns beside its value when it ran to the end.
@@ -85,10 +88,16 @@ thread_local! {
         RefCell::new(FxHashMap::default());
     /// The functions being compiled, so a cycle through other specializations stops.
     static COMPILING: RefCell<FxHashSet<Key>> = RefCell::new(FxHashSet::default());
+    /// How many native functions exist, which refusals in `NATIVES` do not count toward.
+    static COMPILED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many native functions a session compiles at most, since each keeps its closure alive.
 const MAX_NATIVES: usize = 4096;
+
+/// How many refusals the cache keeps before it forgets them. A refusal is keyed by a closure
+/// that is not rooted, so its address may be reused by another closure that deserves a try.
+const MAX_REFUSALS: usize = 65536;
 
 /// How deep a body's expressions may nest, which bounds the compiler's own recursion.
 const MAX_NESTING: usize = 200;
@@ -103,7 +112,7 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
         Some(found) => return found,
         None => {}
     }
-    if NATIVES.with(|natives| natives.borrow().len()) >= MAX_NATIVES
+    if COMPILED.with(Cell::get) >= MAX_NATIVES
         || !COMPILING.with(|compiling| compiling.borrow_mut().insert(key.clone()))
     {
         return None;
@@ -113,6 +122,7 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
     let compiled = match compiled {
         Ok(native) => {
             interp::heap().add_global_root(function);
+            COMPILED.with(|count| count.set(count.get() + 1));
             Some(&*Box::leak(Box::new(native)))
         }
         Err(Refusal(why)) => {
@@ -122,7 +132,13 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
             None
         }
     };
-    NATIVES.with(|natives| natives.borrow_mut().insert(key, compiled));
+    NATIVES.with(|natives| {
+        let mut natives = natives.borrow_mut();
+        if compiled.is_none() && natives.len() - COMPILED.with(Cell::get) >= MAX_REFUSALS {
+            natives.retain(|_, native| native.is_some());
+        }
+        natives.insert(key, compiled);
+    });
     compiled
 }
 
@@ -387,6 +403,10 @@ struct Walker<'p> {
     /// How many `if` branches and right operands of `&&` and `||` enclose the expression being
     /// walked. A local first assigned under one would not be bound on every path.
     conditional: usize,
+    /// How many closure call arguments enclose the expression being walked. R passes them as
+    /// promises the callee may force late or never, so evaluating one eagerly is only unobservable
+    /// when it neither assigns nor returns.
+    lazy: usize,
     /// Whether the expression about to be walked is a statement whose value nobody reads.
     statement: bool,
     nesting: usize,
@@ -415,6 +435,7 @@ impl<'p> Walker<'p> {
                 .map(|&(symbol, ty)| (symbol, ty, None))
                 .collect(),
             conditional: 0,
+            lazy: 0,
             statement: false,
             nesting: 0,
             returned: Kind::Never,
@@ -540,14 +561,24 @@ impl<'p> Walker<'p> {
     ) -> Result<Val, Refusal> {
         let mut kinds: SmallVec<[Kind; 4]> = SmallVec::new();
         let mut arguments: SmallVec<[Value; 4]> = SmallVec::new();
+        self.lazy += 1;
         for &arg in args {
-            let value = self.expression(emitter, arg)?;
+            let value = self.expression(emitter, arg);
+            let value = match value {
+                Ok(value) => value,
+                Err(refusal) => {
+                    self.lazy -= 1;
+                    return Err(refusal);
+                }
+            };
             if value.kind == Kind::Never {
+                self.lazy -= 1;
                 return Ok(value);
             }
             kinds.push(value.kind);
             arguments.extend(value.value);
         }
+        self.lazy -= 1;
         let Some(types) = kinds
             .iter()
             .map(|kind| match kind {
@@ -604,6 +635,7 @@ impl<'p> Walker<'p> {
             (Operation::Paren, [inner]) => self.expression(emitter, *inner),
             (Operation::Block, [_, ..]) => self.block(emitter, args),
             (Operation::Assign, [target, value]) => self.assign(emitter, *target, *value),
+            (Operation::Return, _) if self.lazy > 0 => Err(Refusal("a `return` inside a promise")),
             (Operation::Return, [value]) => {
                 let value = self.expression(emitter, *value)?;
                 self.returned = self.returned.join(value.kind)?;
@@ -760,6 +792,9 @@ impl<'p> Walker<'p> {
     ) -> Result<Val, Refusal> {
         if target.kind() != SexpType::Symbol {
             return Err(Refusal("an assignment to something other than a variable"));
+        }
+        if self.lazy > 0 {
+            return Err(Refusal("an assignment inside a promise"));
         }
         let value = self.expression(emitter, value)?;
         let ty = match value.kind {

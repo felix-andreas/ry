@@ -4474,7 +4474,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   to tier 0, which reruns it and reports the problem exactly as R does. The depth budget is
   `max_depth - frames.len()` at the outermost call, decremented per nested call, so the limit
   matches tier 0's call for call. A left `NA` operand of `&&`/`||` also fails, rather than
-  reproducing R's three-valued rule.
+  reproducing R's three-valued rule. Closure arguments are evaluated eagerly, which R's promises
+  make observable only through an assignment or a `return` inside the argument, so those refuse.
 - **Annotations.** Argument checks are decided by `entry_for` and the return check by
   `annotations::return_admits` when the native compiles, from the specialization's types; a
   function whose checks would fail is never compiled, so its calls go the checked way.

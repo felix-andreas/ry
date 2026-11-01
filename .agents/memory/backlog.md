@@ -504,6 +504,18 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   Next: widen natives to vectors, loops and local closures (`Ty::Closure` is only inlined today),
   then give non-native compiled callees a direct entry with no environment when their frame cannot
   escape.
+- **Native function cache lifetime** (`crates/jit/src/native.rs`, `native_for`). A native roots
+  its closure for the session, so a helper defined inside a function keeps that function's frame
+  (and every large local in it) alive. A recompile after `still_resolves` fails leaks the old
+  `Native` and roots the closure a second time. Refusals are never retried, so mutual recursion
+  (`ev` calls `od` calls `ev`) is refused for good: the inner call hits the `COMPILING` cycle guard.
+  Compile a strongly connected group of functions together instead, and root closures weakly.
+- **Native recursion has no machine-stack check.** It is bounded only by `max_depth`
+  (`jit_depth_budget`). That is safe today only because `options(expressions =)` never raises
+  `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)
+  and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
+  give native entry a stack-limit check, before raising the depth limit.
+- **Tier 0 makes `return(y <- x)` invisible.** GNU R and native functions keep it visible.
 - **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
   compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
   but whether a slot is stored unboxed is per object (only length-1, attribute-free, non-ALTREP
