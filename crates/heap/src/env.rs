@@ -114,7 +114,7 @@ impl Frame {
                     .enumerate()
                     .map(|(position, cell)| (unsafe { cell.car() }, position as u32))
                     .collect();
-                self.index = Some(Box::new(index));
+                self.index = Some(index);
             }
             None => {}
         }
