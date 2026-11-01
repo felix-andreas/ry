@@ -4556,6 +4556,41 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
 
+## Native scalar functions: frameless calls with checks proven at compile time
+
+- **Previous shape.** A compiled call of a closure that could not be inlined (any body with an
+  `if`, so every recursive function) went through `runtime::jit_call`: a frame, promises holding
+  the evaluated arguments, the callee's own compiled entry, and boxed results. Annotation checks
+  were skipped only when `entry_for` proved them, and the result was refined by a guard. Typed and
+  untyped code ran at the same speed, because the profiles already knew what the types said.
+- **Target shape.** `crates/jit/src/native.rs` compiles a closure whose body is a pure scalar
+  computation (constants, parameters, locals, `if`, `&&`/`||`, arithmetic, comparisons, `abs`,
+  `sqrt`, `exp`, `log`, `floor`, `ceiling`, and calls of itself or other such closures) to a
+  machine function `fn(budget, args...) -> (status, value)` over unboxed `i32`/`f64` values,
+  specialized per closure and argument types. A compiled caller with unboxed arguments emits
+  `Action::NativeCall` instead of `Action::Call`; recursion stays in machine code.
+- **Why no frame is observable.** The body reads only its parameters and locals, has no effect,
+  and calls nothing that could look at a frame. Everything that would warn or raise in R (an `NA`
+  condition, integer overflow, `sqrt`/`log` of a negative, the expression-depth limit, a pending
+  interrupt) returns `FAILED` before anything visible has happened, and the caller hands the call
+  to tier 0, which reruns it and reports the problem exactly as R does. The depth budget is
+  `max_depth - frames.len()` at the outermost call, decremented per nested call, so the limit
+  matches tier 0's call for call. A left `NA` operand of `&&`/`||` also fails, rather than
+  reproducing R's three-valued rule. Closure arguments are evaluated eagerly, which R's promises
+  make observable only through an assignment or a `return` inside the argument, so those refuse.
+- **Annotations.** Argument checks are decided by `entry_for` and the return check by
+  `annotations::return_admits` when the native compiles, from the specialization's types; a
+  function whose checks would fail is never compiled, so its calls go the checked way.
+  `entry_for` and `admits_inline` now refuse an `Array` mask for a plain scalar.
+- **Invalidation.** A native's function lookups (its callees' included) join every caller's
+  speculations, and the cache revalidates them on each lookup, recompiling when a callee was
+  rebound. Compiled natives keep their closure rooted (the cache key is its address) and are
+  capped at 4096 per session.
+- **Impact.** why-ry `fib` (`fib(30)`) runs in 0.007 s against GNU R's 1.12 s; `fib(25)` went
+  from 0.072 s through `jit_call` to under 0.001 s. It speeds typed and untyped code equally: types make no scalar function faster than its
+  profile already does, they only decide at compile time what an untyped function never checks.
+  Next: unboxed records, tuples and tagged unions as native arguments and results.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a
