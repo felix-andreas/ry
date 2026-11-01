@@ -1,0 +1,48 @@
+# A package author loads the package into ry's runtime, calls into it, and runs a test
+# script; a failing check makes the run fail.
+
+requires ry-runtime
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file NAMESPACE
+| export(area)
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) {
+|   width * height
+| }
+file R/scale.R
+| scale_area <- function(width, height, factor) {
+|   area(width, height) * factor
+| }
+
+run ry load -e "print(scale_area(2, 3, 10))"
+expect exit 0
+expect stdout "[1] 60"
+expect stderr "Loaded shapes: 2 functions bound lazily"
+
+file tests/check.R
+| for (file in list.files("R", full.names = TRUE)) source(file)
+| stopifnot(area(2, 3) == 6)
+| caught <- tryCatch(area(2, "wide"), error = function(condition) conditionMessage(condition))
+| stopifnot(grepl("non-numeric", caught))
+| cat("all checks passed\n")
+
+run ry run --runtime ry tests/check.R
+expect exit 0
+expect stdout "all checks passed"
+
+file tests/broken.R
+| source("R/area.R")
+| stopifnot(area(2, 3) == 7)
+
+run ry run --runtime ry tests/broken.R
+expect exit 1
+expect stderr "area(2, 3) == 7 is not TRUE"
+
+# GNU R gives the same answers.
+run ry run --runtime gnu-r tests/check.R
+expect exit 0
+expect stdout "all checks passed"

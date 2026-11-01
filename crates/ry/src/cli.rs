@@ -416,7 +416,8 @@ pub(crate) fn analyze_project(
         // R resolves an export with `exists()` from the namespace, which inherits through base
         // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
         let defines = |name: &str| {
-            ProjectFiles::try_get(&db).is_some_and(|files| semantics::package_binds(&db, files, name))
+            ProjectFiles::try_get(&db)
+                .is_some_and(|files| semantics::package_binds(&db, files, name))
                 || semantics::check::DEFAULT_SEARCH_PATH
                     .iter()
                     .any(|package| namespace_exports(&db, package, name))

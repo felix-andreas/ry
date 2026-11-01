@@ -465,6 +465,12 @@ cancellation provably lands while the pull is in flight, and the retryable `SERV
 response and the successful retry after it can be asserted without sleeping and hoping. Nothing
 else sets these variables.
 
+`crates/ry/tests/test_simulation.rs` runs the in-process language-server simulator: random editor
+sessions under a seeded schedule, checked at random points against a server started fresh on the same
+disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user journeys in
+`crates/ry/tests/scenarios/`. [Robustness](/contributing/robustness/) documents both, including the
+scenario format and the replay variables.
+
 ## Incrementality
 
 A fixture checks what an edit produces, but not how much work it took to get there.

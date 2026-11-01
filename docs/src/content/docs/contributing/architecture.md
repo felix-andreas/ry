@@ -289,9 +289,19 @@ and all the documents, and the database handle deliberately never leaves it.
   settled full set, without a version. The settled set is a faithful superset of the first, so the
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
-- **Idle work has an order.** The worker first serves any settled publish it owes for the most
+- **Idle work has an order.** The worker first rescans the `library()` calls of any file whose
+  scan a cancellation interrupted, because the edit that cancelled it may belong to another file and
+  nothing else would rescan this one. Next it serves any settled publish it owes for the most
   recently edited file. With nothing owed, it warms up the rest of the workspace one file at a time
   and never publishes that work. Idle work that gets cancelled is requeued.
+- **Only package files stay loaded while closed.** At startup the server loads the files under `R/`,
+  and a closed or disk-changed file stays in the project only if it is one of them. Test, helper and
+  script files are analyzed while they are open, so a session never holds a file a fresh start would
+  not.
+- **The worker is deterministic and steppable.** Everything it sends the client goes through an
+  `Outbox`, which is the socket in production and a recorder in the
+  [simulator](/contributing/robustness/#the-language-server-simulator), and `run_job` is one step of
+  its loop. Collections whose order reaches the client are ordered.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
@@ -312,4 +322,6 @@ and all the documents, and the database handle deliberately never leaves it.
 The fixture suites are the correctness contract. `crates/semantics/tests/test_incremental.rs` pins
 the incrementality contracts by counting query executions after an edit, and
 `crates/semantics/tests/test_perf.rs` asserts wall-time, memory, and keystroke-latency budgets
-against a corpus of real files. [Testing](/contributing/testing) documents all of them.
+against a corpus of real files. [Testing](/contributing/testing) documents all of them, and
+[Robustness](/contributing/robustness) documents the simulator, the fuzzers and the scenario tests
+that check the whole toolchain against from-scratch runs and GNU R.

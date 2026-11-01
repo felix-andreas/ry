@@ -83,15 +83,46 @@ pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
     read_bytes(bytes, &ReadOptions::default())
 }
 
+/// Any bytes either read into a table whose columns are the ones the sniffer promised, in its
+/// order, or fail with an error; a table that reads also writes. Nothing panics. Shared with the
+/// coverage-guided `fuzz/` target.
+pub fn check_csv_input(bytes: &[u8]) {
+    let Ok(table) = read_csv_bytes(bytes) else {
+        return;
+    };
+    let promised: Vec<String> = sniff::sniff(bytes)
+        .columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    let read: Vec<String> = table
+        .schema()
+        .columns
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    assert_eq!(
+        read, promised,
+        "the columns read differ from the sniffed ones for {bytes:?}"
+    );
+    let mut written = Vec::new();
+    if let Err(error) = write_csv_to(&table, &mut written) {
+        panic!("a table read from {bytes:?} does not write: {error}");
+    }
+}
+
 fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> Result<Table> {
     let layout = sniff::sniff(bytes.as_ref());
     if layout.columns.is_empty() {
         return Ok(Table::default());
     }
     if let Some(columns) = &options.columns
-        && let Some(missing) = columns
-            .iter()
-            .find(|name| !layout.columns.iter().any(|column| column.name == name.as_str()))
+        && let Some(missing) = columns.iter().find(|name| {
+            !layout
+                .columns
+                .iter()
+                .any(|column| column.name == name.as_str())
+        })
     {
         return Err(Error::NoColumn(missing.to_string()));
     }
@@ -195,7 +226,12 @@ fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) ->
         .with_has_header(layout.header)
         .with_schema(Some(Arc::new(schema)))
         .with_rechunk(false)
-        .with_columns(options.columns.as_ref().map(|columns| columns.iter().cloned().collect()))
+        .with_columns(
+            options
+                .columns
+                .as_ref()
+                .map(|columns| columns.iter().cloned().collect()),
+        )
         .with_n_rows(options.rows)
         .map_parse_options(|options| {
             options
@@ -214,8 +250,15 @@ fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) ->
         .into_columns()
         .into_par_iter()
         .map(|column| {
-            let sniffed = layout.columns.iter().find(|sniffed| sniffed.name == column.name().as_str());
-            let declared = if as_text { None } else { sniffed.map(|sniffed| sniffed.kind) };
+            let sniffed = layout
+                .columns
+                .iter()
+                .find(|sniffed| sniffed.name == column.name().as_str());
+            let declared = if as_text {
+                None
+            } else {
+                sniffed.map(|sniffed| sniffed.kind)
+            };
             type_text_column(column, declared)
         })
         .collect::<Result<_>>()?;

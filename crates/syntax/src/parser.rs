@@ -734,49 +734,53 @@ impl Parser<'_, '_> {
             }
             Some(COLON) if self.next_token_is(IDENT) => self.ann_tag(end),
             Some(IDENT) if self.token_str(self.pos) == ".." => self.wrap(TYPE_OTHER_TAGS),
-            Some(IDENT | NULL_KW) => match self.token_str(self.pos) {
-                old @ ("frame" | "record" | "tuple") if self.ann_next_significant(end) == Some(L_BRACE) => {
-                    let new = match old {
-                        "frame" => "DataFrame",
-                        "record" => "Record",
-                        _ => "Tuple",
-                    };
-                    self.error_here(format!("ry's own types are capitalized: write `{new}{{...}}`, not `{old}{{...}}`"));
-                    // Inside `ERROR`, lowering reads the type as unknown, so the one finding is not
-                    // followed by mismatches against a type the user did not mean.
-                    self.start(ERROR);
-                    self.ann_list_braces(end);
-                    self.finish();
-                }
-                "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
-                    self.ann_list_brackets(end);
-                }
-                // Inline, a body may follow a return type, so `list {` and `fn (` with a
-                // space start the body; only the hugging spelling is the type.
-                "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy" | "data.table"
-                | "Record" | "Tuple"
-                    if self.ann_next_significant(end) == Some(L_BRACE)
-                        && (!self.inline_type || self.next_token_is(L_BRACE)) =>
-                {
-                    self.ann_list_braces(end);
-                }
-                "fn" if self.ann_next_significant(end) == Some(L_PAREN)
-                    && (!self.inline_type || self.next_token_is(L_PAREN)) =>
-                {
-                    self.ann_function_type(end);
-                }
-                _ => {
-                    if self.ann_next_significant(end) == Some(LESS) {
-                        self.start(TYPE_APPLY);
-                        self.wrap(NAME);
-                        self.ann_trivia(end);
-                        self.ann_type_arg_list(end);
+            Some(IDENT | NULL_KW) => {
+                match self.token_str(self.pos) {
+                    old @ ("frame" | "record" | "tuple")
+                        if self.ann_next_significant(end) == Some(L_BRACE) =>
+                    {
+                        let new = match old {
+                            "frame" => "DataFrame",
+                            "record" => "Record",
+                            _ => "Tuple",
+                        };
+                        self.error_here(format!("ry's own types are capitalized: write `{new}{{...}}`, not `{old}{{...}}`"));
+                        // Inside `ERROR`, lowering reads the type as unknown, so the one finding is not
+                        // followed by mismatches against a type the user did not mean.
+                        self.start(ERROR);
+                        self.ann_list_braces(end);
                         self.finish();
-                    } else {
-                        self.wrap(TYPE_REF);
+                    }
+                    "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
+                        self.ann_list_brackets(end);
+                    }
+                    // Inline, a body may follow a return type, so `list {` and `fn (` with a
+                    // space start the body; only the hugging spelling is the type.
+                    "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+                    | "data.table" | "Record" | "Tuple"
+                        if self.ann_next_significant(end) == Some(L_BRACE)
+                            && (!self.inline_type || self.next_token_is(L_BRACE)) =>
+                    {
+                        self.ann_list_braces(end);
+                    }
+                    "fn" if self.ann_next_significant(end) == Some(L_PAREN)
+                        && (!self.inline_type || self.next_token_is(L_PAREN)) =>
+                    {
+                        self.ann_function_type(end);
+                    }
+                    _ => {
+                        if self.ann_next_significant(end) == Some(LESS) {
+                            self.start(TYPE_APPLY);
+                            self.wrap(NAME);
+                            self.ann_trivia(end);
+                            self.ann_type_arg_list(end);
+                            self.finish();
+                        } else {
+                            self.wrap(TYPE_REF);
+                        }
                     }
                 }
-            },
+            }
             _ => {
                 self.error_expected("a type");
                 return;

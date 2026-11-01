@@ -1142,6 +1142,9 @@ pub unsafe extern "C" fn ry_run(
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return 2;
     }
+    if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
+        runtime().heap.policy_mut().stress = heap::GcStress::EveryAllocation;
+    }
     let mut outcome = interp::session::Outcome::Completed;
     if let Some(input) = &input {
         outcome = interp::session::run_text(input, "<input>");

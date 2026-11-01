@@ -250,7 +250,9 @@ The recorded decision must state the previous source of truth, what was duplicat
 # Testing strategy
 
 - Prefer fixtures. They are the primary way to validate analysis behavior, they read well in a diff, and they make it cheap to write many tests quickly.
-- Fuzz the whole pipeline from day one (user directive). Every stage (parsing, lowering, naming, inference, diagnostics, incrementality, formatting, the IDE layer) gets fuzz and property coverage the day it exists, never as a later add-on, and a bounded pass belongs in the default test suite. The fuzzing decision record in `decisions.md` has the details.
+- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component (each analysis stage, the language server, the loader, the runtime, the GC, the C API, the JIT, the table engine, package install, the CLI) gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `docs/src/content/docs/contributing/robustness.md` is the contract.
+- Never let nondeterminism escape a seam: no wall clock, OS randomness, unordered iteration that reaches output, or unsteppable threads in a component's logic. Harnesses draw all randomness from one seed and print a replay command on failure. A new incremental shortcut gets a from-scratch cross-check behind `syntax::testing::enable_invariants()`.
+- A bug a harness finds lands with a pinned regression input (a regression battery entry, fixture, or scenario). A user journey a feature enables gets a `crates/ry/tests/scenarios/*.scenario` file.
 - Add or tighten a fixture before writing a parser-local or crate-local unit test, unless the behavior is genuinely awkward to express as a fixture.
 - Favor fixture renderers that expose semantic facts over ones that expose implementation detail.
 - When adding a new phase or module, add or extend a fixture suite for it before relying on ad hoc unit tests.

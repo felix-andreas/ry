@@ -1,7 +1,11 @@
 //! `ry.toml` and the former `roughly.toml` are both looked for in a directory
 //! before walking to its parent, so a stale old-name file higher up never wins.
 
-use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode, SourceSpan};
+use crate::cli::exclude_matcher;
+use miette::{
+    Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
+    SourceSpan,
+};
 use semantics::lints::{LintConfig, NameStyle};
 use serde::de::{self, DeserializeOwned, Deserializer, Visitor};
 use serde::{Deserialize, forward_to_deserialize_any};
@@ -141,6 +145,50 @@ impl Config {
             source_directory: None,
             unknown_keys,
         })
+    }
+}
+
+/// Any text read as `ry.toml` or `roughly.toml` either loads or fails with a report that renders,
+/// and nothing on either path panics: loading, the warnings, the exclude matcher, and the report
+/// with its location. Shared with the coverage-guided `fuzz/` target.
+pub fn check_config_invariants(text: &str) {
+    let parsed = Config::from_toml_str(text);
+    match (&parsed, &Config::from_toml_str(text)) {
+        (Ok(first), Ok(again)) => {
+            assert_eq!(first, again, "non-deterministic config for {text:?}")
+        }
+        (Err(first), Err(again)) => assert_eq!(
+            first.to_string(),
+            again.to_string(),
+            "non-deterministic config error for {text:?}"
+        ),
+        _ => panic!("the config loads only sometimes for {text:?}"),
+    }
+    match parsed {
+        Ok(config) => {
+            config.warnings();
+            // An invalid pattern is a reported error, not a panic.
+            exclude_matcher(&config, Path::new("/")).ok();
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "an empty config error for {text:?}"
+            );
+            if let Some((line, column)) = error.parse_location() {
+                assert!(
+                    line >= 1 && line <= text.lines().count().max(1) + 1 && column >= 1,
+                    "config error location {line}:{column} escapes {text:?}"
+                );
+            }
+            let mut rendered = String::new();
+            assert!(
+                GraphicalReportHandler::new_themed(GraphicalTheme::none())
+                    .render_report(&mut rendered, &error)
+                    .is_ok(),
+                "the config error report does not render for {text:?}"
+            );
+        }
     }
 }
 

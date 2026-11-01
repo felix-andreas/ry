@@ -36,6 +36,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **The language is `ry`** (crate `crates/ry`, published `ry-lang`, config `ry.toml`, suppression `# ry: allow(...)`, env `RY_*`). The former spellings (`roughly.toml`, `# roughly: allow`, `ROUGHLY_*`, extension `roughly.*`) still fall back, and `roughly.toml` must stay.
 - **The type system admits only what is fast to check, which means Hindley-Milner (user directive).** `.Rtypes` overloading is the one sanctioned exception. Traits, typeclasses and general subtyping are declined, not deferred, so evaluate every type-system proposal against `decisions.md` first. Open questions live in `contributing/design/open-questions.md`.
 - **CI gates only `crates/ry`** (`default-members`), so no fixture or fuzz suite runs in CI. The widened workflow is staged in `.github/pending-ci.yml` for a human `git mv`, because the agent token lacks workflow scope. `just gate` runs every suite locally (it does not block landing while main may be broken), and a green CI badge never means "the fixtures pass".
+- **Robustness is the long-run priority (user directive): everything is fuzzable, simulatable and scriptable.** `contributing/robustness.md` is the contract and lists each layer's harness; `decisions.md` ("everything is fuzzable, simulatable and scriptable") has the rationale. The language-server simulator (`crates/ry/src/server/simulation.rs`, `just simulate`) and scenario files (`crates/ry/tests/scenarios/`, `just scenarios`) are the newest; open gaps (in-memory file system, allocation failure, `library()` on an rcmd-installed package) are in `backlog.md`, "Open: robustness harnesses".
 - **Debt queue:** `backlog.md` §abstraction & duplication review and §test & fuzz architecture review. Both list items deliberately not worth fixing, so respect those.
 
 ## Long-term
@@ -155,6 +156,8 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **A foreign renderer's expectations are never bulk-blessed.** Adjudicate each case against the typing reference.
 - **The fuzz batteries' cost is re-parsing the stub corpus per fresh database**, not the iteration count.
 - **A gate must fail on its own exit status.** `cmd | grep …; echo OK` always passes, and a background job's output file can be read mid-write.
+- **A simulator failure is a server bug until shown otherwise, but check the client model first.** Two false-positive classes came from the simulator, not the server: a reopened document must continue its version from the last one (VS Code does), and the first-wave-is-a-subset check only holds when no config or disk change landed since the sync.
+- **`syntax::testing::enable_invariants()` makes every splice reparse also parse from scratch.** The simulator turns it on; a harness that drives incremental code should too.
 - **The REPL pty suite flakes under concurrent load** (one failure, and a suite wall time of 41 s instead of 4 to 6 s). Re-run it serially before believing it. A real desync reproduces and takes about 90 s.
 
 ### REPL and environment

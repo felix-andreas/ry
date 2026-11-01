@@ -852,6 +852,27 @@ A human is required for three things: the `git mv` of `.github/pending-ci.yml`, 
 scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
 corpus cache, and an OSS-Fuzz submission.
 
+## Open: robustness harnesses
+
+Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
+
+- **`R CMD INSTALL` output that `library()` accepts.** `rcmd::install` writes `DESCRIPTION`,
+  `NAMESPACE`, `R/*.R` and `libs/`, but no `Meta/package.rds`, `Meta/nsInfo.rds` or lazy-load
+  database, so `library(pkg, lib.loc = ...)` fails with "not a valid installed package" under both
+  ry's runtime and GNU R. Reproduce with `just scenarios install-package` after changing `use.R` in
+  `crates/ry/tests/scenarios/install-package.scenario` back to `library(tally, lib.loc = "library")`.
+  The packaging draft promises one directory both runtimes load.
+- **An in-memory file system for the server.** The simulator's file-system seam is a real directory,
+  so read errors, partial writes and permission failures are never injected. The worker reads the
+  disk directly (`fs::read_to_string` in `did_close`, watcher handling, metadata), so the seam is a
+  trait the worker reads through.
+- **Allocation failure is not injectable** in the heap or the analysis.
+- **The simulator does not open `.Rtypes` stub buffers**, does not send `workspace/didChangeConfiguration`,
+  and never restarts the server mid-session. Each is a cheap action to add to `Session::act`.
+- **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
+  query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
+  protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.
+
 ## Open: test and fuzz architecture
 
 A second independent review of the fuzzing and test architecture, with every claim measured rather

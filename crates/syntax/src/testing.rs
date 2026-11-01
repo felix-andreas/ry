@@ -8,9 +8,23 @@ use rowan::NodeOrToken;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, fs};
 
 use crate::SyntaxNode;
+
+static INVARIANTS: AtomicBool = AtomicBool::new(false);
+
+/// Switches on the expensive cross-checks that production skips: an incremental result is
+/// recomputed from scratch and must be equal. Simulators and fuzzers turn it on for the whole
+/// process, so a divergence panics at the step that caused it, with the inputs that reproduce it.
+pub fn enable_invariants() {
+    INVARIANTS.store(true, Ordering::Relaxed);
+}
+
+pub fn invariants_enabled() -> bool {
+    INVARIANTS.load(Ordering::Relaxed)
+}
 
 pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     let files = parse_fixture_files(suite_dir);
@@ -276,6 +290,66 @@ impl SplitMix64 {
 
     pub fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
         self.next_u64() % denominator < numerator
+    }
+}
+
+/// The choices a structured generator makes. The in-tree harnesses draw them from a seeded
+/// [`SplitMix64`]; a coverage-guided target draws them from its input through [`ByteStream`],
+/// so one generator serves both and libFuzzer's byte mutations become structural mutations.
+pub trait Entropy {
+    fn next_u64(&mut self) -> u64;
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next_u64() % bound.max(1) as u64) as usize
+    }
+
+    fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
+        self.below(denominator as usize) < numerator as usize
+    }
+}
+
+impl Entropy for SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        SplitMix64::next_u64(self)
+    }
+}
+
+/// Fuzzer input read as a stream of choices. A small choice consumes one byte, so a byte
+/// mutation changes one decision. An exhausted stream answers zero forever, which every
+/// generator must treat as "stop growing".
+pub struct ByteStream<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> ByteStream<'a> {
+    pub fn new(bytes: &'a [u8]) -> ByteStream<'a> {
+        ByteStream { bytes }
+    }
+
+    fn take(&mut self, count: usize) -> u64 {
+        let (head, rest) = self.bytes.split_at(count.min(self.bytes.len()));
+        self.bytes = rest;
+        head.iter()
+            .rev()
+            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte))
+    }
+}
+
+impl Entropy for ByteStream<'_> {
+    fn next_u64(&mut self) -> u64 {
+        self.take(8)
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        let bound = bound.max(1) as u64;
+        let value = if bound <= 1 << 8 {
+            self.take(1)
+        } else if bound <= 1 << 16 {
+            self.take(2)
+        } else {
+            self.take(8)
+        };
+        (value % bound) as usize
     }
 }
 

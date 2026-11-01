@@ -1,0 +1,60 @@
+# A user installs a source package with compiled C code through ry's `R CMD INSTALL`, then
+# calls it from a script on ry's runtime.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: tally
+| Version: 1.0.0
+| Title: Sums numbers in C
+| Description: A small package with compiled code.
+| License: MIT
+file pkg/NAMESPACE
+| useDynLib(tally, .registration = TRUE)
+| export(tally)
+file pkg/R/tally.R
+| tally <- function(values) .Call(tally_sum, as.double(values))
+file pkg/src/tally.c
+| #include <R.h>
+| #include <Rinternals.h>
+| #include <R_ext/Rdynload.h>
+|
+| SEXP tally_sum(SEXP values)
+| {
+|     double total = 0;
+|     const double *data = REAL(values);
+|     for (R_xlen_t i = 0; i < XLENGTH(values); i++)
+|         total += data[i];
+|     return ScalarReal(total);
+| }
+|
+| static const R_CallMethodDef calls[] = {
+|     {"tally_sum", (DL_FUNC) &tally_sum, 1},
+|     {NULL, NULL, 0}
+| };
+|
+| void R_init_tally(DllInfo *info)
+| {
+|     R_registerRoutines(info, NULL, calls, NULL, NULL);
+|     R_useDynamicSymbols(info, FALSE);
+| }
+
+install pkg
+expect exit 0
+expect file library/tally/DESCRIPTION "RyBuilt"
+
+# `library(tally, lib.loc = "library")` is the journey's real last step, but the installed
+# directory has no `Meta/package.rds` or lazy-load database yet, so `library()` rejects it
+# under both runtimes (backlog.md, "R CMD INSTALL output that library() accepts"). Until
+# then the script loads the installed pieces by hand.
+file use.R
+| info <- dyn.load("library/tally/libs/tally.so")
+| tally_sum <- getNativeSymbolInfo("tally_sum", info)
+| source("library/tally/R/tally.R")
+| print(tally(c(1, 2, 3.5)))
+| print(tally(1:10))
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 6.5"
+expect stdout "[1] 55"

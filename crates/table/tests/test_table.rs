@@ -3090,6 +3090,24 @@ fn a_csv_file_reads_into_the_column_types_fread_gives() {
     );
 }
 
+/// Mutated delimited text reads or fails cleanly under `io::check_csv_input`, which the
+/// coverage-guided `csv` target shares.
+#[test]
+fn fuzz_csv_reading() {
+    let seeds = [
+        "id,price,flag,name,empty\n1,1.5,TRUE,x,NA\n2, 3,FALSE,,\n NA,NA,,\"y, z\",\n",
+        "a\tb\n1\t\"q\nq\"\n2\t3\n",
+        "x|y\n1|2.5\nInf|-inf\n",
+        "1,2\n3,4\n",
+        "a,a,\n1,2,3\n",
+    ];
+    let mut rng = SplitMix64(0xc5f_f022);
+    for _ in 0..fuzz_iterations(500) {
+        let seed = seeds[rng.below(seeds.len())];
+        io::check_csv_input(&syntax::testing::mutate_bytes(&mut rng, seed));
+    }
+}
+
 #[test]
 fn a_first_row_that_fits_the_columns_is_data() {
     let table = read_text("1,2\n3,4\n");

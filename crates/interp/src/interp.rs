@@ -68,6 +68,7 @@ pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
+pub mod testing;
 pub mod tools;
 pub mod unwind;
 pub mod utils;

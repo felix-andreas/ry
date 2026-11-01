@@ -2023,7 +2023,14 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                         if is_na_real(value) { NA_REAL } else { f64::NAN };
                     continue;
                 }
+                // GNU R accumulates in x87 long double, where NA's payload outranks a plain
+                // NaN's, so NA wins over NaN in whichever order they come.
                 accumulator = match kind {
+                    Cumulative::Sum | Cumulative::Product
+                        if is_na_real(accumulator) || is_na_real(value) =>
+                    {
+                        NA_REAL
+                    }
                     Cumulative::Sum => accumulator + value,
                     Cumulative::Product => accumulator * value,
                     Cumulative::Max => accumulator.max(value),
@@ -2170,25 +2177,30 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 return values::scalar_complex(total);
             }
             if kind == SexpType::Real {
+                // Within one argument the first NaN or NA wins, as GNU R's double loop gives;
+                // the arguments' sums are then combined in long double, where NA outranks NaN.
                 let mut total = CompensatedSum::default();
                 let mut na = false;
-                let mut add = |value: f64| {
-                    if value.is_nan() {
-                        if na_rm {
-                            return;
-                        }
-                        if is_na_real(value) {
-                            na = true;
-                        }
-                    }
-                    total.add(value);
-                };
                 for &item in &items {
-                    if item.kind() == SexpType::Real {
-                        values::reals(item).iter().for_each(|&value| add(value));
-                    } else {
-                        (0..length(item)).for_each(|index| add(real_at(item, index)));
+                    let mut item_total = CompensatedSum::default();
+                    let mut first_nan = None;
+                    for index in 0..length(item) {
+                        let value = real_at(item, index);
+                        if value.is_nan() && na_rm {
+                            continue;
+                        }
+                        if item_total.sum.is_nan() {
+                            break;
+                        }
+                        if value.is_nan() {
+                            first_nan = Some(value);
+                            break;
+                        }
+                        item_total.add(value);
                     }
+                    let item_sum = first_nan.unwrap_or_else(|| item_total.total());
+                    na |= is_na_real(item_sum);
+                    total.add(item_sum);
                 }
                 return scalar_real(if na { NA_REAL } else { total.total() });
             }
@@ -2211,17 +2223,25 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             scalar_integer(total as i32)
         }
         Summary::Product => {
+            // The same NaN order as the sum: first wins within an argument, NA across them.
             let mut total = 1.0;
+            let mut na = false;
             for &item in &items {
+                let mut item_product: f64 = 1.0;
                 for index in 0..length(item) {
                     let value = real_at(item, index);
                     if na_rm && value.is_nan() {
                         continue;
                     }
-                    total *= value;
+                    if item_product.is_nan() {
+                        break;
+                    }
+                    item_product = if value.is_nan() { value } else { item_product * value };
                 }
+                na |= is_na_real(item_product);
+                total *= item_product;
             }
-            scalar_real(total)
+            scalar_real(if na { NA_REAL } else { total })
         }
         Summary::Max | Summary::Min => {
             let is_max = function == Summary::Max;
@@ -2450,6 +2470,10 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
         }
         SexpType::Real => {
             let data = values::reals(operand);
+            // GNU R sums in x87 long double, where NA's payload outranks a plain NaN's.
+            if data.iter().any(|&value| is_na_real(value)) {
+                return scalar_real(NA_REAL);
+            }
             let mut total = CompensatedSum::default();
             for &value in data {
                 total.add(value);

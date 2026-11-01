@@ -7,10 +7,13 @@
 //! GNU R is one such engine, and ry's runtime will be another.
 
 pub mod bench;
+pub mod fuzz;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use similar::TextDiff;
@@ -85,6 +88,9 @@ pub struct ProcessEngine {
     erases_annotations: bool,
     /// Variables set for the engine's process on top of the locale the oracle fixes.
     environment: Vec<(String, String)>,
+    /// A run that takes longer is killed and fails, so a hang under fuzzing is a finding
+    /// rather than a stuck harness.
+    timeout: Option<Duration>,
 }
 
 /// How an engine is handed `driver.R`.
@@ -107,16 +113,46 @@ impl ProcessEngine {
             driver: Some(Driver::GnuR),
             erases_annotations: true,
             environment: Vec::new(),
+            timeout: None,
         }
     }
 
-    /// The engine a name stands for: `ry`, `ry-jit`, or a command line.
+    /// The engine a name stands for: `gnu-r`, `ry`, `ry-tier0`, `ry-jit`, `ry-gctorture`, or a
+    /// command line.
     pub fn named(name: &str) -> Option<Self> {
         match name {
+            "gnu-r" => Some(ProcessEngine::gnu_r()),
             "ry" => Some(ProcessEngine::ry()),
+            "ry-tier0" => Some(ProcessEngine::ry_tier0()),
             "ry-jit" => Some(ProcessEngine::ry_jit()),
+            "ry-gctorture" => Some(ProcessEngine::ry_gc_torture()),
             command => ProcessEngine::from_command(command),
         }
+    }
+
+    /// Kills a run that takes longer than `timeout` and reports it as failed.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// ry's runtime with the JIT off, so every body runs on the tier-0 bytecode interpreter.
+    pub fn ry_tier0() -> Self {
+        let mut engine = ProcessEngine::ry();
+        engine.name = "ry-tier0".to_string();
+        engine.environment.push(("RY_JIT".to_string(), "off".to_string()));
+        engine
+    }
+
+    /// ry's runtime with collection stress on from the first line of the script
+    /// (`RY_GC_STRESS`): every allocation collects first, so an object the runtime forgot to
+    /// root is freed at the allocation that exposes it rather than at some later collection.
+    /// The JIT stays at its default, so hot code is stressed compiled as well.
+    pub fn ry_gc_torture() -> Self {
+        let mut engine = ProcessEngine::ry();
+        engine.name = "ry-gctorture".to_string();
+        engine.environment.push(("RY_GC_STRESS".to_string(), "1".to_string()));
+        engine
     }
 
     /// ry's runtime with its JIT forced on, so every body that runs twice and every loop runs
@@ -138,6 +174,7 @@ impl ProcessEngine {
             driver: Some(Driver::Script),
             erases_annotations: false,
             environment: Vec::new(),
+            timeout: None,
         }
     }
 
@@ -152,6 +189,7 @@ impl ProcessEngine {
             driver: None,
             erases_annotations: false,
             environment: Vec::new(),
+            timeout: None,
         })
     }
 }
@@ -164,6 +202,26 @@ pub fn ry_program() -> String {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry")
     });
     std::fs::canonicalize(&program).unwrap_or(program).display().to_string()
+}
+
+/// Whether ry's runtime can run here: the `ry` binary exists, and so does the `libR.so` it
+/// loads (from `RY_LIBR`, or beside the binary as `ry` looks for it).
+pub fn ry_runtime_available() -> bool {
+    let program = PathBuf::from(ry_program());
+    if !program.is_file() {
+        return false;
+    }
+    if let Some(library) = std::env::var_os("RY_LIBR") {
+        return Path::new(&library).is_file();
+    }
+    let directory = program.parent().unwrap_or(Path::new("."));
+    [
+        directory.join("libR.so"),
+        directory.join("deps").join("libR.so"),
+        directory.join("../lib/ry/libR.so"),
+    ]
+    .iter()
+    .any(|candidate| candidate.is_file())
 }
 
 impl Engine for ProcessEngine {
@@ -210,12 +268,19 @@ impl Engine for ProcessEngine {
             )
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
-        let output = command.output().map_err(|error| match error.kind() {
+        let output = run_command(command, self.timeout).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => {
                 EngineError::Unavailable(format!("`{}` was not found", self.program))
             }
             _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
         })?;
+        if output.timed_out {
+            return Err(EngineError::Failed(format!(
+                "{} was killed after {} seconds",
+                self.name,
+                self.timeout.map_or(0, |timeout| timeout.as_secs())
+            )));
+        }
         let report = std::fs::read_to_string(&report_path);
         let report = report.map_err(|_| {
             EngineError::Failed(format!(
@@ -236,6 +301,56 @@ impl Engine for ProcessEngine {
             value: report.value,
         })
     }
+}
+
+struct CommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+}
+
+/// Runs `command` to completion, or kills it once `timeout` has passed. The pipes are drained
+/// on their own threads, because a child that fills a pipe nobody reads never exits.
+fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                pipe.read_to_end(&mut bytes).map(|_| bytes)
+            } else {
+                Ok(bytes)
+            }
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            timed_out = true;
+            child.kill()?;
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let joined = |handle: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+        handle
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("a pipe reader panicked")))
+    };
+    Ok(CommandOutput {
+        status,
+        stdout: joined(stdout)?,
+        stderr: joined(stderr)?,
+        timed_out,
+    })
 }
 
 /// The script itself when it has no inline annotation, else its erasure written to `scratch`

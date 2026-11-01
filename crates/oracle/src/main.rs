@@ -33,6 +33,26 @@ enum Command {
     },
     /// Print the outcome of one file under GNU R.
     Show { path: PathBuf },
+    /// Generate random R programs from consecutive seeds and run each under GNU R and the
+    /// given engines, reporting every divergence with its seed and program.
+    Fuzz {
+        /// The first seed.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// How many consecutive seeds to run.
+        #[arg(long, default_value_t = 1)]
+        count: u64,
+        /// The engines compared with GNU R, comma separated: `ry-tier0`, `ry-jit`, `ry`,
+        /// `ry-gctorture`, or command lines.
+        #[arg(long, default_value = "ry-tier0,ry-jit")]
+        engines: String,
+        /// Seconds one engine may take on one program.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Print the program for `--seed` and exit, without running anything.
+        #[arg(long)]
+        print: bool,
+    },
     /// Run packages' testthat suites under GNU R and ry's runtime (both through `ry load`) and
     /// compare them test by test.
     Bench {
@@ -84,6 +104,10 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Fuzz { seed, print: true, .. } = cli.command {
+        print!("{}", oracle::fuzz::program(seed));
+        return ExitCode::SUCCESS;
+    }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
         return ExitCode::from(2);
@@ -141,6 +165,13 @@ fn main() -> ExitCode {
             corpus,
             packages,
         } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, packages),
+        Command::Fuzz {
+            seed,
+            count,
+            engines,
+            timeout,
+            print: _,
+        } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout)),
         Command::Show { path } => match gnu_r.run(&path) {
             Ok(outcome) => {
                 print!("{}", render(&outcome));
@@ -257,6 +288,69 @@ fn compare(gnu_r: &ProcessEngine, second: &dyn Engine, cases: &[PathBuf]) -> Exi
         return ExitCode::SUCCESS;
     }
     summarize(cases.len() - skipped, failures)
+}
+
+fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
+    let mut parsed = Vec::new();
+    for name in engines.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        match ProcessEngine::named(name) {
+            Some(engine) => parsed.push(engine.with_timeout(timeout)),
+            None => {
+                eprintln!("unknown engine `{name}`");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let engines: Vec<&dyn Engine> = parsed.iter().map(|engine| engine as &dyn Engine).collect();
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout);
+    let directory = std::env::temp_dir().join(format!("ry-oracle-fuzz-{}", std::process::id()));
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        eprintln!("{}: {error}", directory.display());
+        return ExitCode::FAILURE;
+    }
+    let started = std::time::Instant::now();
+    let mut diverging = Vec::new();
+    let mut ended_in_error = 0;
+    for seed in first..first.saturating_add(count) {
+        match oracle::fuzz::check_seed(seed, &gnu_r, &engines, &directory) {
+            Ok(report) => {
+                if !report.reference.errors.is_empty() {
+                    ended_in_error += 1;
+                }
+                for reason in &report.unavailable {
+                    eprintln!("unavailable: {reason}");
+                }
+                if report.divergences.is_empty() {
+                    println!("ok      seed {seed}");
+                } else {
+                    println!("DIFFERS {}", oracle::fuzz::render_divergences(&report));
+                    diverging.push(seed);
+                }
+                if !report.unavailable.is_empty() && report.unavailable.len() == engines.len() {
+                    eprintln!("no engine besides GNU R can run here");
+                    return ExitCode::from(2);
+                }
+            }
+            Err(error) => {
+                println!("ERROR   seed {seed}: GNU R: {error}");
+                diverging.push(seed);
+            }
+        }
+    }
+    if let Err(error) = std::fs::remove_dir_all(&directory) {
+        eprintln!("could not remove {}: {error}", directory.display());
+    }
+    println!(
+        "{} of {count} seeds agree ({ended_in_error} ended in an error under GNU R) in {:.1} s",
+        count as usize - diverging.len(),
+        started.elapsed().as_secs_f64()
+    );
+    if diverging.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        println!("diverging seeds: {diverging:?}");
+        ExitCode::FAILURE
+    }
 }
 
 fn run_packages(

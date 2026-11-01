@@ -3684,6 +3684,7 @@ dependencies = [
  "miette",
  "mimalloc",
  "portable-pty",
+ "rcmd",
  "repl",
  "rustc-hash 2.1.3",
  "salsa",
@@ -4070,6 +4071,9 @@ checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 [[package]]
 name = "sniff"
 version = "0.3.2-beta"
+dependencies = [
+ "syntax",
+]
 
 [[package]]
 name = "socket2"
