@@ -25,8 +25,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("serializeb", 5, do_serialize),
     internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("loadFromConn2", 3, |call| unsafe { Err(call.error("load() is not supported yet")) }),
-    internal("saveToConn", 8, |call| unsafe { Err(call.error("save() is not supported yet")) }),
+    internal("loadFromConn2", 3, do_load_from_conn).invisible(),
+    internal("saveToConn", 6, do_save_to_conn).invisible(),
 ];
 
 // Special item codes.
@@ -1000,6 +1000,56 @@ unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
     let bytes = serialize(call.arg(0))?;
     crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
+}
+
+/// `saveToConn(list, con, ascii, version, envir, eval.promises)`: writes the variables named
+/// by `list`, as found from `envir`, to `con` in the binary save format: the `RDX3` magic line
+/// and then one serialized pairlist tagged by the names.
+unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
+    if values::as_logical_scalar(call.arg(2)) == 1 {
+        return Err(call.error("ascii save files are not supported yet"));
+    }
+    let names = call.arg(0);
+    if names.kind() != SexpType::String {
+        return Err(call.error("first argument must be a character vector"));
+    }
+    let env = call.arg(4);
+    let force = values::as_logical_scalar(call.arg(5)) == 1;
+    let mut items = Vec::with_capacity(length(names));
+    for name in values::strings(names) {
+        let name = name.unwrap_or_default();
+        let symbol = values::install(&name)?;
+        let mut value = eval::find_var(symbol, env)?;
+        if value == values::unbound() {
+            return Err(call.error(format!("object '{name}' not found")));
+        }
+        if force && value.kind() == SexpType::Promise {
+            value = eval::force_promise(value)?;
+        }
+        items.push((symbol, value));
+    }
+    let list = values::pairlist(&items, SexpType::Pairlist)?;
+    let mut bytes = b"RDX3\n".to_vec();
+    bytes.extend(serialize(list)?);
+    crate::connections::write_binary(call.arg(1), &bytes)?;
+    Ok(nil())
+}
+
+/// `loadFromConn2(con, envir, verbose)`: defines in `envir` the variables of a binary save
+/// file and returns their names.
+unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
+    let bytes = crate::connections::read_binary(call.arg(0))?;
+    let Some(body) = bytes.strip_prefix(b"RDX3\n").or_else(|| bytes.strip_prefix(b"RDX2\n")) else {
+        return Err(call.error("the input does not start with a magic number compatible with loading from a connection"));
+    };
+    let list = unserialize(body, nil())?;
+    let env = call.arg(1);
+    let mut names = Vec::new();
+    for (tag, value) in values::pairlist_items(list) {
+        eval::define(tag, value, env)?;
+        names.push(values::symbol_name(tag).into_owned());
+    }
+    values::string_vector(&names)
 }
 
 unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
