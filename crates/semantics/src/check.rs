@@ -4120,9 +4120,11 @@ impl<'db> Checker<'db, '_> {
                         && ((forwards
                             && (argument.name == Some(*value_name)
                                 || optional_targets.get(index).copied().unwrap_or(false)))
-                            || library_name.zip(argument.name).is_some_and(|(function, parameter)| {
-                                tests_missing_without_default(function, parameter.as_str())
-                            }))
+                            || library_name.zip(argument.name).is_some_and(
+                                |(function, parameter)| {
+                                    tests_missing_without_default(function, parameter.as_str())
+                                },
+                            ))
                     {
                         continue;
                     }
@@ -4798,16 +4800,10 @@ impl<'db> Checker<'db, '_> {
         }
         match resolved.kind(self.db) {
             TyKind::Any | TyKind::Unknown => return unknown(self.db),
-            TyKind::Var(_)
-                if matches!(
-                    self.table.open_constraint(self.db, resolved),
-                    Some(Constraint::Numeric | Constraint::ScalarNumeric)
-                ) =>
-            {
-                return scalar(self.db, Atomic::Logical);
-            }
             TyKind::Var(_) | TyKind::Rigid(_) => {
-                if !self.reads_open_defaulted_formal(operand, resolved) {
+                if !self.condition_coerces(resolved)
+                    && !self.reads_open_defaulted_formal(operand, resolved)
+                {
                     self.unify_or_report(operand_range, scalar(self.db, Atomic::Logical), resolved);
                 }
                 return scalar(self.db, Atomic::Logical);
@@ -4831,7 +4827,9 @@ impl<'db> Checker<'db, '_> {
                 // An unannotated parameter keeps its open variable beside the shape a test gave it
                 // (`write` is `T | NULL` under `if (is.null(read)) read <- !write`), and the
                 // variable is no evidence of a wrong operand.
-                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) | TyKind::Var(_) => {}
+                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+                | TyKind::Var(_) => {}
+                TyKind::Rigid(_) if self.condition_coerces(member) => {}
                 TyKind::Null => vector = true,
                 TyKind::Vector(element) | TyKind::NamedVector(element)
                     if matches!(
@@ -5239,19 +5237,6 @@ impl<'db> Checker<'db, '_> {
                 return;
             }
         }
-        // A value already required to be numeric (`if (n %% 2L)`) coerces like a number, so the
-        // condition must not pin it to `logical`.
-        let constraint = match resolved.kind(self.db) {
-            TyKind::Var(_) => self.table.open_constraint(self.db, resolved),
-            TyKind::Rigid(name) => self.table.rigid_constraints.get(name).copied(),
-            _ => None,
-        };
-        if matches!(
-            constraint,
-            Some(Constraint::Numeric | Constraint::ScalarNumeric)
-        ) {
-            return;
-        }
         self.unify_or_report(condition_range, scalar(self.db, Atomic::Logical), resolved);
     }
 
@@ -5319,6 +5304,15 @@ impl<'db> Checker<'db, '_> {
             // `double[]`) are length one at run time far more often than not.
             TyKind::Vector(element) => self.condition_coerces(*element),
             TyKind::Union(members) => members.iter().all(|&member| self.condition_coerces(member)),
+            // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
+            TyKind::Var(_) => matches!(
+                self.table.open_constraint(self.db, ty),
+                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+            ),
+            TyKind::Rigid(name) => matches!(
+                self.table.rigid_constraints.get(name),
+                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+            ),
             _ => false,
         }
     }

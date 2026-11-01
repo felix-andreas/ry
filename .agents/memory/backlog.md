@@ -169,6 +169,13 @@ classes, largest first:
 - **A declared vector into a scalar parameter is still reported** (`double[]` into ks
   `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
   variables pass by length (`without_inferred_length`).
+- **A number passed to a parameter tested as a condition is reported** (diffobj
+  `trim_hunk(h, "tar", 0L)` over `if (!line.id)`, ff `if (pagesize)`, renv, rmgarch; about 12
+  corpus reports). R takes `0L` as a condition, but `if (x)` and `!x` bind an open parameter to
+  `logical`. Bounding it by `scalar numeric` instead clears them but turns every flag's signature
+  into `<T: scalar numeric> fn(flag: T)`, which was tried and rejected for hover readability. A
+  call-site relaxation for parameters whose `logical` came from inference is the likely shape, but
+  schemes do not record that.
 - **A generic's dispatch formal, forwarded, reads as optional.** `f <- function(fit) persistence(fit)`
   over `persistence <- function(object, ...) UseMethod("persistence")` gives `f` an optional `fit`,
   yet `f()` errors in R, because `UseMethod` reads a passed argument even though the generic may be
