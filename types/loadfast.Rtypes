@@ -1,0 +1,4 @@
+# loadfast: incremental package loading from source. `load_fast()` returns the package namespace,
+# invisibly, or `NULL` for a package without `R/` files.
+
+load_fast : fn([path]: character, [helpers]: logical, [attach_testthat]: logical | NULL, [full]: logical, [verbose]: logical) -> environment | NULL

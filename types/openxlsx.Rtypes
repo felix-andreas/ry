@@ -1,0 +1,16 @@
+# openxlsx: xlsx workbooks. `Workbook` is a reference class, `Style` an S4 class.
+@type Workbook
+@type Style
+
+createWorkbook : fn([creator]: character, [title]: character | NULL, [subject]: character | NULL, [category]: character | NULL) -> Workbook
+# Returns the new sheet's index.
+addWorksheet : fn(wb: Workbook, sheetName: character, [gridLines]: logical, [tabColour]: character | NULL, [zoom]: double, [header]: character[] | NULL, [footer]: character[] | NULL, [evenHeader]: character[] | NULL, [evenFooter]: character[] | NULL, [firstHeader]: character[] | NULL, [firstFooter]: character[] | NULL, [visible]: logical, [paperSize]: double, [orientation]: character, [vdpi]: double, [hdpi]: double) -> integer
+# Returns 0 invisibly.
+writeData : fn(wb: Workbook, sheet: character | double, x: Any, [startCol]: double | character, [startRow]: double, [array]: logical, [xy]: double[] | NULL, [colNames]: logical, [rowNames]: logical, [headerStyle]: Style | NULL, [borders]: character, [borderColour]: character, [borderStyle]: character, [withFilter]: logical, [keepNA]: logical, [na.string]: character | NULL, [name]: character | NULL, [sep]: character, [col.names]: logical, [row.names]: logical) -> double
+# Returns the workbook's style objects invisibly.
+addStyle : fn(wb: Workbook, sheet: character | double, style: Style, rows: double[], cols: double[], [gridExpand]: logical, [stack]: logical) -> list[Any]
+createStyle : @pure fn([fontName]: character | NULL, [fontSize]: double | NULL, [fontColour]: character | NULL, [numFmt]: character, [border]: character[] | NULL, [borderColour]: character[], [borderStyle]: character[], [bgFill]: character | NULL, [fgFill]: character | NULL, [halign]: character | NULL, [valign]: character | NULL, [textDecoration]: character[] | NULL, [wrapText]: logical, [textRotation]: double | NULL, [indent]: double | NULL, [locked]: logical | NULL, [hidden]: logical | NULL) -> Style
+# Returns 1 invisibly, or whether the copy succeeded when `returnValue = TRUE`.
+saveWorkbook : fn(wb: Workbook, file: character, [overwrite]: logical, [returnValue]: logical) -> double | logical
+write.xlsx : fn(x: Any, file: character, [asTable]: logical, [overwrite]: logical, ...: Any) -> Workbook
+read.xlsx : fn(xlsxFile: character | Workbook, [sheet]: character | double, [startRow]: double, [colNames]: logical, [rowNames]: logical, [detectDates]: logical, [skipEmptyRows]: logical, [skipEmptyCols]: logical, [rows]: double[] | NULL, [cols]: double[] | NULL, [check.names]: logical, [sep.names]: character, [namedRegion]: character | NULL, [na.strings]: character[], [fillMergedCells]: logical) -> data.frame

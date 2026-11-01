@@ -1774,18 +1774,39 @@ frame keeps a hash index.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
-remembered set and the escaped set, and sweeps only the young list (every object allocated since
-the last collection), so its cost is proportional to young data, not the heap. A major collection
-clears the marks first and sweeps every page. Small objects live in 64 KiB pages of 17 size
-classes, the 40-byte class being a triple; larger objects are allocated one by one. Freed slots are
-poisoned, with the kind byte set to `FREESXP` and the collector byte cleared, so a stale handle
-reads as freed and unmarked; any set of handles kept across a sweep is filtered before it. The write barrier records an old parent
-that receives a young child. A vector whose writable element pointer escaped (`STRING_PTR`,
-`DATAPTR` on a list) bypasses the barrier from then on, so it joins the escaped set and every minor
-collection rescans it. Weak references follow ephemeron rules, and the `CHARSXP` intern table is
-weak, with minor collections checking only the young strings. GNU R ages objects through several
-generations; one promotion after one survival is simpler and costs some premature tenuring, which
-profiling can revisit without changing the API.
+remembered set and the escaped set, and sweeps only the pages allocated into since the last
+collection, so its cost is proportional to young data, not the heap. A major collection clears the
+marks first and sweeps every page. The write barrier records an old parent that receives a young
+child. A vector whose writable element pointer escaped (`STRING_PTR`, `DATAPTR` on a list) bypasses
+the barrier from then on, so it joins the escaped set and every minor collection rescans it. Weak
+references follow ephemeron rules, and the `CHARSXP` intern table is weak, with minor collections
+checking only the young strings. GNU R ages objects through several generations; one promotion
+after one survival is simpler and costs some premature tenuring, which profiling can revisit
+without changing the API.
+
+**Small objects live in bitmap pages** (`crates/heap/src/space.rs`). Objects up to 2 KiB come from
+one reserved address range (64 GiB, halved on failure down to 1 GiB for a capped address space such
+as valgrind's) cut into 64 KiB pages of 17 size classes, the 40-byte class being a triple. Each page
+keeps its mark, allocated and finalizable bits in side bitmaps, one bit per slot, stored as
+struct-of-arrays per page. Reasons:
+- Marking an old object tests a dense bit instead of loading its header, and sweeping is word
+  operations (`dead = allocated & !marks`, then `allocated = marks`) that never read a dead object.
+  Only a dead environment is visited, through the finalizable bit, to drop its Rust-side frame.
+- Allocation claims a whole bitmap word of free slots in one step and hands them out with a
+  trailing-zero count, so there is no free list, no young list and no per-object free. A claimed
+  slot never handed out reads as unmarked and is swept like a dead one.
+- Empty pages return to a pool any class can take, so a phase heavy in one size does not strand
+  memory in its class.
+- Debug builds poison dead slots and set their kind byte to `FREESXP`. Release builds do not touch
+  them, so a stale handle is caught only in debug.
+- Large objects are allocated one by one with the global allocator and keep a header mark bit.
+Measured on a closure-call microbenchmark under cachegrind: 4% fewer instructions and 46% fewer L1
+data misses than the free-list pages. Full collections on the loaded dsbench heap take about 35 ms
+against GNU R's 130 ms.
+
+**libR keeps freed memory.** mimalloc's purge delay is set to never (`crates/libr/src/libr.rs`),
+because returning pages that stay free for 10 ms made the kernel zero them again on reuse, which was
+15% of the benchmark tests' profile. The cost is resident memory that stays at its peak.
 
 **Roots.** The `PROTECT` stack, the precious multiset, the handle stack, registered globals, every
 interned symbol, the weak-reference list, and any `RootSource` an interpreter or JIT registers. A
@@ -3008,7 +3029,7 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** Strict mode checked types only, so a strict package file whose top level called `cat()` or `options()` checked clean and ran the call on every load.
 - **Target shape.** `semantics::top_level::item_top_level` classifies each top-level item of a library file as a definition, a constant, or an effect with its range, and `strict` reports the first effect of each statement (`reference/type-system.mdx`, "A package file's top level"). A library file is a `DocumentKind::Package` file (`R/`); scripts, tests, helpers and the console are entries and unrestricted. Class definition forms are read from `object_system_function`, so the lint, the runtime refusal and this rule share one table.
 - **Purity is declared, never inferred** (Roc-style effect inference was rejected: R's higher-order functions take pure and effectful callbacks under one name, and an inferred effect in a type would let one added `cat()` change every transitive caller's interface). `item_declared_pure` is a per-item `bool` read from `#: @pure` or the inline `@pure` marker (`PURE_MARKER` in the syntax tree), so a body edit backdates it and callers never re-check; stubs mark names with `@pure`. The marker is trusted and means "no effect whatever the arguments", which is why `lapply` is not pure. A project definition shadows the stub, and a name with a conditional writer is never pure (`CalleeOrigin::Conditional`), because which definition runs depends on the condition.
-- **Lazy constants.** In a strict file, a single-writer constant is bound lazily by the loader (`load_index::package_index`) only when every package name its initializer mentions has one writer earlier in collation order; otherwise a later or second write would change what a late evaluation reads. `loader::diff` rebinds a lazy constant when anything its initializer reaches changes, and because laziness now depends on other files, it checks every name, not only the dirty items' names, for a flip. The loader installs the stubs and sets `ProjectFiles` only for a strict package, so non-strict loads never parse the stubs. The loader cannot read `ry.toml`, so each host passes strictness in with `Loader::set_strict`: the GNU R hosts read the planned root's config, and ry's runtime gets the project's through the `RUN_FLAG_STRICT` bit of `ry_run`, because libR links its own copy of `loader` and no process-global registration reaches it. Classification resolves callees through the project-wide definition maps. Their conditional-writers half skips `name <- function(...)` items without naming them, since a function body cannot write a top-level name, so strict planning names only the few non-function items and plans faster than a non-strict load (on finbench, about 0.8 s against 0.9 s, and a full load about 150 ms faster).
+- **Lazy constants.** In a strict file, a single-writer constant is bound lazily by the loader (`load_index::package_index`) only when every package name its initializer mentions has one writer earlier in collation order; otherwise a later or second write would change what a late evaluation reads. `loader::diff` rebinds a lazy constant when anything its initializer reaches changes, and because laziness now depends on other files, it checks every name, not only the dirty items' names, for a flip. The loader installs the stubs and sets `ProjectFiles` only for a strict package, so non-strict loads never parse the stubs. The loader cannot read `ry.toml`, so each host passes strictness in with `Loader::set_strict`: the GNU R hosts read the planned root's config, and ry's runtime gets the project's through the `RUN_FLAG_STRICT` bit of `ry_run`, because libR links its own copy of `loader` and no process-global registration reaches it. Classification resolves callees through the project-wide definition maps. Their conditional-writers half skips `name <- function(...)` items without naming them, since a function body cannot write a top-level name, so strict planning names only the few non-function items and plans faster than a non-strict load (on finbench, about 0.8 s against 0.9 s, and a full load about 150 ms faster). A `<<-` anywhere in a package function body (`top_level::item_super_assigned_names`, a scan of the item's flat expression arena) counts as a writer of its target placed after every top-level statement: the namespace locks once loading finishes, so such a write can only land during `.onLoad` or something it calls, and counting every function over-approximates that call graph without building it. A bare stub call takes its purity from the namespace of the name's winning declaration (`StubLibrary::declarations`), the same one its type comes from, instead of a flat name set. A replacement inside `local()` of an outer name is accepted when the outer binding is a literal or `c()`/`list()` of literals (`item_binds_plain_value`), because R replaces in a local copy; reading the outer constant's inferred type would put type inference on the load-planning path.
 - **Impact.** Loading a strict package binds names and registers classes only, so evaluation order between constants no longer matters and a reload reruns less. Incrementality holds: `test_incremental.rs` pins that adding `cat()` to a pure function re-derives only that function, and removing a marker re-classifies only its callers.
 
 # Decision record: one Rmath, one codec stack, and the clean-room numerical routines
@@ -3725,11 +3746,15 @@ explicit allocators".
   constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
   binding's type. A typed closure turns such a binding back into a promise on entry, because an
   inline annotation checks a default only when the body uses it.
-- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_fresh`
+- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_formals`
   skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
   cell, as GNU R's frame list does.
-- **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
-  `identical` has nine formals, and building a map per call cost more than scanning.
+- **Frames scan up to 16 cells before building a hash index**, and hold nine bindings inline as
+  symbol and cell pairs, so a lookup reads one cache line per four bindings. `identical` has nine
+  formals, and building a map per call cost more than scanning. Separate symbol and cell arrays
+  were measured and cost 3% more instructions, because inserts then check two spills.
+- **A call binds its formals in one batch** (`Heap::define_formals`): one collection check that
+  keeps every value and the environment alive, then the cells, then one write barrier.
 - **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
   compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
   a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
@@ -3882,6 +3907,55 @@ explicit allocators".
   agree. Edits to crates `libr` does not link (the formatter, the IDE layer) leave it alone.
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
+
+# Decision record: what typing finbench in strict mode settled
+
+## Shipped stubs are whatever `types/` holds
+
+- **Before.** `stubs.rs` listed every shipped `.Rtypes` and `.exports` file by hand, and a second
+  hand list named the conditional namespaces. A stub added to `types/` without editing both lists
+  either never shipped or was always active, which made a package's names resolve in projects that
+  never use it.
+- **Now.** `crates/semantics/build.rs` scans `types/`, embeds every file, orders the stubs (R's own
+  packages in search-path order, CRAN namespaces alphabetically, `ry` last, so later sources
+  override earlier ones the way R's search path does) and derives `CONDITIONAL_NAMESPACES` as every
+  namespace except R's own packages and `ry`. One source of truth: the directory.
+- `QUALIFIED_ONLY_NAMESPACES` stubs are gated by activation like conditional ones, so an inactive
+  package's `pkg::name` stays a manifest lookup rather than a typed call.
+
+## Override-stub problems are computed after `PackageMetadata` exists
+
+- `stub_library` is a HIGH-durability memo. Computed before the `PackageMetadata` singleton input
+  existed, it saw no active namespaces and was never re-verified, so a project with any
+  `stubs/*.Rtypes` lost every shipped conditional namespace. `cli.rs` creates the metadata input
+  first; `check_keeps_declared_packages_active_beside_override_stubs` in `test_cli.rs` pins it.
+
+## Strict mode implies type errors
+
+- `[check] strict = true` without `typing` used to report the strict findings but no type errors,
+  which made a strict project look clean while its calls did not type. Strict now turns typing on
+  (`diagnostics.rs`); `typing = false` beside it no longer turns type errors off. Strict code is
+  fully typed by definition, so there is no useful strict-but-untyped mode.
+
+## An all-`Any` overload does not veto agreement among unchecked fits
+
+- With an unchecked (`Unknown` or `Any`) argument every candidate fits, and the call is `Unknown`
+  unless the fits agree. A catch-all fallback such as `rep`'s `fn(...) -> Any` always disagreed, so
+  every overloaded call with one unknown argument was `Unknown`, the largest strict friction in the
+  port. `overloaded_call` (`check.rs`) drops all-`Any` fits when a more specific fit exists and
+  every specific fit still fits with each unchecked argument replaced by a witness type that only
+  `Any` or an unconstrained type parameter accepts (`unchecked_arguments_decide_nothing`), then
+  applies the agreement rule. Without the witness test, `levels(unknown)` became `character[]`
+  and `rep(unknown, 2)` a vector: the unknown argument was the one choosing the candidate. Rejected: taking the union of the fits' results. It is sound, but it
+  turns silence into false operand errors downstream (operators do not dispatch per union member),
+  against "the checker presumes R code is correct".
+
+## `$`, `[` and `[[` dispatch to a class's subset method
+
+- A stub or project method named `$.class`, `[.class` or `[[.class` types the access on a value of
+  nominal type `class` (`subset_method_result` in `check.rs`), as R's S3 dispatch would run it. It
+  is consulted before the structural read, so an opaque type gets typed field reads without
+  exposing a representation (`nominals.R.test`, `a_dollar_method_types_field_reads_on_its_class`).
 
 ## The C headers declare the API of the presented R version
 

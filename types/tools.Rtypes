@@ -1,0 +1,5 @@
+# tools: utilities shipped with R.
+toTitleCase : @pure fn(text: character[]) -> character[]
+file_ext : @pure fn(x: character[]) -> character[]
+file_path_sans_ext : @pure fn(x: character[], [compression]: logical) -> character[]
+md5sum : fn(files: character[]) -> character[named]
