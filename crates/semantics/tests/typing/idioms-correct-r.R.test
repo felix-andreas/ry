@@ -310,3 +310,12 @@ flags <- function() vapply(list(1, 2), function(x) x > 1, integer(1))
 lengths_of: <T> fn(xs: list[T] | T[]) -> double[]
 counts: fn() -> double[]
 flags: fn() -> integer[]
+
+#---- a_callback_called_with_forwarded_dots_takes_any_parameters
+with_progress <- function(callback) function(...) callback(...)
+copy <- function(source, target, overwrite = FALSE) TRUE
+run <- function() with_progress(copy)
+#++++
+with_progress: <T> fn(callback: fn(...: Any) -> T) -> fn(...: Any) -> T
+copy: <T, U, V> fn([source]: T, [target]: U, [overwrite]: V) -> logical
+run: fn() -> fn(...: Any) -> logical

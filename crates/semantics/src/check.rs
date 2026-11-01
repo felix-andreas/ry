@@ -7158,8 +7158,10 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any | TyKind::Unknown => unknown(self.db),
             TyKind::Var(_) => {
                 let ret = self.fresh(Constraint::Unconstrained);
-                // A forwarded `...` may be empty, so it demands no parameter of the callee;
-                // what the dots carry is checked where the outer function is called.
+                // A forwarded `...` may carry any number of arguments under any names, so it
+                // makes the callee variadic; what the dots carry is checked where the outer
+                // function is called.
+                let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
                 let positional: Vec<Ty<'db>> = arguments
                     .iter()
                     .filter(|argument| argument.name.is_none() && !argument.forwards_dots)
@@ -7180,7 +7182,10 @@ impl<'db> Checker<'db, '_> {
                                 })
                             })
                             .collect(),
-                        variadic: None,
+                        variadic: forwards_dots.then(|| RestParameter {
+                            element: any(self.db),
+                            preceding_named: 0,
+                        }),
                         ret,
                     }),
                 );
