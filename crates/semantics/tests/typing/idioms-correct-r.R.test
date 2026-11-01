@@ -1399,3 +1399,12 @@ wrap: <T> fn(f: fn(...: double) -> T) -> T
 maker: <T, U, V> fn(tr: T) -> fn(endpoint: U, [other]: V, ...: Any) -> character
 use: Unknown
 208..210 error[type-mismatch] expected `fn(...: double) -> T`, found `fn(endpoint: U, [other]: V, ...: Any) -> character`
+#---- months_of_a_date_is_its_name_and_months_of_anything_else_is_a_package_method
+name <- months(Sys.Date())
+period <- months(3L)
+wrong <- nchar(months(Sys.Date())) + "a"
+#++++
+name: character
+period: Any
+wrong: Unknown
+85..88 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`

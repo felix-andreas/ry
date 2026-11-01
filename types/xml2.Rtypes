@@ -5,12 +5,15 @@
 # per class ends with one over all of them, for a value whose class the checker does not know.
 # `xml_find_first()` on a single node finds no match as an `xml_missing`, and searching an
 # `xml_missing` finds nothing again. Searching and reading a parsed document are pure, while
-# `read_xml()` and `read_html()` may read a file or a URL.
+# `read_xml()` and `read_html()` may read a file or a URL. A nodeset is a list of nodes, so `lapply`
+# walks it, and xml2's `[` method keeps the class on a subset.
 
 @type xml_document
 @type xml_node
-@type xml_nodeset
+@type xml_nodeset {list[xml_node]}
 @type xml_missing
+
+[.xml_nodeset : fn(x: xml_nodeset, ...: Any) -> xml_nodeset
 
 read_xml : fn(x: Any, [encoding]: character, ...: Any, [as_html]: logical, [options]: character[]) -> xml_document
 read_html : fn(x: Any, [encoding]: character, ...: Any, [options]: character[]) -> xml_document

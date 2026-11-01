@@ -729,9 +729,11 @@ as.difftime : @pure fn(tim: Any, [format]: character, [units]: character) -> dif
 strftime : fn(x: Any, [format]: character, [tz]: character, [usetz]: logical, ...: Any) -> character
 strptime : fn(x: Any, format: character, [tz]: character) -> POSIXct
 weekdays : @pure fn(x: Any, [abbreviate]: logical) -> character
-# lubridate adds months.numeric, which builds a period (`months(1)`).
-months : @pure fn(x: double | integer) -> Any
-months : fn(x: Any, [abbreviate]: logical) -> character
+# `months` is an S3 generic: base gives Date and POSIXct the month name, and
+# packages add methods of their own (lubridate's months.numeric builds a period),
+# so any other argument dispatches to a method the stub cannot see.
+months : @pure fn(x: Date | POSIXct, [abbreviate]: logical) -> character
+months : fn(x: Any, ...: Any) -> Any
 julian : @pure Any
 
 # System and session.

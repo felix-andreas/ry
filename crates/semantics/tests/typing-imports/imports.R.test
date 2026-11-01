@@ -391,3 +391,14 @@ apply_twice <- function(path) path(path)
 #++++
 apply_twice: Unknown
 30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+
+#---- an_xml_nodeset_is_a_list_of_nodes_and_keeps_its_class_when_subset
+#namespace import(xml2)
+first_link <- function(page) xml_find_all(page, ".//a")[1]
+texts <- function(page) lapply(xml_find_all(page, ".//a"), xml_text)
+nodes_are_not_numbers <- function(page) xml_find_all(page, ".//a") + 1L
+#++++
+first_link: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> xml_nodeset
+texts: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> list[character]
+nodes_are_not_numbers: Unknown
+192..218 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[xml_node]`
