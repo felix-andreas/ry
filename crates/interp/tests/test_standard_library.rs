@@ -8,7 +8,7 @@
 use std::{cell::RefCell, collections::BTreeSet, fs, path::Path};
 
 use heap::{Heap, object::Sexp};
-use interp::{eval, lower, print, standard_library, unwind::Unwind, values};
+use interp::{eval, frame, lower, print, standard_library, unwind::Unwind, values};
 use syntax::testing::{SplitMix64, fuzz_iterations};
 
 const SETUP: &str = r#"
@@ -418,13 +418,21 @@ fn declarations() -> Vec<(String, Vec<String>)> {
 
 #[test]
 fn declarations_and_runtime_bind_the_same_names() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.exports");
+    let manifest = fs::read_to_string(&manifest)
+        .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", manifest.display()));
+    let exported: BTreeSet<String> =
+        manifest.lines().filter(|line| !line.starts_with('#')).map(str::to_owned).collect();
     let declared: BTreeSet<String> = declarations().into_iter().map(|(name, _)| name).collect();
-    let bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
-    let undeclared: Vec<_> = bound.difference(&declared).collect();
-    let unbound: Vec<_> = declared.difference(&bound).collect();
+    let mut bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
+    bound.extend(frame::package_functions().map(str::to_owned));
+    let unexported: Vec<_> = declared.difference(&exported).collect();
+    let unlisted: Vec<_> = bound.difference(&exported).collect();
+    let unbound: Vec<_> = exported.difference(&bound).collect();
     assert!(
-        undeclared.is_empty() && unbound.is_empty(),
-        "bound but not declared in types/ry.Rtypes: {undeclared:?}; declared but not bound: {unbound:?}"
+        unexported.is_empty() && unlisted.is_empty() && unbound.is_empty(),
+        "declared in types/ry.Rtypes but not in types/ry.exports: {unexported:?}; \
+         bound but not in types/ry.exports: {unlisted:?}; in types/ry.exports but not bound: {unbound:?}"
     );
 }
 
@@ -439,7 +447,10 @@ fn no_shipped_package_exports_a_library_name() {
         .unwrap_or_else(|failure| panic!("cannot list {}: {failure}", directory.display()));
     for entry in entries {
         let path = entry.unwrap_or_else(|failure| panic!("cannot read an entry: {failure}")).path();
-        if path.extension().is_none_or(|extension| extension != "exports") {
+        // `ry.exports` is the library's own list.
+        if path.extension().is_none_or(|extension| extension != "exports")
+            || path.file_stem().is_some_and(|stem| stem == "ry")
+        {
             continue;
         }
         let text = fs::read_to_string(&path)

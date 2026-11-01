@@ -412,19 +412,26 @@ pub unsafe extern "C" fn R_IsPackageEnv(env: Sexp) -> Rboolean {
     })
 }
 
-/// `Rf_GetOption1`: the value of an option, or `NULL`. Options live in an environment the
-/// runtime owns.
+/// `Rf_GetOption1`: the value of an option, or `NULL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_GetOption1(tag: Sexp) -> Sexp {
-    enter(|| {
-        let runtime = runtime();
-        let value = frame_value(runtime.options, tag);
-        if value == runtime.heap.known().unbound {
-            Ok(runtime.nil())
-        } else {
-            Ok(value)
+    enter(|| Ok(option_value(tag)))
+}
+
+/// The option `tag` from base's `.Options`, the one store `options()` and `getOption()` use,
+/// or `NULL`.
+unsafe fn option_value(tag: Sexp) -> Sexp {
+    if !interp::is_installed() {
+        return runtime().nil();
+    }
+    let mut cell = interp::envir::options();
+    while cell.kind() == SexpType::Pairlist {
+        if cell.tag() == tag {
+            return cell.car();
         }
-    })
+        cell = cell.cdr();
+    }
+    runtime().nil()
 }
 
 /// `R_BindingType_t`, with GNU R's numbering.
@@ -963,8 +970,8 @@ pub unsafe extern "C" fn Rf_GetOptionDigits() -> c_int {
 
 unsafe fn option_integer(name: &[u8], default: c_int) -> ApiResult<c_int> {
     let symbol = runtime().heap.install(name)?;
-    let value = frame_value(runtime().options, symbol);
-    if value == runtime().heap.known().unbound || value.kind() == SexpType::Nil {
+    let value = option_value(symbol);
+    if value.kind() == SexpType::Nil {
         return Ok(default);
     }
     let value = crate::vectors::as_integer(value)?;

@@ -73,9 +73,10 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Table beyond queries (session_0111kWqB9LKMquDanx18xVTC, Opus): typing gaps (factors, .SDcols variables), then fread/fwrite, setkey, rbindlist, dcast/melt, shift, fifelse and friends, each typed and benchmarked. PR #124 (typed frame queries) merged as 6070d14.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
-- Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
-- Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
+- data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): verify the #125 merge, run unchanged data.table code on the engine with identical output, remove the subset := overhead. PR #125 (frames in the runtime) merged as ed69655.
+- Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
+- Docs pass and simulated-user testing of the new features (session_0111kWqBrKf593Cdj9soupRR, Sonnet).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -85,4 +86,4 @@ Nothing queued: every build-order step is in flight.
 Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
-- Run the next docs pass after the records/tags, JIT and table-in-interpreter PRs land.
+- Run another docs pass after the table-in-interpreter and JIT round 2 PRs land.

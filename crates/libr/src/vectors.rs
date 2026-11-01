@@ -1163,6 +1163,12 @@ pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
                 object.kind().name()
             )));
         }
+        // GNU R checks only the setter's index. data.table reads the over-allocated column
+        // slots of a table past its length, which hold `NULL` here because growing a list
+        // fills its new slots with `NULL`.
+        if !object.is_altrep() && index >= object.length() && index < object.capacity() {
+            return Ok(runtime().nil());
+        }
         sexp_elt(object, checked_index(object, index, "VECTOR_ELT")?)
     })
 }

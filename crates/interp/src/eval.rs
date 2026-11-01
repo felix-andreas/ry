@@ -280,6 +280,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
     match function.kind() {
         SexpType::Special => {
             let definition = builtin_def(function)?;
+            if definition.is_dispatch_or_eval() {
+                return match dispatch::dispatch_or_eval(definition, call, function, arguments, env)? {
+                    Ok(value) => Ok(value),
+                    Err(args) => call_builtin(definition, call, function, &args, env),
+                };
+            }
             let args: Vec<Arg> = values::pairlist_items(arguments)
                 .into_iter()
                 .map(|(tag, value)| Arg { tag, value })
@@ -345,7 +351,7 @@ pub unsafe fn call_builtin(
         env,
     };
     let result = if !definition.accepts_native
-        && matches!(definition.kind, Kind::Builtin | Kind::Internal)
+        && (matches!(definition.kind, Kind::Builtin | Kind::Internal) || definition.is_dispatch_or_eval())
         && let Err(refused) = crate::records::check_native_args(call, args)
     {
         Err(refused)
@@ -538,7 +544,11 @@ unsafe fn collect_evaluated_args(
             });
             counted_push(args);
         } else {
-            let value = eval(expression, env)?;
+            let value = if keep_missing && argument_is_missing(expression, env)? {
+                missing
+            } else {
+                eval(expression, env)?
+            };
             args.push(Arg {
                 tag: arguments.tag(),
                 value,
@@ -607,8 +617,19 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
     };
     match function.kind() {
         SexpType::Closure => apply_closure(call, function, args, env, None),
-        SexpType::Builtin => {
+        SexpType::Builtin | SexpType::Special => {
             let definition = builtin_def(function)?;
+            if function.kind() == SexpType::Special && !definition.is_dispatch_or_eval() {
+                // A special needs expressions; quote the values so they evaluate to themselves.
+                let mut quoted = Vec::with_capacity(args.len());
+                for arg in args {
+                    quoted.push(Arg {
+                        tag: arg.tag,
+                        value: quote_value(value_of(arg.value)?)?,
+                    });
+                }
+                return call_builtin(definition, call, function, &quoted, env);
+            }
             let mut forced = Vec::with_capacity(args.len());
             for arg in args {
                 let value = if arg.value == missing_arg() {
@@ -627,18 +648,6 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
                 return Ok(value);
             }
             call_builtin(definition, call, function, &forced, env)
-        }
-        SexpType::Special => {
-            // A special needs expressions; quote the values so they evaluate to themselves.
-            let definition = builtin_def(function)?;
-            let mut quoted = Vec::with_capacity(args.len());
-            for arg in args {
-                quoted.push(Arg {
-                    tag: arg.tag,
-                    value: quote_value(value_of(arg.value)?)?,
-                });
-            }
-            call_builtin(definition, call, function, &quoted, env)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
@@ -1014,6 +1023,21 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
     symbol_is_missing(symbol, env, true)
+}
+
+/// Whether an argument expression is a symbol bound in `env`'s own frame to a missing argument,
+/// as GNU R's `R_isMissing` asks for the subset primitives: `f <- function(m, i) m[i, 1]` called
+/// as `f(m, )` passes an empty `i`, which selects everything. A defaulted formal is not missing,
+/// and an unbound symbol is left to evaluation to report.
+pub unsafe fn argument_is_missing(expression: Sexp, env: Sexp) -> R<bool> {
+    if expression.kind() != SexpType::Symbol || expression == symbols().dots {
+        return Ok(false);
+    }
+    let symbol = if dot_dot_index(expression).is_some() { symbols().dots } else { expression };
+    if crate::heap().frame_cell(env, symbol).is_none() {
+        return Ok(false);
+    }
+    symbol_is_missing(expression, env, false)
 }
 
 /// `missing()` of `symbol` in `env`. `defaults_count` says whether a formal that got its default

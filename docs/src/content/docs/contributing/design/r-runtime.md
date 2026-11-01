@@ -679,17 +679,21 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
 
 ### The design
 
-The engine exists as `crates/table`, with its query IR, ALTREP exposure and the checker's `frame`
-type. No interpreter calls it yet. The rest of this section describes the shape it has.
+The engine is `crates/table` and its query IR; `crates/interp/src/frame.rs` makes frames
+interpreter values and lowers queries into the IR, and `crates/libr/src/frame_altrep.rs` exposes
+columns as ALTREP vectors to native code. The user guide is [Frames](/guides/frames/).
 
-- **The type is `frame`, and a frame is a Polars `DataFrame` held by a ry object.** The name is not
-  `table`, because base R's `table()` and its `"table"` class must keep working. The constructor is
-  `frame(...)`, the runtime class is `c("frame", "data.frame")`, and the checker types it as
+- **The type is `frame`, and a frame is an external pointer that owns a Polars `DataFrame`.** The
+  name is not `table`, because base R's `table()` and its `"table"` class must keep working. The
+  constructor is `frame(...)`, the runtime class is `"frame"` alone (a frame is no `data.frame`;
+  `as.data.frame()` and `as.frame()` convert), and the checker types it as
   `frame{id: integer[], price: double[], ticker: character[]}` (the "Frames" section of the typing
   reference). Column references in a query are checked, and the data-masking draft gets the row
   type it was waiting for.
-- **Each column is exposed to R and to native code as an ALTREP vector over the Arrow buffer,** so
-  code that expects a `data.frame` keeps working when it receives a frame. Element and region reads
+- **A column reaches R code as a copied R vector, and native code as an ALTREP vector over the
+  Arrow buffer.** The interpreter copies a column when R code reads it (`$`, `as.list`, a data
+  mask), which is cheap next to the query. The ALTREP path in `libr` is built but no interpreter
+  path hands it out yet. Element and region reads
   go to the buffer, and so does `DATAPTR_OR_NULL` or a read-only data pointer for an integer or
   double column without nulls, because those bytes are identical in both layouts. A writable pointer
   (`INTEGER`, `REAL`, `DATAPTR`), a column with nulls and a logical column (bit-packed in Arrow,
@@ -705,17 +709,18 @@ type. No interpreter calls it yet. The rest of this section describes the shape 
 - **NA maps onto Arrow validity, and NaN stays a value.** Integer NA (`INT_MIN`) and double NA (the
   `NaN` with low word 1954) are rewritten into validity at the boundary. A vector coming in from R
   is copied into a new Arrow buffer; only a column R never materialized comes back zero-copy.
-- **Queries go through a small IR to a Polars lazy plan.** `tbl[price > 0, .(total = sum(price)), by
-  = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
+- **Queries go through a small IR to a Polars lazy plan.** The evaluator and the bytecode hand
+  `tbl[...]` on a frame to the lowering before `i`, `j` and `by` are evaluated, so
+  `tbl[price > 0, .(total = sum(price)), by = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
   filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
   `mean`, `min`, `max`, `.N`, `first`, `last`, `median`, `sd`, `var`, plus `head` and `cor`), equi,
   keyed, rolling and non-equi joins, `by = .EACHI`, `mult =`, and `:=`. Lowering adds R's
   semantics where Polars differs: integer overflow becomes NA, aggregates propagate NA unless `na.rm`, `%/%` and `%%` follow R's signs, and
   joins follow data.table's row and column layout. A query returns the warnings data.table would
-  raise (an overflowing grouped integer sum, a lossy `:=`) as data, for the interpreter to signal.
-  Not covered yet: R functions inside an aggregation, which will fall back to per-group evaluation
-  with a lint saying so.
+  raise (an overflowing grouped integer sum, a lossy `:=`) as data, and the interpreter raises them as R warnings. Anything
+  the IR does not cover, such as an R function inside an aggregation, runs as R code once per group
+  in a data mask that binds the columns it mentions; a lint saying so is planned.
 - **`:=` is copy-on-write with reference counts,** not over-allocation. A frame whose reference count
   is one is updated in place, so `tbl[, x := y * 2]` costs one new column, and a shared frame first
   copies only its column list, because the Arrow buffers themselves are immutable and shared. In the
