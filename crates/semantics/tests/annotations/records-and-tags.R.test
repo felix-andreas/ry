@@ -2,37 +2,37 @@
 #---- record_type
 Record{y: double, x: integer}
 #++++
-record{x: integer, y: double}
+Record{x: integer, y: double}
 
 #---- empty_record_type
 Record{}
 #++++
-record{}
+Record{}
 
 #---- tuple_type
 Tuple{integer, character}
 #++++
-tuple{integer, character}
+Tuple{integer, character}
 
 #---- empty_tuple_type
 Tuple{}
 #++++
-tuple{}
+Tuple{}
 
 #---- record_type_needs_names
 Record{integer, character}
 #++++
-error: a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items
+error: a `Record{...}` type names every field: write each one as `name: TYPE`, or use `Tuple{...}` for unnamed items
 
 #---- tuple_type_takes_no_names
 Tuple{x: integer}
 #++++
-error: a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields
+error: a `Tuple{...}` type lists its items without names: drop the names, or use `Record{...}` for named fields
 
 #---- duplicate_record_field
 Record{x: integer, x: double}
 #++++
-error: the field `x` appears twice in this `record{...}` type
+error: the field `x` appears twice in this `Record{...}` type
 
 #==== tag_types
 #---- bare_tag

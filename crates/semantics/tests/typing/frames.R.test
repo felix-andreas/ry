@@ -1209,3 +1209,13 @@ left: DataFrame{id: integer[]}
 right: DataFrame{key: integer[]}
 joined: Unknown
 101..105 error[type-mismatch] the frame `right` has no column `id`. Its columns are `key`
+
+#---- a_key_missing_from_both_sides_is_reported_once
+left <- DataFrame(id = 1:3)
+right <- DataFrame(id = 1:3)
+joined <- DataFrame.join(left, right, on = "ids")
+#++++
+left: DataFrame{id: integer[]}
+right: DataFrame{id: integer[]}
+joined: Unknown
+100..105 error[type-mismatch] the frame `left` has no column `ids`. Its columns are `id`

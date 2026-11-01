@@ -911,11 +911,16 @@ fn named_list(columns: &[(PlSmallStr, Expr)]) -> String {
             if *name == output_name(expr) {
                 expr.to_string()
             } else {
-                format!("{}.alias(\"{name}\")", Receiver(expr))
+                aliased(expr, name)
             }
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// An expression renamed with `.alias`, in Polars' notation.
+pub fn aliased(expr: &Expr, name: &str) -> String {
+    format!("{}.alias(\"{name}\")", Receiver(expr))
 }
 
 /// Expressions print in Polars' notation, as `col("x").sum() > 1`.

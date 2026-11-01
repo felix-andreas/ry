@@ -681,15 +681,20 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
 
 The engine is `crates/table` and its query IR; `crates/interp/src/frame.rs` makes frames
 interpreter values and lowers queries into the IR, and `crates/libr/src/frame_altrep.rs` exposes
-columns as ALTREP vectors to native code. The user guide is [Frames](/guides/frames/).
+columns as ALTREP vectors to native code. The user guide is [DataFrames](/guides/dataframes/).
 
-- **The type is `frame`, and a frame is an external pointer that owns a Polars `DataFrame`.** The
-  name is not `table`, because base R's `table()` and its `"table"` class must keep working. The
-  constructor is `frame(...)`, the runtime class is `"frame"` alone (a frame is no `data.frame`;
-  `as.data.frame()` and `as.frame()` convert), and the checker types it as
-  `frame{id: integer[], price: double[], ticker: character[]}` (the "Frames" section of the typing
-  reference). Column references in a query are checked, and the data-masking draft gets the row
-  type it was waiting for.
+- **The type is `DataFrame`, an external pointer that owns a Polars `DataFrame`.** The runtime
+  class is `"DataFrame"` alone (a DataFrame is no `data.frame`; `as.data.frame()` and
+  `as.DataFrame()` convert), and the checker types it as
+  `DataFrame{id: integer[], price: double[], ticker: character[]}` (the "DataFrames" section of the
+  typing reference). `LazyFrame` holds a plan instead of a table, and `GroupBy` a DataFrame or plan
+  plus its keys.
+- **The primary API is Polars' verbs over expressions** (`DataFrame.select`, `with_columns`,
+  `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`, `head`, with `col("x")` expressions), all
+  qualified names in `package:ry`. Every verb builds a step of `table::lazy::Plan`, and an eager
+  verb collects at once. The planner pushes filters below `with_columns` and projections, and pushes
+  filters, needed columns and row limits into a file scan. The bracket syntax below stays as
+  data.table compatibility and lowers to the same IR.
 - **A column reaches R code as a copied R vector, and native code as an ALTREP vector over the
   Arrow buffer.** The interpreter copies a column when R code reads it (`$`, `as.list`, a data
   mask), which is cheap next to the query. The ALTREP path in `libr` is built but no interpreter
@@ -710,7 +715,7 @@ columns as ALTREP vectors to native code. The user guide is [Frames](/guides/fra
   `NaN` with low word 1954) are rewritten into validity at the boundary. A vector coming in from R
   is copied into a new Arrow buffer; only a column R never materialized comes back zero-copy.
 - **Queries go through a small IR to a Polars lazy plan.** The evaluator and the bytecode hand
-  `tbl[...]` on a frame to the lowering before `i`, `j` and `by` are evaluated, so
+  `tbl[...]` on a DataFrame to the lowering before `i`, `j` and `by` are evaluated, so
   `tbl[price > 0, .(total = sum(price)), by = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
   filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
@@ -919,8 +924,8 @@ Each step ends with something real running, and each one is a large, whole chang
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
-   IR, ALTREP exposure and the checker's `frame` type exist (section 7); the interpreter now
-   runs frames, and data.table's queries run on the engine. Routing data.table's readers, writers and
+   IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
+   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
    helpers to it is next.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,

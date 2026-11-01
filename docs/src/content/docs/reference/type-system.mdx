@@ -271,8 +271,8 @@ same name, with nothing but a line break between them, is one definition written
 once, so it is not a duplicate, and the inline definition is the one that applies. When the two
 differ in kind (`@type` against `alias`), in the number of type parameters, in a constraint, or in
 the type itself, ry reports `annotation-mismatch` at the inline definition, pointing at the comment.
-Type parameters pair by position, so `#: @alias Pair<T> {tuple{T, T}}` and
-`alias Pair<U> = tuple{U, U}` agree. A `#:` definition anywhere else in the project with the same
+Type parameters pair by position, so `#: @alias Pair<T> {Tuple{T, T}}` and
+`alias Pair<U> = Tuple{U, U}` agree. A `#:` definition anywhere else in the project with the same
 name is a duplicate, as two `#:` definitions are.
 
 This example deliberately uses both spellings on one function:
@@ -772,18 +772,18 @@ either way.
 
 | Literal | Type |
 | --- | --- |
-| `(x = 1, y = 2)` | `record{x: double, y: double}` |
-| `(1L, "a")` | `tuple{integer, character}` |
-| `(x = 1,)` | `record{x: double}` |
-| `(1L,)` | `tuple{integer}` |
-| `()` | `tuple{}` |
+| `(x = 1, y = 2)` | `Record{x: double, y: double}` |
+| `(1L, "a")` | `Tuple{integer, character}` |
+| `(x = 1,)` | `Record{x: double}` |
+| `(1L,)` | `Tuple{integer}` |
+| `()` | `Tuple{}` |
 
 A one-field record and a one-item tuple need the trailing comma, because `(x = 1)` and `(x)` keep
 their R meaning. A literal is all fields or all items, and a repeated field name is an error.
 
 - A record's fields are all required. Field order is part of neither its identity nor its type, so
-  `record{x: double, y: double}` and `record{y: double, x: double}` are the same type.
-- A record and a list are different types: `record{x: double}` does not fit `list{x: double}`, and
+  `Record{x: double, y: double}` and `Record{y: double, x: double}` are the same type.
+- A record and a list are different types: `Record{x: double}` does not fit `list{x: double}`, and
   the reverse does not fit either.
 - `point$x` and `point[["x"]]` type as the field's type, and a field the record lacks is a
   `type-mismatch`. `pair[[1L]]` with a literal index types as that item, and an index past the end
@@ -873,7 +873,7 @@ exceptions are the functions the runtime lets them through: those that understan
 `print`, `identical`, `length`, `[[`, the conversions), those that only ask what a value is
 (`is.null`, `class`, `inherits`), and those that store a value without looking inside it (`list`,
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
-`record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
+`Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
 ## Function types
 
@@ -2483,53 +2483,112 @@ strict-mode origin.
 The class is a real type. It flows through chains, so `DT[a > 1][, .(m = mean(b)), by = g]` stays a
 `data.table` from end to end, and it satisfies or violates annotations and parameter types like any
 other. Column-level knowledge is out of scope for the `data.table` nominal: element types, membership
-checks, and the evolution of columns through `:=` are not tracked. The built-in frame below tracks all
-three.
+checks, and the evolution of columns through `:=` are not tracked. A `data.table` whose columns are
+known, such as the result of `fread`, and the built-in DataFrame below track all three.
 
-### Frames
+### DataFrames
 
-A frame is ry's built-in table. Its type is a record of column vectors, written like a `list{...}`
-record with `frame` in front:
+A `DataFrame` is ry's built-in table. Its type lists its column vectors, written like a `list{...}`
+record with `DataFrame` in front:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
 
 ```r
-price_of <- function(prices: frame{id: integer[], price: double[]}) -> double[] prices$price
+price_of <- function(prices: DataFrame{id: integer[], price: double[]}) -> double[] prices$price
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+#: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 price_of <- function(prices) prices$price
 ```
 
 </TabItem>
 </Tabs>
 
-A column is always a vector, so a scalar column type broadens: `frame{id: integer}` is
-`frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
-reference on it is a silent `Unknown`. A frame is no `data.frame`: its run-time class is `"frame"`
-alone, so passing one to a `data.frame` parameter is a type error, and `as.data.frame()` and
-`as.frame()` convert between the two. A frame satisfies a `list` parameter, because `lapply()`, `Map()`
-and `Filter()` call `as.list()`, which turns it into the list of its columns. This is unsound for
-a function that indexes its `list` argument with `[`, which on a frame selects rows; overloads
-that take a frame directly would close the gap. The name is
-`frame`, not `table`, so that base `table()` keeps working.
+A column is always a vector, so a scalar column type broadens: `DataFrame{id: integer}` is
+`DataFrame{id: integer[]}`. A bare `DataFrame` is one whose columns are unknown, and every column
+reference on it is a silent `Unknown`. Three more types share this shape: `LazyFrame{...}` is a
+query plan, `GroupBy{k: K; a: A}` is a grouped DataFrame whose key columns come before the
+semicolon, and `LazyGroupBy{...}` is a grouped plan. A `data.table` with known columns is written
+`data.table{...}` in the same way.
 
-`frame()` builds one without any import. Each named argument becomes a column of its vector type, and
-an unnamed variable keeps its name:
+A DataFrame is no `data.frame`: its run-time class is `"DataFrame"` alone, so passing one to a
+`data.frame` parameter is a type error. `as.data.frame()` converts it and loses the column types,
+because a base data frame's columns are not typed, while `as.data.table()` and `as.DataFrame()`
+keep every column. A DataFrame satisfies a `list` parameter, because `lapply()`, `Map()` and
+`Filter()` call `as.list()`, which turns it into the list of its columns. This is unsound for a
+function that indexes its `list` argument with `[`, which on a DataFrame selects rows; overloads
+that take a DataFrame directly would close the gap.
+
+`DataFrame()` builds one. Each named argument becomes a column of its vector type, and an unnamed
+variable keeps its name:
 
 ```r
-sales <- frame(team = c("a", "b"), amount = c(1, 2))   # frame{team: character[], amount: double[]}
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))   # DataFrame{team: character[], amount: double[]}
 ```
 
-An unnamed computed argument, a repeated name, or `...` leaves the columns unknown. With no arguments,
-`frame()` is still graphics' `frame()`, and a project's own `frame` function shadows the builtin.
+An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
+project's own function named `DataFrame`, which shadows the builtin.
 
-#### Queries
+#### Verbs
+
+Each verb of the [DataFrame API](/guides/dataframes) types as a new column list, computed from the
+syntax of its arguments. A string argument names a column, and any other argument is an
+expression built from `col("x")`:
+
+| Call | Result |
+| --- | --- |
+| `DataFrame.select(df, ...)` | one column per argument |
+| `DataFrame.with_columns(df, ...)` | `df`'s columns, each argument replacing the column of its name or added after them |
+| `DataFrame.filter(df, ...)`, `DataFrame.sort(df, ...)`, `DataFrame.head(df)`, `DataFrame.tail(df)` | the columns of `df` |
+| `DataFrame.group_by(df, ...)` | `GroupBy{keys; rest}`: the key columns, then `df`'s other columns |
+| `GroupBy.agg(groups, ...)` | `DataFrame{keys, aggregates}` |
+| `DataFrame.join(df, other, on, how)` | `df`'s columns, then `other`'s non-key columns, with `suffix` added to a name `df` already has; `"semi"` and `"anti"` keep `df`'s columns only |
+| `DataFrame.lazy(df)`, `LazyFrame.collect(plan)` | the same columns, as a `LazyFrame` or a `DataFrame` |
+| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)) |
+
+Every `LazyFrame.` verb types like its `DataFrame.` namesake and returns a `LazyFrame`.
+
+An expression's column is named by `Expr.alias` or by the argument's name, and otherwise by the
+first column it reads, as Polars names it. Its type follows R's rules for the operation:
+
+| Expression | Column type |
+| --- | --- |
+| `col("x")` | the type of `x` |
+| `a + b`, `a - b`, `a * b`, `-a` | `integer` when both sides are `integer` or `logical`, otherwise `double` |
+| `a / b`, `a ^ b`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | `double` |
+| comparisons, `&`, `\|`, `!`, `Expr.is_null` | `logical` |
+| `Expr.sum` | `integer` for an `integer` or `logical` column, otherwise `double` |
+| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last` | the type of the column |
+| `Expr.len()`, `Expr.count` | `integer` |
+| `Expr.if_else(test, yes, no)` | the type `yes` and `no` share |
+| `lit(value)`, a plain R value | the value's type |
+
+A string or `col("x")` naming a column the subject does not have is a type error on that string,
+and so is a join key missing on either side. Inside `GroupBy.agg`, an expression that reads a
+column must aggregate it, since `agg` needs one value per group:
+
+```text
+type-mismatch
+
+  x `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
+    --[a.R:10:62]
+ 10 | bad2 <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("units"))
+    |                                                              ^^^^^^^^^^^^
+```
+
+An argument whose expression the checker cannot read, such as a variable holding an `Expr`, leaves
+the result's columns unknown.
+
+#### data.table queries
+
+DataFrames also accept data.table's bracket syntax for compatibility, and the checker types it on
+a DataFrame and on a `data.table` whose columns it knows, such as the result of `fread`. The rest
+of this section describes that syntax.
 
 `f[i, j, by]` evaluates `i`, `j`, and `by` with the frame's columns in scope, as data.table does. A
 bare name that is a column types as that column's vector, ahead of any lexical binding of the same
@@ -2550,7 +2609,7 @@ enclosing scope, so only a name nothing defines is certainly wrong. `.N`, `.GRP`
 columns `.SDcols` selects (see [Every column at once](#every-column-at-once)). A called
 name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A
 `..name` read is the variable `name` from the enclosing scope, never a column, and a bare `..name`
-as `j` selects the columns it names, which makes the result a `frame` with unknown columns.
+as `j` selects the columns it names, which makes the result a `DataFrame` with unknown columns.
 
 The result of the query follows from its arguments:
 
@@ -2559,13 +2618,13 @@ The result of the query follows from its arguments:
 | `f[i]`, `f[order(x)]` | the frame type of `f` |
 | `f[, x]`, with `x` a column | the column vector |
 | `f[, sum(x)]` | the value of `j`, for an atomic or `NULL` value; otherwise `Unknown` |
-| `f[, .(a = e1, b = e2)]` or `list(...)` | `frame{a: T1[], b: T2[]}` |
+| `f[, .(a = e1, b = e2)]` or `list(...)` | `DataFrame{a: T1[], b: T2[]}` |
 | any `j` with `by` | the group columns first, then the `j` columns |
 | `f[, y := v]` | `f` with `y` added, or with its type replaced |
 
 In a `.()` or `list()` `j`, an unnamed bare column keeps its name, `.N` becomes the column `N`, and
 any other unnamed item is named by its position, as data.table names it: `f[, .(id, price * 2)]` is
-`frame{id: integer[], V2: double[]}`. Under `by`, a bare `.N` as `j` is the column `N`, and any other
+`DataFrame{id: integer[], V2: double[]}`. Under `by`, a bare `.N` as `j` is the column `N`, and any other
 unnamed computed `j` becomes the column `V1`. The groups can be written `by = g`,
 `by = .(g, h)`, `by = c("g", "h")`, or `by = "g"`, and `keyby` works the same way. A group named
 in a string must be a column, so a misspelled one is a type error:
@@ -2585,7 +2644,7 @@ chain, and each step sees the columns the step before it produced:
 
 ```r
 sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
-# frame{team: character[], total: double[]}
+# DataFrame{team: character[], total: double[]}
 ```
 
 #### Every column at once
@@ -2594,11 +2653,11 @@ sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 of `.SD`, each typed as `g` applied to that column alone. Under `by`, the group columns come first:
 
 ```r
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 sales[, lapply(.SD, sum), by = team]
-# frame{team: character[], units: integer[], price: double[]}
+# DataFrame{team: character[], units: integer[], price: double[]}
 sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
-# frame{price: double[]}
+# DataFrame{price: double[]}
 ```
 
 Because each column is checked on its own, a function that does not fit one column is reported
@@ -2609,7 +2668,7 @@ type-mismatch
 
   x this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
    --[main.R:2:27]
- 1 | sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ 1 | sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
  2 | print(sales[, lapply(.SD, function(v) v * 2)])
    |                           ^^^^^^^^^^^^^^^^^
 ```
@@ -2654,9 +2713,9 @@ columns ry cannot see, so the result has unknown columns.
 An alias taken earlier keeps the old type, and `y := NULL` removes the column:
 
 ```r
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 before <- sales
-sales[, tax := amount * 0.2]    # sales: frame{team: character[], amount: double[], tax: double[]}
+sales[, tax := amount * 0.2]    # sales: DataFrame{team: character[], amount: double[], tax: double[]}
 before$tax                      # error: the frame `before` has no column `tax`. Its columns are `team`, `amount`
 ```
 
@@ -2695,12 +2754,12 @@ by reference, needs. When that name is a global frame, later reads in the same f
 the updated columns, while other top-level code keeps the frame's declared type:
 
 ```r
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 with_tax <- function() {
   sales[, tax := amount * 0.2]
   sales$tax                       # double[]
 }
-unchanged <- sales                # frame{team: character[], amount: double[]}
+unchanged <- sales                # DataFrame{team: character[], amount: double[]}
 ```
 
 #### Joins
@@ -2753,10 +2812,10 @@ columns of `i` that no condition uses, renamed `i.name` when `x` has the same na
 repeats takes the first free numeric suffix, as R's `make.unique` gives it:
 
 ```r
-events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
-windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2L, 5L))
-events[windows, on = .(id, t >= lo)]           # frame{id: integer[], t: double[], v: character[], hi: integer[]}
-events[windows, on = .(t >= lo, t < hi)]       # frame{id: integer[], t: double[], v: character[], t.1: integer[], i.id: integer[]}
+events <- DataFrame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- DataFrame(id = 1:2, lo = c(0, 1), hi = c(2L, 5L))
+events[windows, on = .(id, t >= lo)]           # DataFrame{id: integer[], t: double[], v: character[], hi: integer[]}
+events[windows, on = .(t >= lo, t < hi)]       # DataFrame{id: integer[], t: double[], v: character[], t.1: integer[], i.id: integer[]}
 ```
 
 Inside the join, `j` can also read either side by prefix: `x.t` is `x`'s own `t`, which the join
@@ -2772,9 +2831,9 @@ the order of their conditions and named as in the join's layout, followed by `j`
 the rows the row matched, and `.N` counts those rows:
 
 ```r
-counts <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+counts <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
 counts[windows, on = .(t >= lo), .(n = .N, total = sum(v), wide = if (hi > 2L) "yes" else "no"), by = .EACHI]
-# frame{t: double[], n: integer[], total: integer[], wide: character[]}
+# DataFrame{t: double[], n: integer[], total: integer[], wide: character[]}
 ```
 
 The `if` on `hi` is accepted because `hi` is one value per row of `i`; the same `if` on `v` is a type
@@ -2796,8 +2855,9 @@ type-mismatch
 
 #### Reading files and data.table's functions
 
-ry's table replaces data.table, so `fread`, `rbindlist`, `melt` and `dcast` return frames, and a frame
-satisfies a `data.table` parameter. The checker sharpens their columns from the arguments it can see.
+`fread`, `rbindlist`, `melt` and `dcast` return a `data.table`, and the checker sharpens its
+columns from the arguments it can see, so the result is a `data.table{...}`. A DataFrame satisfies a
+`data.table` parameter, so data.table's functions accept one.
 
 `fread("data/prices.csv")` types with the columns the file has. ry sniffs the head of every `.csv` and
 `.tsv` file in the project (gitignored ones included) with the same rules as the runtime's reader,
@@ -2806,13 +2866,14 @@ which follow `fread`: the header, the separator, and each column's type out of `
 holding a line break, sniff the literal itself.
 
 ```r
-prices <- fread("data/prices.csv")   # frame{id: integer[], ticker: character[], price: double[]}
+prices <- fread("data/prices.csv")   # data.table{id: integer[], ticker: character[], price: double[]}
 cheap <- prices[prce < 10]           # warning: the frame `prices` has no column `prce`, ... Did you mean `price`?
 ```
 
 `select`, `col.names` and `stringsAsFactors = TRUE` are applied to the sniffed columns. A computed
 path, a file the project does not have, and any other argument that changes the columns (such as
-`colClasses` or `skip`) give a frame with unknown columns.
+`colClasses` or `skip`) give a `data.table` with unknown columns. `DataFrame.read_csv` and
+`LazyFrame.scan_csv` sniff their file the same way.
 
 The other functions follow data.table's rules:
 
@@ -2825,7 +2886,7 @@ The other functions follow data.table's rules:
 | `rbindlist(..., use.names = TRUE)`, `rbindlist(..., fill = TRUE)` | binds by name; `fill` adds the columns only some pieces have |
 | `rbindlist(..., idcol = "source")` | adds a first column of each piece's name (`character[]`), or its position (`integer[]`) when the list is unnamed |
 | `melt(f, id.vars, measure.vars)` | the id columns, `variable: factor` (`character[]` with `variable.factor = FALSE`), and `value` of the measures' widest type; either list defaults to every other column |
-| `dcast(...)` | `frame` |
+| `dcast(...)` | `data.table` |
 | `fifelse(test, yes, no, na)` | a vector of the type `yes`, `no` and `na` share; integers and doubles widen to doubles, a bare `NA` fits any type, and any other mix is a type error |
 | `shift(x)`, `nafill(x)`, `fcoalesce(x, ...)` | the type of `x` |
 | `rleid(...)`, `x %chin% table`, `between(x, lower, upper)`, `uniqueN(x)` | `integer[]`, `logical[]`, `logical[]`, `integer` |

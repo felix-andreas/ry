@@ -804,7 +804,7 @@ List.sublist(list(1L, 2L, 3L, 4L), 2L, 2L)
 #### `List.split_at`
 
 ```
-<T> fn(list: list[T], count: integer) -> record{before: list[T], others: list[T]}
+<T> fn(list: list[T], count: integer) -> Record{before: list[T], others: list[T]}
 ```
 
 The first `count` elements as `before` and the rest as `others`.
@@ -1161,7 +1161,7 @@ Str.replace_last("a.b.c", ".", "-")
 #### `Str.split_first`
 
 ```
-fn(string: character, separator: character) -> Result<record{before: character, after: character}, :NotFound>
+fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
 ```
 
 Splits at the first `separator` into `before` and `after`, or `:Err(:NotFound)`.
@@ -1174,7 +1174,7 @@ Str.split_first("key=value=more", "=")
 #### `Str.split_last`
 
 ```
-fn(string: character, separator: character) -> Result<record{before: character, after: character}, :NotFound>
+fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
 ```
 
 Splits at the last `separator`.
@@ -1533,7 +1533,7 @@ Dict.single("a", 1)
 #### `Dict.from_list`
 
 ```
-<K: key, V> fn(pairs: list[tuple{K, V}]) -> Dict<K, V>
+<K: key, V> fn(pairs: list[Tuple{K, V}]) -> Dict<K, V>
 ```
 
 A dictionary from `(key, value)` tuples; a later tuple replaces an earlier one with the same key.
@@ -1546,7 +1546,7 @@ Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
 #### `Dict.to_list`
 
 ```
-<K: key, V> fn(dict: Dict<K, V>) -> list[tuple{K, V}]
+<K: key, V> fn(dict: Dict<K, V>) -> list[Tuple{K, V}]
 ```
 
 The entries as `(key, value)` tuples, in insertion order.

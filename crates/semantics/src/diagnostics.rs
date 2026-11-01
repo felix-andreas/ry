@@ -2692,9 +2692,9 @@ impl<'db> TypeRenderer<'db> {
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
             TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
             TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
-            TyKind::NativeTuple(items) => format!("tuple{{{}}}", self.render_items(db, items)),
+            TyKind::NativeTuple(items) => format!("Tuple{{{}}}", self.render_items(db, items)),
             TyKind::NativeRecord(fields) => {
-                format!("record{{{}}}", self.render_native_fields(db, fields))
+                format!("Record{{{}}}", self.render_native_fields(db, fields))
             }
             TyKind::Tag(name, payload) => {
                 let name = name.text(db);

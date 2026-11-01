@@ -1267,20 +1267,20 @@ impl<'db> Lowering<'db> {
                 match native_head(node) {
                     Some(NativeHead::Record) if positional => {
                         self.errors.push((
-                            "a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items".to_owned(),
+                            "a `Record{...}` type names every field: write each one as `name: TYPE`, or use `Tuple{...}` for unnamed items".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
                     }
                     Some(NativeHead::Tuple) if named => {
                         self.errors.push((
-                            "a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields".to_owned(),
+                            "a `Tuple{...}` type lists its items without names: drop the names, or use `Record{...}` for named fields".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
                     }
                     Some(NativeHead::Record) => {
-                        self.lower_native_fields(node, "this `record{...}` type")
+                        self.lower_native_fields(node, "this `Record{...}` type")
                     }
                     _ => self.lower_native_items(node),
                 }

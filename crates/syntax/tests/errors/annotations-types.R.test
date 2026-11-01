@@ -49,10 +49,10 @@ error: expected `,` or `}` in this list type
 #: DataFrame{id: integer[] price: double[]}
 prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 #++++
-error: expected `,` or `}` in this frame type
- --> 1:24
+error: expected `,` or `}` in this DataFrame type
+ --> 1:28
   | #: DataFrame{id: integer[] price: double[]}
-  |                        ^^^^^
+  |                            ^^^^^
 
 #---- unclosed_list_bracket
 #: list[integer

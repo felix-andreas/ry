@@ -5630,6 +5630,15 @@ impl<'db> Checker<'db, '_> {
         let ExpressionKind::NameRef(name) = &self.module.expression(callee).kind else {
             return None;
         };
+        // The conversions between ry's table and data.table keep every column and its type.
+        let conversion = match &**name {
+            "as.DataFrame" => Some(FrameKind::DataFrame),
+            "as.data.table" => Some(FrameKind::DataTable),
+            _ => None,
+        };
+        if let Some(kind) = conversion {
+            return self.reaches_library(callee).then_some(DataFrameVerb::Convert(kind));
+        }
         let (receiver, verb) = name.split_once('.')?;
         let lazy = match receiver {
             "DataFrame" => false,
@@ -5753,6 +5762,7 @@ impl<'db> Checker<'db, '_> {
                 Some(frame_of(db, frame_kind(lazy), result))
             }
             DataFrameVerb::Join { lazy } => self.join_type(lazy, &columns, frame, rest),
+            DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
         }
@@ -5795,11 +5805,13 @@ impl<'db> Checker<'db, '_> {
             _ => return None,
         };
         let other_name = variable_name(module, other);
-        let mut known = true;
+        // `on` names each key once for both frames, so a key missing from both is reported once,
+        // against the left frame.
+        let mut reported: Vec<TextRange> = Vec::new();
         for (keys, columns, name) in [(&left_keys, left, frame), (&right_keys, right.as_slice(), other_name)] {
             for (key, range) in keys {
-                if !columns.iter().any(|column| column.name.text(db) == key) {
-                    known = false;
+                if !columns.iter().any(|column| column.name.text(db) == key) && !reported.contains(range) {
+                    reported.push(*range);
                     self.errors.push(TypeError {
                         range: *range,
                         kind: column_does_not_exist(db, key, name, columns),
@@ -5807,7 +5819,7 @@ impl<'db> Checker<'db, '_> {
                 }
             }
         }
-        if !known {
+        if !reported.is_empty() {
             return None;
         }
         let mut result: Vec<(String, Ty<'db>)> =

@@ -353,7 +353,7 @@ unsafe fn do_cor(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let named = expression(call.arg(0), call.call)?;
     let text = match &named.alias {
-        Some(alias) => format!("{}.alias(\"{alias}\")", named.expr),
+        Some(alias) => lazy::aliased(&named.expr, alias),
         None => named.expr.to_string(),
     };
     scalar_string(&text)

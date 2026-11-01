@@ -334,3 +334,16 @@ Any
 x: integer[]
 chosen: character[]
 39..45 warning[unused] `chosen` is assigned but never used.
+
+#==== conversions
+#---- to_and_from_data_table_keep_the_columns
+library(data.table)
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+table <- as.data.table(sales)
+back <- as.DataFrame(table)
+#++++
+Any
+sales: DataFrame{region: character[], units: integer[]}
+table: data.table
+back: DataFrame
+112..116 warning[unused] `back` is assigned but never used.

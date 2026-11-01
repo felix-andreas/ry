@@ -23,8 +23,8 @@ area <- function(shape: Shape) -> double {
 }
 
 area(:Circle(radius = 2))
-point <- (x = 1, y = 2)        # a record of type record{x: double, y: double}
-pair <- (1L, "one")            # a tuple of type tuple{integer, character}
+point <- (x = 1, y = 2)        # a record of type Record{x: double, y: double}
+pair <- (1L, "one")            # a tuple of type Tuple{integer, character}
 ```
 
 Deleting the `:Empty` arm is an error that names the case it misses:
@@ -57,11 +57,11 @@ A record or tuple literal is a parenthesized, comma-separated list:
 
 | Literal | Type |
 | --- | --- |
-| `(x = 1, y = 2)` | `record{x: double, y: double}` |
-| `(1L, "a")` | `tuple{integer, character}` |
-| `(x = 1,)` | `record{x: double}` |
-| `(1L,)` | `tuple{integer}` |
-| `()` | `tuple{}` |
+| `(x = 1, y = 2)` | `Record{x: double, y: double}` |
+| `(1L, "a")` | `Tuple{integer, character}` |
+| `(x = 1,)` | `Record{x: double}` |
+| `(1L,)` | `Tuple{integer}` |
+| `()` | `Tuple{}` |
 
 The comma is what makes it a literal. R reads `(x = 1)` as a parenthesized assignment and `(x)` as
 a parenthesized expression, and both keep that meaning, so a one-field record and a one-item tuple
@@ -70,7 +70,7 @@ parentheses, so every form in the table is new syntax with no prior meaning. A l
 fields or all items: `(1L, y = 2)` is a syntax error, and so is a repeated field name or a spliced
 `...`.
 
-**Types.** `record{name: T}` and `tuple{T1, T2}` are new types, spelled like the existing
+**Types.** `Record{name: T}` and `Tuple{T1, T2}` are new types, spelled like the existing
 `list{...}` and `frame{...}`. They cannot reuse `list{...}`, because a record is not a list: passing
 `(x = 1,)` where `list{x: double}` is expected is a type error, and so is the reverse. A record's
 fields are all required, and field order is part of neither its identity nor its type, so
@@ -169,7 +169,7 @@ built-in name would claim a word users may already use.
 Records, tuples, tags and `match` are syntax, and GNU R has no such values, so a project that keeps
 every file runnable by GNU R (`[check] inline-annotations = false`) cannot create them. It keeps
 what it has today: `list{...}` types on `list(...)`, and unions of list records with a literal
-discriminating field, narrowed by guards. The `record{...}`, `tuple{...}` and tag types are still
+discriminating field, narrowed by guards. The `Record{...}`, `Tuple{...}` and tag types are still
 accepted in `#:` comments, for code that receives values from files that use the inline syntax.
 With the setting off, each record, tuple, tag or `match` is still checked but is reported as a
 `ry-syntax` warning, as each inline annotation is reported as `inline-annotation`. It does not get
@@ -396,7 +396,7 @@ They keep working, because existing code must. ry discourages them in two ways:
 
 ## Settled choices
 
-- Literals are parenthesized comma lists, typed `record{...}` and `tuple{...}`.
+- Literals are parenthesized comma lists, typed `Record{...}` and `Tuple{...}`.
 - The tag marker is a leading `:`, in values, patterns and types.
 - A tag union is a union; `..` makes it open; there are no row variables.
 - `match (x) { PATTERN => EXPR }`, with the `{` on the `)` line, guards written `if (cond)`.

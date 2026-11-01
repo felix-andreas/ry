@@ -66,7 +66,7 @@ f <- function(pair) {
   }
 }
 #++++
-f: fn(pair: tuple{logical, logical}) -> integer
+f: fn(pair: Tuple{logical, logical}) -> integer
 72..84 error[non-exhaustive-match] this `match` does not handle `(TRUE, FALSE)`, `(TRUE, NA)`, `(NA, TRUE)` and more: add arms for them, or a catch-all `_ => ...` arm
 
 #---- logical_needs_na
@@ -148,7 +148,7 @@ f <- function(r) {
   }
 }
 #++++
-f: fn(r: record{x: logical, y: double}) -> integer
+f: fn(r: Record{x: logical, y: double}) -> integer
 72..81 error[non-exhaustive-match] this `match` does not handle `(x = NA, y = _)`: add an arm for it, or a catch-all `_ => ...` arm
 
 #---- or_pattern_covers_both

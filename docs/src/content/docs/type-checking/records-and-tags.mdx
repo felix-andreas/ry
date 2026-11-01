@@ -59,10 +59,10 @@ A record is written in parentheses with named fields, and a tuple with unnamed i
 form needs a trailing comma, so that `(x = 1)` and `(1)` keep the meaning they have in R:
 
 ```r
-point <- (x = 1, y = 2)     # record{x: double, y: double}
-pair <- (1L, "a")           # tuple{integer, character}
-one <- (x = 1,)             # record{x: double}
-empty <- ()                 # tuple{}
+point <- (x = 1, y = 2)     # Record{x: double, y: double}
+pair <- (1L, "a")           # Tuple{integer, character}
+one <- (x = 1,)             # Record{x: double}
+empty <- ()                 # Tuple{}
 ```
 
 Fields are exact. `$` never matches a prefix, and a field that does not exist is an error:
@@ -71,7 +71,7 @@ Fields are exact. `$` never matches a prefix, and a field that does not exist is
 <TabItem label="Inline">
 
 ```r
-origin: record{x: double, y: double} <- (x = 0, y = 0)
+origin: Record{x: double, y: double} <- (x = 0, y = 0)
 moved <- origin$xx
 ```
 
@@ -79,7 +79,7 @@ moved <- origin$xx
 <TabItem label="Comments">
 
 ```r
-#: record{x: double, y: double}
+#: Record{x: double, y: double}
 origin <- (x = 0, y = 0)
 moved <- origin$xx
 ```
@@ -90,7 +90,7 @@ moved <- origin$xx
 ```text
 type-mismatch
 
-  x field `xx` does not exist in `record{x: double, y: double}`
+  x field `xx` does not exist in `Record{x: double, y: double}`
 ```
 
 A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The new value must fit

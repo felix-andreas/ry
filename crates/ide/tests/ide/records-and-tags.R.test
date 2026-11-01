@@ -9,9 +9,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 completion (1): y
-hint @5: record{x: double, y: character}
+hint @5: Record{x: double, y: character}
 
 #---- hover_on_a_tag_literal
 some <- :So$0me(5L)
@@ -74,9 +74,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: record{x: double, y: character}\n"
+  edit 18..18 -> "  #: Record{x: double, y: character}\n"
 completion (2): x, y
-hint @25: record{x: double, y: character}
+hint @25: Record{x: double, y: character}
 
 #---- completion_after_dollar_with_a_prefix
 f <- function() {
@@ -90,9 +90,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: record{height: double, width: double}\n"
+  edit 18..18 -> "  #: Record{height: double, width: double}\n"
 completion (1): width
-hint @25: record{height: double, width: double}
+hint @25: Record{height: double, width: double}
 
 #---- completion_after_colon_in_an_arm_offers_tags
 #: fn(o: :Some(integer) | :None | :Pending) -> integer
@@ -199,11 +199,11 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `point`
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 completion (28): X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs, xfig
-hint @5: record{x: double, y: character}
+hint @5: Record{x: double, y: character}
 
 #---- hover_on_a_tag_payload_field_name
 shape <- :Circle(rad$0ius = 2)
@@ -317,11 +317,11 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: tuple{integer, character}\n"
-  edit 18..18 -> "#: record{first: integer}\n"
+  edit 0..0 -> "#: Tuple{integer, character}\n"
+  edit 18..18 -> "#: Record{first: integer}\n"
 completion: none
-hint @4: tuple{integer, character}
-hint @23: record{first: integer}
+hint @4: Tuple{integer, character}
+hint @23: Record{first: integer}
 
 #---- no_hint_restates_a_payload_free_tag
 nothing <- :None
