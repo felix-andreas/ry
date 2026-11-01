@@ -2209,11 +2209,19 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   grid and ragg could not run and two drawing paths would have had to agree.
   - The display list is struct-of-arrays inside the engine's own `EngineDevice` (parallel `ops`
     and `args` vectors of the primitive and its argument pairlist), and `GEDevDesc.displayList`
-    stays `NULL` because no package reads it. A pairlist is built only where GNU R exposes one:
-    `recordPlot` snapshots and `dev.copy`. Recording a call is two pushes, not a cons chain.
+    stays `R_NilValue`. A pairlist is built only where GNU R exposes one: `recordPlot` snapshots
+    and `dev.copy`. Recording a call is two pushes, not a cons chain. The cost: a C device that
+    tests `displayList != R_NilValue` before replaying on resize (as GNU R's own window devices
+    do) never replays; ragg and the file devices never resize, so none does today.
   - `R_GE_checkVersionOrDie` accepts engine versions 14 to 17 rather than GNU R's exact match,
-    because the struct prefixes packages touch are unchanged across them and installed binaries
-    such as ragg were built against 16. The engine reports 17.
+    so binaries built for any of R 4.1 to 4.6 load. `DevDesc` only grew into its reserved space
+    over those versions. `GEDevDesc` gained `lock` before `gesd` in 4.4, and the engine serves
+    both layouts by storing each system descriptor in two adjacent slots and mirroring `ask` into
+    the last one (`GEDevDesc`'s doc comment).
+  - `R_GE_getVersion`, `R_GE_version` in `GraphicsEngine.h` (through `Rversion.h`) and a recorded
+    plot's `engineVersion` follow the R release ry presents: 16 through R 4.5, 17 from R 4.6. A
+    device binary built for that release and `replayPlot()` on a plot it recorded then see the
+    version they expect.
   - `GEregisterSystem` hands the caller its index (through a claim callback) before it calls the
     system on the open devices, because grid's `InitState` reads its own index on that call.
   - Built-in devices install no-op pattern, clip-path and mask callbacks, because grid's

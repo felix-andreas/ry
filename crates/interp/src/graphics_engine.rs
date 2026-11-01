@@ -62,9 +62,9 @@ pub const MAX_DEVICES: usize = 64;
 
 pub const MAX_SYSTEMS: usize = 24;
 
-/// `R_GE_definitions`, `R_GE_deviceClip`, `R_GE_group` and `R_GE_glyphs`: the device versions
-/// that introduced patterns, device clipping, groups and paths, and glyphs.
-const VERSION_DEFINITIONS: c_int = 13;
+/// `R_GE_deviceClip`, `R_GE_group` and `R_GE_glyphs`: the device versions that introduced
+/// device clipping, groups and paths, and glyphs. Patterns, clipping paths and masks arrived
+/// in version 13, older than any device the engine accepts, so they need no check.
 const VERSION_DEVICE_CLIP: c_int = 14;
 pub const VERSION_GROUP: c_int = 15;
 pub const VERSION_GLYPHS: c_int = 16;
@@ -299,6 +299,9 @@ pub struct EngineDevice {
     /// The name `.Devices` lists, and the file it records as the name's `filepath`.
     name: String,
     file: Option<String>,
+    /// The `ask` value the engine last wrote to both layouts' slots, so a later write through
+    /// either one shows as the slot that no longer holds it.
+    synced_ask: c_int,
     /// The display list, one entry per recorded graphics operation: the primitive called and
     /// its argument pairlist.
     ops: Vec<Sexp>,
@@ -415,17 +418,15 @@ pub fn device_number(dd: *const GEDevDesc) -> usize {
     })
 }
 
-/// `Rf_desc2GEDesc`: the engine device that wraps `dev`, or the first device when none does.
+/// `Rf_desc2GEDesc`: the engine device that wraps `dev`, or null when none does (the null
+/// device has no descriptor here).
 pub fn desc_to_device(dev: *const DevDesc) -> *mut GEDevDesc {
     with_engine(|engine| {
         let found = engine.devices.iter().find(|device| {
             // SAFETY: the table holds live devices.
             !device.is_null() && ptr::eq(unsafe { (***device).ge.dev }, dev)
         });
-        found
-            .copied()
-            .unwrap_or(engine.devices[1])
-            .cast::<GEDevDesc>()
+        found.copied().unwrap_or(null_mut()).cast::<GEDevDesc>()
     })
     .cast()
 }
@@ -514,7 +515,7 @@ unsafe fn open_default_device() -> R<()> {
 /// table.
 pub unsafe fn create_device(dev: *mut DevDesc) -> R<*mut GEDevDesc> {
     let ask = values::as_logical_scalar(crate::envir::get_option("device.ask.default")) == 1;
-    (*dev).event_env = None;
+    (*dev).event_env = Some(nil());
     let device = Box::new(EngineDevice {
         ge: GEDevDesc {
             dev,
@@ -531,6 +532,7 @@ pub unsafe fn create_device(dev: *mut DevDesc) -> R<*mut GEDevDesc> {
         },
         name: String::new(),
         file: None,
+        synced_ask: c_int::from(ask),
         ops: Vec::new(),
         args: Vec::new(),
     });
@@ -543,6 +545,7 @@ pub unsafe fn create_device(dev: *mut DevDesc) -> R<*mut GEDevDesc> {
 unsafe fn sync_ask(dd: *mut GEDevDesc) {
     let slot = ptr::addr_of_mut!((*dd).gesd[MAX_SYSTEMS - 1]).cast::<c_int>();
     slot.write((*dd).ask);
+    (*dd.cast::<EngineDevice>()).synced_ask = (*dd).ask;
 }
 
 pub unsafe fn set_ask(dd: *mut GEDevDesc, ask: bool) {
@@ -555,9 +558,10 @@ pub unsafe fn ask(dd: *mut GEDevDesc) -> bool {
     let mirror = ptr::addr_of!((*dd).gesd[MAX_SYSTEMS - 1])
         .cast::<c_int>()
         .read();
-    if mirror != (*dd).ask {
+    if (*dd).ask == (*dd.cast::<EngineDevice>()).synced_ask {
         (*dd).ask = mirror;
     }
+    sync_ask(dd);
     (*dd).ask != 0
 }
 
@@ -673,8 +677,9 @@ unsafe fn remove_device(number: usize, find_next: bool) -> R<()> {
     if number == 0 || dd.is_null() {
         return Ok(());
     }
+    // The device stays in the table while it closes, as in GNU R, so `close` and the callbacks
+    // it triggers still find it through `desc2GEDesc` and `GEdeviceNumber`.
     let was_current = with_engine(|engine| {
-        engine.devices[number] = null_mut();
         let was_current = engine.current == number;
         if was_current && find_next {
             engine.current = (number + 1..MAX_DEVICES)
@@ -686,9 +691,8 @@ unsafe fn remove_device(number: usize, find_next: bool) -> R<()> {
         }
         was_current
     });
-    publish_devices()?;
     let closing = (|| -> R<()> {
-        if was_current && find_next && !no_devices() {
+        if was_current && find_next && current_number() != 0 {
             let next = device(current_number());
             if let Some(activate) = (*(*next).dev).activate {
                 guarded(|| activate((*next).dev))?;
@@ -699,8 +703,11 @@ unsafe fn remove_device(number: usize, find_next: bool) -> R<()> {
         }
         Ok(())
     })();
+    with_engine(|engine| engine.devices[number] = null_mut());
+    let published = publish_devices();
     destroy_device(dd)?;
-    closing
+    closing?;
+    published
 }
 
 /// `KillAllDevices`: closes every device, the highest slot first.
@@ -861,7 +868,7 @@ pub unsafe fn unregister_system(index: c_int) -> R<()> {
     if registered_systems().is_empty() {
         return crate::conditions::warning("no graphics system to unregister");
     }
-    if index >= MAX_SYSTEMS || index == 0 {
+    if !is_registered(index) {
         return Ok(());
     }
     for dd in open_devices() {
@@ -880,9 +887,19 @@ pub unsafe fn unregister_system(index: c_int) -> R<()> {
     Ok(())
 }
 
+/// Whether `index` is a slot a registered system holds. The other slots alias a system's
+/// descriptor or mirror `ask`, so they must never be freed or read as a descriptor.
+fn is_registered(index: usize) -> bool {
+    system_indices().any(|slot| slot == index)
+        && with_engine(|engine| engine.systems[index].is_some())
+}
+
 /// `GEsystemState`: the state system `index` keeps on `dd`.
 pub unsafe fn system_state(dd: *mut GEDevDesc, index: usize) -> *mut c_void {
-    let descriptor = (*dd).gesd.get(index).copied().unwrap_or(null_mut());
+    if !is_registered(index) {
+        return null_mut();
+    }
+    let descriptor = (*dd).gesd[index];
     if descriptor.is_null() {
         null_mut()
     } else {
@@ -2198,12 +2215,6 @@ pub unsafe fn glyph(
         })?;
     }
     Ok(())
-}
-
-/// Calls one of the device's definition callbacks (patterns, clip paths, masks, groups),
-/// which only devices of version 13 or later have.
-pub unsafe fn definition_version(dd: *mut GEDevDesc) -> bool {
-    (*(*dd).dev).device_version >= VERSION_DEFINITIONS
 }
 
 // Text.

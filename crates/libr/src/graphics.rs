@@ -879,6 +879,9 @@ pub extern "C" fn R_CheckDeviceAvailableBool() -> crate::Rboolean {
 /// ry's console does not prompt otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_NewFrameConfirm(dev: *mut DevDesc) {
+    if !interp::interp().interactive || dev.is_null() {
+        return;
+    }
     if let Some(confirm) = (*dev).new_frame_confirm {
         confirm(dev);
     }
@@ -1133,7 +1136,10 @@ pub unsafe extern "C" fn GEPath(
 ) {
     enter(|| {
         let counts = slice(counts, polygons);
-        let total: c_int = counts.iter().sum();
+        let total = counts
+            .iter()
+            .try_fold(0 as c_int, |total, count| total.checked_add(*count))
+            .ok_or_else(|| error("invalid graphics path"))?;
         graphics_engine::path(
             slice(x, total),
             slice(y, total),

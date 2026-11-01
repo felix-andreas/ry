@@ -3,7 +3,7 @@
 pdf(NULL)
 dev.control(displaylist = "enable")
 print(grDevices:::dev.displaylist())
-p <- recordPlot(); print(class(p)); print(is.null(p[[1]])); print(attr(p, "engineVersion") >= 16)
+p <- recordPlot(); print(class(p)); print(is.null(p[[1]])); print(attr(p, "engineVersion"))
 print(par("page")); print(par("mar", "cex"))
 old <- par(mar = c(1, 1, 1, 1), mfrow = c(2, 2)); print(old)
 print(par("mai")); print(par("mfcol")); print(storage.mode(par("mfrow")))
