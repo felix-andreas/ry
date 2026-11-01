@@ -1,0 +1,21 @@
+# nlminb and nls(algorithm = "port") run ry's own trust-region method behind PORT's interface,
+# so results are rounded and only convergence codes and messages are compared exactly.
+x <- c(1.2, 3.4, 2.2, 5.1, 3.3, 4.8, 2.9, 4.1)
+nll <- function(p) -sum(dnorm(x, p[1], exp(p[2]), log = TRUE))
+fit <- nlminb(c(0, 0), nll)
+print(round(fit$par, 5)); print(round(fit$objective, 6)); print(fit$convergence); print(fit$message)
+rosen <- function(p) 100 * (p[2] - p[1]^2)^2 + (1 - p[1])^2
+grad <- function(p) c(-400 * p[1] * (p[2] - p[1]^2) - 2 * (1 - p[1]), 200 * (p[2] - p[1]^2))
+hess <- function(p) matrix(c(1200 * p[1]^2 - 400 * p[2] + 2, -400 * p[1], -400 * p[1], 200), 2)
+r1 <- nlminb(c(-1.2, 1), rosen); print(round(r1$par, 4)); print(r1$convergence)
+r2 <- nlminb(c(-1.2, 1), rosen, grad); print(round(r2$par, 4)); print(r2$convergence)
+r3 <- nlminb(c(-1.2, 1), rosen, grad, hess); print(round(r3$par, 4)); print(r3$convergence)
+b <- nlminb(c(a = 0.5, b = 0.5), rosen, lower = c(-2, -2), upper = c(0.5, 2)); print(round(b$par, 4)); print(round(b$objective, 6)); print(b$convergence)
+q <- nlminb(c(1, 1, 1), function(p) sum((p - c(3, -1, 2))^2), lower = 0); print(round(q$par, 4)); print(q$message)
+it <- nlminb(c(-1.2, 1), rosen, control = list(iter.max = 3)); print(it$convergence); print(it$message); print(it$iterations)
+print(names(nlminb(c(1, 2), function(p) sum(p^2))))
+DNase1 <- subset(DNase, Run == 1)
+fm <- nls(density ~ Asym/(1 + exp((xmid - log(conc))/scal)), data = DNase1, start = list(Asym = 3, xmid = 0, scal = 1), algorithm = "port")
+print(round(coef(fm), 4)); print(fm$convInfo$isConv)
+fm2 <- nls(density ~ Asym/(1 + exp((xmid - log(conc))/scal)), data = DNase1, start = list(Asym = 3, xmid = 0, scal = 1.2), algorithm = "port", lower = c(0, 0, 1.1))
+print(round(coef(fm2), 4)); print(fm2$convInfo$isConv)

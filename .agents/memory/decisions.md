@@ -2134,20 +2134,35 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
-  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
-  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
-  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
-  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
-  write per finished page. Drawing routines check their arguments and a started plot, then return.
-  A real renderer would slot in behind the same table; nothing else reads pixels today.
-- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+- **Devices record pages of shapes and render them when they close.** Every file device (pdf,
+  postscript, xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device`
+  holding its size, point size, the base graphics parameters and the pages drawn so far. A page is
+  a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
+  each with the clip rectangle in force, so the drawing routines know nothing about file formats
+  and each format is one writer over the same pages. `plot.new` starts a page when the layout's
+  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
+  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
+  system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
+  than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
+  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
+  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
+  R: vector devices create their file at open (so a bad path fails there), a pdf without pages
+  is still a valid document, and bitmap devices with no page write nothing.
+- **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is
+  1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline offset by
+  `ylbias`, symbols are sized from half the character height, font sizes round to whole points,
+  and text widths come from Helvetica's AFM metrics, the same table `strwidth` uses. Rendering a
+  plot through both engines' pdf devices and rasterizing them is how to check a change: plot,
+  hist, barplot and `par(mfrow)` layouts differ in a handful of pixels. Contour labels use a
+  clean-room "flattest window" placement, so they can sit in a different spot than GNU R's.
+- **Display lists and snapshots stay empty.** `dev.control` and
   `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
   GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
   display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
   `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
   not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
-  and that belongs with real drawing, when the display list holds the calls to replay.
+  and that belongs with recording the display list, which would also let devices replay a
+  plot onto a resized or copied device.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
@@ -2704,3 +2719,36 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** Only the lint read the option, so `ry run` happily defined S4, Reference and R6 classes in a project that had turned them off.
 - **Target shape.** `ry run` and `ry repl` on ry's runtime pass the option to the interpreter as a run flag (`RUN_FLAG_OBJECT_SYSTEMS`). With it off, `run_closure` calls `refuse_object_system`, which raises the lint's message (one text, `syntax::native_values::object_systems_disabled_message`, and one table of defining functions, `object_system_function`, shared by both) when a call named `setClass`, `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class` (bare or after `::`) runs a closure owned by `methods` or `R6` and its caller's top environment is the global environment.
 - **Scope.** User code is whatever has the global environment as its top level: scripts, the console, and functions defined there. Packages are exempt, installed or loaded with `ry load`, because they must keep loading (`stats4` defines S4 classes when it loads) and a package's classes are the package author's call; the lint still flags a project package's source. Matching by call name keeps the hot path to one flag test when the option is on and one symbol-name lookup per closure call when it is off; a renamed alias (`f <- setClass`) slips through, which is acceptable for a guardrail whose job is to stop deliberate use.
+
+# Decision record: one Rmath, one codec stack, and the clean-room numerical routines
+
+- **One Rmath.** The interpreter's distributions and libR's Rmath were two independent
+  implementations of the same functions, so a precision fix landed in one and not the other.
+  `crates/interp/src/rmath.rs` is now the single copy (libR's version, the one the conformance
+  suite holds to GNU R): the interpreter's builtins vectorize it, libR only converts C flags,
+  raises the collected warnings and draws variates, and `gamma`, `lgamma`, `beta` and `lbeta` call
+  it instead of libm's `tgamma`, which is not exact for whole arguments.
+- **One compression stack.** libR decoded bzip2 and xz with `bzip2-rs` and `lzma-rs` while the
+  interpreter used `bzip2` and `lzma-rust2`, which also write. libR now calls
+  `interp::connections::decompress` (file magic) and `interp::serialize::decompress_record`
+  (lazy-load records), so one set of codecs reads every file and both crates drop the others.
+- **Time zones come from jiff** reading the system's tz database (`system.rs`, `Zone`). A name the
+  database does not know acts as UTC under the abbreviation glibc gives it (the name's leading
+  letters when there are three or more, else empty). Two glibc behaviors are copied deliberately:
+  an `isdst` that contradicts the zone's rule shifts the reading by an hour, even in a zone with
+  no daylight saving time, except for `"UTC"` and `"GMT"`, which GNU R converts itself; and a
+  year outside jiff's range moves by whole 400-year cycles, which keeps the calendar and weekdays.
+- **`nlm`, `nlminb` and `polyroot` are written from the published algorithms**, not GNU R's code:
+  Dennis and Schnabel's UNCMIN for `nlm`, a trust-region quasi-Newton method behind PORT's
+  `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
+  Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
+  GNU R returns.
+- **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
+  documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
+  (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and
+  errors for unterminated strings. `deparseRd` reads the same tree.
+- **`iconv` goes through the C library's `iconv`** rather than a Rust crate, because GNU R's
+  results (which names it accepts, how `sub` substitutes, transliteration) are glibc's.
+- **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
+  code that libR and the interpreter both run. No effect on static analysis.
+

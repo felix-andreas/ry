@@ -1916,16 +1916,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).
-  - The graphics device keeps a display list but draws nothing.
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
-- **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
-  (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
-  optimum along a slightly different path, so values agree to about seven digits only.
-- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
-  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
-  daylight-saving changes differ from GNU R.
+- **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
+  `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
+  values agree to about seven digits only.
 - **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
   stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
@@ -1942,7 +1938,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
-  `file.copy`, `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
+  `format.Date`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -1950,10 +1946,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** `bzfile()` and `xzfile()` read all three formats but always write gzip,
-  because ry has no streaming bzip2 or xz encoder (readers detect the format, so the files still
-  load). `memCompress(type = "bzip2")`, `fifo()`, URL connections and sockets are not
-  implemented.
+- **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
+  negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -1977,21 +1971,24 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics devices draw nothing** (`decisions.md`, "the default packages' utils, tools,
-  grDevices and graphics routines"). Missing: rendering output files, GNU R's `R_pretty` warnings
-  on subnormal axis ranges, cairo font metrics for bitmap devices, plotmath sizes (an expression is
-  measured as its deparsed text), and `stem()` beyond the empty case.
-- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, 41 of 66 ending with
-  GNU R's exit status). First failures: precision in `polyroot` (complex), noncentral `qchisq`
-  and `dbeta` (d-p-q-r-tests, d-p-q-r-tst-2), complex `%*%` (reg-BLAS), `iconv` to ASCII,
-  `file.copy` (reg-packages), `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
-  `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
-  stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
-  (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
-  (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
-  (`RDX3`, where GNU R writes `RDA3`); `load()` reads it back the same, but the file differs.
-- **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
-  `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+- **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
+  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
+  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
+  (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
+  ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
+  layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
+  case, and contour label placement, which picks slightly different positions than GNU R.
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
+  GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
+  (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
+  `initialize` error (reg-S4-examples), `news()` timing out (reg-examples1), "Error: block"
+  (reg-examples2), Kendall `cor` on empty columns (reg-tests-1b), `kmeans` (reg-tests-1c),
+  `assertCondition` (reg-tests-1d), `env.profile` (reg-tests-1e), the rank in `summary.manova`
+  (reg-tests-2), `nchar` on invalid multibyte strings (reg-tests-3), the DESCRIPTION column
+  layout (reg-packages), URL connections (libcurl), utf8-regex, and a timeout in utf8.
+  reg-large writes temporary files of several gigabytes under ry, so run it with a file size
+  limit (`ulimit -f`).
+- **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
   context, so it prints `Calls: print -> .Call` where ry prints none.

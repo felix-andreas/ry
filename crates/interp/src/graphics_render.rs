@@ -1,0 +1,1054 @@
+//! What a graphics device draws and the files it writes. Base graphics records each page as a
+//! list of shapes in inches from the device's bottom-left corner, and closing the device
+//! renders the pages into its file format: PDF and SVG as vector graphics, PNG, BMP and TIFF
+//! as rasterized pixels.
+
+use crate::graphics::{Colour, text_width_ems};
+use std::{collections::BTreeMap, io::Write, sync::OnceLock};
+
+/// One page of a device: its background and the shapes drawn on it, in drawing order.
+pub struct Page {
+    pub background: Colour,
+    pub items: Vec<Item>,
+}
+
+/// A shape and the region it is clipped to.
+pub struct Item {
+    pub clip: Rect,
+    pub shape: Shape,
+}
+
+/// A rectangle in inches, `x0 <= x1` and `y0 <= y1`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rect {
+    pub x0: f64,
+    pub x1: f64,
+    pub y0: f64,
+    pub y1: f64,
+}
+
+pub enum Shape {
+    /// A polyline, or a polygon when `closed`. An open path is never filled.
+    Path {
+        points: Vec<[f64; 2]>,
+        closed: bool,
+        fill: Colour,
+        stroke: Option<Stroke>,
+    },
+    Circle {
+        centre: [f64; 2],
+        radius: f64,
+        fill: Colour,
+        stroke: Option<Stroke>,
+    },
+    /// One line of text whose baseline starts at `origin` once it is moved back along the
+    /// baseline by `hadj` of its width, rotated `rotation` degrees anticlockwise.
+    Text {
+        origin: [f64; 2],
+        text: String,
+        points: f64,
+        font: i32,
+        rotation: f64,
+        hadj: f64,
+        colour: Colour,
+    },
+}
+
+/// How a line is drawn. `lwd` 1 is 1/96 inch, and each hex digit of `lty` is a dash or gap
+/// length in units of the line width, the first dash in the low bits.
+#[derive(Clone, Copy)]
+pub struct Stroke {
+    pub colour: Colour,
+    pub lwd: f64,
+    pub lty: u32,
+    pub lend: i32,
+    pub ljoin: i32,
+    pub lmitre: f64,
+}
+
+/// The file formats ry renders.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Format {
+    Pdf,
+    Svg,
+    Png,
+    Bmp,
+    Tiff,
+}
+
+/// Renders `pages` of a device `size` inches across into one file for PDF, or into one file
+/// per page for the others, naming page `n` by filling `file`'s `%d` conversion with `n`.
+/// Raster formats use `resolution` pixels per inch.
+pub fn write_pages(
+    format: Format,
+    file: &str,
+    pages: &[Page],
+    size: [f64; 2],
+    resolution: f64,
+    title: &str,
+) -> std::io::Result<()> {
+    if format == Format::Pdf {
+        return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
+    }
+    for (index, page) in pages.iter().enumerate() {
+        let bytes = match format {
+            Format::Svg => svg_document(page, size).into_bytes(),
+            Format::Png | Format::Bmp | Format::Tiff => {
+                let pixels = rasterize(page, size, resolution).ok_or_else(|| {
+                    std::io::Error::other("the page is too large to rasterize")
+                })?;
+                match format {
+                    Format::Png => pixels
+                        .encode_png()
+                        .map_err(|failure| std::io::Error::other(failure.to_string()))?,
+                    Format::Bmp => bmp(&pixels),
+                    _ => tiff(&pixels, resolution),
+                }
+            }
+            Format::Pdf => Vec::new(),
+        };
+        std::fs::write(file_for_page(file, index + 1), bytes)?;
+    }
+    Ok(())
+}
+
+/// A file name with its `%d` (or `%03d`) conversion filled in with `page`, `%%` unescaped,
+/// and a leading `~/` expanded.
+pub fn file_for_page(name: &str, page: usize) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut characters = name.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            result.push(character);
+            continue;
+        }
+        let mut spec = String::new();
+        while let Some(next) = characters.peek().copied() {
+            if next.is_ascii_digit() {
+                spec.push(next);
+                characters.next();
+            } else {
+                break;
+            }
+        }
+        match characters.next() {
+            Some('d') => {
+                let width: usize = spec.parse().unwrap_or(0);
+                result.push_str(&format!("{page:0width$}"));
+            }
+            Some('%') => result.push('%'),
+            Some(other) => {
+                result.push('%');
+                result.push_str(&spec);
+                result.push(other);
+            }
+            None => result.push('%'),
+        }
+    }
+    if let Some(rest) = result.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
+    }
+    result
+}
+
+fn channels(colour: Colour) -> [u8; 4] {
+    colour.to_le_bytes()
+}
+
+fn alpha(colour: Colour) -> u8 {
+    channels(colour)[3]
+}
+
+fn visible(stroke: &Option<Stroke>) -> Option<&Stroke> {
+    stroke
+        .as_ref()
+        .filter(|stroke| alpha(stroke.colour) > 0 && stroke.lty != u32::MAX && stroke.lwd > 0.0)
+}
+
+/// A stroke's dash pattern in inches, empty for a solid line.
+fn dashes(stroke: &Stroke) -> Vec<f64> {
+    let unit = stroke.lwd.max(1.0) / 96.0;
+    let mut pattern = Vec::new();
+    let mut rest = stroke.lty;
+    while rest != 0 && pattern.len() < 8 {
+        pattern.push(f64::from(rest & 0xF) * unit);
+        rest >>= 4;
+    }
+    pattern
+}
+
+/// The control points of four cubic Bézier arcs that approximate a circle, each `[c1, c2,
+/// end]`, starting from the circle's rightmost point.
+fn circle_arcs(centre: [f64; 2], radius: f64) -> ([f64; 2], [[[f64; 2]; 3]; 4]) {
+    let handle = radius * 0.552_284_749_830_793_4;
+    let [x, y] = centre;
+    (
+        [x + radius, y],
+        [
+            [[x + radius, y + handle], [x + handle, y + radius], [x, y + radius]],
+            [[x - handle, y + radius], [x - radius, y + handle], [x - radius, y]],
+            [[x - radius, y - handle], [x - handle, y - radius], [x, y - radius]],
+            [[x + handle, y - radius], [x + radius, y - handle], [x + radius, y]],
+        ],
+    )
+}
+
+// PDF.
+
+const POINTS_PER_INCH: f64 = 72.0;
+
+/// The PDF base fonts for R's font faces 1 to 5. The first four use WinAnsiEncoding.
+const PDF_FONTS: [&str; 5] = [
+    "Helvetica",
+    "Helvetica-Bold",
+    "Helvetica-Oblique",
+    "Helvetica-BoldOblique",
+    "Symbol",
+];
+
+/// A PDF document of `pages`, each `size` inches, with the standard Helvetica fonts. A
+/// document without pages is still valid, which is what a device nothing was drawn on writes.
+fn pdf_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
+    let mut opacities = BTreeMap::new();
+    let contents: Vec<Vec<u8>> = pages
+        .iter()
+        .map(|page| pdf_content(page, &mut opacities).into_bytes())
+        .collect();
+    // Objects 1 to 4 are the catalog, the page tree, the shared resources and the document
+    // information; each page then takes a page object and a content stream.
+    let page_count = pages.len();
+    let first_page = 5;
+    let mut objects: Vec<Vec<u8>> = Vec::with_capacity(4 + 2 * page_count);
+    objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+    let kids: Vec<String> = (0..page_count)
+        .map(|index| format!("{} 0 R", first_page + 2 * index))
+        .collect();
+    objects.push(
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {page_count} >>",
+            kids.join(" ")
+        )
+        .into_bytes(),
+    );
+    let fonts: Vec<String> = PDF_FONTS
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let encoding = if index < 4 {
+                " /Encoding /WinAnsiEncoding"
+            } else {
+                ""
+            };
+            format!(
+                "/F{} << /Type /Font /Subtype /Type1 /BaseFont /{name}{encoding} >>",
+                index + 1
+            )
+        })
+        .collect();
+    let states: Vec<String> = opacities
+        .iter()
+        .map(|((stroke, fill), index)| {
+            format!(
+                "/GS{index} << /Type /ExtGState /CA {:.3} /ca {:.3} >>",
+                f64::from(*stroke) / 255.0,
+                f64::from(*fill) / 255.0
+            )
+        })
+        .collect();
+    objects.push(
+        format!(
+            "<< /ProcSet [/PDF /Text] /Font << {} >> /ExtGState << {} >> >>",
+            fonts.join(" "),
+            states.join(" ")
+        )
+        .into_bytes(),
+    );
+    objects.push(
+        format!(
+            "<< /Title ({}) /Producer (ry) /Creator (R) >>",
+            pdf_string(title)
+        )
+        .into_bytes(),
+    );
+    let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
+    for (index, content) in contents.into_iter().enumerate() {
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2} {height:.2}] \
+                 /Resources 3 0 R /Contents {} 0 R >>",
+                first_page + 2 * index + 1
+            )
+            .into_bytes(),
+        );
+        let compressed = deflate(&content);
+        let mut stream = format!(
+            "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+            compressed.len()
+        )
+        .into_bytes();
+        stream.extend_from_slice(&compressed);
+        stream.extend_from_slice(b"\nendstream");
+        objects.push(stream);
+    }
+    let mut document = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(document.len());
+        document.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        document.extend_from_slice(object);
+        document.extend_from_slice(b"\nendobj\n");
+    }
+    let table = document.len();
+    document.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        document.extend(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    document.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R /Info 4 0 R >>\nstartxref\n{table}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    document
+}
+
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::with_capacity(bytes.len() / 4), flate2::Compression::default());
+    // Writing into a vector cannot fail.
+    match encoder.write_all(bytes).and_then(|()| encoder.finish()) {
+        Ok(compressed) => compressed,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The content stream of one page. Each run of items with the same clip region sits in its
+/// own graphics state, so the clip is set once per run.
+fn pdf_content(page: &Page, opacities: &mut BTreeMap<(u8, u8), usize>) -> String {
+    let mut out = String::new();
+    let mut opacity = |stroke: u8, fill: u8| {
+        let next = opacities.len();
+        *opacities.entry((stroke, fill)).or_insert(next)
+    };
+    let pt = |value: f64| value * POINTS_PER_INCH;
+    if alpha(page.background) > 0 {
+        let [red, green, blue, a] = channels(page.background);
+        if a < 255 {
+            out.push_str(&format!("/GS{} gs\n", opacity(255, a)));
+        }
+        out.push_str(&format!(
+            "{} rg 0 0 10000 10000 re f\n",
+            pdf_rgb(red, green, blue)
+        ));
+    }
+    let mut current_clip: Option<Rect> = None;
+    for item in &page.items {
+        if current_clip != Some(item.clip) {
+            if current_clip.is_some() {
+                out.push_str("Q\n");
+            }
+            let clip = item.clip;
+            out.push_str(&format!(
+                "q {:.2} {:.2} {:.2} {:.2} re W n\n",
+                pt(clip.x0),
+                pt(clip.y0),
+                pt(clip.x1 - clip.x0),
+                pt(clip.y1 - clip.y0)
+            ));
+            current_clip = Some(clip);
+        }
+        match &item.shape {
+            Shape::Path {
+                points,
+                closed,
+                fill,
+                stroke,
+            } => {
+                let fill = if *closed && alpha(*fill) > 0 {
+                    Some(*fill)
+                } else {
+                    None
+                };
+                let stroke = visible(stroke);
+                if (fill.is_none() && stroke.is_none()) || points.is_empty() {
+                    continue;
+                }
+                pdf_paint(&mut out, fill, stroke, &mut opacity);
+                for (index, [x, y]) in points.iter().enumerate() {
+                    let operator = if index == 0 { "m" } else { "l" };
+                    out.push_str(&format!("{:.2} {:.2} {operator}\n", pt(*x), pt(*y)));
+                }
+                if *closed {
+                    out.push_str("h ");
+                }
+                out.push_str(pdf_paint_operator(fill.is_some(), stroke.is_some()));
+                out.push('\n');
+            }
+            Shape::Circle {
+                centre,
+                radius,
+                fill,
+                stroke,
+            } => {
+                let fill = (alpha(*fill) > 0).then_some(*fill);
+                let stroke = visible(stroke);
+                if fill.is_none() && stroke.is_none() {
+                    continue;
+                }
+                pdf_paint(&mut out, fill, stroke, &mut opacity);
+                let (start, arcs) = circle_arcs(*centre, *radius);
+                out.push_str(&format!("{:.2} {:.2} m\n", pt(start[0]), pt(start[1])));
+                for [first, second, end] in arcs {
+                    out.push_str(&format!(
+                        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+                        pt(first[0]),
+                        pt(first[1]),
+                        pt(second[0]),
+                        pt(second[1]),
+                        pt(end[0]),
+                        pt(end[1])
+                    ));
+                }
+                out.push_str("h ");
+                out.push_str(pdf_paint_operator(fill.is_some(), stroke.is_some()));
+                out.push('\n');
+            }
+            Shape::Text {
+                origin,
+                text,
+                points,
+                font,
+                rotation,
+                hadj,
+                colour,
+            } => {
+                let [red, green, blue, a] = channels(*colour);
+                if a == 0 || text.is_empty() {
+                    continue;
+                }
+                if a < 255 {
+                    out.push_str(&format!("/GS{} gs\n", opacity(255, a)));
+                }
+                let face = if (1..=5).contains(font) { *font } else { 1 };
+                let width = text_width_ems(text, face) * points / POINTS_PER_INCH;
+                let (sin, cos) = rotation.to_radians().sin_cos();
+                let x = origin[0] - hadj * width * cos;
+                let y = origin[1] - hadj * width * sin;
+                out.push_str(&format!(
+                    "BT {} rg /F{face} 1 Tf {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} Tm ({}) Tj ET\n",
+                    pdf_rgb(red, green, blue),
+                    points * cos,
+                    points * sin,
+                    -points * sin,
+                    points * cos,
+                    pt(x),
+                    pt(y),
+                    pdf_string(text)
+                ));
+                if a < 255 {
+                    out.push_str(&format!("/GS{} gs\n", opacity(255, 255)));
+                }
+            }
+        }
+    }
+    if current_clip.is_some() {
+        out.push_str("Q\n");
+    }
+    out
+}
+
+fn pdf_rgb(red: u8, green: u8, blue: u8) -> String {
+    format!(
+        "{:.3} {:.3} {:.3}",
+        f64::from(red) / 255.0,
+        f64::from(green) / 255.0,
+        f64::from(blue) / 255.0
+    )
+}
+
+/// Sets the fill and stroke colours, opacity, width, caps, joins and dashes for a shape.
+fn pdf_paint(
+    out: &mut String,
+    fill: Option<Colour>,
+    stroke: Option<&Stroke>,
+    opacity: &mut impl FnMut(u8, u8) -> usize,
+) {
+    let fill_alpha = fill.map_or(255, alpha);
+    let stroke_alpha = stroke.map_or(255, |stroke| alpha(stroke.colour));
+    out.push_str(&format!("/GS{} gs\n", opacity(stroke_alpha, fill_alpha)));
+    if let Some(fill) = fill {
+        let [red, green, blue, _] = channels(fill);
+        out.push_str(&format!("{} rg\n", pdf_rgb(red, green, blue)));
+    }
+    if let Some(stroke) = stroke {
+        let [red, green, blue, _] = channels(stroke.colour);
+        let dash: Vec<String> = dashes(stroke)
+            .iter()
+            .map(|length| format!("{:.2}", length * POINTS_PER_INCH))
+            .collect();
+        out.push_str(&format!(
+            "{} RG {:.2} w {} J {} j {:.2} M [{}] 0 d\n",
+            pdf_rgb(red, green, blue),
+            stroke.lwd * 0.75,
+            pdf_cap(stroke.lend),
+            pdf_join(stroke.ljoin),
+            stroke.lmitre,
+            dash.join(" ")
+        ));
+    }
+}
+
+fn pdf_paint_operator(fill: bool, stroke: bool) -> &'static str {
+    match (fill, stroke) {
+        (true, true) => "B",
+        (true, false) => "f",
+        _ => "S",
+    }
+}
+
+/// PDF's line cap code for R's `lend`: round, butt or square.
+fn pdf_cap(lend: i32) -> i32 {
+    match lend {
+        1 => 0,
+        2 => 2,
+        _ => 1,
+    }
+}
+
+/// PDF's line join code for R's `ljoin`: round, mitre or bevel.
+fn pdf_join(ljoin: i32) -> i32 {
+    match ljoin {
+        1 => 0,
+        2 => 2,
+        _ => 1,
+    }
+}
+
+/// Text as a PDF literal string in WinAnsiEncoding: Latin-1 characters map to themselves and
+/// anything else becomes `?`.
+fn pdf_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '(' | ')' | '\\' => {
+                out.push('\\');
+                out.push(character);
+            }
+            ' '..='~' => out.push(character),
+            '\u{a0}'..='\u{ff}' => out.push_str(&format!("\\{:03o}", character as u32)),
+            _ => out.push('?'),
+        }
+    }
+    out
+}
+
+// SVG.
+
+/// An SVG document of one page, in points with y growing downwards.
+fn svg_document(page: &Page, size: [f64; 2]) -> String {
+    let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
+    let x = |value: f64| value * POINTS_PER_INCH;
+    let y = |value: f64| height - value * POINTS_PER_INCH;
+    let mut out = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" \
+         width=\"{width:.2}pt\" height=\"{height:.2}pt\" viewBox=\"0 0 {width:.2} {height:.2}\">\n"
+    );
+    if alpha(page.background) > 0 {
+        out.push_str(&format!(
+            "<rect width=\"100%\" height=\"100%\" {}/>\n",
+            svg_paint("fill", page.background)
+        ));
+    }
+    let mut clips: Vec<Rect> = Vec::new();
+    let mut open_group = None;
+    for item in &page.items {
+        let clip_index = match clips.iter().position(|clip| *clip == item.clip) {
+            Some(index) => index,
+            None => {
+                let clip = item.clip;
+                out.push_str(&format!(
+                    "<clipPath id=\"clip{}\"><rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\"/></clipPath>\n",
+                    clips.len(),
+                    x(clip.x0),
+                    y(clip.y1),
+                    x(clip.x1 - clip.x0),
+                    x(clip.y1 - clip.y0)
+                ));
+                clips.push(clip);
+                clips.len() - 1
+            }
+        };
+        if open_group != Some(clip_index) {
+            if open_group.is_some() {
+                out.push_str("</g>\n");
+            }
+            out.push_str(&format!("<g clip-path=\"url(#clip{clip_index})\">\n"));
+            open_group = Some(clip_index);
+        }
+        match &item.shape {
+            Shape::Path {
+                points,
+                closed,
+                fill,
+                stroke,
+            } => {
+                let mut data = String::new();
+                for (index, [px, py]) in points.iter().enumerate() {
+                    let command = if index == 0 { 'M' } else { 'L' };
+                    data.push_str(&format!("{command}{:.2} {:.2} ", x(*px), y(*py)));
+                }
+                if *closed {
+                    data.push('Z');
+                }
+                let fill = if *closed { *fill } else { 0 };
+                out.push_str(&format!(
+                    "<path d=\"{}\" {} {}/>\n",
+                    data.trim_end(),
+                    svg_paint("fill", fill),
+                    svg_stroke(stroke)
+                ));
+            }
+            Shape::Circle {
+                centre,
+                radius,
+                fill,
+                stroke,
+            } => out.push_str(&format!(
+                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" {} {}/>\n",
+                x(centre[0]),
+                y(centre[1]),
+                x(*radius),
+                svg_paint("fill", *fill),
+                svg_stroke(stroke)
+            )),
+            Shape::Text {
+                origin,
+                text,
+                points,
+                font,
+                rotation,
+                hadj,
+                colour,
+            } => {
+                let face = if (1..=5).contains(font) { *font } else { 1 };
+                let width = text_width_ems(text, face) * points / POINTS_PER_INCH;
+                let (sin, cos) = rotation.to_radians().sin_cos();
+                let tx = x(origin[0] - hadj * width * cos);
+                let ty = y(origin[1] - hadj * width * sin);
+                let weight = if face == 2 || face == 4 { " font-weight=\"bold\"" } else { "" };
+                let style = if face == 3 || face == 4 { " font-style=\"italic\"" } else { "" };
+                let family = if face == 5 { "Symbol" } else { "Helvetica, Arial, sans-serif" };
+                out.push_str(&format!(
+                    "<text x=\"{tx:.2}\" y=\"{ty:.2}\" transform=\"rotate({:.2} {tx:.2} {ty:.2})\" \
+                     font-family=\"{family}\" font-size=\"{points:.2}\"{weight}{style} {}>{}</text>\n",
+                    -rotation,
+                    svg_paint("fill", *colour),
+                    xml_escape(text)
+                ));
+            }
+        }
+    }
+    if open_group.is_some() {
+        out.push_str("</g>\n");
+    }
+    out.push_str("</svg>\n");
+    out
+}
+
+fn svg_paint(attribute: &str, colour: Colour) -> String {
+    let [red, green, blue, a] = channels(colour);
+    if a == 0 {
+        return format!("{attribute}=\"none\"");
+    }
+    let mut paint = format!("{attribute}=\"rgb({red},{green},{blue})\"");
+    if a < 255 {
+        paint.push_str(&format!(" {attribute}-opacity=\"{:.3}\"", f64::from(a) / 255.0));
+    }
+    paint
+}
+
+fn svg_stroke(stroke: &Option<Stroke>) -> String {
+    let Some(stroke) = visible(stroke) else {
+        return "stroke=\"none\"".to_owned();
+    };
+    let caps = ["round", "butt", "square"];
+    let joins = ["round", "miter", "bevel"];
+    let mut paint = format!(
+        "{} stroke-width=\"{:.2}\" stroke-linecap=\"{}\" stroke-linejoin=\"{}\" stroke-miterlimit=\"{:.2}\"",
+        svg_paint("stroke", stroke.colour),
+        stroke.lwd * 0.75,
+        caps.get(stroke.lend as usize).unwrap_or(&"round"),
+        joins.get(stroke.ljoin as usize).unwrap_or(&"round"),
+        stroke.lmitre
+    );
+    let pattern = dashes(stroke);
+    if !pattern.is_empty() {
+        let lengths: Vec<String> = pattern
+            .iter()
+            .map(|length| format!("{:.2}", length * POINTS_PER_INCH))
+            .collect();
+        paint.push_str(&format!(" stroke-dasharray=\"{}\"", lengths.join(",")));
+    }
+    paint
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+// Rasters.
+
+/// Draws a page into pixels at `resolution` pixels per inch.
+fn rasterize(page: &Page, size: [f64; 2], resolution: f64) -> Option<tiny_skia::Pixmap> {
+    use tiny_skia::{FillRule, Mask, Paint, PathBuilder, Pixmap, Transform};
+    let [width, height] = size.map(|inches| (inches * resolution).round().max(1.0) as u32);
+    let mut pixmap = Pixmap::new(width, height)?;
+    let [red, green, blue, a] = channels(page.background);
+    pixmap.fill(tiny_skia::Color::from_rgba8(red, green, blue, a));
+    let to_pixels = Transform::from_row(
+        resolution as f32,
+        0.0,
+        0.0,
+        -resolution as f32,
+        0.0,
+        f64::from(height) as f32,
+    );
+    let mut mask_for: Option<(Rect, Mask)> = None;
+    for item in &page.items {
+        if mask_for.as_ref().is_none_or(|(clip, _)| *clip != item.clip) {
+            let clip = item.clip;
+            let mask = Mask::new(width, height).and_then(|mut mask| {
+                let rect = tiny_skia::Rect::from_ltrb(
+                    clip.x0 as f32,
+                    clip.y0 as f32,
+                    clip.x1 as f32,
+                    clip.y1 as f32,
+                )?;
+                mask.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, false, to_pixels);
+                Some(mask)
+            });
+            match mask {
+                Some(mask) => mask_for = Some((clip, mask)),
+                None => continue,
+            }
+        }
+        let Some((_, mask)) = mask_for.as_ref() else {
+            continue;
+        };
+        let paint_of = |colour: Colour| {
+            let [red, green, blue, a] = channels(colour);
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(red, green, blue, a);
+            paint.anti_alias = true;
+            paint
+        };
+        let draw = |pixmap: &mut Pixmap, path: tiny_skia::Path, fill: Option<Colour>, stroke: Option<&Stroke>| {
+            if let Some(fill) = fill.filter(|fill| alpha(*fill) > 0) {
+                pixmap.fill_path(&path, &paint_of(fill), FillRule::Winding, to_pixels, Some(mask));
+            }
+            if let Some(stroke) = stroke {
+                pixmap.stroke_path(&path, &paint_of(stroke.colour), &skia_stroke(stroke), to_pixels, Some(mask));
+            }
+        };
+        match &item.shape {
+            Shape::Path {
+                points,
+                closed,
+                fill,
+                stroke,
+            } => {
+                let mut builder = PathBuilder::new();
+                for (index, [x, y]) in points.iter().enumerate() {
+                    if index == 0 {
+                        builder.move_to(*x as f32, *y as f32);
+                    } else {
+                        builder.line_to(*x as f32, *y as f32);
+                    }
+                }
+                if *closed {
+                    builder.close();
+                }
+                if let Some(path) = builder.finish() {
+                    draw(&mut pixmap, path, closed.then_some(*fill), visible(stroke));
+                }
+            }
+            Shape::Circle {
+                centre,
+                radius,
+                fill,
+                stroke,
+            } => {
+                if let Some(path) =
+                    PathBuilder::from_circle(centre[0] as f32, centre[1] as f32, *radius as f32)
+                {
+                    draw(&mut pixmap, path, Some(*fill), visible(stroke));
+                }
+            }
+            Shape::Text {
+                origin,
+                text,
+                points,
+                font,
+                rotation,
+                hadj,
+                colour,
+            } => {
+                if let Some(path) = text_path(text, *points, *font, *origin, *rotation, *hadj) {
+                    draw(&mut pixmap, path, Some(*colour), None);
+                }
+            }
+        }
+    }
+    Some(pixmap)
+}
+
+fn skia_stroke(stroke: &Stroke) -> tiny_skia::Stroke {
+    use tiny_skia::{LineCap, LineJoin, StrokeDash};
+    let inches_per_lwd = 1.0 / 96.0;
+    let pattern: Vec<f32> = dashes(stroke).iter().map(|length| *length as f32).collect();
+    tiny_skia::Stroke {
+        width: (stroke.lwd * inches_per_lwd) as f32,
+        miter_limit: stroke.lmitre as f32,
+        line_cap: match stroke.lend {
+            1 => LineCap::Butt,
+            2 => LineCap::Square,
+            _ => LineCap::Round,
+        },
+        line_join: match stroke.ljoin {
+            1 => LineJoin::Miter,
+            2 => LineJoin::Bevel,
+            _ => LineJoin::Round,
+        },
+        dash: if pattern.len() >= 2 && pattern.len() % 2 == 0 {
+            StrokeDash::new(pattern, 0.0)
+        } else {
+            None
+        },
+    }
+}
+
+/// The outline of a line of text in inches, laid out with the font's own advances.
+fn text_path(
+    text: &str,
+    points: f64,
+    font: i32,
+    origin: [f64; 2],
+    rotation: f64,
+    hadj: f64,
+) -> Option<tiny_skia::Path> {
+    use ab_glyph::{Font, OutlineCurve};
+    let face = raster_font(font)?;
+    let units = f64::from(face.units_per_em()?);
+    let scale = points / POINTS_PER_INCH / units;
+    let glyphs: Vec<_> = text.chars().map(|character| face.glyph_id(character)).collect();
+    let width: f64 = glyphs
+        .iter()
+        .map(|glyph| f64::from(face.h_advance_unscaled(*glyph)))
+        .sum::<f64>()
+        * scale;
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let place = |pen: f64, x: f32, y: f32| -> (f32, f32) {
+        let local_x = pen + f64::from(x) * scale - hadj * width;
+        let local_y = f64::from(y) * scale;
+        (
+            (origin[0] + local_x * cos - local_y * sin) as f32,
+            (origin[1] + local_x * sin + local_y * cos) as f32,
+        )
+    };
+    let mut builder = tiny_skia::PathBuilder::new();
+    let mut pen = 0.0;
+    for glyph in glyphs {
+        if let Some(outline) = face.outline(glyph) {
+            let mut last: Option<ab_glyph::Point> = None;
+            for curve in &outline.curves {
+                let start = match curve {
+                    OutlineCurve::Line(start, _)
+                    | OutlineCurve::Quad(start, _, _)
+                    | OutlineCurve::Cubic(start, _, _, _) => *start,
+                };
+                if last != Some(start) {
+                    if last.is_some() {
+                        builder.close();
+                    }
+                    let (x, y) = place(pen, start.x, start.y);
+                    builder.move_to(x, y);
+                }
+                match curve {
+                    OutlineCurve::Line(_, end) => {
+                        let (x, y) = place(pen, end.x, end.y);
+                        builder.line_to(x, y);
+                        last = Some(*end);
+                    }
+                    OutlineCurve::Quad(_, control, end) => {
+                        let (cx, cy) = place(pen, control.x, control.y);
+                        let (x, y) = place(pen, end.x, end.y);
+                        builder.quad_to(cx, cy, x, y);
+                        last = Some(*end);
+                    }
+                    OutlineCurve::Cubic(_, first, second, end) => {
+                        let (ax, ay) = place(pen, first.x, first.y);
+                        let (bx, by) = place(pen, second.x, second.y);
+                        let (x, y) = place(pen, end.x, end.y);
+                        builder.cubic_to(ax, ay, bx, by, x, y);
+                        last = Some(*end);
+                    }
+                }
+            }
+            if last.is_some() {
+                builder.close();
+            }
+        }
+        pen += f64::from(face.h_advance_unscaled(glyph)) * scale;
+    }
+    builder.finish()
+}
+
+/// The system fonts rasters draw text with, faces 1 to 4: Liberation Sans, which has
+/// Helvetica's metrics, or else DejaVu Sans or FreeSans. Without any of them, raster text is
+/// not drawn.
+fn raster_font(font: i32) -> Option<&'static ab_glyph::FontVec> {
+    static FONTS: OnceLock<[Option<ab_glyph::FontVec>; 4]> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let candidates: [[&str; 3]; 4] = [
+            [
+                "liberation/LiberationSans-Regular.ttf",
+                "dejavu/DejaVuSans.ttf",
+                "freefont/FreeSans.ttf",
+            ],
+            [
+                "liberation/LiberationSans-Bold.ttf",
+                "dejavu/DejaVuSans-Bold.ttf",
+                "freefont/FreeSansBold.ttf",
+            ],
+            [
+                "liberation/LiberationSans-Italic.ttf",
+                "dejavu/DejaVuSans-Oblique.ttf",
+                "freefont/FreeSansOblique.ttf",
+            ],
+            [
+                "liberation/LiberationSans-BoldItalic.ttf",
+                "dejavu/DejaVuSans-BoldOblique.ttf",
+                "freefont/FreeSansBoldOblique.ttf",
+            ],
+        ];
+        candidates.map(|names| {
+            names.iter().find_map(|name| {
+                ["/usr/share/fonts/truetype", "/usr/share/fonts/TTF", "/usr/share/fonts"]
+                    .iter()
+                    .find_map(|directory| std::fs::read(format!("{directory}/{name}")).ok())
+                    .and_then(|bytes| ab_glyph::FontVec::try_from_vec(bytes).ok())
+            })
+        })
+    });
+    let index = match font {
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        _ => 0,
+    };
+    fonts[index].as_ref().or(fonts[0].as_ref())
+}
+
+/// The pixels of a raster, without premultiplied alpha, row by row from the top.
+fn rgba_rows(pixmap: &tiny_skia::Pixmap) -> Vec<[u8; 4]> {
+    pixmap
+        .pixels()
+        .iter()
+        .map(|pixel| {
+            let colour = pixel.demultiply();
+            [colour.red(), colour.green(), colour.blue(), colour.alpha()]
+        })
+        .collect()
+}
+
+/// An uncompressed 24-bit BMP, its rows bottom-up and padded to four bytes. Transparent
+/// pixels are composited on white, since the format has no alpha.
+fn bmp(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    let row_bytes = (3 * width).div_ceil(4) * 4;
+    let image_bytes = row_bytes * height;
+    let mut out = Vec::with_capacity(54 + image_bytes);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&((54 + image_bytes) as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(width as i32).to_le_bytes());
+    out.extend_from_slice(&(height as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(image_bytes as u32).to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    let pixels = rgba_rows(pixmap);
+    for row in (0..height).rev() {
+        let start = out.len();
+        for pixel in &pixels[row * width..(row + 1) * width] {
+            let [red, green, blue] = on_white(*pixel);
+            out.extend_from_slice(&[blue, green, red]);
+        }
+        out.resize(start + row_bytes, 0);
+    }
+    out
+}
+
+fn on_white([red, green, blue, a]: [u8; 4]) -> [u8; 3] {
+    let blend = |channel: u8| {
+        let a = u32::from(a);
+        ((u32::from(channel) * a + 255 * (255 - a) + 127) / 255) as u8
+    };
+    [blend(red), blend(green), blend(blue)]
+}
+
+/// An uncompressed baseline RGB TIFF, transparent pixels composited on white.
+fn tiff(pixmap: &tiny_skia::Pixmap, resolution: f64) -> Vec<u8> {
+    let (width, height) = (pixmap.width(), pixmap.height());
+    let pixels = rgba_rows(pixmap);
+    let image: Vec<u8> = pixels.iter().flat_map(|pixel| on_white(*pixel)).collect();
+    // Header, then the image, then the bits-per-sample and resolution values, then the
+    // directory, so every offset is known when it is written.
+    let image_offset = 8u32;
+    let bits_offset = image_offset + image.len() as u32;
+    let resolution_offset = bits_offset + 6;
+    let directory_offset = resolution_offset + 8;
+    let mut out = Vec::with_capacity(directory_offset as usize + 200);
+    out.extend_from_slice(b"II*\0");
+    out.extend_from_slice(&directory_offset.to_le_bytes());
+    out.extend_from_slice(&image);
+    for _ in 0..3 {
+        out.extend_from_slice(&8u16.to_le_bytes());
+    }
+    out.extend_from_slice(&(resolution.round().max(1.0) as u32).to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    // Each entry: tag, type (3 short, 4 long, 5 rational), count, value or offset.
+    let entries: [(u16, u16, u32, u32); 12] = [
+        (256, 4, 1, width),
+        (257, 4, 1, height),
+        (258, 3, 3, bits_offset),
+        (259, 3, 1, 1),
+        (262, 3, 1, 2),
+        (273, 4, 1, image_offset),
+        (277, 3, 1, 3),
+        (278, 4, 1, height),
+        (279, 4, 1, image.len() as u32),
+        (282, 5, 1, resolution_offset),
+        (283, 5, 1, resolution_offset),
+        (296, 3, 1, 2),
+    ];
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out
+}
