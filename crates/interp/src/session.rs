@@ -13,9 +13,7 @@ use crate::{
 };
 use heap::object::{Sexp, SexpType};
 
-pub const BUILTINS: &[BuiltinDef] = &[
-    internal("mkUnbound", 1, do_mk_unbound).invisible(),
-];
+pub const BUILTINS: &[BuiltinDef] = &[internal("mkUnbound", 1, do_mk_unbound).invisible()];
 
 /// How a session starts.
 pub struct StartOptions {
@@ -33,19 +31,29 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     read_renviron();
+    crate::system::init_locale();
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;
     eval::define(values::install(".Machine")?, machine, base_env())?;
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
     crate::graphics::define_device_variables()?;
-    eval::define(values::install(".BaseNamespaceEnv")?, base_namespace(), base_env())?;
-    eval::define(values::install("base")?, base_namespace(), crate::heap().known().namespace_registry)?;
+    eval::define(
+        values::install(".BaseNamespaceEnv")?,
+        base_namespace(),
+        base_env(),
+    )?;
+    eval::define(
+        values::install("base")?,
+        base_namespace(),
+        crate::heap().known().namespace_registry,
+    )?;
     let home = crate::system::r_home();
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     if !options.vanilla {
-        let site = std::env::var("R_PROFILE").unwrap_or_else(|_| format!("{home}/etc/Rprofile.site"));
+        let site =
+            std::env::var("R_PROFILE").unwrap_or_else(|_| format!("{home}/etc/Rprofile.site"));
         if std::path::Path::new(&site).exists() {
             source_file(&site, base_env())?;
         }
@@ -164,7 +172,11 @@ fn expand_environment(value: &str) -> String {
             return result;
         };
         let inner = &after[..end];
-        let (name, default) = match inner.find(":-").map(|position| (position, 2)).or_else(|| inner.find('-').map(|position| (position, 1))) {
+        let (name, default) = match inner
+            .find(":-")
+            .map(|position| (position, 2))
+            .or_else(|| inner.find('-').map(|position| (position, 1)))
+        {
             Some((position, width)) => (&inner[..position], Some(&inner[position + width..])),
             None => (inner, None),
         };
@@ -172,7 +184,9 @@ fn expand_environment(value: &str) -> String {
             Ok(found) if !found.is_empty() => result.push_str(&found),
             _ => {
                 if let Some(default) = default {
-                    result.push_str(&expand_environment(default.trim_matches(|c| c == '\'' || c == '"')));
+                    result.push_str(&expand_environment(
+                        default.trim_matches(|c| c == '\'' || c == '"'),
+                    ));
                 }
             }
         }
@@ -198,7 +212,10 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
     let script = match crate::lower::parse_script(text, source_name) {
         Ok(script) => script,
         Err(Unwind::Error(failure)) => {
-            write_console(format!("Error: {}\nExecution halted\n", failure.message).as_bytes(), true);
+            write_console(
+                format!("Error: {}\nExecution halted\n", failure.message).as_bytes(),
+                true,
+            );
             return Outcome::Failed;
         }
         Err(_) => return Outcome::Failed,
@@ -250,13 +267,14 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
         match crate::lower::parse_script(&text, "<text>") {
             Ok(script) => {
                 for node in &script.expressions {
-                    let succeeded = match crate::lower::lower_script_expression(&script, node, keep_source()) {
-                        Ok(expression) => run_toplevel(expression),
-                        Err(unwind) => {
-                            report_toplevel(unwind);
-                            false
-                        }
-                    };
+                    let succeeded =
+                        match crate::lower::lower_script_expression(&script, node, keep_source()) {
+                            Ok(expression) => run_toplevel(expression),
+                            Err(unwind) => {
+                                report_toplevel(unwind);
+                                false
+                            }
+                        };
                     if !succeeded {
                         break;
                     }
@@ -309,7 +327,8 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     conditions::print_warnings();
     // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
     let visible = interp().visible;
-    if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible) {
+    if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
+    {
         report_toplevel(unwind);
         interp().frames.clear();
         interp().handlers = interp().global_handlers.clone();
@@ -334,10 +353,16 @@ pub unsafe fn report_toplevel(unwind: Unwind) {
         Unwind::Jump(jump) => match *jump {
             Jump::TopLevel => {}
             Jump::Return { .. } => {
-                write_console(b"Error: no function to return from, jumping to top level\n", true);
+                write_console(
+                    b"Error: no function to return from, jumping to top level\n",
+                    true,
+                );
             }
             Jump::Break { .. } | Jump::Next { .. } => {
-                write_console(b"Error: no loop for break/next, jumping to top level\n", true);
+                write_console(
+                    b"Error: no loop for break/next, jumping to top level\n",
+                    true,
+                );
             }
         },
     }

@@ -5,13 +5,13 @@ use semantics::annotations::lower_annotation;
 use semantics::diagnostics::{Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics};
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
-    parse_description_package, parse_namespace_imports,
+    parse_description_package, parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
 use semantics::{
     AnalysisSettings, DataFiles, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
-    file_typing_mode, item_check, item_hir, item_tree,
+    file_typing_mode, item_check, item_hir, item_tree, test_document_kind,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -30,6 +30,11 @@ fn render_case(
             .map(|(path, text)| {
                 let kind = if path.starts_with("R/") {
                     DocumentKind::Package
+                } else if let Some(file_name) = path
+                    .strip_prefix("tests/testthat/")
+                    .filter(|rest| !rest.contains('/'))
+                {
+                    test_document_kind(file_name)
                 } else {
                     DocumentKind::Script
                 };
@@ -75,6 +80,7 @@ fn render_with_metadata(source: &str) -> String {
         parse_description_dependencies(&description_source),
         Default::default(),
         parse_description_package(&description_source),
+        parse_native_symbols(&namespace_source),
     );
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
@@ -191,6 +197,7 @@ fn render_with_data_files(source: &str) -> String {
         Default::default(),
         Default::default(),
         None,
+        Default::default(),
     );
     metadata.set_attached(&mut db).to(attached);
     let mut output = String::new();

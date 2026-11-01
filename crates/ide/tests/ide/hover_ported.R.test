@@ -111,28 +111,28 @@ hint @29: integer
 data <- 1L
 result <- data$field$0
 #++++
-hover 21..31: Unknown
+hover 26..31: field: Unknown
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (1): field
+completion: none
 hint @4: integer
 
 #---- dollar_field_name
 data <- 1L
 result <- data$fie$0ld
 #++++
-hover 21..31: Unknown
+hover 26..31: field: Unknown
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (1): field
+completion: none
 hint @4: integer
 
 #---- block_expression
@@ -603,16 +603,16 @@ hint @6: <T> fn(x: T) -> T
 pair <- function(x, y) x
 pa$0ir
 #++++
-hover 25..29: pair: <T, U> fn(x: T, y: U) -> T
+hover 25..29: pair: <T, U> fn(x: T, [y]: U) -> T
 hover-definition: global 0..4
 definition 0..4
 references: 0..4*, 25..29
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(x: T, y: U) -> T\n"
+  edit 0..0 -> "#: <T, U> fn(x: T, [y]: U) -> T\n"
 completion (37): pair, pacf, package.skeleton, package_version, packageDate, packageDescription, packageEvent, packageHasNamespace
-hint @4: <T, U> fn(x: T, y: U) -> T
+hint @4: <T, U> fn(x: T, [y]: U) -> T
 
 #---- numeric_constraint_displayed
 add_one <- function(x) x + 1L
@@ -654,11 +654,11 @@ references: 24..30*, 32..38
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `wrap`
-  edit 0..0 -> "#: <T, U> fn(first: T, second: U) -> U\n"
+  edit 0..0 -> "#: <T, U> fn([first]: T, second: U) -> U\n"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(first: T, second: U) -> U\n"
+  edit 0..0 -> "#: <T, U> fn([first]: T, second: U) -> U\n"
 completion (128+): second, Set.intersection, ts.intersect, InsectSprays, chooseCRANmirror, intersect, .leap.seconds, se.contrast
-hint @4: <T, U> fn(first: T, second: U) -> U
+hint @4: <T, U> fn([first]: T, second: U) -> U
 
 #==== hover_unknown
 #---- uninferable_binding

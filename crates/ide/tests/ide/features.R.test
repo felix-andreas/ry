@@ -509,7 +509,7 @@ hint @5: <T> fn(x: T) -> T
 config <- list(alpha = 1, beta = "b")
 use <- function() config$al$0
 #++++
-hover 56..65: Unknown
+hover 63..65: al: Unknown
 definition: none
 references: none
 rename: none
@@ -594,10 +594,10 @@ completion (1): integer
 #: <T> fn(x: T$0) -> T
 ident <- function(x) x
 #++++
-hover 35..36: T
-definition: none
-references: none
-rename: none
+hover 35..36: type parameter T
+definition 26..27
+references: 26..27*, 35..36, 41..42
+rename: 3 edit(s)
 signature: none
 completion (1): T
 

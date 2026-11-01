@@ -756,6 +756,65 @@ fn check_reports_an_export_the_package_does_not_define() {
     );
 }
 
+#[test]
+fn check_accepts_exports_of_imports_and_of_chained_definitions() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\nImports: magrittr\n"),
+        (
+            "NAMESPACE",
+            "export(\"%>%\")\nexport(memoize)\nexport(memoise)\nexport(not_anywhere)\n\
+             importFrom(magrittr,\"%>%\")\n",
+        ),
+        ("R/a.R", "memoise <- memoize <- function(f) f\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    let rendered = &output.stderr;
+    for name in ["%>%", "memoize", "memoise"] {
+        assert!(
+            !rendered.contains(&format!("`{name}` is exported")),
+            "`{name}` is in the namespace: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("`not_anywhere` is exported"),
+        "an export nothing defines or imports is still reported: {rendered}"
+    );
+
+    // A whole-namespace import of a package without stubs may supply any name.
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\nImports: someunknownpkg\n"),
+        ("NAMESPACE", "export(reexported)\nimport(someunknownpkg)\n"),
+        ("R/a.R", "f <- function() 1L\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("`reexported` is exported"),
+        "the unknown namespace may export it: {}",
+        output.stderr
+    );
+}
+
+// testthat runs a test file in a child of the package namespace, so the file's own `path`
+// value neither hides the package's `path` from `pkg::path` nor from a call of `path`.
+#[test]
+fn check_reads_the_package_namespace_past_a_test_file_s_bindings() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: pathpkg\n"),
+        ("ry.toml", "[check]\ntyping = true\n"),
+        ("R/a.R", "path <- function(x) x\n"),
+        (
+            "tests/testthat/test-a.R",
+            "path <- \"a\"\nqualified <- pathpkg::path(1L)\ncalled <- path(2L)\n",
+        ),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("not a function"),
+        "both calls reach the package's function: {}",
+        output.stderr
+    );
+}
+
 // The caret pads by terminal cells, not characters, so it sits beneath the glyph.
 #[test]
 fn check_reports_character_columns_and_aligns_the_caret() {

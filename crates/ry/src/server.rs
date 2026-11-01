@@ -2,7 +2,7 @@
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
 use crate::cli::{
-    data_file_key, project_order, project_stub_paths, scan_data_files, shares_a_namespace,
+    data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
     sniff_data_file,
 };
 use crate::config::{
@@ -22,13 +22,15 @@ use async_lsp::{ClientSocket, ErrorCode, LanguageClient, LanguageServer, Respons
 use futures::future::BoxFuture;
 use ide::{
     CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
-    HoverDefinition, NavigationTarget, SignatureData, StubTarget,
+    HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
+    classify_type_token,
 };
 use salsa::{Durability, Setter};
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::metadata::{
-    PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_imports,
+    NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
+    parse_description_collate, parse_description_dependencies, parse_description_package,
+    parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -45,10 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{env, fs, panic, process, thread};
-use syntax::{
-    SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_inline_annotation,
-    is_syntactic_name,
-};
+use syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
@@ -288,6 +287,7 @@ struct WorkspaceMetadata {
     dependencies: BTreeSet<String>,
     collate: Vec<String>,
     package: Option<String>,
+    native_symbols: NativeSymbols,
 }
 
 impl Worker {
@@ -398,6 +398,7 @@ impl Worker {
             metadata.dependencies,
             Default::default(),
             metadata.package,
+            metadata.native_symbols,
         );
         DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
         worker.load_workspace_sources();
@@ -439,6 +440,10 @@ impl Worker {
             .as_deref()
             .map(|text| normalized_imports(&parse_namespace_imports(text)))
             .unwrap_or_default();
+        let native_symbols = namespace_text
+            .as_deref()
+            .map(parse_native_symbols)
+            .unwrap_or_default();
         let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
             .as_deref()
@@ -457,6 +462,7 @@ impl Worker {
             dependencies,
             collate,
             package,
+            native_symbols,
         }
     }
 
@@ -512,13 +518,17 @@ impl Worker {
         let metadata = PackageMetadata::get(&self.db);
         let facts_changed = metadata.imports(&self.db) != &current.imports
             || metadata.dependencies(&self.db) != &current.dependencies
-            || metadata.package(&self.db) != &current.package;
+            || metadata.package(&self.db) != &current.package
+            || metadata.native_symbols(&self.db) != &current.native_symbols;
         if facts_changed {
             metadata.set_imports(&mut self.db).to(current.imports);
             metadata
                 .set_dependencies(&mut self.db)
                 .to(current.dependencies);
             metadata.set_package(&mut self.db).to(current.package);
+            metadata
+                .set_native_symbols(&mut self.db)
+                .to(current.native_symbols);
         }
         if facts_changed || collate_changed {
             self.refresh_all_diagnostics();
@@ -676,8 +686,9 @@ impl Worker {
         Some((file, text, offset))
     }
 
-    fn is_package_path(&self, path: &Path) -> bool {
-        shares_a_namespace(path, &self.workspace_root)
+    /// Package and test files are read from disk, so a closed or changed one reloads.
+    fn is_project_path(&self, path: &Path) -> bool {
+        document_kind(path, &self.workspace_root) != DocumentKind::Script
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -843,12 +854,7 @@ impl Worker {
             return;
         }
 
-        let is_package = self.is_package_path(&path);
-        let kind = if is_package {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
             Some(&file) => {
                 file.set_text(&mut self.db).to(params.text_document.text);
@@ -976,7 +982,7 @@ impl Worker {
         self.open_documents.remove(&path);
         self.pending_semantic_publishes.retain(|owed| owed != &path);
 
-        if self.is_package_path(&path) {
+        if self.is_project_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
             match fs::read_to_string(&path) {
                 Ok(text) => {
@@ -1057,7 +1063,7 @@ impl Worker {
                         self.publish_config_diagnostics(Some(&error));
                     }
                 }
-            } else if self.is_package_path(&path)
+            } else if self.is_project_path(&path)
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "R" || extension == "r")
@@ -1072,7 +1078,8 @@ impl Worker {
                             reloaded_documents.push(path.clone());
                         }
                         None => {
-                            let file = SourceFile::builder(text, DocumentKind::Package)
+                            let kind = document_kind(&path, &self.workspace_root);
+                            let file = SourceFile::builder(text, kind)
                                 .durability(Durability::MEDIUM)
                                 .new(&self.db);
                             self.files.insert(path.clone(), file);
@@ -1478,14 +1485,16 @@ fn initialize_result(
                 lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                     lsp_types::SemanticTokensOptions {
                         legend: lsp_types::SemanticTokensLegend {
-                            // In index order. Only `#:` annotation bodies are colored:
-                            // R grammars cannot see type syntax.
+                            // In `semantic_class_index` order. Only ry's own syntax is
+                            // colored, because R grammars already color R.
                             token_types: vec![
                                 lsp_types::SemanticTokenType::TYPE,
                                 lsp_types::SemanticTokenType::TYPE_PARAMETER,
                                 lsp_types::SemanticTokenType::PARAMETER,
                                 lsp_types::SemanticTokenType::OPERATOR,
                                 lsp_types::SemanticTokenType::DECORATOR,
+                                lsp_types::SemanticTokenType::KEYWORD,
+                                lsp_types::SemanticTokenType::ENUM_MEMBER,
                             ],
                             token_modifiers: Vec::new(),
                         },
@@ -2101,7 +2110,7 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            let tokens = annotation_semantic_tokens(&worker.db, file, &text, worker.encoding);
+            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding);
             Ok(Some(lsp_types::SemanticTokensResult::Tokens(
                 lsp_types::SemanticTokens {
                     result_id: None,
@@ -2389,59 +2398,29 @@ fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_ty
     ranges
 }
 
-fn annotation_semantic_tokens(
+fn ry_semantic_tokens(
     db: &RootDatabase,
     file: SourceFile,
     text: &str,
     encoding: PositionEncoding,
 ) -> Vec<lsp_types::SemanticToken> {
-    let parse = semantics::parse(db, file);
-    let mut spans: Vec<(TextRange, u32)> = Vec::new();
-    for annotation in parse
-        .syntax_node()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node))
-    {
-        for element in annotation.descendants_with_tokens() {
-            let SyntaxElement::Token(token) = element else {
-                continue;
-            };
-            if let Some(token_type) = classify_annotation_token(&token)
-                && !token.text_range().is_empty()
-            {
-                spans.push((token.text_range(), token_type));
-            }
-        }
-    }
+    let spans = ide::semantic_tokens(db, file)
+        .into_iter()
+        .map(|(range, class)| (range, semantic_class_index(class)))
+        .collect();
     delta_encode_tokens(spans, text, encoding)
 }
 
-/// Indices into the advertised legend: type names 0, `<T>` binders 1,
-/// field/parameter names 2, punctuation 3, `@` directives 4.
-fn classify_annotation_token(token: &SyntaxToken) -> Option<u32> {
-    let parent_kind = token.parent().map(|parent| parent.kind());
-    match token.kind() {
-        SyntaxKind::IDENT => match parent_kind {
-            Some(SyntaxKind::TYPE_BINDER) => Some(1),
-            Some(SyntaxKind::TYPE_FIELD) | Some(SyntaxKind::TYPE_FUNCTION) => Some(2),
-            Some(SyntaxKind::ANNOTATION_DIRECTIVE) => Some(4),
-            _ => Some(0),
-        },
-        SyntaxKind::COMMA
-        | SyntaxKind::PIPE
-        | SyntaxKind::COLON
-        | SyntaxKind::L_BRACKET
-        | SyntaxKind::R_BRACKET
-        | SyntaxKind::L_PAREN
-        | SyntaxKind::R_PAREN
-        | SyntaxKind::L_BRACE
-        | SyntaxKind::R_BRACE
-        | SyntaxKind::LESS
-        | SyntaxKind::GREATER
-        | SyntaxKind::DOTS => Some(3),
-        SyntaxKind::AT => Some(4),
-        SyntaxKind::NULL_KW => Some(0),
-        _ => None,
+/// The class's index in the advertised legend.
+fn semantic_class_index(class: SemanticClass) -> u32 {
+    match class {
+        SemanticClass::Type => 0,
+        SemanticClass::TypeParameter => 1,
+        SemanticClass::Parameter => 2,
+        SemanticClass::Operator => 3,
+        SemanticClass::Decorator => 4,
+        SemanticClass::Keyword => 5,
+        SemanticClass::Tag => 6,
     }
 }
 
@@ -2505,7 +2484,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             if u32::from(range.start()) < 3 || range.is_empty() {
                 continue;
             }
-            if let Some(class) = classify_annotation_token(&token) {
+            if let Some(class) = classify_type_token(&token).map(semantic_class_index) {
                 let start = usize::from(range.start()) - 3;
                 let length = usize::from(range.len());
                 if start + length <= type_text.len() + 1 {

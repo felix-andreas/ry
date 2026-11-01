@@ -112,6 +112,35 @@ fn defining_a_missing_name_rechecks_its_readers() {
 }
 
 #[test]
+fn a_new_helper_definition_rediagnoses_no_test_file_that_does_not_read_it() {
+    let mut db = ProbeDatabase::default();
+    let helper = SourceFile::new(
+        &db,
+        "helper_a <- function() 1L\n".to_owned(),
+        DocumentKind::TestHelper,
+    );
+    let test = SourceFile::new(
+        &db,
+        "helper_a()\nmisspeled()\n".to_owned(),
+        DocumentKind::Test,
+    );
+    ProjectFiles::new(&db, vec![helper, test]);
+    settle(&db, &[helper, test]);
+    db.executions_since(&["file_diagnostics"]);
+
+    db.edit(
+        helper,
+        "helper_a <- function() 1L\nfresh <- function() 2L\n".to_owned(),
+    );
+    settle(&db, &[helper, test]);
+    assert_eq!(
+        db.executions_since(&["file_diagnostics"]),
+        [1],
+        "only the edited helper's diagnostics re-run"
+    );
+}
+
+#[test]
 fn inserting_a_statement_rechecks_only_the_reads_it_intercepts() {
     for kind in [DocumentKind::Package, DocumentKind::Script] {
         let mut db = ProbeDatabase::default();
@@ -490,7 +519,14 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         "trades <- fread(\"trades.csv\")\n",
     ]);
     let attached = attached_union(&db, files.iter().copied());
-    PackageMetadata::new(&db, Vec::new(), Default::default(), attached, None);
+    PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        attached,
+        None,
+        Default::default(),
+    );
     let layouts = |prices: &str| {
         BTreeMap::from([
             (

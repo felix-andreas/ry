@@ -53,7 +53,7 @@ fn(x: T) -> T
 #---- constant_function_literal
 function(x) 1L
 #++++
-fn(x: T) -> integer
+fn([x]: T) -> integer
 
 #---- higher_order_apply_literal
 function(f, value) f(value)
@@ -63,7 +63,7 @@ fn(f: fn(T) -> U, value: T) -> U
 #---- two_parameter_function_literal
 function(x, y) x
 #++++
-fn(x: T, y: U) -> T
+fn(x: T, [y]: U) -> T
 
 #---- function_returning_identity_literal
 function(f) function(x) f(x)

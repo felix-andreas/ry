@@ -807,7 +807,10 @@ impl Heap {
     /// `Rf_defineVar`: binds `symbol` in `env`'s own frame.
     pub unsafe fn define(&mut self, env: Sexp, symbol: Sexp, value: Sexp) -> HeapResult<()> {
         if let Some(cell) = self.frame_cell(env, symbol) {
-            return self.set_binding_value(cell, value);
+            self.set_binding_value(cell, value)?;
+            // A formal that was missing stops being missing once it is assigned, as in GNU R.
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+            return Ok(());
         }
         if env == self.known.empty_env {
             return Err(HeapError::EmptyEnvironment);
@@ -1349,7 +1352,7 @@ impl Heap {
                             SexpType::String | SexpType::List | SexpType::Expression
                         ) =>
                     {
-                        children.extend((0..parent.length() as usize).map(|i| parent.element(i)));
+                        children.extend((0..parent.length() as usize).map(|index| parent.element(index)));
                     }
                     Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
                     Shape::Environment => {
@@ -1363,7 +1366,7 @@ impl Heap {
                         children.extend([parent.external_tag(), parent.external_protected()])
                     }
                     Shape::Record => children.extend(
-                        (0..parent.record_slot_count()).filter_map(|i| parent.record_handle(i)),
+                        (0..parent.record_slot_count()).filter_map(|slot| parent.record_handle(slot)),
                     ),
                     _ => {}
                 }
@@ -1547,6 +1550,7 @@ impl Heap {
             self.known.base_env = base_env;
             let global_env = self.alloc_environment(base_env)?;
             self.known.global_env = global_env;
+            self.set_frame_hashed(global_env, 0);
             let base_namespace = self.alloc_environment(global_env)?;
             self.known.base_namespace = base_namespace;
             let namespace_registry = self.alloc_environment(nil)?;

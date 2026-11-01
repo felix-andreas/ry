@@ -20,11 +20,13 @@ path = "src/main.rs"
 [features]
 # Heap profilers such as massif only see the system allocator, so profiling builds drop it.
 default = ["mimalloc"]
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 
 [dependencies]
 clap.workspace = true
 dirs = "6"
 mimalloc = { version = "0.1", optional = true }
+libmimalloc-sys = { version = "0.1.49", features = ["extended"], optional = true }
 console.workspace = true
 ignore.workspace = true
 miette.workspace = true

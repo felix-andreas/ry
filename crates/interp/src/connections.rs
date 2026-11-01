@@ -284,6 +284,14 @@ impl Table {
                 marker.mark(target.env);
             }
         }
+        // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
+        // `sink(file(path))` is not closed as unused while output still goes to it.
+        for sink in &self.sinks {
+            let id = self.entries.get(sink.slot).and_then(Option::as_ref).and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
+            if let Some(id) = id {
+                marker.mark(id);
+            }
+        }
     }
 }
 
@@ -524,7 +532,10 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary) {
+    // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
+    // and the connection then becomes a `gzfile` for good.
+    let sniffs = open.is_empty() || parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary);
+    let compression = if !raw && sniffs {
         file_compression(&path).ok().flatten()
     } else {
         None
@@ -537,7 +548,8 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         compression: 6,
         stream: None,
     });
-    let object = new_builtin("file", description.as_bytes(), &open, "r", device, |con| {
+    let default_mode = if compression.is_some() { "rt" } else { "r" };
+    let object = new_builtin("file", description.as_bytes(), &open, default_mode, device, |con| {
         (*con).blocking = blocking as Rboolean;
     })?;
     // The object keeps the class it was created with; only the struct says what it became.

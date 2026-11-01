@@ -595,14 +595,20 @@ fn ry_runtime_refuses_class_definitions_when_object_systems_are_off() {
     }
     let config = "[check]\nobject-systems = false\n";
     for (code, function) in [
-        ("setClass(\"P\", representation(x = \"numeric\"))\n", "setClass"),
+        (
+            "setClass(\"P\", representation(x = \"numeric\"))\n",
+            "setClass",
+        ),
         ("methods::setRefClass(\"A\")\n", "setRefClass"),
     ] {
         let script = format!("cat(\"before\\n\")\n{code}cat(\"after\\n\")\n");
         let (status, stdout, stderr) =
             run_project("ry", &[("script.R", &script), ("ry.toml", config)]);
         assert_eq!(status, Some(1), "{function}: {stderr}");
-        assert!(stdout.contains("before") && !stdout.contains("after"), "{stdout}");
+        assert!(
+            stdout.contains("before") && !stdout.contains("after"),
+            "{stdout}"
+        );
         assert!(
             stderr.contains(&format!(
                 "(`[check] object-systems = false`), so `{function}` cannot define"
@@ -612,7 +618,10 @@ fn ry_runtime_refuses_class_definitions_when_object_systems_are_off() {
     }
     let (status, stdout, stderr) = run_project(
         "ry",
-        &[("script.R", "setClass(\"P\", representation(x = \"numeric\"))\ncat(\"defined\\n\")\n")],
+        &[(
+            "script.R",
+            "setClass(\"P\", representation(x = \"numeric\"))\ncat(\"defined\\n\")\n",
+        )],
     );
     assert_eq!(status, Some(0), "{stderr}");
     assert!(stdout.contains("defined"), "{stdout}");
@@ -660,11 +669,23 @@ fn piped_input_is_evaluated_and_autoprinted_on_both_runtimes() {
             .expect("piped stdin")
             .write_all(b"1 + 1\nf <- function(a) {\n  a * 2\n}\nf(21)\n")
             .expect("write the commands");
-        let output = child.wait_with_output().expect("console exits at end of input");
+        let output = child
+            .wait_with_output()
+            .expect("console exits at end of input");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{runtime}: {output:?}");
         assert!(stdout.contains("[1] 2\n"), "{runtime}: {stdout}");
         assert!(stdout.contains("[1] 42\n"), "{runtime}: {stdout}");
+        assert_eq!(
+            stdout.trim(),
+            "[1] 2\n[1] 42",
+            "{runtime}: no banner, only results"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("Type q() or Ctrl-D"),
+            "{runtime}: {stderr}"
+        );
     }
 }
 
@@ -725,13 +746,22 @@ fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
 
 /// Each query's type as the checker infers it, which must also be its schema at runtime.
 const FRAME_TYPES: &[(&str, &str)] = &[
-    ("sales", "frame{team: character[], amount: double[], units: integer[]}"),
-    ("sales[amount > 1]", "frame{team: character[], amount: double[], units: integer[]}"),
+    (
+        "sales",
+        "frame{team: character[], amount: double[], units: integer[]}",
+    ),
+    (
+        "sales[amount > 1]",
+        "frame{team: character[], amount: double[], units: integer[]}",
+    ),
     (
         "sales[, .(total = sum(amount), n = .N), by = team]",
         "frame{team: character[], total: double[], n: integer[]}",
     ),
-    ("sales[, .(team, double = units * 2)]", "frame{team: character[], double: double[]}"),
+    (
+        "sales[, .(team, double = units * 2)]",
+        "frame{team: character[], double: double[]}",
+    ),
     (
         "sales[labels, on = \"team\"]",
         "frame{team: character[], amount: double[], units: integer[], label: character[]}",
@@ -748,7 +778,9 @@ fn frame_types_agree_between_the_checker_and_the_runtime() {
          labels <- frame(team = c(\"a\", \"b\"), label = c(\"A\", \"B\"))\n",
     );
     for (index, (expression, ty)) in FRAME_TYPES.iter().enumerate() {
-        script.push_str(&format!("q{index}: {ty} <- {expression}\nprint(frame_type(q{index}))\n"));
+        script.push_str(&format!(
+            "q{index}: {ty} <- {expression}\nprint(frame_type(q{index}))\n"
+        ));
     }
     let directory = tempfile::tempdir().expect("temp dir");
     fs::write(directory.path().join("script.R"), &script).expect("write the script");
@@ -767,6 +799,9 @@ fn frame_types_agree_between_the_checker_and_the_runtime() {
     let (status, stdout, stderr) = run_project("ry", &[("script.R", script.as_str())]);
     assert_eq!(status, Some(0), "{stderr}");
     for (_, ty) in FRAME_TYPES {
-        assert!(stdout.contains(&format!("[1] \"{ty}\"")), "the runtime schema differs from `{ty}`:\n{stdout}");
+        assert!(
+            stdout.contains(&format!("[1] \"{ty}\"")),
+            "the runtime schema differs from `{ty}`:\n{stdout}"
+        );
     }
 }

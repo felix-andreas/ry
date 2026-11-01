@@ -1,0 +1,19 @@
+[stdout]
+| [1] "boom"
+| caught: inner 
+| [1] TRUE
+| List of 2
+|  $ : num 3
+|  $ : num 4
+| [1] "c.txt" "a.R"   "b.R"  
+| [1] "sub"
+| [1] 0
+| [1] "C"
+| [1] "A" "B" "a" "b"
+| [1] ""
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| ""

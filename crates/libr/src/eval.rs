@@ -44,6 +44,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
+    interp::register_builtins(crate::serialize::BUILTINS);
     install_evaluator(&Interpreter);
 }
 

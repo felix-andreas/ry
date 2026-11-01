@@ -32,18 +32,19 @@ pub mod conditions;
 pub mod connections;
 pub mod data_table;
 pub mod deparse;
-pub mod distributions;
 pub mod dispatch;
+pub mod distributions;
 pub mod envir;
 pub mod eval;
 pub mod format;
 pub mod frame;
-pub mod linalg;
 pub mod graphics;
+pub mod linalg;
 pub mod graphics_render;
 pub mod lower;
 pub mod methods;
 pub mod native;
+pub mod parallel;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -66,7 +67,6 @@ pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
-pub mod parallel;
 pub mod tools;
 pub mod unwind;
 pub mod utils;
@@ -121,7 +121,8 @@ pub struct Hooks {
     pub task_callback_routine: unsafe fn(TaskCallbackRoutine, &[Sexp]) -> R<Sexp>,
     /// Calls a C method of a custom connection under the host's native-code boundary, which
     /// turns an R error the method raises into an unwind.
-    pub connection_method: unsafe fn(connections::Rconnection, connections::NativeMethod<'_>) -> R<()>,
+    pub connection_method:
+        unsafe fn(connections::Rconnection, connections::NativeMethod<'_>) -> R<()>,
     /// Runs `body` as an entry from native code: the host's boundary turns an unwind into a
     /// `longjmp` into whatever native frame called the connection.
     pub enter_from_native: unsafe fn(&mut dyn FnMut() -> R<()>),
@@ -165,6 +166,8 @@ pub struct Interp {
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
+    /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
+    pub immediate_warning: bool,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
     /// Whether the default error handler prints (`R_ShowErrorMessages`).
@@ -276,6 +279,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         assignment_call: None,
         warnings: Vec::new(),
+        immediate_warning: false,
         error_message: String::new(),
         show_error_messages: true,
         in_error: 0,
@@ -331,7 +335,9 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
     use std::io::Write;
     // Console output that cannot be written has nowhere else to go, as in GNU R.
     let written = if is_error {
-        std::io::stdout().flush().and_then(|()| std::io::stderr().write_all(text))
+        std::io::stdout()
+            .flush()
+            .and_then(|()| std::io::stderr().write_all(text))
     } else {
         std::io::stdout().write_all(text)
     };
@@ -401,6 +407,10 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            if let Some((replacement, whole, _)) = interp.assignment_call {
+                marker.mark(replacement);
+                marker.mark(whole);
+            }
             for &(call, _) in &interp.warnings {
                 marker.mark(call);
             }
@@ -435,7 +445,8 @@ impl Interp {
     }
 
     pub fn is_internal(&self, index: u32) -> bool {
-        self.builtin(index)
-            .is_some_and(|definition| matches!(definition.kind, Kind::Internal | Kind::InternalSpecial))
+        self.builtin(index).is_some_and(|definition| {
+            matches!(definition.kind, Kind::Internal | Kind::InternalSpecial)
+        })
     }
 }

@@ -700,9 +700,12 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
             None => na_encode.then(|| if quote.is_some() { "NA" } else { "<NA>" }.to_owned()),
         })
         .collect();
-    let target = if width == nil() {
-        0
-    } else if values::as_integer_scalar(width) == NA_INTEGER {
+    // GNU R treats `width = NULL` like `width = NA`: pad to the widest element.
+    let requested = if width == nil() { NA_INTEGER } else { values::as_integer_scalar(width) };
+    if requested != NA_INTEGER && requested < 0 {
+        return Err(error("invalid 'width' value"));
+    }
+    let target = if requested == NA_INTEGER {
         encoded
             .iter()
             .flatten()
@@ -710,7 +713,7 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
             .max()
             .unwrap_or(0)
     } else {
-        values::as_integer_scalar(width).max(0) as usize
+        requested as usize
     };
     let result = alloc(SexpType::String, count)?;
     for (index, item) in encoded.into_iter().enumerate() {

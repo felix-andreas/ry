@@ -44,12 +44,11 @@ f <- function(flag) {
 #++++
 f: fn(flag: logical) -> integer | double
 
-#---- union_with_character_member_fails_comparison
+#---- union_with_character_member_compares
 f <- function(flag) {
   x <- 1L
   if (flag) x <- "two"
   x > 0L
 }
 #++++
-f: Unknown
-61..63 error[type-mismatch] expected `integer | character`, found `integer`
+f: fn(flag: logical) -> logical

@@ -144,3 +144,60 @@ action: Add inferred type annotations for the whole file
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
+
+#---- call_head_skips_a_value_binding
+outer <- function() {
+  helper <- function(y) y + 1
+  inner <- function() {
+    helper <- "three"
+    hel$0per(2)
+  }
+  inner()
+}
+#++++
+hover 102..108: helper: fn(y: double) -> double
+hover-definition: local 24..30
+definition 24..30
+references: 24..30*, 102..108
+rename: 2 edit(s)
+signature: fn(y: double) -> double
+parameters: [y: double]
+action: Add inferred type annotation for `inner`
+  edit 52..52 -> "  #: fn() -> double\n"
+action: Add inferred type annotation for `outer`
+  edit 0..0 -> "#: fn() -> double\n"
+action: Add inferred type annotations for the whole file
+  edit 22..22 -> "  #: fn(y: T) -> double\n"
+  edit 76..76 -> "    #: character\n"
+  edit 52..52 -> "  #: fn() -> double\n"
+  edit 0..0 -> "#: fn() -> double\n"
+completion (28): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+hint @5: fn() -> double
+hint @30: fn(y: T) -> double
+hint @59: fn() -> double
+hint @86: character
+
+#---- call_head_falls_through_to_the_package_function
+scale_by <- function(x, by) x * by
+apply_scale <- function(x) {
+  scale_by <- 2
+  scal$0e_by(x, scale_by)
+}
+#++++
+hover 82..90: scale_by: fn(x: double, by: double) -> double
+hover-definition: global 0..8
+definition 0..8
+references: 0..8*, 82..90
+rename: 2 edit(s)
+signature: fn(x: double, by: double) -> double
+parameters: [x: double] | by: double
+action: Add inferred type annotation for `apply_scale`
+  edit 35..35 -> "#: fn(x: double) -> double\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric> fn(x: T, by: T) -> T\n"
+  edit 64..64 -> "  #: double\n"
+  edit 35..35 -> "#: fn(x: double) -> double\n"
+completion (36): scale_by, scale, scale.default, cmdscale, apply_scale, sequence.default, setGraphicsEventHandlers, srcfilealias
+hint @8: <T: numeric> fn(x: T, by: T) -> T
+hint @46: fn(x: double) -> double
+hint @74: double
