@@ -691,10 +691,10 @@ impl Writer<'_, '_> {
         self.write_integer(SexpType::Environment.code() as i32)?;
         self.write_integer(env.has_gp(gp::FRAME_LOCKED) as i32)?;
         self.write_item(env.enclosure())?;
-        // GNU R conses a new binding onto the front of an unhashed frame, so the newest
-        // binding comes first.
+        // `frame_symbols` already lists in GNU R's order, which puts the newest binding of an
+        // unhashed frame first.
         let symbols = runtime().heap.frame_symbols(env);
-        for &symbol in symbols.iter().rev() {
+        for &symbol in &symbols {
             let Some(cell) = runtime().heap.frame_cell(env, symbol) else {
                 continue;
             };
