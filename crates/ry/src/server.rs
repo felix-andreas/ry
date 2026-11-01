@@ -33,8 +33,8 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        file_conditional_writers, file_interface_reads, item_naming, item_tree,
         diagnostics::{Diagnostic, Severity, parse_stage_diagnostics},
+        file_conditional_writers, file_interface_reads, item_naming, item_tree,
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
