@@ -291,7 +291,7 @@ This example deliberately uses both spellings on one function:
 apply_discount <- function(price: integer, rate) price * (1 - rate)
 ```
 
-```text
+```text ry check typing
 ! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it
   `double`. ry uses the inline type; make the two agree, or delete one
 ```
@@ -320,7 +320,7 @@ scale <- function(values: double, by: double) -> double values * by
 scale("a", 1)
 ```
 
-```text
+```text ry run runtime=ry
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`
 ```
@@ -3454,7 +3454,7 @@ variable of its own function that neither another parameter nor the return type 
 describe <- function(x) cat("a value\n")
 ```
 
-```text
+```text ry check typing strict
 x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any
   value is accepted unchecked. Annotate it, as in `x: TYPE`
 ```

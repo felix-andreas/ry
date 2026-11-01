@@ -3311,6 +3311,48 @@ first lines R had already read, leaving R mid-command.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
 
+# Decision record: everything is fuzzable, simulatable and scriptable
+
+This is a user directive: robustness is the long-run priority, so the whole toolchain is designed to
+be fuzzed, simulated and driven by scenario tests. It widens the per-stage fuzzing record above from
+the analysis pipeline to every component. `docs/src/content/docs/contributing/robustness.md` is the
+contract.
+
+- **Previous shape.** Each analysis stage had a seeded fuzz battery, but the language server could be
+  tested only over a real socket with a real worker thread, so its interleavings (edits racing
+  queries, cancellations, delayed watcher events) were untestable and unreproducible. The worker
+  iterated a `HashSet` of open documents when refreshing, so the order of its publishes was
+  nondeterministic. No harness compared a long editor session with a fresh start, and no test
+  scripted a user journey across the editor, the CLI and the runtime.
+- **Target shape.** Nondeterminism lives behind seams a seed drives. The server's worker sends
+  through an `Outbox` (the socket, or a recorder) and its loop body is `run_job`, so
+  `server::simulation` runs the real server single-threaded with a seeded schedule and injects
+  cancellation at the Nth cancellable checkpoint (`cancel_at_checkpoint`), always followed by a real
+  notification because the server assumes a newer edit is queued whenever it is cancelled. The
+  oracle is a fresh server on the same disk and buffers, compared by input state, diagnostics, random
+  requests, range geometry and the push contract. Expensive incremental cross-checks run behind
+  `syntax::testing::enable_invariants()`. Scenario files script journeys through the simulator and
+  the real binary. The file-system seam is a directory only the simulator writes, not an in-memory
+  file system; injected IO errors are a gap.
+- **Why a recorder and a step function, not a mock server.** The simulator must exercise the code an
+  editor talks to. Two narrow seams keep production and simulation on one code path, and the
+  simulated client sends real `lsp_types` notifications through the real `ServerState` handlers.
+- **Harness modules ship in the library, not behind a cargo feature.** `server::simulation` and the
+  crates' `testing` modules compile into release builds. A package's own integration tests see only
+  its default features, so a feature gate would make the bounded passes opt-in, which breaks the
+  rule that every harness runs in plain `cargo test`. They panic on a broken contract by design,
+  since that is how a harness reports.
+- **Impact.** Correctness: the simulator found divergences that unit tests and the existing fuzzers
+  missed (a closed test file staying in the project, a lost `library()` rescan after cancellation,
+  a formatting edit measured in bytes instead of UTF-16 units, and two splice reparses that
+  disagreed with a full parse: an edit that opened a string the suffix closed, and one that left a
+  `function(...)` whose body a full parse found in the suffix). Differential fuzzing against GNU R
+  found three runtime bugs (NA against NaN propagation in `mean`, `sum`, `prod` and the cumulative
+  functions, a zero-length replacement into a zero-length vector, and a top-level `nargs()`). Simplicity: two seams, no
+  parallel implementation. Performance: none in production; the cross-checks are off unless a
+  harness enables them. Incrementality: the from-scratch oracle now covers the server's own
+  bookkeeping (open documents, attach sets, config, metadata), not only salsa queries.
+
 ## The presented R version comes from the base package the runtime runs
 
 - **Previous shape.** Three sources: `Rversion.h` and `libr`'s `R_VERSION_STRING` said 4.6.2, `rcmd::R_VERSION` said 4.6.2, and the interpreter's `R.version` said 4.3.3, while `packageVersion("base")` came from the linked GNU R library. A package compiled from source took its R 4.6 C branches while its R code took the 4.3 branches: rlang's C made `ns_registry_env()` defunct and its R code still called it, which broke pkgload, generics and downlit; presenting 4.6.2 in R as well made `is_installed("base", version = getRversion())` false and sent R code to 4.4+ base functions that a 4.3 base lacks.

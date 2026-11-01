@@ -966,6 +966,30 @@ pub unsafe fn from_bytes(bytes: &[u8]) -> ApiResult<Sexp> {
     Ok(unserialize(&mut source, None)?.0)
 }
 
+/// Any byte stream either fails to read with an error or reads into an object that writes back
+/// and reads again. Nothing panics. Shared by the in-tree corrupted-stream harness and the
+/// coverage-guided `fuzz/` target.
+///
+/// # Safety
+/// The caller has the runtime to itself, as for every API call.
+pub unsafe fn check_unserialize_input(bytes: &[u8]) {
+    unsafe {
+        let mark = runtime().heap.handle_mark();
+        if let Ok(object) = from_bytes(bytes) {
+            let written = to_bytes(object, Format::Xdr, 3);
+            let Ok(written) = written else {
+                panic!("an object read from {bytes:02x?} does not write back: {written:?}");
+            };
+            let again = from_bytes(&written);
+            assert!(
+                again.is_ok(),
+                "an object read from {bytes:02x?} wrote a stream that does not read: {again:?}"
+            );
+        }
+        runtime().heap.release_handles(mark);
+    }
+}
+
 /// Reads a stream's header only, as `R_SerializeInfo` does.
 pub unsafe fn header_of(bytes: &[u8]) -> ApiResult<StreamHeader> {
     let mut source = SliceSource::new(bytes);

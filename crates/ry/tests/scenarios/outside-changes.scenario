@@ -1,0 +1,37 @@
+# Files change on disk behind the editor's back, as a `git checkout` does: the editor picks
+# up new definitions, forgets deleted ones, and follows a config change. The client pulls
+# diagnostics and counts columns in UTF-8.
+
+client pull utf8
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file ry.toml
+| [check]
+| typing = true
+file R/main.R
+| run <- function() {
+|   balance(10)
+| }
+
+open R/main.R
+expect diagnostics R/main.R "balance"
+
+file R/balance.R
+| #: fn(amount: double) -> double
+| balance <- function(amount) amount * 2
+expect diagnostics R/main.R none
+expect definition R/main.R "balance" R/balance.R "balance <- function"
+
+replace R/main.R "balance(10)" "balance(\"ten\")"
+expect diagnostics R/main.R "expected `double`"
+
+# Turning type errors off in the config clears the finding without touching the buffer.
+file ry.toml
+| [check]
+| typing = false
+expect no diagnostic R/main.R "expected `double`"
+
+remove R/balance.R
+expect diagnostics R/main.R "balance"
