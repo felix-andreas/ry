@@ -32,7 +32,7 @@ sales |>
   DataFrame.sort("revenue", descending = TRUE)
 ```
 
-```text
+```text ry run runtime=ry exact
 $ ry run sales.R
    region revenue orders
    <char>   <num>  <int>
@@ -103,7 +103,7 @@ Key: <g>
 DataFrame.schema(sales)
 ```
 
-```text
+```text ry run runtime=ry exact continue
        region         units         price
 "character[]"   "integer[]"    "double[]"
 ```
@@ -129,7 +129,7 @@ expression in parentheses first.
 (col("price") * 2) |> Expr.alias("double")
 ```
 
-```text
+```text ry run runtime=ry exact continue
 (col("price") * 2.0).alias("double")
 ```
 
@@ -155,7 +155,7 @@ runtime both reject it until you aggregate it.
 sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3L)
 ```
 
-```text
+```text ry run runtime=ry exact continue
    region  cost  units
    <char> <num> <lgcl>
 1:     eu   1.8   TRUE
@@ -204,7 +204,7 @@ regions <- DataFrame(region = c("eu", "us"), manager = c("Ana", "Bo"))
 DataFrame.join(sales, regions, on = "region", how = "left")
 ```
 
-```text
+```text ry run runtime=ry exact continue
    region units price manager
    <char> <int> <num>  <char>
 1:     eu     3   1.5     Ana
@@ -252,7 +252,7 @@ LazyFrame.explain(plan)
 LazyFrame.collect(plan)
 ```
 
-```text
+```text ry run runtime=ry exact continue
 SELECT [col("region"), col("revenue")]
   WITH_COLUMNS [(col("units") * col("price")).alias("revenue")]
     FILTER col("region") == "eu"
@@ -280,7 +280,7 @@ is a type error.
 as.data.frame(sales)
 ```
 
-```text
+```text ry run runtime=ry exact continue
   region units price
 1     eu     3   1.5
 2     us     5   2.0

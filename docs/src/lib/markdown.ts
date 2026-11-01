@@ -72,7 +72,8 @@ function bodyToMarkdown(body: string): string {
     }
     if (fenceMatch) {
       fence = { marker: fenceMatch[1][0], length: fenceMatch[1].length };
-      push(line, true);
+      // A ` ry ...` marker tells the docs test how to run the block; readers need only the language.
+      push(line.replace(/^(\s*(?:`{3,}|~{3,})\S*)\s+ry\b.*$/, '$1'), true);
       continue;
     }
 

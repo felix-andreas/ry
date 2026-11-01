@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "format"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "regex",
  "serde",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "heap"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "hashbrown 0.16.0",
  "rustc-hash 2.1.3",
@@ -1716,7 +1716,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "ide"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "salsa",
  "semantics",
@@ -1780,7 +1780,7 @@ checksum = "f4c7245a08504955605670dbf141fceab975f15ca21570696aebe9d2e71576bd"
 
 [[package]]
 name = "interp"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "ab_glyph",
  "bzip2",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "jit"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "libr"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "cc",
  "heap",
@@ -2023,6 +2023,7 @@ dependencies = [
  "jit",
  "libc",
  "libloading",
+ "libmimalloc-sys",
  "loader",
  "mimalloc",
  "polars",
@@ -2070,7 +2071,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "loader"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "heap",
  "interp",
@@ -2385,7 +2386,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oracle"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "clap",
  "serde",
@@ -3353,7 +3354,7 @@ dependencies = [
 
 [[package]]
 name = "rcmd"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "libloading",
 ]
@@ -3475,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "repl"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "crossterm 0.28.1",
  "dirs",
@@ -3673,7 +3674,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ry-lang"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "async-lsp",
  "clap",
@@ -3689,6 +3690,7 @@ dependencies = [
  "miette",
  "mimalloc",
  "portable-pty",
+ "rcmd",
  "repl",
  "rustc-hash 2.1.3",
  "salsa",
@@ -3809,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "semantics"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "boxcar",
  "hashbrown 0.17.1",
@@ -4075,7 +4077,10 @@ checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "sniff"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
+dependencies = [
+ "syntax",
+]
 
 [[package]]
 name = "socket2"
@@ -4287,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "rowan",
  "tree-sitter",
@@ -4310,7 +4315,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "0.3.2-beta"
+version = "0.4.0-beta"
 dependencies = [
  "foldhash 0.2.0",
  "itoa",
@@ -5544,7 +5549,7 @@ dependencies = [
 
 [[package]]
 name = "zed_ry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "zed_extension_api",
 ]

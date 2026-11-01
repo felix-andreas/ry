@@ -1,0 +1,48 @@
+# A package author fixes a type error, renames a function across files, and formats.
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file NAMESPACE
+| export(area)
+file ry.toml
+| [check]
+| typing = true
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) {
+|   width * height
+| }
+file R/report.R
+| report <- function() {
+|   area(2, 3)
+| }
+
+open R/report.R
+expect diagnostics R/report.R none
+
+# Typing a string argument is a type error, reported where the string is.
+replace R/report.R "area(2, 3)" "area(2, \"wide\")"
+expect diagnostics R/report.R "expected `double`"
+replace R/report.R "\"wide\"" "4"
+expect diagnostics R/report.R none
+
+expect hover R/report.R "area" "double"
+expect definition R/report.R "area" R/area.R "area <- function"
+type R/report.R after "area(2, 4)" "\n  x <- are"
+expect completion R/report.R after "x <- are" area
+erase R/report.R "\n  x <- are"
+
+# Renaming from a call site rewrites the definition in a file that is not open.
+rename R/report.R "area" surface
+expect buffer R/report.R "surface(2, 4)"
+expect buffer R/area.R "surface <- function"
+expect diagnostics R/report.R none
+save R/report.R
+save R/area.R
+expect file R/area.R "surface <- function"
+
+# Formatting the buffer normalizes spacing without touching meaning.
+replace R/report.R "surface(2, 4)" "surface( 2,4 )"
+format R/report.R
+expect buffer R/report.R "surface(2, 4)"

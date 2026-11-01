@@ -236,6 +236,13 @@ That means `R_VERSION` and `Rversion.h`, and also `R_SVN_REVISION`: data.table's
 `R_VERSION < R_Version(4, 6, 0) || R_SVN_REVISION < 89077` (and `< 89194` for `R_mapAttrib`), so ry
 must report a revision of at least 89194 or data.table takes the backport.
 
+In practice the runtime runs the base R code of the GNU R installation its R home links, so ry
+presents that installation's version. `R.version`, `getRversion()` and the home's generated
+`Rversion.h` all come from its `library/base/DESCRIPTION`, and the revision is raised to at least
+89194. Linked to R 4.6, ry presents 4.6 as recommended here. Linked to an older R, such as the 4.3.3
+the corpus baseline runs on, it presents that version, because a package whose C code takes the 4.6
+branches while its R code runs on a 4.3 base breaks (rlang's `ns_registry_env()` is one example).
+
 A real non-API surface remains after that, unguarded: the promise accessors in `rlang`, `vctrs`,
 `lazyeval` and `magrittr` and `PRCODE`/`PRENV` in Rcpp's `Promise.h`, `ATTRIB` and `SET_ATTRIB`,
 `IS_UTF8` and `IS_ASCII` in `stringi`, `fansi` and data.table's `forder.c`, `Rf_findVarInFrame` in
@@ -514,8 +521,10 @@ that the gain over a good interpreter is real but modest.
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
-  tenth entry, and a running loop compiles after 500 backward jumps and continues in compiled code
-  at the loop header (on-stack replacement).
+  1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
+  code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
+  optimizing compiler: a lower one compiled the methods package's code that a package load runs
+  only a few dozen times, which made the load slower.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds

@@ -1687,8 +1687,7 @@ edit. `backlog.md` tracks it.
 
 # Decision record: the Linux release binary links glibc 2.17 through zig
 
-**Status:** decided and implemented. The user directed one release build per platform, plus a
-native package for Nix users.
+**Status:** superseded by "Releases are built natively per platform, with the runtime beside the binary", which builds each archive on its own CI runner (glibc 2.35 floor). Kept for the reasoning about loaders and musl.
 
 **Problem.** The Linux release package was crane's native build against nixpkgs' glibc, so the
 shipped binary's ELF interpreter and RUNPATH were `/nix/store/...` paths. It started only on a
@@ -1831,8 +1830,9 @@ constants, symbols, promises, and calls to a handful of primitives (`.Call`, `.E
 `warning`, `dyn.load`, `list`, `identity`, `invisible`, `quote`), which is what native code needs to
 drive native code. Calling a closure is an error that says so.
 
-**ry presents itself as R 4.6.2 with revision 89194**, the lowest revision that keeps data.table on
-its modern branches, and its native encoding is UTF-8.
+**ry presents the version of the base R it runs, with a revision of at least 89194** (the lowest
+that keeps data.table on its modern branches), and its native encoding is UTF-8. See "The presented
+R version comes from the base package the runtime runs" below.
 
 **Considered and rejected.** Source compatibility alone saves nothing, because the opaque `SEXP`
 already forces every accessor to be a real function. A moving nursery cannot coexist with raw
@@ -2660,6 +2660,12 @@ first lines R had already read, leaving R mid-command.
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
+- **Compile thresholds are 1000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
+  At 10 and 500, a package load compiled the methods package's bodies that each `setClass` runs a
+  few dozen times, and compiling took half of a large package's S4 definitions (callgrind) and
+  about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
+  benchmarks time the same. Lower them only together with a cheaper first tier or background
+  compilation.
 - **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
   (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
   `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
@@ -3312,13 +3318,68 @@ first lines R had already read, leaving R mid-command.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
 
+## libR commits mimalloc arenas lazily, and handle vectors are not zeroed before their fill
+
+- **Previous shape.** `libR.so` declares its own mimalloc, separate from the `ry` binary's, and only the binary turned off eager arena commit. In `libR` an eagerly committed arena is backed by transparent huge pages, so after earlier work had purged parts of it, the next large vector faulted them back in and the kernel zeroed and compacted whole huge pages. Every `Rf_allocVector` also zeroed the whole vector, which GNU R does not do for numbers, and a character vector or list was zeroed and then filled.
+- **Target shape.** `libR` sets `mi_option_arena_eager_commit` to 0 from an `.init_array` constructor (`crates/libr/src/libr.rs`). `Rf_allocVector` allocates numeric vectors uninitialized through `Heap::alloc_vector_uninit`, and `Heap::alloc_vector` zeroes only the header of a vector it fills with handles. Purging stays on (`MIMALLOC_PURGE_DELAY=-1` shaves a little more, but resident memory would only grow).
+- **Impact.** In ops.R's sequence at 1e7 rows, `rbindlist`'s slow first calls dropped from 2 to 6 s to about 1.3 s (GNU R: 0.9 to 2.1 s). Run-to-run noise on the other questions is larger than any change. Package loading gains too: it plans on every core, every planning thread's arena paid the zeroing, and the plan of a 326,000-line package went from 680-990 ms to 330-440 ms.
+
+# Decision record: everything is fuzzable, simulatable and scriptable
+
+This is a user directive: robustness is the long-run priority, so the whole toolchain is designed to
+be fuzzed, simulated and driven by scenario tests. It widens the per-stage fuzzing record above from
+the analysis pipeline to every component. `docs/src/content/docs/contributing/robustness.md` is the
+contract.
+
+- **Previous shape.** Each analysis stage had a seeded fuzz battery, but the language server could be
+  tested only over a real socket with a real worker thread, so its interleavings (edits racing
+  queries, cancellations, delayed watcher events) were untestable and unreproducible. The worker
+  iterated a `HashSet` of open documents when refreshing, so the order of its publishes was
+  nondeterministic. No harness compared a long editor session with a fresh start, and no test
+  scripted a user journey across the editor, the CLI and the runtime.
+- **Target shape.** Nondeterminism lives behind seams a seed drives. The server's worker sends
+  through an `Outbox` (the socket, or a recorder) and its loop body is `run_job`, so
+  `server::simulation` runs the real server single-threaded with a seeded schedule and injects
+  cancellation at the Nth cancellable checkpoint (`cancel_at_checkpoint`), always followed by a real
+  notification because the server assumes a newer edit is queued whenever it is cancelled. The
+  oracle is a fresh server on the same disk and buffers, compared by input state, diagnostics, random
+  requests, range geometry and the push contract. Expensive incremental cross-checks run behind
+  `syntax::testing::enable_invariants()`. Scenario files script journeys through the simulator and
+  the real binary. The file-system seam is a directory only the simulator writes, not an in-memory
+  file system; injected IO errors are a gap.
+- **Why a recorder and a step function, not a mock server.** The simulator must exercise the code an
+  editor talks to. Two narrow seams keep production and simulation on one code path, and the
+  simulated client sends real `lsp_types` notifications through the real `ServerState` handlers.
+- **Harness modules ship in the library, not behind a cargo feature.** `server::simulation` and the
+  crates' `testing` modules compile into release builds. A package's own integration tests see only
+  its default features, so a feature gate would make the bounded passes opt-in, which breaks the
+  rule that every harness runs in plain `cargo test`. They panic on a broken contract by design,
+  since that is how a harness reports.
+- **Impact.** Correctness: the simulator found divergences that unit tests and the existing fuzzers
+  missed (a closed test file staying in the project, a lost `library()` rescan after cancellation,
+  a formatting edit measured in bytes instead of UTF-16 units, and two splice reparses that
+  disagreed with a full parse: an edit that opened a string the suffix closed, and one that left a
+  `function(...)` whose body a full parse found in the suffix). Differential fuzzing against GNU R
+  found three runtime bugs (NA against NaN propagation in `mean`, `sum`, `prod` and the cumulative
+  functions, a zero-length replacement into a zero-length vector, and a top-level `nargs()`). Simplicity: two seams, no
+  parallel implementation. Performance: none in production; the cross-checks are off unless a
+  harness enables them. Incrementality: the from-scratch oracle now covers the server's own
+  bookkeeping (open documents, attach sets, config, metadata), not only salsa queries.
+
+## The presented R version comes from the base package the runtime runs
+
+- **Previous shape.** Three sources: `Rversion.h` and `libr`'s `R_VERSION_STRING` said 4.6.2, `rcmd::R_VERSION` said 4.6.2, and the interpreter's `R.version` said 4.3.3, while `packageVersion("base")` came from the linked GNU R library. A package compiled from source took its R 4.6 C branches while its R code took the 4.3 branches: rlang's C made `ns_registry_env()` defunct and its R code still called it, which broke pkgload, generics and downlit; presenting 4.6.2 in R as well made `is_installed("base", version = getRversion())` false and sent R code to 4.4+ base functions that a 4.3 base lacks.
+- **Target shape.** One source of truth: `library/base/DESCRIPTION` of the R home (`Version`, `Revision`, `Last Changed Date`). The interpreter reads it for `R.version` and `getRversion()` (`interp::system::r_version`), `serialize` writes it as the writer version, and `rcmd::assemble` generates the home's `include/Rversion.h` from the same file. The revision is raised to at least 89194, because ry implements the API data.table guards on it. The checked-in `crates/libr/include/Rversion.h` (4.6.2) serves only code built directly against `crates/libr/include`.
+- **Why not always 4.6.** The runtime runs the base R code of the linked installation, so a version claim above it is false at the R level. With an R 4.6 library linked, as the packaging design intends, ry presents 4.6 and packages take their modern-API branches; with 4.3.3 linked, they take the 4.3 branches, which match the GNU R baseline the corpus is measured against.
+- **Impact.** Packages installed from source must be reinstalled after a home's base version changes. `tests/test_install.rs` pins that `getRversion()`, `packageVersion("base")`, `Rversion.h` and `R --version` agree.
+
 ## An Array is a flagged R vector, written `[...]`
 
 - **Previous shape.** ry had no strict vector. Typed code used `c()`, whose result R coerces (`c(1, "a")` is character), recycles, and lets hold `NA`, so neither the checker nor a DataFrame column could promise one item type without missing values.
 - **Target shape.** `[a, b, c]` is ry syntax for `Array<T>`, the standard library's strict vector: one exact item type (a single `logical`, `integer`, `double` or `character`, or a ry value), no `NA`, no attributes, no recycling and no implicit conversion. The contract is `reference/type-system.mdx`, "Arrays"; the user page is `type-checking/arrays.mdx`.
 - **Runtime representation.** An Array is an ordinary R vector carrying the heap flag `flag_bits::ARRAY` (`crates/heap/src/object.rs`): atomic storage for scalar items, a VECSXP for ry-value items. A separate object type was rejected because every C API accessor, `sum()`, and the JIT already read the unboxed storage, so converting to R is free (drop the flag) and nothing has to learn a new layout. Setting any attribute clears the flag, which keeps "no attributes" true without checks at every attribute write. `values::duplicate` and `shallow_duplicate` drop the flag on the copy (nested Arrays keep theirs), because a copier is about to write and a builtin or C code may write an `NA`; only `arrays::writable` re-flags a copy, after checking the write.
 - **One place enforces the rules.** `crates/interp/src/arrays.rs` validates construction, operators (`arith.rs` wraps each builtin in `strict`), indexing and replacement, then flags the result. The bytecode fast paths and the JIT's type guard refuse a flagged operand, so they can never skip a check; a dedicated Array feedback kind is backlog work.
-- **R code keeps working on Arrays.** Reads follow R's positions wherever R gives no `NA` (negative positions, zeros), and everything that would produce `NA` is an error. A replacement that is not an item of the item type (an `NA`, an R vector, another type) does not error: the result is the plain R vector R would build, so base functions such as `ifelse()` that assign into an argument keep working. Typed code cannot reach that path because the checker rejects the value; the rules the checker cannot see (bounds, no recycling) stay runtime errors, so a typed `Array<T>` never holds a plain vector.
+- **R code keeps working on Arrays.** Reads follow R's positions wherever R gives no `NA` (negative positions, zeros), and everything that would produce `NA` is an error. A replacement that is not an item of the item type (an `NA`, an R vector, another type) does not error: the result is the plain R vector R would build, so base functions such as `ifelse()` that assign into an argument keep working. An operator works the same way: an operand that is not an Array and not a single item of the item type makes R's operator run and return a plain vector (`arrays::check_operands`), because base `str()` computes `ob - signif(ob, digits)` and `signif()` returns a plain vector. Typed code cannot reach that path because the checker rejects the value; the rules the checker cannot see (bounds, no recycling) stay runtime errors, so a typed `Array<T>` never holds a plain vector.
 - **`List` results.** A `List` function returns an Array only when its collection argument (`list`, `first`, `lists`) is one, never because an item argument is. A callback's result type is bound by the `item` constraint (`types/ry.Rtypes`), so the checker rejects `List.map` to a non-item instead of failing at run time.
 - **Checker.** `Array<T>` fits `T[]` (atomic items) or `list[T]` (ry-value items), never the reverse, so Arrays pass to R code and R vectors need `as.Array()`. A DataFrame stores an Array column as its plain vector, so `column_type` maps `Array<T>` to `T[]`.
 - **Impact.** No duplicated state: the flag is the single source of truth for strictness, and the checker's type and the runtime flag agree by construction. Pinned by `crates/semantics/tests/typing/arrays.R.test`, `crates/interp/tests/test_arrays.rs` (including a generated round trip) and Array seeds in both fuzzers.
@@ -3520,6 +3581,38 @@ explicit allocators".
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
 
+# Decision record: HIR as struct-of-arrays, lowered from the green tree
+
+- **Previous shape.** `Module` held `expressions: Vec<Expression { kind, range }>` and
+  `patterns: Vec<Pattern>`, and each composite kind owned its lists (`Box<[Argument]>`,
+  `Box<[Parameter]>`, `Box<[ExprId]>`, `Box<[MatchArm]>` and the pattern lists), one allocation
+  per list. Literal text was a `String`. Lowering walked rowan's red tree, which allocates and
+  frees a cursor node for every node it visits, and grew fresh vectors per item, then shrank them.
+- **What was weak.** About 60% of `item_hir`'s samples were red-cursor work, allocation was about
+  12% of cold-check CPU, and the grow-then-shrink pattern touched about twice the memory the memo
+  kept. Owned lists also made every kind non-`Copy`, so readers cloned lists to release a borrow.
+- **Target shape (`crates/semantics/src/hir.rs`).** An `ExprId` indexes separate `kinds` and
+  `ranges` arrays, because inference reads kinds and mostly only diagnostics read ranges. Each
+  list type has one side array in the module and a kind holds a `Span<T>` (`u32` start and
+  length) into it; `module[span]` is the slice. Literal text lives in a per-module text buffer that a
+  `Text` span addresses (`module[text]` is the `&str`), so every HIR kind is `Copy`. It is not a
+  `Symbol`, because the interner leaks by design: interning literals would keep every
+  intermediate spelling of a string literal typed in the editor for the life of the server. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
+  per-kind child vector. Lowering reads the green tree through `syntax::GreenNodeAt` (green node
+  plus absolute start), collects each list on a scratch stack and seals it into its side array
+  once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
+  the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
+  rule of the data-oriented record above.
+- **Kept deliberately.** `ExprId` allocation order is the old one, so ids, fixtures and every
+  downstream map are unchanged. `Module` still owns plain vectors and compares by value, so salsa
+  backdating works as before.
+- **Impact.** Findings are byte-identical on the three benchmark code bases. In interleaved runs
+  the cold check used 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS
+  than the list-owning HIR. The checker also records expression types in a vector indexed by
+  `ExprId` instead of a hash map (`RecordedTypes` in `check.rs`), since the memoized
+  `ExpressionTypes` was already dense. IDE scans that need both kind and range go through
+  `Module::expressions`, which zips the two arrays.
+
 # Decision record: the interpreter's call path, lookups and allocation
 
 - **Goal.** Per-test time on the three benchmark code bases, without the JIT, at or below GNU R's.
@@ -3572,6 +3665,29 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## Releases are built natively per platform, with the runtime beside the binary
+
+- **Before.** `just release` cross-built `ry` alone for three targets with nix and zig on one
+  machine, and the archives held a single `ry`. That was fine while ry was only a checker, but
+  ry's runtime is a second artifact (`libR.so`/`libR.dylib`) that links zlib, bzip2 and xz on
+  Linux, which zig's glibc 2.17 sysroot does not carry, and macOS cross-linking has only
+  libSystem stubs.
+- **Shape.** `.github/pending-release.yml` (moved into `.github/workflows/` by a maintainer)
+  builds each platform on its own runner with `just package VERSION`, smoke-tests the archive with
+  `tools/smoke-test.sh`, and publishes. `just package` is the one recipe CI and
+  `just release-dry-run` share, so a local dry run exercises the same packaging. An archive is
+  flat (`ry`, the runtime library, `LICENSE`), because `ry run` looks beside the executable first
+  and the Zed extension expects `ry` at the archive root; installers may move the library to
+  `../lib/ry/`, the other place ry looks. Windows archives carry `ry.exe` alone and use the MSVC
+  target, which native Windows runners build without MinGW.
+- **Linux glibc floor.** Native builds on `ubuntu-22.04` need glibc 2.35, up from 2.17. Accepted
+  for the beta; a manylinux-style container is the fix if users on older distributions ask.
+- **Nix.** The flake's toolchain comes from `rust-toolchain.toml` (rust-overlay's
+  `fromRustupToolchain`). `nix build` builds `ry` and libR, installs the library at
+  `lib/ry/libR.so`, and wraps `ry` with `R_HOME` defaulting to nixpkgs' R, because a Nix-built
+  binary cannot load another distribution's libR; a user-set `R_HOME` still wins. `ry-unwrapped` skips the wrapper. The zig cross outputs
+  remain for the checker-only binaries.
 
 ## In-place updates through nested targets
 
@@ -3634,6 +3750,7 @@ explicit allocators".
 - **Findings.** An operand error on a hinted formal's use becomes `ContextualParameter`, which names
   the formal and says the call supplied its type, and is reported on the use rather than the whole
   literal.
+- **Accumulators get no hint.** A formal whose expected type shares a type variable with the expected result (`S` in `fn(S, T) -> S`) is a fold accumulator, but only when another argument is that bare variable (the initial state); otherwise `List.update`'s `fn(T) -> T` lost its item hint and a field typo in the lambda went unreported. Hinting it with the initial state pinned `List.walk(xs, list(), \(seen, x) List.append(seen, x))` to `list{}`, which the widened result no longer fit. `parameter_hints_for` reads the variables before the probe binds them.
 - The spec is "Function literals in call arguments" in `reference/type-system.mdx`.
 
 ## ry refuses a `libR.so` built from other sources
