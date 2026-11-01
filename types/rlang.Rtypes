@@ -24,7 +24,7 @@ cnd_message : fn(cnd: Any, ...: Any, [inherit]: logical, [prefix]: logical) -> c
 
 # Dots. The names and the number of the elements are whatever the caller passed.
 list2 : @pure fn(...: Any) -> list[Any]
-dots_list : @pure fn(...: Any, [.named]: logical, [.ignore_empty]: character, [.preserve_empty]: logical, [.homonyms]: character, [.check_assign]: logical) -> list[Any]
+dots_list : @pure fn(...: Any, [.named]: logical | NULL, [.ignore_empty]: character, [.preserve_empty]: logical, [.homonyms]: character, [.check_assign]: logical) -> list[Any]
 
 is_string : @pure fn(x: Any, [string]: character[] | NULL) -> logical
 is_scalar_character : @pure fn(x: Any) -> logical

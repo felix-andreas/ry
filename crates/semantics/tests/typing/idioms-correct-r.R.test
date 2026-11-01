@@ -1043,8 +1043,7 @@ my_helper <- NULL
 widths <- function(words) vapply(words, my_helper, integer(1))
 #++++
 my_helper: NULL
-widths: Unknown
-44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 4 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
+widths: <T> fn(words: list[T] | T[]) -> integer[]
 
 #---- a_branch_with_an_open_variable_inside_a_list_is_not_pinned_by_the_other_branch
 split_deps <- function(dp) if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)
@@ -1258,3 +1257,65 @@ f <- function() {
 #++++
 f: fn() -> Unknown
 20..21 warning[unused] `x` is assigned but never used.
+
+#---- a_union_with_a_string_member_is_a_condition
+# usethis reads `cfg$origin$is_configured` from a list whose fields mix strings and flags.
+f <- function(flag) {
+  setting <- if (flag) Sys.getenv("SETTING") else TRUE
+  if (setting) 1 else 2
+}
+#++++
+f: fn(flag: logical) -> double
+
+#---- a_union_with_a_string_member_is_still_rejected_by_and
+f <- function(flag) {
+  setting <- if (flag) Sys.getenv("SETTING") else TRUE
+  if (setting && flag) 1 else 2
+}
+#++++
+f: Unknown
+83..90 error[type-mismatch] expected `logical`, found `character | logical`
+
+#---- a_list_of_unknown_elements_may_be_a_named_list
+# rmgarch passes `fixed.pars = as.list(fit@mfit$garchcoef[, i])`, a named vector turned list.
+#: fn(pars: list[named: double]) -> double
+fit <- function(pars) 1
+refit <- function(coefficients) fit(as.list(coefficients))
+#++++
+fit: fn(pars: list[named: double]) -> double
+refit: <T> fn(coefficients: T) -> double
+
+#---- a_tuple_is_still_not_a_named_list
+#: fn(pars: list[named: double]) -> double
+fit <- function(pars) 1
+refit <- function() fit(list(1, 2))
+#++++
+fit: fn(pars: list[named: double]) -> double
+refit: Unknown
+91..101 error[type-mismatch] expected `list[named: double]`, found `list{double, double}`
+
+#---- a_variable_only_ever_written_null_is_a_placeholder
+# lifecycle writes `msg <- NULL # trick R CMD check` before filling it with `%<~%`.
+#: fn(message: character[]) -> NULL
+report <- function(message) invisible(NULL)
+msg <- NULL
+report(msg)
+flag <- NULL
+if (flag) 1 else 2
+#++++
+report: fn(message: character[]) -> NULL
+msg: NULL
+NULL
+flag: NULL
+double
+
+#---- a_null_parameter_or_literal_is_still_checked
+#: fn(message: character[]) -> NULL
+report <- function(message) invisible(NULL)
+relay <- function(value = NULL) report(value)
+report(NULL)
+#++++
+report: fn(message: character[]) -> NULL
+relay: fn([value]: character[] | NULL) -> NULL
+NULL
+133..137 error[type-mismatch] expected `character[]`, found `NULL`

@@ -238,13 +238,14 @@ g: <T> fn(x: T) -> fn() -> T
 f: Unknown
 46..47 error[type-mismatch] this call leaves out `x`, which the function requires
 
-#---- a_formal_read_by_a_forced_default_is_required
+#---- a_formal_read_only_by_a_default_is_optional
+# Matrix's `.mkDet(modulus = sum(log(abs(x))), ..., x)`: a call that supplies `modulus` never
+# runs the default, so it never needs `x`.
 g <- function(x, y = x) y
-f <- function() g()
+r <- g(y = 1)
 #++++
-g: <T, U> fn(x: T, [y]: U) -> U
-f: Unknown
-42..43 error[type-mismatch] this call leaves out `x`, which the function requires
+g: <T, U> fn([x]: T, [y]: U) -> U
+r: double
 
 #---- substitute_does_not_force_a_formal
 g <- function(x) deparse(substitute(x))
@@ -340,7 +341,7 @@ ok: integer
 pair <- function(x, y = x) y
 from_pair <- pair(1L)
 #++++
-pair: <T, U> fn(x: T, [y]: U) -> U
+pair: <T, U> fn([x]: T, [y]: U) -> U
 from_pair: integer
 
 #---- a_default_closes_at_the_item_boundary_like_the_parameter_it_belongs_to
@@ -362,7 +363,7 @@ choose <- function(a, b, c, d, e, g, h, i, j = i) {
 }
 picked <- choose(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, 1L)
 #++++
-choose: <T, U> fn(a: logical, b: logical, c: logical, d: logical, e: logical, g: logical, h: logical, i: T, [j]: U) -> U
+choose: <T, U> fn(a: logical, b: logical, c: logical, d: logical, e: logical, g: logical, h: logical, [i]: T, [j]: U) -> U
 picked: integer
 
 #---- a_declared_binder_admits_its_own_default
@@ -894,3 +895,23 @@ evaluate <- function(f) f(arglist = 1)
 #++++
 evaluate: fn(f: fn(double, ...: Any) -> double) -> double
 165..166 error[type-mismatch] this call supplies 0 positional arguments, but the function requires 1, so a required argument is missing
+
+#---- a_formal_handed_to_a_local_helper_that_never_reads_it_is_optional
+# callr's `format_advice(x)` passes `x` to a local `format_advice_plain(x, ...)` that ignores it.
+make <- function() {
+  plain <- function(x) "advice"
+  advice <- function(x) plain(x)
+  advice()
+}
+#++++
+make: fn() -> character
+
+#---- a_formal_handed_to_a_local_helper_that_reads_it_is_required
+make <- function() {
+  shout <- function(x) toupper(x)
+  advice <- function(x) shout(x)
+  advice()
+}
+#++++
+make: Unknown
+90..96 error[type-mismatch] this call leaves out `x`, which the function requires

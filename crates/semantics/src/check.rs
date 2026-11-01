@@ -2325,7 +2325,6 @@ impl<'db> Checker<'db, '_> {
                 let mark = self.environment.mark();
                 let mut uses = FormalUses::default();
                 self.collect_formal_uses(*body, &mut uses);
-                self.collect_forced_default_uses(&module[parameters], &mut uses);
                 let mut probed = FxHashSet::default();
                 self.collect_type_probed(*body, &mut probed);
                 let mut named = Vec::new();
@@ -4667,7 +4666,11 @@ impl<'db> Checker<'db, '_> {
                             .globals
                             .is_none_or(|globals| globals.library_candidates(name).is_none());
                         let optional_targets = match forwards {
-                            true => self.optional_argument_targets(name, &self.module[arguments]),
+                            true => self.optional_argument_targets(
+                                *callee,
+                                name,
+                                &self.module[arguments],
+                            ),
                             false => Vec::new(),
                         };
                         (forwards, optional_targets)
@@ -4715,12 +4718,30 @@ impl<'db> Checker<'db, '_> {
     /// passed on does not take the callee's default, so a defaulted parameter that the
     /// callee reads still errors. Names match exactly, and the remaining
     /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
-    /// optional targets, so its arguments stay forced.
-    fn optional_argument_targets(&self, name: &str, arguments: &[Argument]) -> Vec<bool> {
-        let Some(scheme) = self.globals.and_then(|globals| globals.scheme(name, true)) else {
-            return Vec::new();
+    /// optional targets, so its arguments stay forced. A local function the enclosing body
+    /// has already bound counts as well, as callr's `format_advice(x)` hands `x` to a local
+    /// helper that never reads it.
+    fn optional_argument_targets(
+        &self,
+        callee: ExprId,
+        name: &str,
+        arguments: &[Argument],
+    ) -> Vec<bool> {
+        let callee_ty = match self.naming.resolutions.get(&callee) {
+            Some(&slot) => match self.environment.get(slot) {
+                Some(EnvEntry::Mono(ty)) => Some(ty),
+                Some(EnvEntry::Scheme(index)) => self
+                    .scheme_arena
+                    .get(index as usize)
+                    .map(|scheme| scheme.body),
+                Some(EnvEntry::MissingFormal(_)) | None => None,
+            },
+            None => self
+                .globals
+                .and_then(|globals| globals.scheme(name, true))
+                .map(|scheme| scheme.body),
         };
-        let TyKind::Function(function) = scheme.body.kind(self.db) else {
+        let Some(TyKind::Function(function)) = callee_ty.map(|ty| ty.kind(self.db)) else {
             return Vec::new();
         };
         let leaves_unread =
@@ -4800,31 +4821,6 @@ impl<'db> Checker<'db, '_> {
             self.collect_formal_uses(*rhs, &mut right);
             self.collect_true_edge_reads(*rhs, &mut right);
             uses.forced.extend(right.forced);
-        }
-    }
-
-    /// A forced formal that the call omits evaluates its default, so the default's reads
-    /// force too (`function(x, y = x) y`). Repeats until no default adds a name, since a
-    /// default may read a formal whose own default reads another.
-    fn collect_forced_default_uses(&self, parameters: &[Formal], uses: &mut FormalUses) {
-        let mut visited = vec![false; parameters.len()];
-        loop {
-            let mut grew = false;
-            for (index, parameter) in parameters.iter().enumerate() {
-                if visited[index] || !uses.forced.contains(&parameter.name) {
-                    continue;
-                }
-                visited[index] = true;
-                if let Some(default) = parameter.default {
-                    let mut from_default = FormalUses::default();
-                    self.collect_formal_uses(default, &mut from_default);
-                    uses.forced.extend(from_default.forced);
-                    grew = true;
-                }
-            }
-            if !grew {
-                return;
-            }
         }
     }
 
@@ -5990,6 +5986,7 @@ impl<'db> Checker<'db, '_> {
         let resolved = self.structural(inferred);
         if (self.condition_coerces(resolved) && !self.is_long_combine(condition))
             || self.reads_open_defaulted_formal(condition, resolved)
+            || self.reads_null_placeholder(condition, resolved)
         {
             return;
         }
@@ -6025,13 +6022,20 @@ impl<'db> Checker<'db, '_> {
                 .copied()
                 .filter(|&member| !matches!(member.kind(self.db), TyKind::Null))
                 .collect();
+            // A `character` member is read through `as.logical` as a lone string is.
+            let reads_text = |member: Ty<'db>| {
+                site == ConditionSite::IfOrWhile
+                    && matches!(member.kind(self.db), TyKind::Scalar(Atomic::Character))
+            };
             if !values.is_empty()
-                && values
-                    .iter()
-                    .all(|&member| self.condition_coerces(member) || self.is_open_parameter(member))
+                && values.iter().all(|&member| {
+                    self.condition_coerces(member)
+                        || reads_text(member)
+                        || self.is_open_parameter(member)
+                })
             {
                 for member in values {
-                    if !self.condition_coerces(member) {
+                    if !self.condition_coerces(member) && !reads_text(member) {
                         self.unify_or_report(
                             condition_range,
                             scalar(self.db, Atomic::Logical),
@@ -6603,7 +6607,6 @@ impl<'db> Checker<'db, '_> {
 
         let mut uses = FormalUses::default();
         self.collect_formal_uses(*body, &mut uses);
-        self.collect_forced_default_uses(&module[parameters], &mut uses);
         // A call may omit a formal the body never forces, but only a default or a
         // `missing()` test makes optionality part of the formal's contract. Laziness only
         // relaxes what nothing declares: a declared required parameter stays required.
@@ -7189,6 +7192,21 @@ impl<'db> Checker<'db, '_> {
             }
         }
         walk(db, resolved, &unconstrained)
+    }
+
+    /// A variable whose every visible write is `NULL`, such as `msg <- NULL # trick R CMD
+    /// check` before `msg %<~% ...`, or a top-level `.flag = NULL` that `assign()` fills in, is
+    /// a placeholder for a value written where the checker cannot see. Correct R never tests
+    /// or passes on a value that is always `NULL` where `NULL` fails, so such a read is not
+    /// reported there. A parameter's `NULL` is what the caller passed, and stays checked.
+    fn reads_null_placeholder(&self, value: ExprId, ty: Ty<'db>) -> bool {
+        let mut value = value;
+        while let ExpressionKind::Paren(inner) = self.module.kind(value) {
+            value = *inner;
+        }
+        matches!(ty.kind(self.db), TyKind::Null)
+            && matches!(self.module.kind(value), ExpressionKind::NameRef(_))
+            && !self.binds_parameter(value)
     }
 
     fn binds_parameter(&self, callee: ExprId) -> bool {
@@ -10606,7 +10624,9 @@ impl<'db> Checker<'db, '_> {
             self.record_expectation(value, expected);
         }
         let resolved_found = self.table.resolve(self.db, found);
-        if matches!(resolved_found.kind(self.db), TyKind::Unknown) {
+        if matches!(resolved_found.kind(self.db), TyKind::Unknown)
+            || value.is_some_and(|value| self.reads_null_placeholder(value, resolved_found))
+        {
             return Ok(());
         }
         if self.table.compatible(self.db, resolved_found, expected) {

@@ -441,10 +441,11 @@ rendered, in backticks, so `list(\`max size\` = 10L)` has the type `` list{`max 
 
 - Any list coerces to a list-like `list[T]` when every element is compatible with `T`.
 - A record-like or dict-like list coerces to a dict-like `list[named: T]` when every value is
-  compatible with `T`.
+  compatible with `T`. So does a `list[Any]` or `list[Unknown]`, whose names are not known, such
+  as `as.list(x)` on an untyped `x`.
 - When `T` is still open, it becomes the union of the element types, so `lapply(list(1L, "a"), f)`
   passes `integer | character`.
-- The reverse is never allowed: a `list[T]` does not coerce back into a tuple-like, record-like, or
+- Otherwise the reverse is not allowed: a `list[T]` does not coerce back into a tuple-like, record-like, or
   dict-like list, and a `list[named: T]` does not coerce back into a record-like one.
 
 Two records are compatible when they declare the same field names and each field's type is
@@ -472,6 +473,12 @@ empty, so any element read from `list{}` is `Unknown`: `out <- list(); out[[1]]`
 
 The literal `NULL` has the type `NULL`, which is the unit type of this type system and is
 incompatible with every other type. An empty block is also `NULL`.
+
+A variable whose every visible write is `NULL` is a placeholder for a value written where the
+checker cannot see, such as lifecycle's `msg <- NULL # trick R CMD check` before `msg %<~% ...`,
+or a top-level flag that `assign()` fills in later. Passing such a variable as an argument, or
+testing it as a condition, is not reported. A parameter whose type is `NULL` and the literal
+`NULL` stay checked, so `report(NULL)` against a `character[]` parameter is an error.
 
 ### `Any` and `Unknown`
 
@@ -1569,7 +1576,8 @@ scalar condition admits:
 - A `character` condition of `if` or `while` is accepted unless it is a string literal. R reads it
   with `as.logical`, which accepts the spellings of `TRUE` and `FALSE` (such as `"T"` or `"true"`),
   and the value of `Sys.getenv("FLAG", unset = "TRUE")` presumably is one. Only a literal shows its
-  text, so `if ("yes")` is reported and `if ("TRUE")` is not. An operand of `&&` or `||` that is
+  text, so `if ("yes")` is reported and `if ("TRUE")` is not. The same holds for a `character`
+  member of a union condition, such as `character | logical`. An operand of `&&` or `||` that is
   `character` is a type error, because R rejects any string there.
 - A vector is accepted, because a vector type carries no length, and the vector a test produces,
   such as `x >= 1` on a `double[]`, has length one at run time far more often than not. Only a
@@ -2350,8 +2358,9 @@ exceptions and additions:
 - `x <<- 1` writes an enclosing frame, so it never assigns the formal `x`.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
-- When a forced formal has a default, the formals its default reads are forced too, so in
-  `function(x, y = x) y`, `x` is required.
+- A read inside another formal's default does not force a formal, because the default runs only
+  when the call omits that formal. So in `function(x, y = x) y`, `x` is optional, and `g(y = 1)`
+  is accepted.
 
 #### `missing()` on a defaultless formal
 

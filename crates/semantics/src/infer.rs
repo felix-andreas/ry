@@ -1040,6 +1040,16 @@ impl<'db> InferenceTable<'db> {
             | (TyKind::List(actual_element), TyKind::List(expected_element)) => {
                 self.compatible_probe(db, *actual_element, *expected_element, depth + 1)
             }
+            // A list whose elements are not known at all, such as `as.list(x)` on an untyped
+            // `x`, says nothing about its names, so it may be the named list the target wants.
+            (TyKind::List(actual_element), TyKind::NamedList(_))
+                if matches!(
+                    self.shallow_resolve(db, *actual_element).kind(db),
+                    TyKind::Any | TyKind::Unknown
+                ) =>
+            {
+                true
+            }
             (TyKind::Function(actual_function), TyKind::Function(expected_function)) => {
                 self.function_compatible(db, actual_function, expected_function, depth)
             }
