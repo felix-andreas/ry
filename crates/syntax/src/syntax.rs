@@ -134,7 +134,9 @@ impl Parse {
 
 /// The plain R program an annotated one means: every inline annotation removed,
 /// which is a binding's or parameter's `: TYPE`, a function's `<...>` type
-/// parameters, and its `-> TYPE`. Comments and `#:` annotations are kept.
+/// parameters, its `-> TYPE`, and the `@Name` of `@Name(value)`. An inline type
+/// definition becomes its `#: @type` or `#: @alias` comment, so the erased program
+/// still declares the type. Comments and `#:` annotations are kept.
 pub fn erase_inline_annotations(parse: &Parse) -> String {
     let root = parse.syntax_node();
     let mut out = String::with_capacity(usize::from(root.text_range().len()));
@@ -145,6 +147,10 @@ pub fn erase_inline_annotations(parse: &Parse) -> String {
         };
         match element {
             NodeOrToken::Token(token) => out.push_str(token.text()),
+            NodeOrToken::Node(node) if node.kind() == SyntaxKind::TYPE_DEFINITION => {
+                out.push_str(&type_definition_comment(&node));
+                preorder.skip_subtree();
+            }
             NodeOrToken::Node(node) if is_inline_annotation(&node) => preorder.skip_subtree(),
             NodeOrToken::Node(_) => {}
         }
@@ -152,10 +158,52 @@ pub fn erase_inline_annotations(parse: &Parse) -> String {
     out
 }
 
+/// `type Name<T> = TYPE` as `#: @type Name<T> {TYPE}`, each further line of a
+/// multi-line type behind its own `#: ` marker.
+fn type_definition_comment(node: &SyntaxNode) -> String {
+    let mut out = String::from("#: @");
+    let mut after_equals = false;
+    for element in node.children_with_tokens() {
+        match element {
+            NodeOrToken::Token(token) => match token.kind() {
+                SyntaxKind::EQ => {
+                    if !out.ends_with(' ') {
+                        out.push(' ');
+                    }
+                    out.push('{');
+                    after_equals = true;
+                }
+                SyntaxKind::IDENT => out.push_str(token.text()),
+                // Trivia after `=` is dropped so the type opens the braces directly.
+                _ if after_equals || out.ends_with(' ') => {}
+                _ => out.push(' '),
+            },
+            NodeOrToken::Node(child) => {
+                for token in child
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                {
+                    out.push_str(token.text());
+                    if token.kind() == SyntaxKind::NEWLINE {
+                        out.push_str("#: ");
+                    }
+                }
+            }
+        }
+    }
+    if after_equals {
+        out.push('}');
+    }
+    out
+}
+
 /// Inline annotation syntax: R's own grammar has no reading for these nodes.
 pub fn is_inline_annotation(node: &SyntaxNode) -> bool {
     match node.kind() {
-        SyntaxKind::TYPE_ASCRIPTION | SyntaxKind::RETURN_TYPE => true,
+        SyntaxKind::TYPE_ASCRIPTION
+        | SyntaxKind::RETURN_TYPE
+        | SyntaxKind::TYPE_DEFINITION
+        | SyntaxKind::NEW_TYPE => true,
         SyntaxKind::TYPE_BINDER_LIST => {
             node.parent().map(|parent| parent.kind()) == Some(SyntaxKind::FUNCTION_DEF)
         }

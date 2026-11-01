@@ -400,9 +400,11 @@ SOURCE_FILE@0..100
   NAME@81..82
     IDENT@81..82 "x"
   NEWLINE@82..83 "\n"
-  ERROR@83..85
-    AT@83..84 "@"
-    IDENT@84..85 "y"
+  NEW_EXPR@83..85
+    NEW_TYPE@83..85
+      AT@83..84 "@"
+      TYPE_REF@84..85
+        IDENT@84..85 "y"
   NEWLINE@85..86 "\n"
   NEWLINE@86..87 "\n"
   NAME@87..88
@@ -420,7 +422,7 @@ SOURCE_FILE@0..100
     COLON3@96..99 ":::"
     IDENT@99..100 "y"
 err: 77..78: expected a statement, found `$`
-err: 83..84: expected a statement, found `@`
+err: 84..85: expected `(` right after the type in `@Name(value)`
 err: 89..91: expected a statement, found `::`
 err: 96..99: expected a statement, found `:::`
 

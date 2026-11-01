@@ -51,6 +51,7 @@ fn parse_with_cache(text: &str, cache: &mut NodeCache) -> Parse {
         in_annotation: false,
         type_region: false,
         inline_type: false,
+        type_brackets: 0,
         deferred_trivia: None,
         annotation_reported: false,
         annotation_unclosed_reported: false,
@@ -85,6 +86,9 @@ struct Parser<'a, 'cache> {
     /// Inline type grammar sits in R code, so its trivia follows R's newline rules
     /// instead of a `#:` region's.
     inline_type: bool,
+    /// Brackets open in the current inline type. R does not track them, so the type
+    /// grammar does: inside one, a line break continues the type.
+    type_brackets: u32,
     /// Where trivia skipped by inline type grammar starts. It is emitted only when the
     /// type continues past it, so trivia after the type stays outside its node.
     deferred_trivia: Option<usize>,
@@ -169,6 +173,15 @@ impl Parser<'_, '_> {
     fn bump(&mut self) {
         self.flush_deferred_trivia();
         let kind = self.current().expect("bump at end of input");
+        if self.inline_type {
+            match kind {
+                L_PAREN | L_BRACKET | L_BRACKET2 | L_BRACE | LESS => self.type_brackets += 1,
+                R_PAREN | R_BRACKET | R_BRACE | GREATER => {
+                    self.type_brackets = self.type_brackets.saturating_sub(1)
+                }
+                _ => {}
+            }
+        }
         let text = &self.text[self.offsets[self.pos]..self.offsets[self.pos + 1]];
         self.builder.token(kind.into(), text);
         self.pos += 1;
@@ -297,6 +310,7 @@ impl Parser<'_, '_> {
     fn starts_new_statement(&self) -> bool {
         match self.current() {
             Some(IF_KW | FOR_KW | WHILE_KW | REPEAT_KW) => true,
+            Some(IDENT) if self.type_definition_ahead() => true,
             Some(IDENT | STRING) => {
                 matches!(
                     self.peek_significant(self.pos + 1, false)
@@ -361,7 +375,7 @@ impl Parser<'_, '_> {
             loop {
                 match self.current() {
                     Some(WHITESPACE) => self.pos += 1,
-                    Some(NEWLINE | COMMENT) if !self.newlines_significant() => self.pos += 1,
+                    Some(NEWLINE | COMMENT) if !self.inline_newlines_significant() => self.pos += 1,
                     _ => break,
                 }
             }
@@ -378,6 +392,20 @@ impl Parser<'_, '_> {
         {
             self.bump();
         }
+    }
+
+    /// Inline type grammar continues across a line break where R's grammar would, and
+    /// also inside a bracket the type opened.
+    fn inline_newlines_significant(&self) -> bool {
+        self.newlines_significant() && self.type_brackets == 0
+    }
+
+    /// Trivia before a type that must follow, such as after a union's `|` or a
+    /// definition's `=`: the type continues on the next line.
+    fn ann_trivia_continuing(&mut self, end: usize) {
+        self.type_brackets += 1;
+        self.ann_trivia(end);
+        self.type_brackets -= 1;
     }
 
     fn adjacent(&self, pos: usize) -> bool {
@@ -620,7 +648,7 @@ impl Parser<'_, '_> {
                 }
                 members += 1;
                 self.bump();
-                self.ann_trivia(end);
+                self.ann_trivia_continuing(end);
                 self.ann_primary(end);
             } else {
                 break;
@@ -753,9 +781,15 @@ impl Parser<'_, '_> {
     }
 
     fn ann_next_significant(&self, end: usize) -> Option<SyntaxKind> {
-        let across_newlines = !(self.inline_type && self.newlines_significant());
-        let (kind, pos) = self.peek_significant(self.pos + 1, across_newlines)?;
-        (pos < end).then_some(kind)
+        if self.inline_type {
+            let across_newlines = !self.inline_newlines_significant();
+            let (kind, pos) = self.peek_significant(self.pos + 1, across_newlines)?;
+            return (pos < end).then_some(kind);
+        }
+        // Inside a `#:` region a later line's marker is trivia, not a new region.
+        (self.pos + 1..end)
+            .map(|pos| self.tokens[pos].kind)
+            .find(|kind| !matches!(kind, WHITESPACE | COMMENT | NEWLINE | ANNOTATION_MARKER))
     }
 
     fn ann_type_arg_list(&mut self, end: usize) {
@@ -1154,6 +1188,10 @@ impl Parser<'_, '_> {
     /// R reads that binding as `` `:<-` `` on `name:TYPE`, a replacement function
     /// base R does not define, so no working R program has this shape.
     fn statement(&mut self) -> bool {
+        if self.type_definition_ahead() {
+            self.type_definition();
+            return true;
+        }
         let Some(assignment) = self.annotated_binding_ahead() else {
             return self.expression(0);
         };
@@ -1169,7 +1207,13 @@ impl Parser<'_, '_> {
         }
         self.start(TYPE_ASCRIPTION);
         self.bump();
-        self.inline_type(|parser, end| parser.ann_type(end, false));
+        self.inline_type(|parser, end| {
+            if parser.at(AT) {
+                parser.inline_directive(end);
+            } else {
+                parser.ann_type(end, false);
+            }
+        });
         let mut next = self.pos;
         while self
             .tokens
@@ -1221,10 +1265,21 @@ impl Parser<'_, '_> {
         // statements.
         let mut depth = 0u32;
         let mut angles = 0u32;
+        let mut after_pipe = false;
         loop {
-            match kind_at(pos)? {
+            let kind = kind_at(pos)?;
+            match kind {
                 WHITESPACE | COMMENT => {}
-                NEWLINE if depth > 0 => {}
+                NEWLINE if depth > 0 || after_pipe => {}
+                // A coercion directive: `@` and the adjacent words of its name.
+                AT => {
+                    while kind_at(pos + 1).is_some_and(|next| {
+                        (next == IDENT || next == MINUS || next.is_keyword())
+                            && self.adjacent(pos + 1)
+                    }) {
+                        pos += 1;
+                    }
+                }
                 L_PAREN | L_BRACKET | L_BRACE => depth += 1,
                 R_PAREN | R_BRACKET | R_BRACE => depth = depth.checked_sub(1)?,
                 LESS => angles += 1,
@@ -1233,15 +1288,109 @@ impl Parser<'_, '_> {
                 IDENT | NULL_KW | PIPE | COMMA | COLON | MINUS_GREATER | DOTS => {}
                 _ => return None,
             }
+            if !matches!(kind, WHITESPACE | COMMENT | NEWLINE) {
+                after_pipe = kind == PIPE;
+            }
             pos += 1;
         }
+    }
+
+    /// `type Name` or `alias Name` at the start of a statement: two names side by side
+    /// on one line are a syntax error in R, so code that uses `type` or `alias` as an
+    /// ordinary name never has this shape.
+    fn type_definition_ahead(&self) -> bool {
+        if !self.at(IDENT) || !matches!(self.token_str(self.pos), "type" | "alias") {
+            return false;
+        }
+        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let mut pos = self.pos + 1;
+        if kind_at(pos) != Some(WHITESPACE) {
+            return false;
+        }
+        while kind_at(pos) == Some(WHITESPACE) {
+            pos += 1;
+        }
+        kind_at(pos) == Some(IDENT)
+    }
+
+    /// `type Name<T> = TYPE` or `alias Name = TYPE`, the inline spelling of a
+    /// `#: @type` or `#: @alias` block.
+    fn type_definition(&mut self) {
+        self.start(TYPE_DEFINITION);
+        let keyword = self.token_str(self.pos).to_owned();
+        self.bump();
+        self.inline_type(|parser, end| {
+            parser.wrap(NAME);
+            parser.ann_trivia(end);
+            if parser.at(LESS) {
+                parser.ann_binder_list(end);
+                parser.ann_trivia(end);
+            }
+            if parser.at(EQ) {
+                parser.bump();
+                parser.ann_trivia_continuing(end);
+                if parser.at(NEWLINE) || parser.current().is_none() {
+                    parser.error_expected("a type after `=`");
+                } else {
+                    parser.ann_type(end, false);
+                }
+            } else {
+                let found = parser.describe_current();
+                parser.error_here(format!(
+                    "expected `=` after the type name, found {found}; a definition reads `{keyword} Name = TYPE`"
+                ));
+                parser.start(ERROR);
+                while !matches!(parser.current(), None | Some(NEWLINE | SEMICOLON)) {
+                    parser.bump();
+                }
+                parser.finish();
+            }
+        });
+        self.finish();
+    }
+
+    /// A coercion directive on an annotated binding: `@trust`, `@if-unknown` or
+    /// `@new`, followed by its type.
+    fn inline_directive(&mut self, end: usize) {
+        let mut name = String::new();
+        let mut pos = self.pos + 1;
+        while pos < self.tokens.len()
+            && self.adjacent(pos)
+            && (matches!(self.tokens[pos].kind, IDENT | MINUS)
+                || self.tokens[pos].kind.is_keyword())
+        {
+            name.push_str(self.token_str(pos));
+            pos += 1;
+        }
+        if matches!(name.as_str(), "trust" | "if-unknown" | "new") {
+            self.ann_directive(end);
+            return;
+        }
+        let range = TextRange::new(
+            self.token_range(self.pos).start(),
+            self.token_range(pos.saturating_sub(1)).end(),
+        );
+        self.error_at(
+            range,
+            format!(
+                "`@{name}` cannot annotate a binding; only `@trust`, `@if-unknown` and `@new` can"
+            ),
+        );
+        self.start(ERROR);
+        while self.pos < pos {
+            self.bump();
+        }
+        self.finish();
+        self.ann_trivia(end);
+        self.ann_type(end, false);
     }
 
     /// Runs type grammar on R's token stream: errors are R syntax errors, and
     /// trivia follows R's newline rules.
     fn inline_type(&mut self, parse: impl FnOnce(&mut Self, usize)) {
-        let saved = (self.inline_type, self.type_region);
+        let saved = (self.inline_type, self.type_region, self.type_brackets);
         self.inline_type = true;
+        self.type_brackets = 0;
         self.type_region = true;
         self.annotation_reported = false;
         self.annotation_unclosed_reported = false;
@@ -1252,7 +1401,7 @@ impl Parser<'_, '_> {
         if let Some(start) = self.deferred_trivia.take() {
             self.pos = start;
         }
-        (self.inline_type, self.type_region) = saved;
+        (self.inline_type, self.type_region, self.type_brackets) = saved;
     }
 
     /// Returns false, consuming nothing, when no expression starts here; the
@@ -1358,6 +1507,7 @@ impl Parser<'_, '_> {
             }
             IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
             COLON if self.next_token_is(IDENT) => self.tag_expr(),
+            AT if self.next_token_is(IDENT) => self.new_expr(),
             L_PAREN if self.literal_ahead() => self.collection_literal(),
             ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
@@ -1924,6 +2074,24 @@ impl Parser<'_, '_> {
         self.finish();
     }
 
+    /// `@Name(value)`: prefix `@` is a syntax error in R, so the form is free. The
+    /// value is whatever the parentheses hold, so `@Point(x = 1, y = 2)` wraps a record.
+    fn new_expr(&mut self) {
+        self.start(NEW_EXPR);
+        self.start(NEW_TYPE);
+        self.bump();
+        self.inline_type(|parser, end| parser.ann_primary(end));
+        self.finish();
+        if self.at(L_PAREN) {
+            if !self.primary() {
+                self.error_expected("`(value)` after the nominal type");
+            }
+        } else {
+            self.error_here("expected `(` right after the type in `@Name(value)`");
+        }
+        self.finish();
+    }
+
     fn tag_expr(&mut self) {
         self.start(TAG_EXPR);
         self.bump();
@@ -2010,7 +2178,12 @@ impl Parser<'_, '_> {
             self.finish();
         }
         self.eat_trivia(false);
-        debug_assert!(self.at(L_BRACE));
+        if !self.at(L_BRACE) {
+            // Only a malformed value stops short of the `{` the lookahead saw, and
+            // that value already reported its error.
+            self.finish();
+            return;
+        }
         let open_range = self.token_range(self.pos);
         self.groups.push(0);
         self.bump();

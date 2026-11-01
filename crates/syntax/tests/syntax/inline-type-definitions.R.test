@@ -1,0 +1,443 @@
+#==== inline_type_definitions
+#---- nominal_definition
+type UserId = integer
+#++++
+SOURCE_FILE@0..21
+  TYPE_DEFINITION@0..21
+    IDENT@0..4 "type"
+    WHITESPACE@4..5 " "
+    NAME@5..11
+      IDENT@5..11 "UserId"
+    WHITESPACE@11..12 " "
+    EQ@12..13 "="
+    WHITESPACE@13..14 " "
+    TYPE_REF@14..21
+      IDENT@14..21 "integer"
+
+#---- generic_alias_spanning_lines
+alias Shape<T: numeric> = list{
+  kind: character, # what it is
+  size: T,
+}
+#++++
+SOURCE_FILE@0..76
+  TYPE_DEFINITION@0..76
+    IDENT@0..5 "alias"
+    WHITESPACE@5..6 " "
+    NAME@6..11
+      IDENT@6..11 "Shape"
+    TYPE_BINDER_LIST@11..23
+      LESS@11..12 "<"
+      TYPE_BINDER@12..22
+        NAME@12..13
+          IDENT@12..13 "T"
+        COLON@13..14 ":"
+        WHITESPACE@14..15 " "
+        NAME@15..22
+          IDENT@15..22 "numeric"
+      GREATER@22..23 ">"
+    WHITESPACE@23..24 " "
+    EQ@24..25 "="
+    WHITESPACE@25..26 " "
+    TYPE_RECORD@26..76
+      NAME@26..30
+        IDENT@26..30 "list"
+      L_BRACE@30..31 "{"
+      NEWLINE@31..32 "\n"
+      WHITESPACE@32..34 "  "
+      TYPE_FIELD@34..49
+        NAME@34..38
+          IDENT@34..38 "kind"
+        COLON@38..39 ":"
+        WHITESPACE@39..40 " "
+        TYPE_REF@40..49
+          IDENT@40..49 "character"
+      COMMA@49..50 ","
+      WHITESPACE@50..51 " "
+      COMMENT@51..63 "# what it is"
+      NEWLINE@63..64 "\n"
+      WHITESPACE@64..66 "  "
+      TYPE_FIELD@66..73
+        NAME@66..70
+          IDENT@66..70 "size"
+        COLON@70..71 ":"
+        WHITESPACE@71..72 " "
+        TYPE_REF@72..73
+          IDENT@72..73 "T"
+      COMMA@73..74 ","
+      NEWLINE@74..75 "\n"
+      R_BRACE@75..76 "}"
+
+#---- union_continues_after_trailing_pipe
+type Result<T, E> =
+  :Ok(T) |
+  :Err(E)
+#++++
+SOURCE_FILE@0..40
+  TYPE_DEFINITION@0..40
+    IDENT@0..4 "type"
+    WHITESPACE@4..5 " "
+    NAME@5..11
+      IDENT@5..11 "Result"
+    TYPE_BINDER_LIST@11..17
+      LESS@11..12 "<"
+      TYPE_BINDER@12..13
+        NAME@12..13
+          IDENT@12..13 "T"
+      COMMA@13..14 ","
+      WHITESPACE@14..15 " "
+      TYPE_BINDER@15..16
+        NAME@15..16
+          IDENT@15..16 "E"
+      GREATER@16..17 ">"
+    WHITESPACE@17..18 " "
+    EQ@18..19 "="
+    NEWLINE@19..20 "\n"
+    WHITESPACE@20..22 "  "
+    TYPE_UNION@22..40
+      TYPE_TAG@22..28
+        COLON@22..23 ":"
+        NAME@23..25
+          IDENT@23..25 "Ok"
+        TYPE_TAG_PAYLOAD@25..28
+          L_PAREN@25..26 "("
+          TYPE_REF@26..27
+            IDENT@26..27 "T"
+          R_PAREN@27..28 ")"
+      WHITESPACE@28..29 " "
+      PIPE@29..30 "|"
+      NEWLINE@30..31 "\n"
+      WHITESPACE@31..33 "  "
+      TYPE_TAG@33..40
+        COLON@33..34 ":"
+        NAME@34..37
+          IDENT@34..37 "Err"
+        TYPE_TAG_PAYLOAD@37..40
+          L_PAREN@37..38 "("
+          TYPE_REF@38..39
+            IDENT@38..39 "E"
+          R_PAREN@39..40 ")"
+
+#---- type_as_an_ordinary_name
+type <- 1
+type(x)
+f(type = 1, alias = 2)
+type
+UserId
+#++++
+SOURCE_FILE@0..52
+  BINARY_EXPR@0..9
+    NAME@0..4
+      IDENT@0..4 "type"
+    WHITESPACE@4..5 " "
+    LESS_MINUS@5..7 "<-"
+    WHITESPACE@7..8 " "
+    LITERAL@8..9
+      DOUBLE@8..9 "1"
+  NEWLINE@9..10 "\n"
+  CALL_EXPR@10..17
+    NAME@10..14
+      IDENT@10..14 "type"
+    ARGUMENT_LIST@14..17
+      L_PAREN@14..15 "("
+      ARGUMENT@15..16
+        NAME@15..16
+          IDENT@15..16 "x"
+      R_PAREN@16..17 ")"
+  NEWLINE@17..18 "\n"
+  CALL_EXPR@18..40
+    NAME@18..19
+      IDENT@18..19 "f"
+    ARGUMENT_LIST@19..40
+      L_PAREN@19..20 "("
+      ARGUMENT@20..28
+        NAME@20..24
+          IDENT@20..24 "type"
+        WHITESPACE@24..25 " "
+        EQ@25..26 "="
+        WHITESPACE@26..27 " "
+        LITERAL@27..28
+          DOUBLE@27..28 "1"
+      COMMA@28..29 ","
+      WHITESPACE@29..30 " "
+      ARGUMENT@30..39
+        NAME@30..35
+          IDENT@30..35 "alias"
+        WHITESPACE@35..36 " "
+        EQ@36..37 "="
+        WHITESPACE@37..38 " "
+        LITERAL@38..39
+          DOUBLE@38..39 "2"
+      R_PAREN@39..40 ")"
+  NEWLINE@40..41 "\n"
+  NAME@41..45
+    IDENT@41..45 "type"
+  NEWLINE@45..46 "\n"
+  NAME@46..52
+    IDENT@46..52 "UserId"
+
+#---- missing_equals
+type UserId integer
+#++++
+SOURCE_FILE@0..19
+  TYPE_DEFINITION@0..19
+    IDENT@0..4 "type"
+    WHITESPACE@4..5 " "
+    NAME@5..11
+      IDENT@5..11 "UserId"
+    WHITESPACE@11..12 " "
+    ERROR@12..19
+      IDENT@12..19 "integer"
+err: 12..19: expected `=` after the type name, found identifier; a definition reads `type Name = TYPE`
+
+#---- missing_type_after_equals
+type UserId =
+#++++
+SOURCE_FILE@0..13
+  TYPE_DEFINITION@0..13
+    IDENT@0..4 "type"
+    WHITESPACE@4..5 " "
+    NAME@5..11
+      IDENT@5..11 "UserId"
+    WHITESPACE@11..12 " "
+    EQ@12..13 "="
+err: 13..13: expected a type after `=`, found end of file
+
+#==== inline_coercions
+#---- trust_binding
+x: @trust integer <- f()
+#++++
+SOURCE_FILE@0..24
+  BINARY_EXPR@0..24
+    NAME@0..1
+      IDENT@0..1 "x"
+    TYPE_ASCRIPTION@1..17
+      COLON@1..2 ":"
+      WHITESPACE@2..3 " "
+      ANNOTATION_DIRECTIVE@3..17
+        AT@3..4 "@"
+        IDENT@4..9 "trust"
+        WHITESPACE@9..10 " "
+        TYPE_REF@10..17
+          IDENT@10..17 "integer"
+    WHITESPACE@17..18 " "
+    LESS_MINUS@18..20 "<-"
+    WHITESPACE@20..21 " "
+    CALL_EXPR@21..24
+      NAME@21..22
+        IDENT@21..22 "f"
+      ARGUMENT_LIST@22..24
+        L_PAREN@22..23 "("
+        R_PAREN@23..24 ")"
+
+#---- if_unknown_binding
+y: @if-unknown character | NULL <- g()
+#++++
+SOURCE_FILE@0..38
+  BINARY_EXPR@0..38
+    NAME@0..1
+      IDENT@0..1 "y"
+    TYPE_ASCRIPTION@1..31
+      COLON@1..2 ":"
+      WHITESPACE@2..3 " "
+      ANNOTATION_DIRECTIVE@3..31
+        AT@3..4 "@"
+        IF_KW@4..6 "if"
+        MINUS@6..7 "-"
+        IDENT@7..14 "unknown"
+        WHITESPACE@14..15 " "
+        TYPE_UNION@15..31
+          TYPE_REF@15..24
+            IDENT@15..24 "character"
+          WHITESPACE@24..25 " "
+          PIPE@25..26 "|"
+          WHITESPACE@26..27 " "
+          TYPE_REF@27..31
+            NULL_KW@27..31 "NULL"
+    WHITESPACE@31..32 " "
+    LESS_MINUS@32..34 "<-"
+    WHITESPACE@34..35 " "
+    CALL_EXPR@35..38
+      NAME@35..36
+        IDENT@35..36 "g"
+      ARGUMENT_LIST@36..38
+        L_PAREN@36..37 "("
+        R_PAREN@37..38 ")"
+
+#---- new_binding
+id: @new UserId <- 5L
+#++++
+SOURCE_FILE@0..21
+  BINARY_EXPR@0..21
+    NAME@0..2
+      IDENT@0..2 "id"
+    TYPE_ASCRIPTION@2..15
+      COLON@2..3 ":"
+      WHITESPACE@3..4 " "
+      ANNOTATION_DIRECTIVE@4..15
+        AT@4..5 "@"
+        IDENT@5..8 "new"
+        WHITESPACE@8..9 " "
+        TYPE_REF@9..15
+          IDENT@9..15 "UserId"
+    WHITESPACE@15..16 " "
+    LESS_MINUS@16..18 "<-"
+    WHITESPACE@18..19 " "
+    LITERAL@19..21
+      INTEGER@19..21 "5L"
+
+#---- other_directive_refused
+x: @param integer <- 1
+#++++
+SOURCE_FILE@0..22
+  BINARY_EXPR@0..22
+    NAME@0..1
+      IDENT@0..1 "x"
+    TYPE_ASCRIPTION@1..17
+      COLON@1..2 ":"
+      WHITESPACE@2..3 " "
+      ERROR@3..9
+        AT@3..4 "@"
+        IDENT@4..9 "param"
+      WHITESPACE@9..10 " "
+      TYPE_REF@10..17
+        IDENT@10..17 "integer"
+    WHITESPACE@17..18 " "
+    LESS_MINUS@18..20 "<-"
+    WHITESPACE@20..21 " "
+    LITERAL@21..22
+      DOUBLE@21..22 "1"
+err: 3..9: `@param` cannot annotate a binding; only `@trust`, `@if-unknown` and `@new` can
+
+#---- multi_line_binding_type
+x: list{
+  a: integer,
+} <- list(a = 1L)
+#++++
+SOURCE_FILE@0..40
+  BINARY_EXPR@0..40
+    NAME@0..1
+      IDENT@0..1 "x"
+    TYPE_ASCRIPTION@1..24
+      COLON@1..2 ":"
+      WHITESPACE@2..3 " "
+      TYPE_RECORD@3..24
+        NAME@3..7
+          IDENT@3..7 "list"
+        L_BRACE@7..8 "{"
+        NEWLINE@8..9 "\n"
+        WHITESPACE@9..11 "  "
+        TYPE_FIELD@11..21
+          NAME@11..12
+            IDENT@11..12 "a"
+          COLON@12..13 ":"
+          WHITESPACE@13..14 " "
+          TYPE_REF@14..21
+            IDENT@14..21 "integer"
+        COMMA@21..22 ","
+        NEWLINE@22..23 "\n"
+        R_BRACE@23..24 "}"
+    WHITESPACE@24..25 " "
+    LESS_MINUS@25..27 "<-"
+    WHITESPACE@27..28 " "
+    CALL_EXPR@28..40
+      NAME@28..32
+        IDENT@28..32 "list"
+      ARGUMENT_LIST@32..40
+        L_PAREN@32..33 "("
+        ARGUMENT@33..39
+          NAME@33..34
+            IDENT@33..34 "a"
+          WHITESPACE@34..35 " "
+          EQ@35..36 "="
+          WHITESPACE@36..37 " "
+          LITERAL@37..39
+            INTEGER@37..39 "1L"
+        R_PAREN@39..40 ")"
+
+#==== nominal_constructor
+#---- new_expression
+u <- @UserId(5L)
+#++++
+SOURCE_FILE@0..16
+  BINARY_EXPR@0..16
+    NAME@0..1
+      IDENT@0..1 "u"
+    WHITESPACE@1..2 " "
+    LESS_MINUS@2..4 "<-"
+    WHITESPACE@4..5 " "
+    NEW_EXPR@5..16
+      NEW_TYPE@5..12
+        AT@5..6 "@"
+        TYPE_REF@6..12
+          IDENT@6..12 "UserId"
+      PAREN_EXPR@12..16
+        L_PAREN@12..13 "("
+        LITERAL@13..15
+          INTEGER@13..15 "5L"
+        R_PAREN@15..16 ")"
+
+#---- new_expression_with_type_arguments_wraps_record
+p <- @Pair<integer>(x = 1L, y = 2L)
+#++++
+SOURCE_FILE@0..35
+  BINARY_EXPR@0..35
+    NAME@0..1
+      IDENT@0..1 "p"
+    WHITESPACE@1..2 " "
+    LESS_MINUS@2..4 "<-"
+    WHITESPACE@4..5 " "
+    NEW_EXPR@5..35
+      NEW_TYPE@5..19
+        AT@5..6 "@"
+        TYPE_APPLY@6..19
+          NAME@6..10
+            IDENT@6..10 "Pair"
+          TYPE_ARG_LIST@10..19
+            LESS@10..11 "<"
+            TYPE_REF@11..18
+              IDENT@11..18 "integer"
+            GREATER@18..19 ">"
+      RECORD_EXPR@19..35
+        ARGUMENT_LIST@19..35
+          L_PAREN@19..20 "("
+          ARGUMENT@20..26
+            NAME@20..21
+              IDENT@20..21 "x"
+            WHITESPACE@21..22 " "
+            EQ@22..23 "="
+            WHITESPACE@23..24 " "
+            LITERAL@24..26
+              INTEGER@24..26 "1L"
+          COMMA@26..27 ","
+          WHITESPACE@27..28 " "
+          ARGUMENT@28..34
+            NAME@28..29
+              IDENT@28..29 "y"
+            WHITESPACE@29..30 " "
+            EQ@30..31 "="
+            WHITESPACE@31..32 " "
+            LITERAL@32..34
+              INTEGER@32..34 "2L"
+          R_PAREN@34..35 ")"
+
+#---- new_expression_needs_hugging_paren
+u <- @UserId 5L
+#++++
+SOURCE_FILE@0..15
+  BINARY_EXPR@0..13
+    NAME@0..1
+      IDENT@0..1 "u"
+    WHITESPACE@1..2 " "
+    LESS_MINUS@2..4 "<-"
+    WHITESPACE@4..5 " "
+    NEW_EXPR@5..12
+      NEW_TYPE@5..12
+        AT@5..6 "@"
+        TYPE_REF@6..12
+          IDENT@6..12 "UserId"
+    WHITESPACE@12..13 " "
+  ERROR@13..15
+    INTEGER@13..15 "5L"
+err: 12..13: expected `(` right after the type in `@Name(value)`
+err: 13..15: unexpected integer literal after this expression; expected a newline or `;`
