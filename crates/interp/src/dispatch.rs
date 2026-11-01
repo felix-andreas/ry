@@ -1240,7 +1240,9 @@ unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
             }
         )));
     }
-    let copy = modifiable(object)?;
+    // Unlike a replacement function, unclass may not reuse a value any variable still holds:
+    // `lapply(unclass(x), f, oldClass(x))` reads the class of `x` afterwards.
+    let copy = if object.refcount() > 0 { values::shallow_duplicate(object)? } else { object };
     set_class_attribute(copy, nil())?;
     Ok(copy)
 }

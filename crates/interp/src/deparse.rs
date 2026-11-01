@@ -835,8 +835,14 @@ impl Deparser {
                 }
                 SexpType::Complex => {
                     let value = values::complexes(vector)[index];
-                    if is_na_real(value.r) || is_na_real(value.i) {
+                    if is_na_real(value.r) && is_na_real(value.i) {
                         if keep_na && all_na { "NA_complex_".to_owned() } else { "NA".to_owned() }
+                    } else if !value.r.is_finite() || !value.i.is_finite() {
+                        // `Inf+Infi` would not parse back, so a non-finite part needs the call.
+                        let part = |part: f64| {
+                            if is_na_real(part) { "NA".to_owned() } else { format::format_real_alone(part, 15) }
+                        };
+                        format!("complex(real={}, imaginary={})", part(value.r), part(value.i))
                     } else {
                         format::format_complex_alone(value, 15)
                     }

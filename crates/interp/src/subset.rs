@@ -555,11 +555,9 @@ unsafe fn array_subset(
         (0..new_dims.len()).collect()
     };
     if kept.len() <= 1 && drop {
-        // The result is a plain vector, named by the remaining dimension's names.
-        if let Some(&dimension) = kept.first()
-            && new_dimnames[dimension] != nil()
-        {
-            values::set_attr(result, symbols().names, new_dimnames[dimension])?;
+        let names = dropped_names(&kept, &new_dimnames);
+        if names != nil() {
+            values::set_attr(result, symbols().names, names)?;
         }
         return Ok(result);
     }
@@ -699,7 +697,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     let names = values::names(object);
     if index.kind() == SexpType::String
         && matches!(object.kind(), SexpType::List | SexpType::Expression)
-        && match_name(names, index.element(0).bytes(), exact)?.is_none()
+        && (index.element(0).bytes().is_empty() || match_name(names, index.element(0).bytes(), exact)?.is_none())
     {
         // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
         return Ok(nil());
@@ -730,7 +728,9 @@ unsafe fn single_position(index: Sexp, extent: usize, names: Sexp, exact: Option
     match index.kind() {
         SexpType::String => {
             let wanted = index.element(0);
-            match match_name(names, wanted.bytes(), exact)? {
+            // An empty name means "no name", so it never selects an element.
+            let found = if wanted.bytes().is_empty() { None } else { match_name(names, wanted.bytes(), exact)? };
+            match found {
                 Some(position) => Ok(position),
                 None => Err(crate::unwind::error_in(call, "subscript out of bounds")),
             }
@@ -2274,13 +2274,28 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
             let list = values::list_vector(&list)?;
             values::set_attr(result, symbols().dimnames, list)?;
         }
-    } else if let Some(&dimension) = kept.first()
-        && dimnames != nil()
-        && dimnames.element(dimension) != nil()
-    {
-        values::set_attr(result, symbols().names, dimnames.element(dimension))?;
+    } else if dimnames != nil() {
+        let all_dimnames: Vec<Sexp> = (0..dims.len()).map(|dimension| dimnames.element(dimension)).collect();
+        let names = dropped_names(&kept, &all_dimnames);
+        if names != nil() {
+            values::set_attr(result, symbols().names, names)?;
+        }
     }
     Ok(result)
+}
+
+/// The names of an array dropped to a plain vector: those of the one dimension `kept`, or for a
+/// single element those of the only dimension that has names. With names on several
+/// dimensions, none of them names a single element.
+fn dropped_names(kept: &[usize], dimnames: &[Sexp]) -> Sexp {
+    let named: Vec<Sexp> = match kept {
+        [dimension] => dimnames.get(*dimension).copied().into_iter().collect(),
+        _ => dimnames.iter().copied().filter(|names| *names != nil()).collect(),
+    };
+    match named.as_slice() {
+        [names] => *names,
+        _ => nil(),
+    }
 }
 
 /// `cbind` and `rbind` for vectors and matrices; data frames dispatch to their R methods.
