@@ -2805,14 +2805,26 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             if span / by < 0.0 {
                 return Err(call.error("wrong sign in 'by' argument"));
             }
-            let steps = (span / by + 1e-10).floor() as usize;
+            // `to - from` overflows for endpoints near the double range, while the quotient
+            // taken term by term stays finite.
+            let quotient = if span.is_finite() {
+                span / by
+            } else {
+                to / by - from / by
+            };
+            if !quotient.is_finite() || quotient > 4_503_599_627_370_496.0 {
+                return Err(call.error("'by' argument is much too small"));
+            }
+            let steps = (quotient + 1e-10).floor() as usize;
             if all_integer {
                 let values: Vec<i32> = (0..=steps)
                     .map(|index| (from + index as f64 * by) as i32)
                     .collect();
                 values::integer_vector(&values)
             } else {
-                let values: Vec<f64> = (0..=steps).map(|index| from + index as f64 * by).collect();
+                let values: Vec<f64> = (0..=steps)
+                    .map(|index| finite_term(from, index as f64, by))
+                    .collect();
                 values::real_vector(&values)
             }
         }
@@ -2823,13 +2835,18 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
                     if count == 1 {
                         return values::real_vector(&[from]);
                     }
-                    let by = (to - from) / (count as f64 - 1.0);
+                    let intervals = count as f64 - 1.0;
+                    let by = (to - from) / intervals;
+                    // When `to - from` overflows, the half-size step still exists.
+                    let half_by = to / (2.0 * intervals) - from / (2.0 * intervals);
                     let values: Vec<f64> = (0..count)
                         .map(|index| {
                             if index == count - 1 {
                                 to
-                            } else {
+                            } else if by.is_finite() {
                                 from + index as f64 * by
+                            } else {
+                                2.0 * (from / 2.0 + index as f64 * half_by)
                             }
                         })
                         .collect();
@@ -2869,6 +2886,17 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             }
         }
         _ => Err(call.error("invalid arguments")),
+    }
+}
+
+/// `from + index * by`, which can overflow midway even when the term itself is finite, as for
+/// a sequence from `-1.5e308` to `1e308`. Halving every part keeps the arithmetic in range.
+fn finite_term(from: f64, index: f64, by: f64) -> f64 {
+    let term = from + index * by;
+    if term.is_finite() {
+        term
+    } else {
+        2.0 * (from / 2.0 + index * (by / 2.0))
     }
 }
 

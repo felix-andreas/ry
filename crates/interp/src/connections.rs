@@ -1013,9 +1013,18 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
             return Err(error("cannot write to this connection"));
         }
         let mut line = Vec::new();
-        for element in values::strings(text) {
+        for index in 0..values::length(text) {
             line.clear();
-            line.extend_from_slice(element.as_deref().unwrap_or("NA").as_bytes());
+            let charsxp = text.element(index);
+            // Only Latin-1 text needs re-encoding for the UTF-8 session; every other string,
+            // bytes-declared or invalid UTF-8 included, goes out as the bytes it holds.
+            if charsxp == values::na_string() {
+                line.extend_from_slice(b"NA");
+            } else if charsxp.has_gp(heap::object::gp::LATIN1) {
+                line.extend_from_slice(values::char_str(charsxp).as_bytes());
+            } else {
+                line.extend_from_slice(charsxp.bytes());
+            }
             line.extend_from_slice(separator.as_bytes());
             method_print(con, &line)?;
         }

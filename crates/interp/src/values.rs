@@ -605,6 +605,19 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     if charsxp.has_gp(gp::LATIN1) {
         return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
     }
+    // GNU R reads a string declared as bytes through its `\xNN` spelling wherever it needs
+    // text, so printing, formatting and pasting show the escapes rather than decoded characters.
+    if charsxp.has_gp(gp::BYTES) {
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            if byte.is_ascii() {
+                text.push(char::from(byte));
+            } else {
+                text.push_str(&format!("\\x{byte:02x}"));
+            }
+        }
+        return Cow::Owned(text);
+    }
     escape_invalid_bytes(bytes)
 }
 

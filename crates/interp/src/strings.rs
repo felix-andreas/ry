@@ -240,6 +240,17 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
                 set_elt(result, index, na_string());
                 continue;
             }
+            if Encoding::of(charsxp) == Encoding::Bytes {
+                let bytes = charsxp.bytes();
+                let first = (start.max(1) as usize - 1).min(bytes.len());
+                let last = (stop.max(0) as usize).min(bytes.len()).max(first);
+                set_elt(
+                    result,
+                    index,
+                    values::mkchar_bytes(&bytes[first..last], Encoding::Bytes)?,
+                );
+                continue;
+            }
             let text = values::char_str(charsxp);
             let (first, last) = char_span(&text, start, stop);
             if first == 0 && last == text.len() {

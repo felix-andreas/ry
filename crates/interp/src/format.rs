@@ -448,7 +448,7 @@ pub fn encode_bytes(bytes: &[u8], quote: Option<char>) -> String {
 /// An element of a character vector as `print` shows it, from its bytes unless it is marked
 /// as Latin-1.
 pub unsafe fn encode_element(charsxp: Sexp, quote: Option<char>) -> String {
-    if charsxp.has_gp(gp::LATIN1) {
+    if charsxp.has_gp(gp::LATIN1) || charsxp.has_gp(gp::BYTES) {
         encode_string(&values::char_str(charsxp), quote)
     } else {
         encode_bytes(charsxp.bytes(), quote)
