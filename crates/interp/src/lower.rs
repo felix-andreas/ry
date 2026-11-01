@@ -275,6 +275,7 @@ fn is_skipped(node: &SyntaxNode) -> bool {
             | SyntaxKind::TYPE_BINDER_LIST
             | SyntaxKind::TYPE_DEFINITION
             | SyntaxKind::NEW_TYPE
+            | SyntaxKind::PURE_MARKER
     )
 }
 
@@ -350,7 +351,7 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             let mut function = lower(function, source)?;
             // R's parser turns a string in function position into a symbol: `"f<-"(x)`.
             if function.kind() == SexpType::String && values::length(function) == 1 {
-                function = values::install_bytes(function.element(0).bytes())?;
+                function = values::install_charsxp(function.element(0))?;
             }
             let mut items = vec![(nil(), function)];
             items.extend(argument_list(arguments, source)?);
@@ -368,7 +369,13 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 symbols().bracket2
             };
             let mut items = vec![(nil(), operator), (nil(), lower(object, source)?)];
-            items.extend(argument_list(arguments, source)?);
+            let subscripts = argument_list(arguments, source)?;
+            // R's grammar gives `x[]` and `x[[]]` one empty subscript, unlike `f()`, so
+            // `nargs()` in a `[<-` method counts it (`[<-.data.frame` relies on that).
+            if subscripts.is_empty() {
+                items.push((nil(), missing_arg()));
+            }
+            items.extend(subscripts);
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR | SyntaxKind::NAMESPACE_EXPR => {
@@ -1055,7 +1062,7 @@ pub fn parse_number(text: &str) -> f64 {
 /// The content of a quoted string literal, with escapes resolved.
 pub fn string_literal(text: &str) -> R<String> {
     let inner = &text[1..text.len().saturating_sub(1).max(1)];
-    unescape(inner).map_err(|message| error(message))
+    unescape(inner).map_err(error)
 }
 
 fn raw_string(text: &str) -> String {

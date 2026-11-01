@@ -3,6 +3,7 @@ name = "repl"
 edition = "2024"
 version.workspace = true
 publish = false
+build = "build.rs"
 
 [lib]
 path = "src/repl.rs"

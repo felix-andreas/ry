@@ -63,13 +63,32 @@ bless *args:
 format-docs:
     RY_BLESS=1 cargo test -p format --test test_format_docs
 
+# Run the docs' marked examples, or those of the pages whose path contains `page`.
+docs-test page="":
+    DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
+
+# Rewrite the output of the docs' exact examples from the real tool; excerpts are left to you.
+docs-bless page="":
+    RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
+
 # The seeded deep fuzz run; `FUZZ_ITERS` scales the budget.
 fuzz-deep:
     cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
 
-# libFuzzer (parse | format | semantics); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
+# One libFuzzer target (`cargo fuzz list` names them all); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
     cargo fuzz run {{ target }} {{ args }}
+
+# Every libFuzzer target for `seconds` each, after seeding the corpora. The lockfile is seeded
+# from the workspace's, because a fresh resolution can pick a salsa-macro-rules that does not
+# match the pinned salsa. Stops at the first target that finds a failure.
+fuzz-all seconds="120":
+    cp Cargo.lock fuzz/Cargo.lock
+    cargo -Zscript scripts/seed-fuzz-corpus.rs
+    for target in $(cargo fuzz list); do \
+        echo "== $target"; \
+        cargo fuzz run -O "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096 || exit 1; \
+    done
 
 # Phase timings, memory and typing bursts for a workspace.
 stats path=".":
@@ -258,3 +277,25 @@ bench-compare *args:
 # Run a generated package's tests under GNU R, e.g. `just bench-test .bench/finbench`.
 bench-test package reporter="summary":
     Rscript tools/bench/run-tests.R {{ package }} {{ reporter }}
+
+# Differential fuzzing of the runtime: random programs under GNU R, ry's tier 0 and the forced JIT.
+# `just fuzz-differential 0 500` runs seeds 0 to 499; add `ry-gctorture` to the engines for stress.
+fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
+    cargo build -q -p ry-lang -p libr -p oracle
+    ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
+
+# Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
+# `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares them with GNU R instead.
+gc-torture:
+    cargo build -q -p ry-lang -p libr
+    FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases cases_survive_gc_torture -- --nocapture
+
+# The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
+# 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.
+simulate count="200" actions="60" base="0":
+    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --release --test test_simulation -- --nocapture
+
+# The scripted user journeys in crates/ry/tests/scenarios; `just scenarios edit-and-rename` runs one.
+scenarios name="":
+    cargo build -q -p libr
+    SCENARIO={{ name }} cargo test -p ry-lang --test test_scenarios -- --nocapture

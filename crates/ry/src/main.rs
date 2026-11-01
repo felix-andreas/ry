@@ -314,11 +314,12 @@ fn run_load(
 
 /// With inline annotations turned off they are erased and nothing checks them, at run time
 /// as in analysis. With object systems turned off, user code cannot define S4, R6 or Reference
-/// Classes.
+/// Classes. In strict mode, `ry load` binds a package's pure constants lazily.
 fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     repl::RuntimeFlags {
         annotation_checks: config.check.inline_annotations,
         object_systems: config.check.object_systems,
+        strict: config.check.strict,
     }
 }
 

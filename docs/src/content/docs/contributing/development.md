@@ -66,6 +66,22 @@ workspace builds and its tests run on a machine with no R. Only running the cons
 end-to-end tests skip cleanly where R is missing; run `just repl-e2e` before you touch the console.
 [REPL design](/contributing/design/repl/) records how the embedding works.
 
+### ry's runtime is built separately
+
+`ry run` and `ry repl --runtime ry` load ry's own runtime, `libR.so`, from the directory of the
+`ry` executable. It is a separate crate (`libr`), so `cargo build -p ry-lang` does not rebuild it;
+`just ry` and `just build` do. To keep a leftover library from running old code, `ry` compares a
+hash of the runtime's sources with the one stored in `libR.so` right after loading it, and refuses
+a mismatch with exit status 2:
+
+```text
+  x ry's runtime (target/debug/libR.so) is out of date: it has build 8fcdf6d9f4862983, but this ry is build
+  | 2588183553632a45; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)
+```
+
+Build `libr` with the same profile as `ry` and the error goes away. The hash covers the sources
+of `libr` and the crates it links, so editing the formatter or the IDE layer never triggers it.
+
 ## Debugging
 
 - `ry server --debug`, or `RY_DEBUG=1` in the server's environment, adds a "Debug" section to every
@@ -82,10 +98,13 @@ end-to-end tests skip cleanly where R is missing; run `just repl-e2e` before you
 
 Every typed example in the docs is a pair of tabs, `Inline` first and `Comments` second, inside a
 Starlight `<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. Pages
-with tabs are `.mdx`. After editing one, run `python3 docs/check-tabs.py docs/src/content/docs/**/*.mdx`
-with a built `ry` (set `RY` if it is not at `target/debug/ry`): it checks both tabs of each pair and
-fails when their diagnostics differ. Every annotation form has both spellings, type definitions
-included, so the Inline tab carries no `#:` line except to show the two spellings together.
+with tabs are `.mdx`. Every annotation form has both spellings, type definitions included, so the
+Inline tab carries no `#:` line except to show the two spellings together.
+
+Every block of `ry` output on a page is a test: mark it as described in
+[Docs examples](/contributing/testing#docs-examples), and `just docs-test` runs each tab through the
+real binary and compares the output. A tab group with no output block after it must give the same
+findings in both tabs.
 
 Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
 `/type-checking/overview.md`), with the frontmatter, imports and components removed and each tab

@@ -114,6 +114,13 @@ pub enum TypeErrorKind<'db> {
         constraint: Constraint,
         found: Ty<'db>,
     },
+    /// An `InvalidOperand` on a use of a function literal's formal whose type came from
+    /// the call the literal is passed to, so the finding names the formal and the call.
+    ContextualParameter {
+        name: String,
+        expected: OperandExpectation,
+        passed: Ty<'db>,
+    },
     /// Separate from `Mismatch` because rendered types drop constraints, so two whole
     /// signatures can print identically; this names the failing position.
     CallbackShape {
@@ -302,6 +309,9 @@ pub struct ItemCheck<'db> {
     /// the fields a literal still lacks. Nested literals record nothing: their expectation is
     /// the enclosing one's field or payload.
     pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
+    /// The element type each `for` loop binds its variable to, keyed by the loop. The
+    /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
+    pub loop_variables: FxHashMap<ExprId, Ty<'db>>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -522,12 +532,15 @@ pub fn check_item_with_annotation<'db>(
         table,
         frame_level: 0,
         discarded_if: None,
+        parameter_hints: FxHashMap::default(),
+        hinted_parameters: FxHashSet::default(),
         expression_annotations: expression_annotations.iter().cloned().collect(),
         environment: Environment::default(),
         scheme_arena: Vec::new(),
         recorded: FxHashMap::default(),
         recorded_patterns: FxHashMap::default(),
         recorded_expectations: FxHashMap::default(),
+        recorded_loop_variables: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
@@ -700,6 +713,11 @@ pub fn check_item_with_annotation<'db>(
         .iter()
         .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
         .collect();
+    let loop_variables = context
+        .recorded_loop_variables
+        .iter()
+        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+        .collect();
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -739,6 +757,7 @@ pub fn check_item_with_annotation<'db>(
         expression_types,
         pattern_types,
         literal_expectations,
+        loop_variables,
         errors,
         strict_origins: context.strict_origins,
         scheme,
@@ -940,12 +959,19 @@ struct Checker<'db, 'a> {
     frame_level: u32,
     /// The `if` statement about to infer whose value its block discards.
     discarded_if: Option<ExprId>,
+    /// Parameter types an unannotated function literal takes from the function type its call
+    /// argument position expects, by formal position; `None` leaves a formal to inference.
+    parameter_hints: FxHashMap<ExprId, Vec<Option<Ty<'db>>>>,
+    /// The ranges of the formals that took their type from a call's expected function type, so
+    /// only findings on those say the call supplied the type.
+    hinted_parameters: FxHashSet<TextRange>,
     expression_annotations: FxHashMap<ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: FxHashMap<ExprId, Ty<'db>>,
     recorded_patterns: FxHashMap<PatId, Ty<'db>>,
     recorded_expectations: FxHashMap<ExprId, Ty<'db>>,
+    recorded_loop_variables: FxHashMap<ExprId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
@@ -1926,6 +1952,24 @@ impl<'db> Checker<'db, '_> {
                     return self.record(id, signature);
                 }
                 let parameters = parameters.clone();
+                // Hints apply only when they type every formal without a default: a partly
+                // typed lambda (`Reduce(function(a, b) a + b, xs)` fixes `b` but not the
+                // accumulator `a`) infers better with all formals open, where `a + b` ties
+                // the two together.
+                let hints: Vec<Option<Ty<'db>>> = self
+                    .parameter_hints
+                    .remove(&id)
+                    .filter(|hints| {
+                        parameters
+                            .iter()
+                            .filter(|parameter| parameter.name != "...")
+                            .enumerate()
+                            .all(|(index, parameter)| {
+                                parameter.default.is_some()
+                                    || hints.get(index).is_some_and(Option::is_some)
+                            })
+                    })
+                    .unwrap_or_default();
                 self.table.level += 1;
                 let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
                 let pending_mark = self.pending_enclosing_writes.len();
@@ -1945,8 +1989,14 @@ impl<'db> Checker<'db, '_> {
                         });
                         continue;
                     }
+                    let hint = hints.get(named.len()).copied().flatten();
                     let parameter_ty = if probed.contains(&parameter.name) {
                         unknown(self.db)
+                    } else if let Some(hint) = hint
+                        && parameter.default.is_none()
+                    {
+                        self.hinted_parameters.insert(parameter.range);
+                        hint
                     } else {
                         self.fresh(Constraint::Unconstrained)
                     };
@@ -3823,6 +3873,10 @@ impl<'db> Checker<'db, '_> {
                 unknown(self.db)
             }
         };
+        if variable_range.is_some() {
+            self.recorded_loop_variables
+                .insert(loop_expression, element);
+        }
         let loop_slot = variable_range.and_then(|variable_range| {
             self.naming
                 .bindings
@@ -6254,7 +6308,9 @@ impl<'db> Checker<'db, '_> {
             FunctionLookup::Library(name, candidates) => {
                 self.callee_targets.insert(callee, CalleeTarget::Library);
                 if candidates.len() >= 2 {
-                    let call_arguments = self.infer_call_arguments(range, arguments);
+                    let callees = self.hinting_callees(&candidates, arguments);
+                    let call_arguments =
+                        self.infer_call_arguments_against(range, arguments, &callees);
                     return self.overloaded_call(
                         id,
                         range,
@@ -6313,7 +6369,7 @@ impl<'db> Checker<'db, '_> {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
-        let mut call_arguments = self.infer_call_arguments(range, arguments);
+        let mut call_arguments = self.infer_call_arguments_against(range, arguments, &[callee_ty]);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
         let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
         if callback_outputs.is_empty() {
@@ -8223,7 +8279,9 @@ impl<'db> Checker<'db, '_> {
                     if schemes.len() < 2 {
                         return None;
                     }
-                    let call_arguments = self.infer_call_arguments(range, arguments);
+                    let callees = self.hinting_callees(&schemes, arguments);
+                    let call_arguments =
+                        self.infer_call_arguments_against(range, arguments, &callees);
                     return Some(self.overloaded_call(
                         id,
                         range,
@@ -8246,7 +8304,8 @@ impl<'db> Checker<'db, '_> {
 
         // Arguments infer once, before any probe: the probe snapshot does not reverse
         // environment or recorded-type writes.
-        let mut call_arguments = self.infer_call_arguments(range, arguments);
+        let callees = self.hinting_callees(&schemes, arguments);
+        let mut call_arguments = self.infer_call_arguments_against(range, arguments, &callees);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
         if let Some(ty) = self.s3_method_call(range, &name, &call_arguments) {
             return Some(ty);
@@ -8574,36 +8633,258 @@ impl<'db> Checker<'db, '_> {
         range: TextRange,
         arguments: &[Argument],
     ) -> Vec<CallArgument<'db>> {
-        arguments
+        self.infer_call_arguments_against(range, arguments, &[])
+    }
+
+    /// Infers a call's arguments, typing an unannotated function literal last and in context:
+    /// its formals take the parameter types of the function the callee expects at its
+    /// position, once the other arguments have bound the callee's type variables. In
+    /// `List.map(xs, \(x) c(x, x))`, `x` is the item type of `xs` before the body infers, so
+    /// `c(x, x)` types concretely instead of over an open variable. `callees` are the
+    /// instantiated candidate signatures; a hint is used only where every candidate that
+    /// accepts the other arguments agrees on it.
+    fn infer_call_arguments_against(
+        &mut self,
+        range: TextRange,
+        arguments: &[Argument],
+        callees: &[Ty<'db>],
+    ) -> Vec<CallArgument<'db>> {
+        let deferred: Vec<bool> = arguments
             .iter()
             .map(|argument| {
-                let ty = argument.value.map(|value| self.infer(value));
-                let argument_range = argument
-                    .value
-                    .map(|value| self.blame_range(value))
-                    .unwrap_or(range);
-                let whole_double = argument
-                    .value
-                    .is_some_and(|value| self.is_whole_double(value));
-                let forwards_dots = argument.name.is_none()
-                    && argument.value.is_some_and(|value| {
-                        matches!(
-                            &self.module.expression(value).kind,
-                            ExpressionKind::NameRef(name) if name == "..."
-                        )
-                    });
-                CallArgument {
-                    name: argument.name.map(|name| name.to_string()),
-                    name_range: argument.name_range,
-                    ty,
-                    range: argument_range,
-                    value: argument.value,
-                    whole_double,
-                    forwards_dots,
-                    named_function: None,
-                }
+                !callees.is_empty()
+                    && argument
+                        .value
+                        .is_some_and(|value| self.needs_parameter_hints(value))
             })
-            .collect()
+            .collect();
+        let mut call_arguments: Vec<CallArgument<'db>> = arguments
+            .iter()
+            .zip(&deferred)
+            .map(|(argument, &deferred)| {
+                let ty = if deferred {
+                    None
+                } else {
+                    argument.value.map(|value| self.infer(value))
+                };
+                self.call_argument(range, argument, ty)
+            })
+            .collect();
+        if !deferred.contains(&true) {
+            return call_arguments;
+        }
+        let hints = self.parameter_hints_for(callees, &call_arguments, &deferred);
+        for (index, argument) in arguments.iter().enumerate() {
+            let Some(value) = argument.value.filter(|_| deferred[index]) else {
+                continue;
+            };
+            if let Some(hint) = hints.get(index).cloned().flatten() {
+                self.parameter_hints.insert(value, hint);
+            }
+            let errors_before = self.errors.len();
+            call_arguments[index].ty = Some(self.infer(value));
+            self.name_contextual_parameters(value, errors_before);
+        }
+        call_arguments
+    }
+
+    fn call_argument(
+        &self,
+        range: TextRange,
+        argument: &Argument,
+        ty: Option<Ty<'db>>,
+    ) -> CallArgument<'db> {
+        let argument_range = argument
+            .value
+            .map(|value| self.blame_range(value))
+            .unwrap_or(range);
+        let whole_double = argument
+            .value
+            .is_some_and(|value| self.is_whole_double(value));
+        let forwards_dots = argument.name.is_none()
+            && argument.value.is_some_and(|value| {
+                matches!(
+                    &self.module.expression(value).kind,
+                    ExpressionKind::NameRef(name) if name == "..."
+                )
+            });
+        CallArgument {
+            name: argument.name.map(|name| name.to_string()),
+            name_range: argument.name_range,
+            ty,
+            range: argument_range,
+            value: argument.value,
+            whole_double,
+            forwards_dots,
+            named_function: None,
+        }
+    }
+
+    /// Rewrites the findings that a typed function literal's body produced at a bare use of
+    /// one of its formals, so they say the call supplied the type.
+    fn name_contextual_parameters(&mut self, function: ExprId, errors_before: usize) {
+        let ExpressionKind::Function { parameters, body } = &self.module.expression(function).kind
+        else {
+            return;
+        };
+        if self.errors.len() == errors_before {
+            return;
+        }
+        let formals: Vec<(BindingId, &str)> = parameters
+            .iter()
+            .filter(|parameter| self.hinted_parameters.contains(&parameter.range))
+            .filter_map(|parameter| {
+                let binding = self
+                    .naming
+                    .bindings
+                    .iter()
+                    .find(|(_, info)| info.range == parameter.range)
+                    .map(|(id, _)| *id)?;
+                Some((binding, parameter.name.as_str()))
+            })
+            .collect();
+        let mut uses: FxHashMap<TextRange, String> = FxHashMap::default();
+        let mut pending = vec![*body];
+        while let Some(id) = pending.pop() {
+            let expression = self.module.expression(id);
+            if let ExpressionKind::NameRef(_) = expression.kind
+                && let Some(binding) = self.naming.resolutions.get(&id)
+                && let Some((_, name)) = formals.iter().find(|(formal, _)| formal == binding)
+            {
+                uses.insert(expression.range, (*name).to_owned());
+            }
+            pending.extend(expression.kind.child_ids());
+        }
+        for error in &mut self.errors[errors_before..] {
+            if let TypeErrorKind::InvalidOperand { expected, found } = error.kind
+                && let Some(name) = uses.get(&error.range)
+            {
+                error.kind = TypeErrorKind::ContextualParameter {
+                    name: name.clone(),
+                    expected,
+                    passed: found,
+                };
+            }
+        }
+    }
+
+    /// A function literal with a formal that has neither a type annotation nor a default. A
+    /// formal after `...` is left out, because R binds positional arguments to `...` first.
+    fn needs_parameter_hints(&self, value: ExprId) -> bool {
+        let ExpressionKind::Function { parameters, .. } = &self.module.expression(value).kind
+        else {
+            return false;
+        };
+        let leading = parameters
+            .iter()
+            .position(|parameter| parameter.name == "...")
+            .map_or(&parameters[..], |dots| &parameters[..dots]);
+        let after_dots_required = parameters[leading.len()..]
+            .iter()
+            .any(|parameter| parameter.name != "..." && parameter.default.is_none());
+        self.declared_function_annotation(value).is_none()
+            && self.inline_parameters(value).is_empty()
+            && !after_dots_required
+            && leading.iter().any(|parameter| parameter.default.is_none())
+    }
+
+    /// Per argument, the parameter types its deferred function literal takes, found by
+    /// probing each candidate with the already-inferred arguments and rolling back.
+    fn parameter_hints_for(
+        &mut self,
+        callees: &[Ty<'db>],
+        arguments: &[CallArgument<'db>],
+        deferred: &[bool],
+    ) -> Vec<Option<Vec<Option<Ty<'db>>>>> {
+        let mut agreed: Vec<Option<Vec<Option<Ty<'db>>>>> = vec![None; arguments.len()];
+        let mut first_candidate = true;
+        for &callee in callees {
+            let resolved = self.table.shallow_resolve(self.db, callee);
+            let resolved = if matches!(resolved.kind(self.db), TyKind::Named(..)) {
+                self.structural(resolved)
+            } else {
+                resolved
+            };
+            let TyKind::Function(function) = resolved.kind(self.db) else {
+                continue;
+            };
+            let function = function.clone();
+            let targets = self.argument_targets(&function, arguments);
+            let target_ty = |target: &Option<ArgumentTarget>| match target {
+                Some(ArgumentTarget::Positional(index)) => function.positional.get(*index).copied(),
+                Some(ArgumentTarget::Named(index)) => {
+                    function.named.get(*index).map(|parameter| parameter.ty)
+                }
+                Some(ArgumentTarget::Rest) => function.variadic.as_ref().map(|rest| rest.element),
+                _ => None,
+            };
+            let snapshot = self.table.snapshot();
+            let accepts = arguments.iter().zip(&targets).zip(deferred).all(
+                |((argument, target), &deferred)| {
+                    if deferred {
+                        return true;
+                    }
+                    match (argument.ty, target_ty(target)) {
+                        (Some(actual), Some(expected)) => {
+                            self.table.compatible(self.db, actual, expected)
+                        }
+                        // An argument the candidate has no parameter for rules the candidate out.
+                        (Some(_), None) => false,
+                        _ => true,
+                    }
+                },
+            );
+            let candidate: Vec<Option<Vec<Option<Ty<'db>>>>> = targets
+                .iter()
+                .zip(deferred)
+                .map(|(target, &deferred)| {
+                    if !deferred || !accepts {
+                        return None;
+                    }
+                    let expected = self.table.shallow_resolve(self.db, target_ty(target)?);
+                    let TyKind::Function(expected) = expected.kind(self.db) else {
+                        return None;
+                    };
+                    let formals = expected
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(expected.named.iter().map(|parameter| parameter.ty));
+                    Some(
+                        formals
+                            .map(|formal| {
+                                let formal = self.table.resolve(self.db, formal);
+                                (!self.table.contains_unbound_var(self.db, formal)
+                                    && !matches!(
+                                        formal.kind(self.db),
+                                        TyKind::Any | TyKind::Unknown
+                                    ))
+                                .then_some(formal)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+            self.table.rollback(snapshot);
+            if !accepts {
+                continue;
+            }
+            for (slot, hint) in agreed.iter_mut().zip(candidate) {
+                *slot = match (first_candidate, slot.take(), hint) {
+                    (true, _, hint) => hint,
+                    (false, Some(previous), Some(hint)) => Some(
+                        previous
+                            .iter()
+                            .zip(&hint)
+                            .map(|(left, right)| if left == right { *left } else { None })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+            }
+            first_candidate = false;
+        }
+        agreed
     }
 
     /// R's functional helpers resolve their function argument with `match.fun`, which also
@@ -11615,6 +11896,26 @@ impl<'db> Checker<'db, '_> {
         mapping.insert(representative, name);
         binders.push((name, constraint));
         Ty::new(self.db, TyKind::Rigid(name))
+    }
+
+    /// The candidates instantiated only when an argument can use their parameter types.
+    fn hinting_callees(
+        &mut self,
+        schemes: &[TypeScheme<'db>],
+        arguments: &[Argument],
+    ) -> Vec<Ty<'db>> {
+        let hintable = arguments.iter().any(|argument| {
+            argument
+                .value
+                .is_some_and(|value| self.needs_parameter_hints(value))
+        });
+        if !hintable {
+            return Vec::new();
+        }
+        schemes
+            .iter()
+            .map(|scheme| self.instantiate(scheme))
+            .collect()
     }
 
     fn instantiate(&mut self, scheme: &TypeScheme<'db>) -> Ty<'db> {

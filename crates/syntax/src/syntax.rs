@@ -257,7 +257,8 @@ pub fn is_green_inline_annotation(kind: SyntaxKind, parent: Option<SyntaxKind>) 
         SyntaxKind::TYPE_ASCRIPTION
         | SyntaxKind::RETURN_TYPE
         | SyntaxKind::TYPE_DEFINITION
-        | SyntaxKind::NEW_TYPE => true,
+        | SyntaxKind::NEW_TYPE
+        | SyntaxKind::PURE_MARKER => true,
         SyntaxKind::TYPE_BINDER_LIST => parent == Some(SyntaxKind::FUNCTION_DEF),
         _ => false,
     }
@@ -507,7 +508,19 @@ fn materialize(stack: &mut [GreenFrame<'_>]) -> Option<SyntaxNode> {
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length
 /// in `new_text`; the result always equals `parse(new_text)`.
 pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSize) -> Parse {
-    reparse::try_splice(old, new_text, deleted, inserted).unwrap_or_else(|| parse(new_text))
+    let Some(spliced) = reparse::try_splice(old, new_text, deleted, inserted) else {
+        return parse(new_text);
+    };
+    if testing::invariants_enabled() {
+        let full = parse(new_text);
+        assert!(
+            spliced == full,
+            "a splice reparse differs from a full parse\nold text: {:?}\nnew text: {:?}\ndeleted: {deleted:?}\ninserted: {inserted:?}",
+            old.syntax_node().text().to_string(),
+            new_text,
+        );
+    }
+    spliced
 }
 
 fn dump_node(out: &mut String, node: &SyntaxNode, depth: usize) {

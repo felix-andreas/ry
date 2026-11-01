@@ -5,9 +5,14 @@
 //! context functions) would stay hidden. A second version script lists them; the linker merges
 //! the two. The list comes from the `RY_EXPORT` markers in `src/native.c`, so it cannot drift.
 
+#[path = "build_identity.rs"]
+mod build_identity;
+
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    emit_runtime_identity();
+    println!("cargo:rerun-if-changed=build_identity.rs");
     let source = "src/native.c";
     println!("cargo:rerun-if-changed={source}");
     println!("cargo:rerun-if-changed=include");
@@ -75,4 +80,17 @@ fn main() {
             println!("cargo:rustc-cdylib-link-arg=-Wl,--no-as-needed,-l{library},--as-needed");
         }
     }
+}
+
+/// `ry` compares this value with its own after loading the library, so a `libR.so` left over
+/// from older sources is refused instead of silently running them.
+fn emit_runtime_identity() {
+    let manifest = env::var("CARGO_MANIFEST_DIR")
+        .unwrap_or_else(|error| panic!("CARGO_MANIFEST_DIR: {error}"));
+    let crates_directory = PathBuf::from(manifest).join("..");
+    let identity = build_identity::runtime_identity(&crates_directory);
+    for path in &identity.watched {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rustc-env=RY_RUNTIME_ID={}", identity.hash);
 }

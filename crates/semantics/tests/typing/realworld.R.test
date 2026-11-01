@@ -553,7 +553,7 @@ broken <- function() {
 #++++
 map_option: <T, U> fn(value: T | NULL, transform: fn(T) -> U) -> U | NULL
 broken: Unknown
-203..221 error[type-mismatch] this function is passed `character`, but its parameter `n` is used as a numeric value (`integer` or `double`)
+215..216 error[type-mismatch] `n` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
 
 #==== optional_callbacks
 #---- optional_callback_annotation_is_writable_and_narrows
@@ -1065,7 +1065,7 @@ count_positive <- function() {
 }
 #++++
 count_positive: Unknown
-143..150 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+124..129 error[type-mismatch] `count` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
 
 #==== text_processing
 #---- word_statistics_is_clean

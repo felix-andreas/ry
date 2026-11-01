@@ -123,6 +123,7 @@ export default defineConfig({
 						{ slug: 'contributing/architecture' },
 						{ slug: 'contributing/structure' },
 						{ slug: 'contributing/testing' },
+						{ slug: 'contributing/robustness' },
 						{ slug: 'contributing/corpus-and-oracle' },
 						{ slug: 'contributing/authoring-stubs' },
 						{ slug: 'contributing/releasing' },

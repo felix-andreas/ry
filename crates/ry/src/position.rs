@@ -64,28 +64,33 @@ impl LineIndex {
         }
     }
 
+    /// An offset inside a character counts the characters before it.
     pub fn line_column_chars(&self, offset: TextSize, text: &str) -> LineColumn {
-        let position = self.line_column(offset);
-        let start = self.line_starts[position.line as usize] as usize;
+        let (line, before) = self.line_prefix(offset, text);
         LineColumn {
-            line: position.line,
-            column: text[start..start + position.column as usize]
-                .chars()
-                .count() as u32,
+            line,
+            column: before.chars().count() as u32,
         }
     }
 
+    /// An offset inside a character counts the code units before it.
     pub fn line_column_utf16(&self, offset: TextSize, text: &str) -> LineColumn {
+        let (line, before) = self.line_prefix(offset, text);
+        LineColumn {
+            line,
+            column: before
+                .chars()
+                .map(|character| character.len_utf16() as u32)
+                .sum(),
+        }
+    }
+
+    /// The line holding `offset` and its text before `offset`, cut at a character boundary.
+    fn line_prefix<'a>(&self, offset: TextSize, text: &'a str) -> (u32, &'a str) {
         let position = self.line_column(offset);
         let start = self.line_starts[position.line as usize] as usize;
-        let column = text[start..start + position.column as usize]
-            .chars()
-            .map(|character| character.len_utf16() as u32)
-            .sum();
-        LineColumn {
-            line: position.line,
-            column,
-        }
+        let end = text.floor_char_boundary(start + position.column as usize);
+        (position.line, text.get(start..end).unwrap_or_default())
     }
 
     /// Line and byte column are both clamped.
@@ -113,6 +118,57 @@ impl LineIndex {
             units += character.len_utf16() as u32;
         }
         TextSize::from(line_end as u32)
+    }
+}
+
+/// Every conversion accepts any offset and any position without panicking, and lands inside the
+/// text on a character boundary. An offset on a character boundary, outside a line's terminator,
+/// survives the round trip through both a byte and a UTF-16 position. Shared with the
+/// coverage-guided `fuzz/` target.
+pub fn check_position_invariants(text: &str) {
+    let index = LineIndex::new(text);
+    let in_text = |offset: TextSize, what: &str| {
+        let offset = usize::from(offset);
+        assert!(
+            offset <= text.len() && text.is_char_boundary(offset),
+            "{what} gave offset {offset}, not a character boundary of {text:?}"
+        );
+    };
+    for offset in 0..=text.len() + 1 {
+        let size = TextSize::from(offset as u32);
+        let position = index.line_column(size);
+        assert!(
+            position.line < index.line_count(),
+            "offset {offset} maps to line {} of {text:?}",
+            position.line
+        );
+        let chars = index.line_column_chars(size, text);
+        let utf16 = index.line_column_utf16(size, text);
+        assert!(
+            chars.column <= position.column && chars.column <= utf16.column,
+            "columns disagree at offset {offset} of {text:?}"
+        );
+        let round = index.offset(position, text);
+        in_text(round, "a byte position");
+        let round_utf16 = index.offset_utf16(utf16, text);
+        in_text(round_utf16, "a UTF-16 position");
+        let in_line = position.column <= index.line_length(position.line, text);
+        if offset <= text.len() && text.is_char_boundary(offset) && in_line {
+            assert_eq!(usize::from(round), offset, "byte round trip in {text:?}");
+            assert_eq!(
+                usize::from(round_utf16),
+                offset,
+                "UTF-16 round trip in {text:?}"
+            );
+        }
+    }
+    for line in 0..=index.line_count() {
+        let length = index.line_length(line.min(index.line_count() - 1), text);
+        for column in [0, 1, length / 2, length, length + 1, u32::MAX] {
+            let position = LineColumn { line, column };
+            in_text(index.offset(position, text), "a byte position");
+            in_text(index.offset_utf16(position, text), "a UTF-16 position");
+        }
     }
 }
 
