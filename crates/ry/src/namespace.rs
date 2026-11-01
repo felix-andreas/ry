@@ -4,7 +4,6 @@ use rustc_hash::FxHashSet;
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
 use semantics::metadata::NamespaceImport;
-use std::collections::BTreeSet;
 use syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
@@ -47,7 +46,7 @@ pub fn namespace_export_problems(
     defines: &dyn Fn(&str) -> bool,
     knows_namespace: &dyn Fn(&str) -> bool,
     namespace_exports: &dyn Fn(&str, &str) -> bool,
-    used_tokens: &BTreeSet<String>,
+    used_tokens: &FxHashSet<&str>,
 ) -> Vec<Diagnostic> {
     let imported = |name: &str| {
         imports.iter().any(|import| match &import.name {
@@ -59,13 +58,13 @@ pub fn namespace_export_problems(
     };
     let defines_at_run_time = RUNTIME_DEFINERS
         .iter()
-        .any(|definer| used_tokens.contains(*definer));
+        .any(|definer| used_tokens.contains(definer));
     exports
         .iter()
         .filter(|(name, _)| {
             !defines(name)
                 && !imported(name)
-                && !(defines_at_run_time && used_tokens.contains(name))
+                && !(defines_at_run_time && used_tokens.contains(name.as_str()))
         })
         .map(|(name, range)| {
             Diagnostic::new(
@@ -95,7 +94,7 @@ const RUNTIME_DEFINERS: &[&str] = &[
 /// `import(pkg)` directives are not checked.
 pub fn unused_import_diagnostics(
     imports: &[NamespaceImport],
-    used_tokens: &BTreeSet<String>,
+    used_tokens: &FxHashSet<&str>,
     level: LintLevel,
 ) -> Vec<Diagnostic> {
     let Some(severity) = lint_severity(level, None) else {
@@ -105,7 +104,7 @@ pub fn unused_import_diagnostics(
         .iter()
         .filter_map(|import| {
             let name = import.name.as_ref()?;
-            if used_tokens.contains(name) {
+            if used_tokens.contains(name.as_str()) {
                 return None;
             }
             Some(Diagnostic::new(
@@ -140,15 +139,16 @@ pub fn token_scan_names<'a>(
 }
 
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
-/// string tokens contribute their unquoted content.
-pub fn collect_used_tokens(
+/// string tokens contribute their unquoted content. Records borrow the scanned names, so a
+/// scan allocates nothing per token.
+pub fn collect_used_tokens<'a>(
     root: &SyntaxNode,
-    scanned: &FxHashSet<&str>,
-    out: &mut BTreeSet<String>,
+    scanned: &FxHashSet<&'a str>,
+    out: &mut FxHashSet<&'a str>,
 ) {
     let mut insert = |text: &str| {
-        if scanned.contains(text) && !out.contains(text) {
-            out.insert(text.to_owned());
+        if let Some(&name) = scanned.get(text) {
+            out.insert(name);
         }
     };
     for_each_token(root, |kind, text| {
@@ -247,7 +247,7 @@ mod tests {
     fn unused_for(namespace: &str, sources: &[&str], level: LintLevel) -> Vec<String> {
         let namespace = parse_namespace(namespace);
         let scanned = token_scan_names(&namespace.imports, &namespace.exports);
-        let mut used = BTreeSet::new();
+        let mut used = FxHashSet::default();
         for source in sources {
             collect_used_tokens(&syntax::parse(source).syntax_node(), &scanned, &mut used);
         }
