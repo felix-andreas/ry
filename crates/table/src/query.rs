@@ -2727,14 +2727,20 @@ impl Lowering<'_> {
                     Aggregate::Sum if kind != ColumnType::Double => {
                         value.cast(DataType::Int64).sum()
                     }
-                    Aggregate::Sum => value.sum(),
+                    // data.table's grouped sum of doubles adds each group's values in row order,
+                    // and a cumulative sum is the Polars reduction that keeps that order, where
+                    // `sum` adds pairwise and rounds differently.
+                    Aggregate::Sum => value.cum_sum(false).last().fill_null(lit(0.0)),
                     // With `na.rm = TRUE` a group with no values left has the mean `0 / 0`, which
                     // is `NaN` in R, where Polars gives null.
                     Aggregate::Mean if *na_rm => {
                         let value = value.cast(DataType::Float64);
                         value.clone().sum() / value.count().cast(DataType::Float64)
                     }
-                    Aggregate::Mean => value.cast(DataType::Float64).mean(),
+                    Aggregate::Mean => {
+                        let value = value.cast(DataType::Float64);
+                        value.clone().cum_sum(false).last() / len().cast(DataType::Float64)
+                    }
                     // R's `min` and `max` are `NaN` when an input is, where Polars skips it.
                     Aggregate::Min if kind == ColumnType::Double => value.nan_min(),
                     Aggregate::Max if kind == ColumnType::Double => value.nan_max(),
