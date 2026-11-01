@@ -1,0 +1,15 @@
+[stdout]
+| [1] "\\code{rootpath=\"\\\\\"\\} relative to \\\\code\\{\"\\\\\"}\n"
+| [1] "\\code" "TEXT"  
+| [1] "\\code{x <- \"a\nb\"} and \\code{'\\\\''}\n"
+| [1] "\\code" "TEXT"   "\\code" "TEXT"  
+| [1] "\\code{\"a\\\\\"b\"} \\code{\\\\\"}\n"
+| [1] "\\code" "TEXT"   "\\code" "TEXT"  
+| [1] "\\code{f(\"\\link{g}\")}\n"
+| [1] "\\code" "TEXT"  
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("\\code", "TEXT")

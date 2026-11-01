@@ -20,8 +20,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("lazyLoadDBfetch", 4, do_lazy_load_fetch),
     internal("unserializeFromConn", 2, do_unserialize_from_conn),
     internal("unserialize", 2, do_unserialize),
-    internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
-    internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("lazyLoadDBflush", 1, |call| unsafe {
+        forget_database(&values::require_string(call.arg(0), "file")?);
+        Ok(nil())
+    })
+    .invisible(),
     internal("loadFromConn2", 3, do_load_from_conn).invisible(),
     internal("getVarsFromFrame", 3, do_get_vars_from_frame),
     internal("memCompress", 2, do_mem_compress),
@@ -736,6 +739,60 @@ fn file_cache() -> &'static mut FxHashMap<String, Vec<u8>> {
     unsafe {
         CACHE.get_or_insert_with(FxHashMap::default)
     }
+}
+
+/// Drops a database file from the read cache, because the installer appends to it.
+pub fn forget_database(path: &str) {
+    file_cache().remove(path);
+}
+
+/// One lazy-load database record holding `stream`, as GNU R's `R_compress1`, `R_compress2` and
+/// `R_compress3` write it: the stream's length (big-endian), then for `kind` 1 a zlib stream, and
+/// for 2 and 3 a type byte and bzip2 or raw LZMA2 data, or `0` and the stream itself when
+/// compressing does not make it smaller. `kind` 0 is the stream alone.
+pub fn compress_record(stream: &[u8], kind: i32) -> R<Vec<u8>> {
+    use std::io::Write;
+    if kind == 0 {
+        return Ok(stream.to_vec());
+    }
+    let length = u32::try_from(stream.len())
+        .map_err(|_| error("a lazy-load database record cannot exceed 4GB"))?;
+    let mut record = length.to_be_bytes().to_vec();
+    fn failed(failure: impl std::fmt::Display) -> crate::unwind::Unwind {
+        error(format!("compression failed: {failure}"))
+    }
+    let packed = match kind {
+        2 => {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+            encoder.write_all(stream).map_err(failed)?;
+            Some((b'2', encoder.finish().map_err(failed)?))
+        }
+        3 => {
+            let options = lzma_rust2::Lzma2Options::with_preset(9);
+            let mut encoder = lzma_rust2::Lzma2Writer::new(Vec::new(), options);
+            encoder.write_all(stream).map_err(failed)?;
+            Some((b'Z', encoder.finish().map_err(failed)?))
+        }
+        _ => None,
+    };
+    match packed {
+        Some((_, data)) if data.len() >= stream.len() => {
+            record.push(b'0');
+            record.extend_from_slice(stream);
+        }
+        Some((method, data)) => {
+            record.push(method);
+            record.extend_from_slice(&data);
+        }
+        None => {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(record, flate2::Compression::default());
+            encoder.write_all(stream).map_err(failed)?;
+            record = encoder.finish().map_err(failed)?;
+        }
+    }
+    Ok(record)
 }
 
 /// The stream inside one lazy-load database record. `kind` is `lazyLoadDBfetch`'s `compressed`:

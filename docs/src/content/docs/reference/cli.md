@@ -66,7 +66,8 @@ the console on ry's own interpreter, which loads no package and runs no startup 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
 `Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
 startup banner is not printed, so the output is only what the script prints. Arguments after the
-file reach the script through `commandArgs(trailingOnly = TRUE)`.
+file reach the script through `commandArgs(trailingOnly = TRUE)`. Put `--` before an argument that
+starts with a dash: `ry run script.R -- --verbose`.
 
 Before anything runs, `ry run` checks the script and `ry repl` checks each command against the
 project's `ry.toml`. They print the [inline annotation](/type-checking/inline-annotations) warnings,

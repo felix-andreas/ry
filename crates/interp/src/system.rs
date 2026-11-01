@@ -2142,6 +2142,10 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
             None => values::set_elt(result, index, values::na_string()),
         }
     }
+    // GNU R converts a duplicate of a character `x`, so names and other attributes survive.
+    if !from_list && !to_raw {
+        values::copy_attributes(input, result)?;
+    }
     Ok(result)
 }
 
