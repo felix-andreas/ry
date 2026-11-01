@@ -409,6 +409,30 @@ fn run_error_exits_nonzero() {
     );
 }
 
+#[test]
+fn run_passes_trailing_arguments_to_the_script() {
+    if !r_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let script = directory.path().join("script.R");
+    fs::write(
+        &script,
+        "cat(commandArgs(trailingOnly = TRUE), sep = \"|\")\n",
+    )
+    .expect("write script");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .arg(&script)
+        .args(["--", "first", "--second"])
+        .output()
+        .expect("run the binary");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "first|--second"
+    );
+}
+
 /// ry's runtime is the `libR` built beside the binary, which `cargo test -p ry-lang` does not
 /// build, so these tests skip without it: `cargo build -p libr` first.
 fn ry_runtime_available() -> bool {

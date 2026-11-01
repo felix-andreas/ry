@@ -322,6 +322,7 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        arguments: &[CString],
     ) -> Result<(), ReplError> {
         // R re-derives R_HOME through its own lookup; export ours so both agree.
         unsafe { env::set_var("R_HOME", &self.r_home) };
@@ -336,6 +337,9 @@ impl RApi {
         .iter()
         .chain(quiet.then_some(&c"--quiet"))
         .map(|argument| argument.as_ptr() as *mut c_char)
+        // `commandArgs(trailingOnly = TRUE)` is what follows `--args`.
+        .chain((!arguments.is_empty()).then_some(c"--args".as_ptr() as *mut c_char))
+        .chain(arguments.iter().map(|argument| argument.as_ptr() as *mut c_char))
         .collect();
 
         unsafe {
@@ -367,9 +371,13 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        arguments: &[CString],
     ) -> Result<(), ReplError> {
         unsafe { env::set_var("R_HOME", &self.r_home) };
-        let mut argv = [c"ry".as_ptr() as *mut c_char];
+        let mut argv: Vec<*mut c_char> = std::iter::once(c"ry".as_ptr() as *mut c_char)
+            .chain((!arguments.is_empty()).then_some(c"--args".as_ptr() as *mut c_char))
+            .chain(arguments.iter().map(|argument| argument.as_ptr() as *mut c_char))
+            .collect();
 
         let rhome = CString::new(self.r_home.to_string_lossy().into_owned())
             .map_err(|_| ReplError("R_HOME contains a NUL byte".to_owned()))?;

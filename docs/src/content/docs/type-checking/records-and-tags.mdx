@@ -55,20 +55,12 @@ ry runs.
 
 ## Structural or nominal
 
-Records and tuples combine values (product types), and tag unions choose between cases (sum types).
-Each kind comes in two flavors. A *structural* type matches any value of the same shape, and `alias`
-only gives that shape a name. A *nominal* type, declared with `type`, is distinct by name, so a value
-with the right shape is not one until its constructor `@Name(...)` creates it:
-
-| | Records and tuples | Tag unions |
-| --- | --- | --- |
-| **Structural** | `alias Point = Record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
-| **Nominal** | `type Celsius = Record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
-
-The comment spellings are `#: @alias Point {...}` and `#: @type Celsius {...}`. Structural is the
-default and usually right. Choose nominal when values have the same shape but must not mix, such as
-Celsius and Fahrenheit, or a user ID and an order ID, or when every value should come from one
-constructor that checks it:
+Each of these types comes in two flavors, as [custom types](/type-checking/custom-types) explains:
+`alias` names a *structural* type, which any value of the same shape fits, and `type` declares a
+*nominal* one, which only its constructor `@Name(...)` creates. Choose nominal when values have the
+same shape but must not mix, such as Celsius and Fahrenheit, or a user ID and an order ID, or when
+every value should come from one constructor that checks it. The comment spellings are
+`#: @alias Point {...}` and `#: @type Celsius {...}`:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
@@ -116,8 +108,7 @@ type-mismatch
 
 type-mismatch
 
-  x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is
-    a nominal type, so only `@Shape(...)` (or `#: @new Shape`) creates one
+  x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
 ```
 
 The parentheses of `@Name(...)` belong to the value inside, so `@Celsius(degrees = 100,)` is a
@@ -198,7 +189,7 @@ bad <- :Ok("five")
 ```text
 type-mismatch
 
-  x expected `:Ok(integer) | :Err(character)`, found `:Ok(character)`
+  x expected `integer`, found `character`
 ```
 
 A union that ends in `..` is open: it accepts any other tag as well, so a `match` on it needs a

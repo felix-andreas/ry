@@ -30,8 +30,9 @@ ry's own syntax gets the same features as plain R:
 - **Type definitions and annotations.** Go-to-definition on a type name or a type parameter such as
   `T` jumps to its definition, and a type parameter renames within its definition or function.
   Hover on a standard-library alias such as `Result` shows its definition.
-- **Frames.** Inside `sales[i, j, by]`, completion offers the frame's columns and the query symbols
-  `.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and `.BY`.
+- **DataFrames.** Inside `col("...")` or any column string of a verb, completion offers the columns
+  of the DataFrame at that step, and hover shows the column's type. Inside data.table's
+  `sales[i, j, by]`, it also offers the query symbols `.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and `.BY`.
 - **Highlighting.** Semantic tokens color type names, type parameters, tags, the `match` keyword and
   `=>`, in inline annotations, `#:` comments and `.Rtypes` stub files alike.
 
