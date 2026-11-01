@@ -130,8 +130,9 @@ The CLI's cold check leans on this to cap its peak. It runs three passes over th
 first, spread over the cores. The first pass works in batches and calls `trigger_lru_eviction`
 between them: `diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is
 resident. The second pass names every item and derives its interface and top-level read sets, and
-the third assembles the diagnostics. Neither later pass reads a tree, so each runs as one batch
-with no barriers. Each file is therefore parsed exactly once, and at most a few batches of trees
+the third assembles the diagnostics. Neither later pass reads a tree. Naming runs as one batch
+with no barriers, and the diagnostics pass evicts between larger batches, which bounds the peak on
+a project with many findings. Each file is therefore parsed exactly once, and at most a few batches of trees
 are alive at a time. `RootDatabase::one_shot` also turns
 off the splice cache, which would otherwise keep the previous tree of every file. A
 `test_incremental.rs` case pins the one-parse property.

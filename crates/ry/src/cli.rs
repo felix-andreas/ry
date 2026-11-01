@@ -381,11 +381,9 @@ pub(crate) fn analyze_project(
     }
 
     // Per-item naming and the read sets derived from it run across cores first: inside the
-    // project-wide interface and slot walks they would serialize on one thread.
-    // Neither later pass reads a tree, so nothing they compute is evictable and they run as
-    // one batch: a barrier per batch would idle every worker behind its slowest file.
-    let one_batch = by_size.len();
-    in_batches(&mut db, workers, &by_size, one_batch, |db, index| {
+    // project-wide interface and slot walks they would serialize on one thread. This pass
+    // reads no tree and holds nothing evictable, so it runs as one batch with no barriers.
+    in_batches(&mut db, workers, &by_size, by_size.len(), |db, index| {
         for &item in semantics::item_tree(db, files[index]) {
             let _ = semantics::item_naming(db, item);
             let _ = semantics::item_interface_reads(db, item);
@@ -393,10 +391,19 @@ pub(crate) fn analyze_project(
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    for (index, diagnostics) in in_batches(&mut db, workers, &by_size, one_batch, |db, index| {
-        let rendered = document_diagnostics(db, files[index], &config);
-        apply_suppressions(rendered, files[index].text(db))
-    }) {
+    // Reads no tree either, but evicting between larger batches still bounds the peak on a
+    // project with many findings.
+    let diagnostics_batch = tree_batch * 4;
+    for (index, diagnostics) in in_batches(
+        &mut db,
+        workers,
+        &by_size,
+        diagnostics_batch,
+        |db, index| {
+            let rendered = document_diagnostics(db, files[index], &config);
+            apply_suppressions(rendered, files[index].text(db))
+        },
+    ) {
         per_file[index] = diagnostics;
     }
     // Computed last so the `unused-import` lint sees the whole package.

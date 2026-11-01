@@ -67,8 +67,9 @@ pub fn namespace_export_problems(
         .collect()
 }
 
-/// `used_tokens` is every token text across the package's sources: a conservative
-/// scan that under-reports rather than risk a false positive. Whole-namespace
+/// `used_tokens` holds the imported names that appear as a token anywhere in the
+/// package's sources: a conservative scan that under-reports rather than risk a false
+/// positive. Whole-namespace
 /// `import(pkg)` directives are not checked.
 pub fn unused_import_diagnostics(
     imports: &[NamespaceImport],

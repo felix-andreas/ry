@@ -2243,8 +2243,9 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     before naming, while the tree is resident.
   - `ry check` uses `RootDatabase::one_shot` (no splice cache) and runs three passes. Only the
     syntax pass works in batches of 16 files per core with `trigger_lru_eviction` between them
-    (which needs no new revision); the naming and diagnostics passes read no tree and run as one
-    batch each.
+    (which needs no new revision). The naming and diagnostics passes read no tree. Naming runs
+    as one batch; diagnostics evicts between batches of 64 files per core, because one batch
+    raised peak memory from about 750 to 870 MB on a 3000-file corpus with many findings.
     `diagnostics::derive_from_syntax` lists every tree-derived fact a later pass reads; a new tree
     reader must be added there, or the cold check re-parses (the one-parse test in
     `test_incremental.rs` catches it).
@@ -2857,12 +2858,13 @@ first lines R had already read, leaving R mid-command.
     lint can fire.
   - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
     binders in one query, cached in `SalsaGlobals`.
-  - `Name` and `Ty` are interned with `revisions = usize::MAX`. They are never garbage-collected,
+  - `Name` and `Ty` are interned with `revisions = usize::MAX`. They are never garbage-collected.
     That costs nothing in a one-shot check. In the server the tables grow with the distinct types
     and names ever seen, which repeat heavily because types are structural.
   - The CLI creates every input at `Durability::HIGH` except `PackageMetadata.attached`, the one
     input it sets after analysis starts.
 - **Impact.** About 26% less CPU, 30% less wall time and 70 MiB less peak memory on the
-  benchmark code bases, with byte-identical findings. Incremental behaviour is unchanged, because
-  every new query is per file or per item.
+  benchmark code bases, with byte-identical findings. Invalidation is unchanged, because every new
+  query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
+  tables never shrink.
 

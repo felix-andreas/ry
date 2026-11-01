@@ -359,16 +359,6 @@ impl SyntaxSites {
     }
 }
 
-fn is_ry_syntax(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::RECORD_EXPR
-            | SyntaxKind::TUPLE_EXPR
-            | SyntaxKind::TAG_EXPR
-            | SyntaxKind::MATCH_EXPR
-    )
-}
-
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     let mut sites = Vec::new();
@@ -405,6 +395,16 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         }
     });
     SyntaxSites(sites)
+}
+
+fn is_ry_syntax(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::RECORD_EXPR
+            | SyntaxKind::TUPLE_EXPR
+            | SyntaxKind::TAG_EXPR
+            | SyntaxKind::MATCH_EXPR
+    )
 }
 
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
