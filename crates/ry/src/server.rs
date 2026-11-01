@@ -1168,11 +1168,12 @@ impl Worker {
 
         let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
-            // Opening usually shows the text already on disk. Rewriting it anyway would be a
-            // MEDIUM write (a setter keeps the field's durability), which makes every memo in
-            // the project deep-verify before the first diagnostics.
+            // Opening usually shows the text already on disk, so lowering its durability
+            // waits for idle time: the drop defeats backdating, and everything derived from
+            // the file re-runs once. Before the warm-up has derived anything from it, the drop
+            // is cheap, and lowering at once spares a second check of the file.
             Some(&file) => {
-                if *file.text(&self.db) == params.text_document.text {
+                if *file.text(&self.db) == params.text_document.text && self.unwarmed.is_empty() {
                     self.pending_lowering.push(path.clone());
                 } else {
                     file.set_text(&mut self.db)

@@ -2887,6 +2887,7 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
+- A file opened at startup settles about 450 ms after the open (target 200 ms). On dsbench with 4 cores the time goes to the attach scan (about 110 ms, mostly parsing all 1,006 files), project naming (about 290 ms: `item_hir` lowering and `resolve_item`), then the file's own check (about 60 ms). The settled wave waits for all naming because `conditional_slot_items` (lints through `s3_generics`, and `package_name`) needs every item's top-level writes. In samples of the naming pass, about a fifth of helper time spins on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs` in `function/sync.rs`, taken twice per query execution) and another fifth is in mimalloc's page slow path. Levers: fewer tracked queries per item on the cold path, a cheaper source for the top-level writes than full naming, or a sharded claim table upstream.
 
 ## Open: false errors on real CRAN code
 
