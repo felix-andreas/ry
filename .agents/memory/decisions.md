@@ -108,6 +108,41 @@ accepts `character`, which no numeric binder covers. Never say these functions h
 scheme. A gradual checker that cannot describe the standard library is not usable. A user's `#:` annotation stays pure
 Hindley-Milner, which is what keeps the user-facing promise honest.
 
+## ry has no macros
+
+This is a user directive: compile time and type-checking speed rank highest, so ry adds no macro
+system, syntactic or procedural.
+
+- **Why.** A macro makes what a file means depend on code that runs before checking. Every check
+  then pays for expansion, an item's names can no longer be read from its syntax, and an edit to a
+  macro invalidates every site that expands it, which defeats the per-item firewalls. Vx, which has
+  `macro_rules`, confines expansion to its own phase before name resolution so that it cannot break
+  parallel per-body checking, and its notes cite rustc, where macro expansion and name resolution
+  are still serial (`docs/language_rules_for_a_parallel_compiler.md` in vx-lang/Vx).
+- **R's own non-standard evaluation stays.** `quote`, `substitute`, `bquote`, `eval`, tidy
+  evaluation and data masks keep working, because existing R code must run unchanged. The checker
+  treats them as ordinary R calls (the recognized data masks read bare names as columns, and `eval()`
+  returns `Any`), and ry builds nothing on top of them.
+- **Prior art.** Roc's language reference describes no macros; it evaluates top-level constants at
+  compile time instead. Bend lists "no macros beyond compile-time templates" among its limitations.
+  goose's reference describes no macros; its `const for` copies a fragment once per field, variant
+  or type at specialization time, as its form of reflection. Vx has `macro_rules`, restricted as
+  above.
+- **What replaces common macro uses.**
+  - Derived behavior, such as Rust's `derive` for printing, equality or serialization, comes from
+    structural types: with no declaration, `print((x = 1, y = 2))` prints `(x = 1, y = 2)`, and
+    `identical()` compares two records by value.
+  - Boilerplate repeated over types is written once with generics (`<T> fn(...)`) and the standard
+    library's higher-order functions.
+  - Code generation happens outside the language, in a script that writes ordinary files the checker
+    reads, as `scripts/export-manifests.R` writes the export manifests; `.Rtypes` stubs declare what
+    R code cannot express.
+  - Values computed ahead of time are pure top-level constants, which strict mode's planned
+    definitions-only top level makes possible (`backlog.md`, "strict mode restricts what a file's
+    top level runs").
+- **Consequence.** Reject any proposal that expands or generates code before checking, including
+  generation driven by annotations inside the checker.
+
 ## An overload set is a bounded, ordered probe
 
 A function whose result type depends on the argument type gets an ordered overload set, on the stub
