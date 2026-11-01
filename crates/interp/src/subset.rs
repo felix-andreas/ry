@@ -1305,8 +1305,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             Ok(result)
         };
     }
-    if object == nil() && value == nil() {
-        return Ok(nil());
+    // GNU R leaves an empty object alone when the value is empty too, whatever the index, so
+    // `x <- numeric(0); x[1] <- numeric(0)` is not the "replacement has length zero" error.
+    if (object == nil() || object.kind().is_vector())
+        && length(object) == 0
+        && (value == nil() || (value.kind().is_vector() && length(value) == 0))
+        && (object == nil() || object.kind() == value.kind() || value.kind() != SexpType::List)
+    {
+        return Ok(object);
     }
     let object = if object == nil() {
         alloc(

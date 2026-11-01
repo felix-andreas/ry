@@ -73,13 +73,14 @@ pub fn try_splice(
     if middle_touches_annotation(middle_text) {
         return None;
     }
-    // An unterminated string or backtick at the middle's end would swallow the
-    // suffix in a full parse.
+    // An unterminated string or backtick in the middle stops at its line break only because
+    // no closing quote follows inside the middle; a full parse would close it in the suffix.
+    // Any other lexer error at the middle's end would swallow the suffix too.
     let (middle_tokens, middle_lexer_errors) = lex(middle_text);
-    if middle_lexer_errors
-        .iter()
-        .any(|error| u32::from(error.range.end()) as usize == middle_text.len())
-    {
+    if middle_lexer_errors.iter().any(|error| {
+        error.message.starts_with("unterminated")
+            || u32::from(error.range.end()) as usize == middle_text.len()
+    }) {
         return None;
     }
     // Kind-matched, not a counter: recovery never lets a stray closer close
@@ -105,12 +106,13 @@ pub fn try_splice(
         return None;
     }
     let middle = parse(middle_text);
-    // An error at the middle's end (trailing operator, dangling `else`) means a
-    // full parse would continue across the suffix newline.
+    // An error at the middle's end (trailing operator, dangling `else`), or one the middle's
+    // end cut off wherever it is reported (`function(x)` whose body is on the next line), means
+    // a full parse would continue across the suffix newline.
     if middle
         .errors()
         .iter()
-        .any(|error| u32::from(error.range.end()) as usize == middle_text.len())
+        .any(|error| error.incomplete || u32::from(error.range.end()) as usize == middle_text.len())
     {
         return None;
     }

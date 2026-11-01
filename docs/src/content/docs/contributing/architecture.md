@@ -316,11 +316,14 @@ and all the documents, and the database handle deliberately never leaves it.
   scans every file's `library()` and `require()` calls and applies the attached set once, then
   derives every item's naming and the per-file folds behind the project-wide maps. Every semantic
   wave reads those maps, and one thread would take seconds to derive them, so settled publishes
-  wait for it. After the warm-up the worker serves any settled publish it owes, most recently
+  wait for it. After the warm-up the worker rescans the `library()` calls of any file whose scan a
+  cancellation interrupted, because the edit that cancelled it may belong to another file and
+  nothing else would rescan this one. Then it serves any settled publish it owes, most recently
   edited file first. Then it re-derives `project_global_names`, the set goto-definition and
   references consult on every library call, whenever the warm-up or a durability drop left it
   stale: salsa never backdates across a durability drop, so the fold re-runs once per opened file
-  (about 20 ms at 300,000 lines) and would otherwise land on the first request. Next it lowers the durability of documents opened since (see below). With
+  (about 20 ms at 300,000 lines) and would otherwise land on the first request. Next it lowers the
+  durability of documents opened since (see below). With
   nothing else to do, it checks the rest of the workspace in parallel batches and never publishes
   that work. Idle work that gets cancelled is requeued.
 - **Parallel idle work stops between files.** It runs on one cloned database handle per core, and
@@ -330,6 +333,14 @@ and all the documents, and the database handle deliberately never leaves it.
 - **A request preempts idle work.** A request is queued first and then cancels the idle unit in
   flight, if any, so a hover never waits for a background file to finish. A request never cancels
   another request or a sync.
+- **Only package files stay loaded while closed.** At startup the server loads the files under `R/`,
+  and a closed or disk-changed file stays in the project only if it is one of them. Test, helper and
+  script files are analyzed while they are open, so a session never holds a file a fresh start would
+  not.
+- **The worker is deterministic and steppable.** Everything it sends the client goes through an
+  `Outbox`, which is the socket in production and a recorder in the
+  [simulator](/contributing/robustness/#the-language-server-simulator), and `run_job` is one step of
+  its loop. Collections whose order reaches the client are ordered.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
@@ -361,4 +372,6 @@ and all the documents, and the database handle deliberately never leaves it.
 The fixture suites are the correctness contract. `crates/semantics/tests/test_incremental.rs` pins
 the incrementality contracts by counting query executions after an edit, and
 `crates/semantics/tests/test_perf.rs` asserts wall-time, memory, and keystroke-latency budgets
-against a corpus of real files. [Testing](/contributing/testing) documents all of them.
+against a corpus of real files. [Testing](/contributing/testing) documents all of them, and
+[Robustness](/contributing/robustness) documents the simulator, the fuzzers and the scenario tests
+that check the whole toolchain against from-scratch runs and GNU R.

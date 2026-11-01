@@ -340,10 +340,9 @@ protects construction but nothing after it.
   would let compiled loops run strict arithmetic without the generic call.
 - A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
-
-## Open: `fuzz_multi_file` hits a salsa backdate violation
-
-`cargo test -p semantics --test test_fuzz fuzz_multi_file` panics in debug builds with a backdate violation on `global_scheme` (salsa's `report_backdate_violation`): the query's value compared equal while its new `changed_at` is older than the old one's. A query under `global_scheme` reads state salsa does not track, or depends on iteration order. Bisect among the Array (`[...]`) and function-literal typing changes.
+- An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
+  as well as the Array error, because the check runs after R's operator. Muffle the warning when the
+  result is rejected.
 
 ## Open: strict mode's top-level rule
 
@@ -945,6 +944,26 @@ type-check guard, the `fuzz_deep` floor that unblocks the CI move, and the dead-
 A human is required for three things: the `git mv` of `.github/pending-ci.yml`, which needs workflow
 scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
 corpus cache, and an OSS-Fuzz submission.
+
+## Open: robustness harnesses
+
+Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
+
+- **Startup-mode collection stress (`RY_GC_STRESS=startup`) is unusable in a debug build**: an empty script runs for over 300 s, because each collection scans every root and every eighth is major. Cheaper root scanning would make it usable.
+- **Run `just gc-torture` over every oracle case on an idle machine.** No full run has completed yet; a debug build needs several minutes per four cases.
+- **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.
+- **The oracle's `run_command` timeout kills only the direct child** (`crates/oracle/src/oracle.rs`). A grandchild that inherited stdout or stderr keeps the drain threads blocked in `join`, so a hung subprocess tree still hangs the harness. Spawn the engine in its own process group and kill the group.
+- **The simulator does not model idle preemption** (`preempt_idle`/`set_idle` in `server.rs`: a request queued during an idle unit cancels that unit, never a sync or another request). Its interrupted steps deliver only notifications, so schedule requests mid-idle-unit and check the preempted unit is redone, including `pending_lowering` and the parallel warm-up.
+- **An in-memory file system for the server.** The simulator's file-system seam is a real directory,
+  so read errors, partial writes and permission failures are never injected. The worker reads the
+  disk directly (`fs::read_to_string` in `did_close`, watcher handling, metadata), so the seam is a
+  trait the worker reads through.
+- **Allocation failure is not injectable** in the heap or the analysis.
+- **The simulator does not open `.Rtypes` stub buffers**, does not send `workspace/didChangeConfiguration`,
+  and never restarts the server mid-session. Each is a cheap action to add to `Session::act`.
+- **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
+  query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
+  protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.
 
 ## Open: test and fuzz architecture
 

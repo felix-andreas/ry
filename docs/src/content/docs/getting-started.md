@@ -55,6 +55,9 @@ then turning on types.
   [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta), or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
+- **From a clone of the repository:** `just try` builds ry and its runtime, then runs each command
+  on this page, and more, in a demo project.
+
 [Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 
 ## Step 1: check the code you have

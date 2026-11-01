@@ -83,8 +83,6 @@ pub type R_xlen_t = isize;
 pub type R_len_t = c_int;
 /// `Rboolean` is a C enum, so it has the size of `int`.
 pub type Rboolean = c_int;
-/// The R version ry presents, which `Rversion.h` and `R.version` report too.
-pub const R_VERSION_STRING: &str = "4.6.2";
 pub const TRUE: Rboolean = 1;
 pub const FALSE: Rboolean = 0;
 

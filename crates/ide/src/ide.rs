@@ -34,6 +34,8 @@ use {
     },
 };
 
+pub mod testing;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hover {
     pub range: TextRange,

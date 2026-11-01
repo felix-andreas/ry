@@ -7,6 +7,7 @@
 pub mod r;
 #[cfg(feature = "runtime")]
 pub mod ry_runtime;
+pub mod testing;
 
 use {
     rustc_hash::{FxHashMap, FxHashSet},
