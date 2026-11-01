@@ -192,3 +192,29 @@ f <- function(cond) {
 f: fn(cond: logical) -> Unknown
 48..49 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
 68..69 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing.
+
+#---- a_closure_reads_the_enclosing_value_on_paths_that_skip_its_superassignment
+#~~~~ R/main.R
+f <- function(fun) {
+  cache <- NULL
+  function() {
+    if (is.null(cache)) cache <<- fun()
+    cache
+  }
+}
+#++++
+== R/main.R
+f: <T> fn([fun]: fn() -> T) -> fn() -> T | NULL
+
+#---- a_closure_local_assigned_on_one_path_might_be_undefined
+#~~~~ R/main.R
+f <- function(flag) {
+  function() {
+    if (flag) cache <- 1L
+    cache
+  }
+}
+#++++
+== R/main.R
+f: fn(flag: logical) -> fn() -> integer
+67..72 warning[maybe-undefined] `cache` is only assigned on some paths here, so this read can find nothing.

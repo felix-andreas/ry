@@ -1174,6 +1174,7 @@ enum OperandShape {
 
 /// How one level of a replacement spine (`x$a`, `x[["a"]]`, `x[[1]]`, `x[[i]]`) reaches
 /// into its container.
+#[derive(Clone)]
 enum ReplacementStep {
     Field(String),
     Position(usize),
@@ -3146,7 +3147,7 @@ impl<'db> Checker<'db, '_> {
     fn join_enclosing_write(&mut self, slot: BindingId, written: Ty<'db>) {
         let entry = match self.environment.get(slot) {
             Some(EnvEntry::Mono(existing)) if existing != written => {
-                EnvEntry::Mono(self.join_types(existing, written))
+                EnvEntry::Mono(self.join_closure_write(existing, written))
             }
             Some(entry @ EnvEntry::Mono(_)) => entry,
             Some(EnvEntry::Scheme(index)) => {
@@ -3161,6 +3162,34 @@ impl<'db> Checker<'db, '_> {
             None => EnvEntry::Mono(written),
         };
         self.environment.set(slot, entry);
+    }
+
+    /// Closures that write one variable with `<<-` run in any order, so no write constrains
+    /// another: `cache <<- fun()` beside a reset `cache <<- TRUE` leaves `fun` returning
+    /// anything. A side that is still an unconstrained variable therefore joins as a union
+    /// member instead of being bound to the other side.
+    fn join_closure_write(&mut self, existing: Ty<'db>, written: Ty<'db>) -> Ty<'db> {
+        let open_variable = |checker: &Self, ty: Ty<'db>| {
+            let resolved = checker.table.resolve(checker.db, ty);
+            guard_members(checker.db, resolved)
+                .iter()
+                .any(|member| match member.kind(checker.db) {
+                    TyKind::Var(var) => matches!(
+                        checker.table.entry(*var),
+                        Entry::Unbound {
+                            constraint: Constraint::Unconstrained,
+                            ..
+                        }
+                    ),
+                    _ => false,
+                })
+        };
+        if open_variable(self, existing) || open_variable(self, written) {
+            let existing = self.table.resolve(self.db, existing);
+            let written = self.table.resolve(self.db, written);
+            return union_of(self.db, [existing, written]);
+        }
+        self.join_types(existing, written)
     }
 
     /// Kept recorded so each further enclosing scope re-applies them too (the join is idempotent).
@@ -3407,6 +3436,23 @@ impl<'db> Checker<'db, '_> {
         if matches!(step, ReplacementStep::Rewrite) {
             return unknown(self.db);
         }
+        // Each member a path may hold takes the write, so `ret <- list()` that a loop may or
+        // may not have filled still records `ret$count <- n` on both shapes.
+        if let TyKind::Union(members) = prior.kind(self.db)
+            && matches!(
+                step,
+                ReplacementStep::Field(_) | ReplacementStep::Element | ReplacementStep::Position(_)
+            )
+        {
+            let written = members
+                .clone()
+                .into_iter()
+                .map(|member| {
+                    self.write_replacement_step(lhs, step.clone(), value_expression, member, value)
+                })
+                .collect::<Vec<_>>();
+            return union_of(self.db, written);
+        }
         let module = self.module;
         let kind = module.kind(lhs);
         let field_name = match &step {
@@ -3522,6 +3568,17 @@ impl<'db> Checker<'db, '_> {
                         self.check_nominal_field_write(prior, &field_name, value_expression, value);
                     }
                     prior
+                }
+                // A list whose names are not tracked gains a field of the written type, so
+                // `ret[[i]] <- part; ret$count <- n` leaves `ret` holding parts and the count.
+                // Writing `NULL` removes a field and adds no type.
+                TyKind::NamedList(element) | TyKind::List(element)
+                    if !matches!(value.kind(self.db), TyKind::Null) =>
+                {
+                    Ty::new(
+                        self.db,
+                        TyKind::NamedList(union_of(self.db, [element, value])),
+                    )
                 }
                 _ => prior,
             };

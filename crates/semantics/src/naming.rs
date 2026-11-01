@@ -1052,6 +1052,9 @@ impl Context<'_> {
         for reach in self.flow.get(&slot).into_iter().flatten() {
             match reach {
                 Reach::Assignment(index) => self.writes[*index as usize].used = true,
+                // A closure's flow starts empty, so an enclosing slot that one path writes with
+                // `<<-` reads the enclosing frame's value on the other paths, not nothing.
+                Reach::Unassigned if depth < function_depth => {}
                 Reach::Unassigned => maybe_undefined = true,
                 Reach::Implicit => {}
             }

@@ -422,3 +422,27 @@ f: Unknown
 g: Unknown
 16..34 error[type-mismatch] a vector cannot be indexed by `list{double}`. Expected a numeric, logical, or character index
 51..65 error[type-mismatch] a vector cannot be indexed by `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`. Expected a numeric, logical, or character index
+#---- a_field_write_into_an_untracked_named_list_adds_the_value_type
+collect <- function(gs) {
+  ret <- list()
+  for (i in seq_along(gs)) {
+    ret[[i]] <- list(pf = gs[[i]], lpi = 1)
+  }
+  ret$nlp <- 3
+  ret
+}
+#++++
+collect: <T> fn(gs: T) -> list{nlp: double} | list[named: list{pf: Unknown, lpi: double} | double]
+
+#---- a_field_written_into_an_untracked_named_list_reads_back_as_the_wider_union
+collect <- function(gs) {
+  ret <- list()
+  for (i in seq_along(gs)) {
+    ret[[i]] <- list(pf = gs[[i]], lpi = 1)
+  }
+  ret$label <- "parts"
+  ret$label + 1L
+}
+#++++
+collect: Unknown
+144..153 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | list{pf: Unknown, lpi: double}`

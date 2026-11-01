@@ -1409,7 +1409,7 @@ period: Any
 wrong: Unknown
 85..88 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 #---- a_default_reads_a_variable_the_body_assigns_before_forcing_it
-simulate <- function(n, ma, innov = rnorm(n + q)) {
+simulate <- function(ma, innov = rnorm(q)) {
   q <- length(ma)
   innov
 }
@@ -1418,7 +1418,7 @@ choose <- function(object, label = if (big) "big" else "small") {
   label
 }
 #++++
-simulate: <T, U, V> fn([n]: T, ma: U, [innov]: V) -> V
+simulate: <T, U> fn(ma: T, [innov]: U) -> U
 choose: <T, U> fn(object: T, [label]: U) -> U
 
 #---- a_default_reads_a_package_function_when_the_body_never_assigns_the_name
@@ -1428,3 +1428,26 @@ simulate <- function(n, innov = rnorm(n + q)) {
 #++++
 simulate: Unknown
 42..43 error[type-mismatch] expected a numeric value (`integer` or `double`), found `fn([save]: character, [status]: Any, [runLast]: logical) -> Any`
+#---- a_closure_write_beside_a_reset_does_not_fix_the_callback_return_type
+memoize <- function(fun) {
+  cache <- NULL
+  dec <- function() {
+    if (is.null(cache)) cache <<- fun()
+    cache
+  }
+  attr(dec, "clear") <- function() cache <<- TRUE
+  dec
+}
+#++++
+memoize: <T> fn([fun]: fn() -> T) -> fn() -> T | NULL
+
+#---- concrete_closure_writes_of_different_types_still_join
+counter <- function() {
+  count <- 0L
+  attr(count, "reset") <- function() count <<- "none"
+  bump <- function() count <<- count + 1L
+  bump
+}
+#++++
+counter: Unknown
+123..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | character`

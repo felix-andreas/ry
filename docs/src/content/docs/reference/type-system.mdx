@@ -2707,7 +2707,12 @@ slot, so the slot's type reflects the update:
 
 - A write to a known field, `x$field <- v` or `x[["literal"]] <- v`, on a record-like `x` sets that
   field's type to the type of `v`, adding the field if it is absent. The same write on an empty
-  `list()` starts a record `list{field: V}`.
+  `list()` starts a record `list{field: V}`, and on a list whose names are not tracked,
+  `list[named: T]` or `list[T]`, it gives `list[named: T | V]`. Writing `NULL` removes a field, so
+  it adds no type.
+- When `x` is a union, as after a loop that may or may not have filled it, each member takes the
+  write and the results join, so `ret <- list()`, a loop of `ret[[i]] <- part`, and then
+  `ret$count <- n` leave every shape of `ret` holding the count.
 - The same write on a *nominal* `x` is checked rather than applied, because a nominal type's
   representation is its invariant: `v` is checked against the field's declared type, a field the
   representation does not declare is an error, and `x` keeps its nominal type either way.
