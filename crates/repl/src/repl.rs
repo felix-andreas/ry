@@ -199,6 +199,41 @@ pub fn run_console_on_ry_runtime(
     })
 }
 
+/// Reads the debug client's next message for [`debug_on_ry_runtime`]; `libr::eval::DebugReceive`
+/// states the contract.
+pub type DebugReceive = unsafe extern "C" fn(
+    std::ffi::c_int,
+    *mut usize,
+    *mut std::ffi::c_void,
+) -> *const std::ffi::c_char;
+
+/// Sends one message to the debug client; `libr::eval::DebugSend` states the contract.
+pub type DebugSend = unsafe extern "C" fn(*const std::ffi::c_char, usize, *mut std::ffi::c_void);
+
+/// Runs a Debug Adapter Protocol server on ry's runtime, which talks to the client through
+/// `receive` and `send` with `data` passed back to both, and returns the debugged program's
+/// exit status.
+///
+/// # Safety
+///
+/// The callbacks must keep their contracts, and `data` must stay valid, until this returns.
+pub unsafe fn debug_on_ry_runtime(
+    receive: DebugReceive,
+    send: DebugSend,
+    data: *mut std::ffi::c_void,
+    flags: RuntimeFlags,
+) -> Result<i32, ReplError> {
+    let library = ry_runtime()?;
+    type Adapter = unsafe extern "C" fn(
+        DebugReceive,
+        DebugSend,
+        *mut std::ffi::c_void,
+        std::ffi::c_int,
+    ) -> std::ffi::c_int;
+    let adapter = runtime_entry::<Adapter>(library, "ry_debug_adapter")?;
+    Ok(unsafe { adapter(receive, send, data, flags.bits()) })
+}
+
 /// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.
 struct RuntimeReloadWatcher {
     changed: unsafe extern "C" fn() -> std::ffi::c_int,

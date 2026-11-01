@@ -250,9 +250,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
             balance_posixlt(call.arg(0), true, false)
         }
     }),
-    // ry has no interactive debugger, so `browser()` continues as it does in a
-    // non-interactive GNU R session.
-    special("browser", -1, |_| Ok(nil())).invisible(),
+    // Without an attached debug adapter, `browser()` continues as it does in a non-interactive
+    // GNU R session.
+    special("browser", -1, |_| unsafe {
+        crate::debugger::browser()?;
+        Ok(nil())
+    })
+    .invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),

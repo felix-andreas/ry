@@ -1896,7 +1896,12 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
         Op::ForEnd => register(operand(0)).decrement_refcount(),
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
-        Op::SetSrcref => interp().srcref = constants.element(operand(0)),
+        Op::SetSrcref => {
+            interp().srcref = constants.element(operand(0));
+            if interp().debugger.is_some() {
+                crate::debugger::statement()?;
+            }
+        }
         Op::EndStatement => {
             set(operand(0), nil());
             for register in operand(1)..operand(2) {

@@ -15,13 +15,18 @@ use {
         ClientOptions, Notification, RequestKind, Simulation, position_of,
         verify_against_fresh_start,
     },
-    serde_json::Value,
+    serde_json::{Value, json},
     std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, VecDeque},
         fs,
+        io::BufReader,
         path::{Path, PathBuf},
-        process::Command,
-        sync::OnceLock,
+        process::{Child, ChildStdin, Command, Stdio},
+        sync::{
+            OnceLock,
+            mpsc::{self, Receiver},
+        },
+        time::Duration,
     },
 };
 
@@ -100,6 +105,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         editor: None,
         open: BTreeMap::new(),
         last_run: None,
+        debugger: None,
     };
     for step in &steps {
         journey.run(step).map_err(|problem| {
@@ -302,6 +308,7 @@ struct Journey {
     /// The editor's open buffers by URI: version and text.
     open: BTreeMap<String, (i32, String)>,
     last_run: Option<Run>,
+    debugger: Option<DebugSession>,
 }
 
 impl Journey {
@@ -707,8 +714,142 @@ impl Journey {
                     Err(format!("{stream} lacks `{needle}`:\n{output}"))
                 }
             }
+            ["debug", "start", path, options @ ..] => {
+                let mut session = DebugSession::start(&self.root)?;
+                let program = self.root.join(path);
+                let mut stop_on_entry = false;
+                let mut lines = Vec::new();
+                let mut options = options.iter();
+                while let Some(option) = options.next() {
+                    match *option {
+                        "entry" => stop_on_entry = true,
+                        "break" => {
+                            let line: u64 = options
+                                .next()
+                                .and_then(|line| line.parse().ok())
+                                .ok_or("`break` needs a line number")?;
+                            lines.push(json!({ "line": line }));
+                        }
+                        other => return Err(format!("unknown debug option `{other}`")),
+                    }
+                }
+                session.request("initialize", json!({ "adapterID": "ry" }))?;
+                session.request(
+                    "launch",
+                    json!({ "program": program, "stopOnEntry": stop_on_entry }),
+                )?;
+                session.request(
+                    "setBreakpoints",
+                    json!({ "source": { "path": program }, "breakpoints": lines }),
+                )?;
+                session.request("setExceptionBreakpoints", json!({ "filters": ["error"] }))?;
+                session.request("configurationDone", json!({}))?;
+                self.debugger = Some(session);
+                Ok(())
+            }
+            [
+                "debug",
+                action @ ("continue" | "next" | "step-in" | "step-out" | "disconnect"),
+            ] => {
+                let command = match *action {
+                    "step-in" => "stepIn",
+                    "step-out" => "stepOut",
+                    other => other,
+                };
+                self.debugger()?
+                    .request(command, json!({ "threadId": 1 }))?;
+                Ok(())
+            }
+            ["debug", "evaluate", expression] => {
+                let session = self.debugger()?;
+                let response = session.request(
+                    "evaluate",
+                    json!({ "expression": expression, "frameId": 1, "context": "repl" }),
+                )?;
+                session.evaluated = match response["success"].as_bool() {
+                    Some(true) => response["body"]["result"].as_str().map(str::to_owned),
+                    _ => response["message"]
+                        .as_str()
+                        .map(|message| format!("error: {message}")),
+                };
+                Ok(())
+            }
+            ["expect", "stopped", reason, "at", line] => {
+                let session = self.debugger()?;
+                let stopped = session.event("stopped")?;
+                let found = stopped["body"]["reason"].as_str().unwrap_or_default();
+                if found != *reason {
+                    return Err(format!("stopped for `{found}`: {stopped}"));
+                }
+                let stack = session.stack()?;
+                match stack.first() {
+                    Some(top) if top.ends_with(&format!("@{line}")) => Ok(()),
+                    _ => Err(format!("stopped at {stack:?}")),
+                }
+            }
+            ["expect", "stack", needle] => {
+                let stack = self.debugger()?.stack()?.join(" ");
+                match stack.contains(needle) {
+                    true => Ok(()),
+                    false => Err(format!("the stack is `{stack}`")),
+                }
+            }
+            ["expect", "variable", name, value] => {
+                let session = self.debugger()?;
+                let scopes = session.request("scopes", json!({ "frameId": 1 }))?;
+                let reference = scopes["body"]["scopes"][0]["variablesReference"].clone();
+                let variables =
+                    session.request("variables", json!({ "variablesReference": reference }))?;
+                let variables = variables["body"]["variables"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                match variables.iter().find(|variable| variable["name"] == *name) {
+                    Some(variable) if variable["value"] == *value => Ok(()),
+                    Some(variable) => Err(format!("`{name}` is {}", variable["value"])),
+                    None => Err(format!("no variable `{name}` among {variables:?}")),
+                }
+            }
+            ["expect", "evaluated", needle] => {
+                let session = self.debugger()?;
+                match &session.evaluated {
+                    Some(result) if result.contains(needle) => Ok(()),
+                    other => Err(format!("evaluated to {other:?}")),
+                }
+            }
+            ["expect", "debug-output", needle] => {
+                let session = self.debugger()?;
+                session.drain();
+                match session.output.contains(needle) {
+                    true => Ok(()),
+                    false => Err(format!("the output lacks `{needle}`:\n{}", session.output)),
+                }
+            }
+            ["expect", "exited", code] => {
+                let session = self.debugger()?;
+                let exited = session.event("exited")?;
+                session.event("terminated")?;
+                session.request("disconnect", json!({}))?;
+                let status = session
+                    .child
+                    .wait()
+                    .map_err(|error| format!("waiting for the adapter: {error}"))?;
+                session.drain();
+                match exited["body"]["exitCode"].to_string() == *code && status.code().is_some() {
+                    true => Ok(()),
+                    false => Err(format!(
+                        "exited with {exited} and the adapter with {status}"
+                    )),
+                }
+            }
             _ => Err("unknown step".to_owned()),
         }
+    }
+
+    fn debugger(&mut self) -> Result<&mut DebugSession, String> {
+        self.debugger
+            .as_mut()
+            .ok_or_else(|| "no debug session is running".to_owned())
     }
 
     fn editor(&mut self) -> &mut Simulation {
@@ -958,4 +1099,143 @@ fn offset_of(text: &str, position: lsp_types::Position, utf8: bool) -> usize {
         };
     }
     line_end
+}
+
+/// `ry debug-adapter` driven over its stdio, as an editor drives it.
+struct DebugSession {
+    child: Child,
+    stdin: ChildStdin,
+    messages: Receiver<Value>,
+    /// Events that arrived and no step has waited for yet.
+    events: VecDeque<Value>,
+    /// Everything the program printed, from `output` events.
+    output: String,
+    evaluated: Option<String>,
+    seq: u64,
+}
+
+/// A step that waits longer than this is a hang, not a slow machine.
+const DEBUG_TIMEOUT: Duration = Duration::from_secs(120);
+
+impl DebugSession {
+    fn start(root: &Path) -> Result<DebugSession, String> {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("debug-adapter")
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("starting the debug adapter: {error}"))?;
+        let stdin = child.stdin.take().ok_or("the adapter has no stdin")?;
+        let stdout = child.stdout.take().ok_or("the adapter has no stdout")?;
+        let (sender, messages) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            while let Ok(Some(body)) = ry::debug_adapter::read_message(&mut reader) {
+                let Ok(message) = serde_json::from_slice::<Value>(&body) else {
+                    break;
+                };
+                if sender.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(DebugSession {
+            child,
+            stdin,
+            messages,
+            events: VecDeque::new(),
+            output: String::new(),
+            evaluated: None,
+            seq: 0,
+        })
+    }
+
+    fn request(&mut self, command: &str, arguments: Value) -> Result<Value, String> {
+        self.seq += 1;
+        let seq = self.seq;
+        let message =
+            json!({ "seq": seq, "type": "request", "command": command, "arguments": arguments });
+        ry::debug_adapter::write_message(&mut self.stdin, message.to_string().as_bytes())
+            .map_err(|error| format!("sending `{command}`: {error}"))?;
+        loop {
+            let message = self.receive(command)?;
+            if message["type"] == "response" && message["request_seq"] == seq {
+                return Ok(message);
+            }
+        }
+    }
+
+    /// The next event named `name`, skipping the other events before it.
+    fn event(&mut self, name: &str) -> Result<Value, String> {
+        while let Some(event) = self.events.pop_front() {
+            if event["event"] == name {
+                return Ok(event);
+            }
+        }
+        loop {
+            self.receive(name)?;
+            while let Some(event) = self.events.pop_front() {
+                if event["event"] == name {
+                    return Ok(event);
+                }
+            }
+        }
+    }
+
+    /// The stack of the stopped program as `name@line`, innermost first.
+    fn stack(&mut self) -> Result<Vec<String>, String> {
+        let response = self.request("stackTrace", json!({ "threadId": 1 }))?;
+        Ok(response["body"]["stackFrames"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|frame| {
+                format!(
+                    "{}@{}",
+                    frame["name"].as_str().unwrap_or_default(),
+                    frame["line"]
+                )
+            })
+            .collect())
+    }
+
+    /// Takes in the messages that already arrived.
+    fn drain(&mut self) {
+        while let Ok(message) = self.messages.try_recv() {
+            self.take(message);
+        }
+    }
+
+    fn receive(&mut self, waiting_for: &str) -> Result<Value, String> {
+        let message = self.messages.recv_timeout(DEBUG_TIMEOUT).map_err(|_| {
+            format!(
+                "no answer while waiting for `{waiting_for}`; output:\n{}",
+                self.output
+            )
+        })?;
+        self.take(message.clone());
+        Ok(message)
+    }
+
+    fn take(&mut self, message: Value) {
+        if message["event"] == "output" {
+            self.output
+                .push_str(message["body"]["output"].as_str().unwrap_or_default());
+        } else if message["type"] == "event" {
+            self.events.push_back(message);
+        }
+    }
+}
+
+impl Drop for DebugSession {
+    fn drop(&mut self) {
+        // A scenario that failed midway leaves the adapter waiting for its client.
+        if let Err(error) = self.child.kill() {
+            eprintln!("stopping the debug adapter: {error}");
+        }
+        if let Err(error) = self.child.wait() {
+            eprintln!("waiting for the debug adapter: {error}");
+        }
+    }
 }
