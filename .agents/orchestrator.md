@@ -76,6 +76,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
 - Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
+- Docs pass and simulated-user testing of the new features (session_0111kWqBrKf593Cdj9soupRR, Sonnet).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -85,4 +86,4 @@ Nothing queued: every build-order step is in flight.
 Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
-- Run the next docs pass after the records/tags, JIT and table-in-interpreter PRs land.
+- Run another docs pass after the table-in-interpreter and JIT round 2 PRs land.
