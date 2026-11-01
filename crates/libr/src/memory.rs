@@ -27,7 +27,10 @@ pub unsafe fn alloc_vector(kind: SexpType, length: R_xlen_t) -> ApiResult<Sexp> 
         SexpType::Pairlist => alloc_list(length, SexpType::Pairlist),
         SexpType::Language => alloc_list(length, SexpType::Language),
         _ if kind.is_vector() && kind != SexpType::Char => {
-            let object = runtime.heap.alloc_vector(kind, length)?;
+            // GNU R leaves a fresh vector of numbers uninitialized, and packages fill what they
+            // allocate, so zeroing it would touch every page of a large vector twice.
+            let length = usize::try_from(length).map_err(|_| HeapError::NegativeLength)?;
+            let object = runtime.heap.alloc_vector_uninit(kind, length)?;
             runtime.heap.root(object);
             Ok(object)
         }

@@ -151,3 +151,18 @@ port <- config@port
 config: integer
 port: Unknown
 21..32 error[strict] strict mode: could not determine the type of `port`; add a type annotation
+
+#---- a_data_frame_column_read_is_a_strict_origin
+#~~~~ R/main.R
+#: fn(df: data.frame) -> double
+total <- function(df) sum(df$amount)
+#: fn(df: data.frame) -> double
+first <- function(df) sum(df[["amount"]])
+#++++
+== R/main.R
+total: fn(df: data.frame) -> double
+first: fn(df: data.frame) -> double
+54..68 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+58..67 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+123..142 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+127..141 error[strict] strict mode: this expression has an undetermined type (`Unknown`)

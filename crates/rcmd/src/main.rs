@@ -101,14 +101,13 @@ fn assemble(arguments: &[String]) -> rcmd::Result<PathBuf> {
             libr: &absolute(libr)?,
             rcmd: &rcmd,
             gnu_r_home: &gnu_r_home,
-            toolchain: rcmd::Toolchain::default(),
+            toolchain: rcmd::Toolchain::for_gnu_r_home(&gnu_r_home)?,
         },
     )?;
     Ok(root)
 }
 
-/// Runs a session on ry's runtime, the `libR.so` of the R home, which also holds the
-/// interpreter.
+/// Runs a session on ry's runtime, the libR of the R home, which also holds the interpreter.
 fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
     let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session
     {
@@ -142,9 +141,9 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
     }
     // With neither a file nor `-e`, `ry_run` reads stdin as a console, one expression at a time.
     let input = expressions.clone();
-    let library_path = home.join("lib/libR.so");
-    // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
-    // dynamic linker satisfy them from it.
+    let library_path = home.join("lib").join(rcmd::LIBR_FILE);
+    // Loading ry's libR globally is what lets compiled packages resolve R's API from it: by
+    // soname on Linux, by flat lookup on macOS.
     let library = unsafe {
         libloading::os::unix::Library::open(
             Some(&library_path),

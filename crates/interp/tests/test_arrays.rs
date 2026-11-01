@@ -58,6 +58,11 @@ const PRINTS: &[(&str, &str)] = &[
     // Operators.
     ("xs * 2", "[2, 4, 6]\n"),
     ("xs + [10, 20, 30]", "[11, 22, 33]\n"),
+    // An operand that is not an item of the item type gives R's plain vector, as base R code
+    // such as `str()` needs when it subtracts a vector it derived from an Array.
+    ("xs - c(1, 1, 1)", "[1] 0 1 2\n"),
+    ("is.Array(xs + 1L)", "[1] FALSE\n"),
+    ("is.Array(xs + NA)", "[1] FALSE\n"),
     ("-xs", "[-1, -2, -3]\n"),
     ("ns %/% 2L", "[0L, 1L, 1L]\n"),
     ("ns / 2L", "[0.5, 1, 1.5]\n"),
@@ -158,15 +163,10 @@ const ERRORS: &[(&str, &str)] = &[
         "has class \"money\"",
     ),
     (
-        "xs + c(1, 2)",
-        "combines an Array only with another Array or a single value",
-    ),
-    (
         "xs + [1, 2]",
         "needs Arrays of the same length, but they have 3 and 2 items",
     ),
     ("xs + ns", "one is double and the other is integer"),
-    ("xs + 1L", "one is double and the other is integer"),
     (
         "words + \"b\"",
         "`+` is not defined for an Array of character items",
@@ -178,6 +178,10 @@ const ERRORS: &[(&str, &str)] = &[
     (
         "points == points",
         "`==` is not defined for an Array of ry value items",
+    ),
+    (
+        "points + 1",
+        "`+` is not defined for an Array of ry value items",
     ),
     ("[2000000000L] * 2L", "produced a missing value at item 1"),
     ("[0] / [0]", "produced a missing value"),
