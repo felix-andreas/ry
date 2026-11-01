@@ -1,12 +1,11 @@
-# Runs the table benchmark's questions as R code on ry's DataFrame, under `ry run --runtime ry`,
+# Runs the table benchmark's questions as R code on ry's DataFrame, under `ry run`,
 # and prints one tab-separated line per run:
 # `question  run  seconds  rows  cols  checksum`. Loading is not timed, as in db-benchmark, and
 # every question runs twice so the second run shows warm-cache behavior. The questions use the
-# Polars-style API; the top-two question, the `:=` loops and the rolling join use the data.table
-# syntax the DataFrame keeps for compatibility, because the API has no top-k, in-place update or
-# rolling join.
+# Polars-style API. The `:=` loops use the data.table syntax the DataFrame keeps for
+# compatibility, because they measure in-place updates, which the Polars-style API does not do.
 #
-# Usage: ry run --runtime ry ry.R <data-dir>
+# Usage: ry run ry.R <data-dir>
 
 args <- commandArgs(trailingOnly = TRUE)
 dir <- args[[1]]
@@ -52,7 +51,11 @@ time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
 time_question("groupby q7", by("id3") |> GroupBy.agg(
   range_v1_v2 = (col("v1") |> Expr.max()) - (col("v2") |> Expr.min())
 ))
-time_question("groupby q8", x[order(-v3), .(largest2_v3 = head(v3, 2L)), by = id6])
+time_question("groupby q8", DataFrame.lazy(x) |>
+  LazyFrame.sort("v3", descending = TRUE) |>
+  LazyFrame.group_by("id6") |>
+  LazyGroupBy.agg(largest2_v3 = col("v3") |> Expr.head(2L)) |>
+  LazyFrame.collect())
 time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(col("v1"), col("v2"))^2))
 time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
   sum_of("v3"),
@@ -89,5 +92,4 @@ invisible(gc())
 
 prices <- read("rolljoin_prices.csv", factors = FALSE)
 trades <- read("rolljoin_trades.csv", factors = FALSE)
-setkey(prices, ticker, time)
-time_question("rolljoin keyed", prices[trades, on = .(ticker, time), roll = TRUE])
+time_question("rolljoin keyed", DataFrame.join_asof(trades, prices, on = "time", by = "ticker"))

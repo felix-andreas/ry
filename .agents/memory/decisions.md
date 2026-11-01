@@ -3256,6 +3256,31 @@ first lines R had already read, leaving R mid-command.
   nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
   pin the behavior.
 
+## Per-group top rows and as-of joins reuse the engine's kernels
+
+- **Previous shape.** The Polars-style API had no way to keep each group's best rows or to join on
+  the nearest key, so the table bench answered db-benchmark's top-two question and the keyed
+  rolling join with data.table syntax (`x[order(-v3), head(v3, 2L), by = id6]`,
+  `prices[trades, roll = TRUE]`).
+- **`Expr.head(n)` inside `agg` keeps up to `n` values per group, as rows.** Polars gives a list
+  per group there, but ry has no list columns, so the values are exploded into rows, which is also
+  data.table's layout. The checker tracks an expression's shape (`Shape` in
+  `crates/semantics/src/check.rs`: per row, per group, or up to `n` per group) and accepts `Head`
+  only as a whole `agg` item, because `head(v, 2) + 1` would mix shapes. After a sort, the planner
+  fuses sort and aggregation into one query, which hits the engine's top-k kernel
+  (`group.rs::top_k_shape`) instead of sorting the whole table.
+- **`join_asof` is `How::Asof(Strategy)` in `table::lazy`, lowered to the rolling join.** The left
+  frame is data.table's `i`, so `"backward"` is `roll = TRUE`, `"forward"` is `roll = -Inf` and
+  `"nearest"` is `roll = "nearest"`. The `by` columns become the leading equality keys and `on` the
+  rolled key. One kernel (`join.rs::rolling`, with Polars' asof as the fallback) serves both APIs.
+- **A grouped median holds `(row, slot)` pairs, one list per run of rows.** It used to hold
+  `(slot, value)` pairs and concatenate the threads' lists, 240 MB of fresh memory per 1e7-row
+  query; page-faulting that in made groupby q6 from R two to ten times slower than the same kernel
+  measured from Rust. Reading the value from the input column during the counting sort halves the
+  lists and drops the concatenation.
+- **Impact.** No new kernel or stored state; both verbs are thin plan steps. The typing fixtures in
+  `frames.R.test` and `crates/table/tests/test_lazy.rs` pin the semantics.
+
 ## data.table's helpers run data.table's own C, and the C API is what makes them fast
 
 - **Previous shape.** The plan was to route R calls to `fread`, `fwrite`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`, `fifelse`, `tstrsplit` and friends to the engine's kernels in `table::ops` and `table::io`, which beat data.table when measured from Rust. Under ry's runtime those calls ran data.table's own C through libr, at up to 2.5 times GNU R's time, because every C API call (`TRUELENGTH`, `STRING_ELT`, `LENGTH`, `INTEGER`, the type predicates, `PROTECT`) entered the full error boundary.
@@ -3270,6 +3295,18 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+
+## An Array is a flagged R vector, written `[...]`
+
+- **Previous shape.** ry had no strict vector. Typed code used `c()`, whose result R coerces (`c(1, "a")` is character), recycles, and lets hold `NA`, so neither the checker nor a DataFrame column could promise one item type without missing values.
+- **Target shape.** `[a, b, c]` is ry syntax for `Array<T>`, the standard library's strict vector: one exact item type (a single `logical`, `integer`, `double` or `character`, or a ry value), no `NA`, no attributes, no recycling and no implicit conversion. The contract is `reference/type-system.mdx`, "Arrays"; the user page is `type-checking/arrays.mdx`.
+- **Runtime representation.** An Array is an ordinary R vector carrying the heap flag `flag_bits::ARRAY` (`crates/heap/src/object.rs`): atomic storage for scalar items, a VECSXP for ry-value items. A separate object type was rejected because every C API accessor, `sum()`, and the JIT already read the unboxed storage, so converting to R is free (drop the flag) and nothing has to learn a new layout. Setting any attribute clears the flag, which keeps "no attributes" true without checks at every attribute write. `values::duplicate` and `shallow_duplicate` drop the flag on the copy (nested Arrays keep theirs), because a copier is about to write and a builtin or C code may write an `NA`; only `arrays::writable` re-flags a copy, after checking the write.
+- **One place enforces the rules.** `crates/interp/src/arrays.rs` validates construction, operators (`arith.rs` wraps each builtin in `strict`), indexing and replacement, then flags the result. The bytecode fast paths and the JIT's type guard refuse a flagged operand, so they can never skip a check; a dedicated Array feedback kind is backlog work.
+- **R code keeps working on Arrays.** Reads follow R's positions wherever R gives no `NA` (negative positions, zeros), and everything that would produce `NA` is an error. A replacement that is not an item of the item type (an `NA`, an R vector, another type) does not error: the result is the plain R vector R would build, so base functions such as `ifelse()` that assign into an argument keep working. Typed code cannot reach that path because the checker rejects the value; the rules the checker cannot see (bounds, no recycling) stay runtime errors, so a typed `Array<T>` never holds a plain vector.
+- **`List` results.** A `List` function returns an Array only when its collection argument (`list`, `first`, `lists`) is one, never because an item argument is. A callback's result type is bound by the `item` constraint (`types/ry.Rtypes`), so the checker rejects `List.map` to a non-item instead of failing at run time.
+- **Checker.** `Array<T>` fits `T[]` (atomic items) or `list[T]` (ry-value items), never the reverse, so Arrays pass to R code and R vectors need `as.Array()`. A DataFrame stores an Array column as its plain vector, so `column_type` maps `Array<T>` to `T[]`.
+- **Impact.** No duplicated state: the flag is the single source of truth for strictness, and the checker's type and the runtime flag agree by construction. Pinned by `crates/semantics/tests/typing/arrays.R.test`, `crates/interp/tests/test_arrays.rs` (including a generated round trip) and Array seeds in both fuzzers.
+
 # Decision record: editor responsiveness at 300,000 lines
 
 - **Previous shape.** Completion walked every item in the project per request, reading each item's

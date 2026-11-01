@@ -7,7 +7,7 @@
 
 use {
     heap::{Heap, object::Sexp},
-    interp::{eval, frame, lower, print, standard_library, unwind::Unwind, values},
+    interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
     std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
     syntax::testing::{SplitMix64, fuzz_iterations},
 };
@@ -861,15 +861,30 @@ fn declarations_and_runtime_bind_the_same_names() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.exports");
     let manifest = fs::read_to_string(&manifest)
         .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", manifest.display()));
-    // The list conversions are base builtins, listed in the manifest only for the checker.
+    // The list and Array conversions are base builtins, listed in the manifest only for the
+    // checker.
+    let outside = |name: &str| {
+        matches!(
+            name,
+            "as.record" | "as.tuple" | "as.tag" | "as.Array" | "is.Array"
+        )
+    };
     let exported: BTreeSet<String> = manifest
         .lines()
-        .filter(|line| {
-            !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag")
-        })
+        .filter(|line| !line.starts_with('#') && !outside(line))
         .map(str::to_owned)
         .collect();
-    let declared: BTreeSet<String> = declarations().into_iter().map(|(name, _)| name).collect();
+    // An S3 method such as `Ops.Expr` is declared for the checker but registered, not exported.
+    let registered: BTreeSet<&str> = dataframe::METHODS
+        .lines()
+        .filter_map(|line| line.trim().split_once(" = function"))
+        .map(|(name, _)| name)
+        .collect();
+    let declared: BTreeSet<String> = declarations()
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| !outside(name) && !registered.contains(name.as_str()))
+        .collect();
     let mut bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
     bound.extend(frame::package_functions().map(str::to_owned));
     let unexported: Vec<_> = declared.difference(&exported).collect();
