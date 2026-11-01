@@ -10,7 +10,8 @@ use {
         stubs::stubs,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
-            for_each_child_type, map_child_types, scalar, substitute_rigid, union_of, unknown,
+            array_element, for_each_child_type, is_ry_value_type, map_child_types, scalar,
+            substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -862,6 +863,20 @@ impl<'db> InferenceTable<'db> {
             {
                 true
             }
+            // An Array is an R vector at run time: a scalar item type makes it an atomic vector
+            // and a ry-value item type a list, so it passes to R code as one, never the reverse.
+            (
+                TyKind::Named(..),
+                TyKind::Vector(expected_element) | TyKind::List(expected_element),
+            ) if array_element(db, actual).is_some() => {
+                let element = array_element(db, actual).map(|element| self.resolve(db, element));
+                let Some(element) = element else {
+                    return false;
+                };
+                let atomic = !is_ry_value_type(db, element);
+                atomic == matches!(expected.kind(db), TyKind::Vector(_))
+                    && self.compatible_probe(db, element, *expected_element, depth + 1)
+            }
             // Only the projection direction: structural into nominal happens only via `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
                 match self.representation(db, *actual_name, actual_arguments) {
@@ -1086,9 +1101,11 @@ impl<'db> InferenceTable<'db> {
         }
         if !self.compatible(db, actual.ret, expected.ret) {
             let returns = self.resolve(db, actual.ret);
+            let required = self.resolve(db, expected.ret);
             return Some(FunctionMismatch::Return {
-                required: self.resolve(db, expected.ret),
+                required,
                 constraint: self.variable_constraint(db, returns),
+                required_constraint: self.variable_constraint(db, required),
                 returns,
             });
         }
@@ -1175,7 +1192,7 @@ impl<'db> InferenceTable<'db> {
 
     /// The one fact the rendered type cannot show: `fn(s: U) -> U` prints the same
     /// whether `U` accepts anything or only numbers.
-    fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
+    pub(crate) fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let TyKind::Var(var) = ty.kind(db) else {
             return None;
         };
@@ -1238,7 +1255,10 @@ pub enum FunctionMismatch<'db> {
     Return {
         required: Ty<'db>,
         returns: Ty<'db>,
+        /// The constraint the function's own result type carries.
         constraint: Option<Constraint>,
+        /// The constraint the expected result type carries, such as `item` on `List.map`'s `B`.
+        required_constraint: Option<Constraint>,
     },
 }
 
@@ -1507,6 +1527,14 @@ fn constraint_rejects<'db>(
             .get(name)
             .is_some_and(|declared| declared.join(constraint) == *declared)
     };
+    // A union satisfies a bound when every member does: `double | integer` is a number either way.
+    if let TyKind::Union(members) = ty.kind(db) {
+        let every_member_admissible = members
+            .iter()
+            .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
+        return (!every_member_admissible)
+            .then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
@@ -1547,6 +1575,15 @@ fn constraint_rejects<'db>(
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
+        },
+        Constraint::ArrayItem => match ty.kind(db) {
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
+            )
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => is_ry_value_type(db, ty),
         },
     };
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))

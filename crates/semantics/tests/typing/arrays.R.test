@@ -1,0 +1,355 @@
+#==== literal
+#---- items_share_one_type
+xs <- [1, 2, 3]
+ns <- [1L, 2L]
+bs <- [TRUE, FALSE]
+ss <- ["a", "b"]
+#++++
+xs: Array<double>
+ns: Array<integer>
+bs: Array<logical>
+ss: Array<character>
+
+#---- empty_takes_its_type_from_the_annotation
+#: Array<character>
+names <- []
+#++++
+names: Array<character>
+
+#---- empty_takes_its_type_from_first_use
+xs <- []
+ys <- List.append(xs, 1L)
+#++++
+xs: Array<Unknown>
+ys: Array<integer>
+
+#---- items_never_convert
+xs <- [1L, 2.5]
+#++++
+xs: Unknown
+11..14 error[type-mismatch] this item is `double`, but the Array's first item is `integer`. An Array's items share one type and are never converted into each other
+
+#---- tags_join_into_a_union
+ts <- [:Ok(1), :Err("no")]
+#++++
+ts: Array<:Ok(double) | :Err(character)>
+
+#---- records_box_into_a_list
+points <- [(x = 1, y = 2), (x = 3, y = 4)]
+first_x <- points[[1]]$x
+#++++
+points: Array<Record{x: double, y: double}>
+first_x: double
+
+#---- missing_value_is_an_error
+xs <- [1, NA]
+#++++
+xs: Unknown
+10..12 error[type-mismatch] an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`
+
+#---- vector_item_is_an_error
+xs <- [c(1, 2)]
+#++++
+xs: Unknown
+7..14 error[type-mismatch] an Array cannot hold `double[]`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+
+#---- null_item_is_an_error
+xs <- [1, NULL]
+#++++
+xs: Unknown
+10..14 error[type-mismatch] an Array cannot hold `NULL`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+
+#---- complex_item_is_an_error
+xs <- [1i]
+#++++
+xs: Unknown
+7..9 error[type-mismatch] an Array cannot hold `complex`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+
+#---- nested_arrays
+grid <- [[1, 2], [3, 4]]
+cell <- grid[[2]][[1]]
+#++++
+grid: Array<Array<double>>
+cell: double
+
+#==== annotations
+#---- vector_item_type_is_an_error
+#: Array<double[]>
+xs <- [1]
+#++++
+xs: Array<double>
+9..17 error[annotation] an Array cannot hold `double[]`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+
+#---- nullable_item_type_is_an_error
+#: Array<double | NULL>
+xs <- [1]
+#++++
+xs: Array<double>
+9..22 error[annotation] an Array cannot hold `double | NULL`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+
+#---- tag_union_item_type
+#: Array<:Some(double) | :None>
+xs <- [:Some(1), :None]
+#++++
+xs: Array<:Some(double) | :None>
+
+#---- annotation_checks_the_items
+#: Array<integer>
+xs <- [1, 2]
+#++++
+xs: Array<integer>
+24..30 error[type-mismatch] expected `Array<integer>`, found `Array<double>`
+
+#==== conversion
+#---- array_passes_to_r_code
+#: fn(x: double[]) -> double
+total <- function(x) sum(x)
+t <- total([1, 2])
+m <- mean([1, 2])
+#++++
+total: fn(x: double[]) -> double
+t: double
+m: double
+
+#---- r_vector_is_not_an_array
+#: fn(x: Array<double>) -> double
+total <- function(x) sum(x)
+t <- total(c(1, 2))
+#++++
+total: fn(x: Array<double>) -> double
+t: Unknown
+73..80 error[type-mismatch] expected `Array<double>`, found `double[]`. Convert an R vector with `as.Array()`
+
+#---- as_array_converts
+a <- as.Array(c(1, 2))
+b <- as.Array(1:3)
+c1 <- as.Array(c("a", "b"))
+d <- as.Array(list((x = 1,), (x = 2,)))
+#++++
+a: Array<double>
+b: Array<integer>
+c1: Array<character>
+d: Array<Record{x: double}>
+
+#---- array_of_records_passes_as_a_list
+xs <- [(x = 1,), (x = 2,)]
+n <- length(xs)
+#++++
+xs: Array<Record{x: double}>
+n: integer
+
+#==== operators
+#---- arithmetic_keeps_the_item_type
+xs <- [1, 2]
+ns <- [1L, 2L]
+a <- xs + xs
+b <- ns * 2L
+c1 <- ns %/% 2L
+d <- ns / 2L
+e <- -xs
+f <- xs ^ 2
+#++++
+xs: Array<double>
+ns: Array<integer>
+a: Array<double>
+b: Array<integer>
+c1: Array<integer>
+d: Array<double>
+e: Array<double>
+f: Array<double>
+
+#---- comparison_and_logic
+xs <- [1, 2]
+big <- xs > 1
+both <- big & !big
+either <- big | big
+#++++
+xs: Array<double>
+big: Array<logical>
+both: Array<logical>
+either: Array<logical>
+
+#---- integer_and_double_never_mix
+ns <- [1L, 2L]
+a <- ns + 1
+#++++
+ns: Array<integer>
+a: Unknown
+20..26 error[type-mismatch] `+` is not defined between `Array<integer>` and `double`. Both sides must have one item type, and `integer` and `double` are never converted into each other
+
+#---- r_vector_operand_is_an_error
+xs <- [1, 2]
+a <- xs + c(1, 2)
+#++++
+xs: Array<double>
+a: Unknown
+18..30 error[type-mismatch] `+` is not defined between `Array<double>` and `double[]`. Convert the R vector with `as.Array()` first
+
+#---- character_arithmetic_is_an_error
+a <- ["a"] + ["b"]
+#++++
+a: Unknown
+5..18 error[type-mismatch] `+` is not defined between `Array<character>` and `Array<character>`. On Arrays it takes `integer` or `double` items
+
+#---- not_on_numbers_is_an_error
+a <- ![1, 2]
+#++++
+a: Unknown
+6..12 error[type-mismatch] expected a `logical` value, found `Array<double>`
+
+#==== indexing
+#---- extract_and_subset
+xs <- [10, 20, 30]
+one <- xs[[2]]
+some <- xs[2:3]
+masked <- xs[xs > 15]
+positions <- [1L, 3L]
+by_array <- xs[positions]
+all <- xs[]
+#++++
+xs: Array<double>
+one: double
+some: Array<double>
+masked: Array<double>
+positions: Array<integer>
+by_array: Array<double>
+all: Array<double>
+
+#---- name_index_is_an_error
+xs <- [10, 20]
+a <- xs["a"]
+#++++
+xs: Array<double>
+a: Unknown
+23..26 error[type-mismatch] `x[i]` on an Array takes one index: positions, or a `logical` mask, but this index is `character`. An Array has one dimension and no names
+
+#---- two_indexes_is_an_error
+xs <- [10, 20]
+a <- xs[[1, 2]]
+#++++
+xs: Array<double>
+a: Unknown
+20..30 error[type-mismatch] `x[[i]]` on an Array takes one position, an `integer` or `double`. An Array has one dimension and no names
+
+#==== iteration
+#---- for_binds_the_item_type
+total <- 0
+for (x in [1, 2, 3]) total <- total + x
+#++++
+total: double
+NULL
+
+#==== standard_library
+#---- list_functions_take_and_return_arrays
+xs <- [1, 2, 3]
+doubled <- List.map(xs, function(x) x * 2)
+big <- List.keep_if(xs, function(x) x > 1)
+n <- List.len(xs)
+s <- List.sum(xs)
+first <- List.first(xs)
+labels <- List.map(xs, function(x) Num.to_str(x))
+both <- List.concat(xs, [4])
+parts <- List.split_at(xs, 1L)
+#++++
+xs: Array<double>
+doubled: Array<double>
+big: Array<double>
+n: integer
+s: double
+first: :Ok(double) | :Err(:ListWasEmpty)
+labels: Array<character>
+both: Array<double>
+parts: Record{before: Array<double>, others: Array<double>}
+
+#---- list_functions_still_take_lists
+n <- List.len(list(1, 2))
+#++++
+n: integer
+
+#---- mapping_to_a_non_item_is_an_error
+xs <- [1, 2]
+twice <- function(x: double) -> double[] c(x, x)
+pairs <- List.map(xs, twice)
+wrapped <- List.map(xs, function(x) list(x))
+#++++
+xs: Array<double>
+twice: fn(x: double) -> double[]
+pairs: Unknown
+wrapped: Unknown
+84..89 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `double[]`
+115..134 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `list{double}`
+
+#---- as_array_needs_items
+ys <- as.Array(list(c(1, 2)))
+#++++
+ys: Unknown
+6..29 error[type-mismatch] no overload of `as.Array` matches these arguments. I tried all 6 declared signatures; the first candidate fails with: expected `logical[]`, found `list{double[]}`
+
+#==== contextual_lambdas
+#---- a_lambda_takes_the_item_type
+xs <- [1, 2]
+halves <- List.map(xs, \(x) x / 2)
+pairs <- List.map(xs, \(x) c(x, x))
+#++++
+xs: Array<double>
+halves: Array<double>
+pairs: Unknown
+70..82 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `double[]`
+
+#---- a_list_types_the_lambda_too
+words <- list("a", "bb")
+sizes <- List.map(words, \(w) nchar(w))
+#++++
+words: list{character, character}
+sizes: list[integer]
+
+#---- nested_lambdas_take_their_own_context
+grid <- List.map([1, 2], \(x) List.sum(List.map([10, 20], \(y) x * y)))
+#++++
+grid: Array<double>
+
+#---- an_annotated_parameter_keeps_its_annotation
+xs <- [1, 2]
+ys <- List.map(xs, function(x: integer) x)
+#++++
+xs: Array<double>
+ys: Unknown
+32..54 error[type-mismatch] this function is passed `double`, but its parameter `x` accepts `integer`
+
+#---- a_formal_with_a_default_is_left_to_inference
+xs <- [1, 2]
+scaled <- List.map(xs, function(x, scale = 2) x * scale)
+#++++
+xs: Array<double>
+scaled: Array<double>
+
+#---- a_body_that_refuses_the_item_type_names_the_parameter
+words <- ["a", "b"]
+bad <- List.map(words, \(w) w * 2)
+#++++
+words: Array<character>
+bad: Unknown
+48..49 error[type-mismatch] `w` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
+
+#---- a_formal_after_dots_takes_no_type
+words <- ["a", "b"]
+doubled <- List.map(words, function(..., w) w * 2)
+#++++
+words: Array<character>
+doubled: Unknown
+47..69 error[type-mismatch] this function is passed `character`, but its parameter `w` is used as a numeric value (`integer` or `double`)
+
+#---- a_fold_accumulator_is_left_to_inference
+bytes <- Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
+total <- List.walk([1L, 2L], list(), function(seen, item) List.append(seen, item))
+#++++
+bytes: list{}
+total: list{}
+
+#---- an_update_callback_keeps_its_item_hint
+people <- [(name = "a", age = 1), (name = "b", age = 2)]
+renamed <- List.update(people, 1L, function(p) (name = p$nme, age = p$age))
+#++++
+people: Array<Record{age: double, name: character}>
+renamed: Unknown
+114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`

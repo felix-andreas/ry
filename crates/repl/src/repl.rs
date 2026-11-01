@@ -2,6 +2,9 @@
 //! symbol at runtime, so nothing here needs R at build time.
 
 pub mod console;
+// The GNU R installations ry's runtime searches too; `repl` does not link the interpreter.
+#[path = "../../interp/src/gnu_r_home.rs"]
+mod gnu_r_home;
 pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
@@ -142,40 +145,97 @@ pub struct RuntimeFlags {
     pub annotation_checks: bool,
     /// S4, R6 and Reference Class definitions in user code are allowed.
     pub object_systems: bool,
+    /// The project is in strict mode, so the package loader binds pure constants lazily.
+    pub strict: bool,
 }
 
 impl RuntimeFlags {
     fn bits(self) -> std::ffi::c_int {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
+            | (std::ffi::c_int::from(self.strict) << 2)
     }
 }
 
-/// Runs the interactive console on ry's own runtime instead of GNU R. Only the editor, the
-/// completer and the filter of `options` apply: ry's runtime has no `.Call` routines to register
-/// and runs no startup code.
+/// Runs the interactive console on ry's own runtime instead of GNU R. The runtime attaches the
+/// package loader and evaluates `startup` before the first prompt, and before each command it
+/// reloads a loaded package whose sources changed, so it brings its own `hooks` and refuses
+/// a caller's. `routines` does not apply: ry's runtime has no `.Call` routines to register.
 pub fn run_console_on_ry_runtime(
-    options: RunOptions,
+    mut options: RunOptions,
     flags: RuntimeFlags,
 ) -> Result<i32, ReplError> {
-    use std::ffi::{c_char, c_int, c_uchar};
+    use std::ffi::{CString, c_char, c_int, c_uchar};
+    if options.hooks.is_some() {
+        return Err(ReplError(
+            "ry's runtime watches for reloads itself and takes no console hooks".into(),
+        ));
+    }
     let library = ry_runtime()?;
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
-    type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
+    type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
+    let changed = runtime_entry::<unsafe extern "C" fn() -> c_int>(library, "ry_loader_changed")?;
+    let startup = match options.startup.is_empty() {
+        true => None,
+        false => Some(
+            CString::new(options.startup.join("\n"))
+                .map_err(|_| ReplError("the startup code contains a NUL byte".into()))?,
+        ),
+    };
+    options.hooks = Some(Box::new(RuntimeReloadWatcher { changed }));
     let banner = std::io::stdin()
         .is_terminal()
         .then(|| "ry console on ry's runtime. Type q() or Ctrl-D to quit.".to_owned());
     console::install_for_ry_runtime(options, banner)?;
-    Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
+    Ok(unsafe {
+        repl(
+            console::ry_read_console,
+            startup
+                .as_ref()
+                .map_or(std::ptr::null(), |startup| startup.as_ptr()),
+            flags.bits(),
+        )
+    })
 }
 
-fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
+/// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.
+struct RuntimeReloadWatcher {
+    changed: unsafe extern "C" fn() -> std::ffi::c_int,
+}
+
+impl ConsoleHooks for RuntimeReloadWatcher {
+    fn before_command(&mut self) -> Option<String> {
+        // SAFETY: the runtime is loaded for the life of the process, and the console calls its
+        // hooks on the runtime's thread between commands.
+        let changed = unsafe { (self.changed)() } != 0;
+        changed.then(|| ".ry_autoreload()".to_owned())
+    }
+}
+
+// Loading with RTLD_GLOBAL is what lets compiled packages resolve R's API from ry's runtime, and
+// Windows has no equivalent, so the runtime is not shipped there yet.
+#[cfg(unix)]
+type RuntimeLibrary = libloading::os::unix::Library;
+#[cfg(not(unix))]
+type RuntimeLibrary = libloading::Library;
+
+#[cfg(not(unix))]
+fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
+    Err(ReplError(
+        "ry's runtime is not available on Windows yet; use `ry R` to run code on GNU R".into(),
+    ))
+}
+
+#[cfg(unix)]
+fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
     let library_path = ry_runtime_library()?;
-    // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
-    // dynamic linker satisfy them from it.
+    // On Linux, compiled packages record `libR.so` as a needed library, and loading ry's globally
+    // lets the dynamic linker satisfy them from it. On macOS, `libr`'s loader rebinds GNU R's
+    // package binaries to this library's install name, and packages ry builds look R's API up in
+    // the flat namespace that RTLD_GLOBAL populates.
     let library = unsafe {
-        libloading::os::unix::Library::open(
+        RuntimeLibrary::open(
             Some(&library_path),
             libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
         )
@@ -186,19 +246,52 @@ fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
             library_path.display()
         ))
     })?;
-    Ok(Box::leak(Box::new(library)))
+    let library: &'static libloading::os::unix::Library = Box::leak(Box::new(library));
+    let built_from = runtime_id(library);
+    if built_from.as_deref() != Some(RUNTIME_ID) {
+        return Err(ReplError(stale_runtime_message(
+            &library_path,
+            built_from.as_deref(),
+        )));
+    }
+    Ok(library)
 }
 
-fn runtime_entry<T: Copy>(
-    library: &'static libloading::os::unix::Library,
-    name: &str,
-) -> Result<T, ReplError> {
+/// The identity of the sources `ry` was built from, which `libR.so` must have been built from
+/// too (`crates/libr/build_identity.rs` defines it).
+#[cfg(unix)]
+const RUNTIME_ID: &str = env!("RY_RUNTIME_ID");
+
+/// `None` for a library that exports no identity, which predates the check.
+#[cfg(unix)]
+fn runtime_id(library: &'static RuntimeLibrary) -> Option<String> {
+    type RuntimeId = unsafe extern "C" fn() -> *const std::ffi::c_char;
+    let id = runtime_entry::<RuntimeId>(library, "ry_runtime_id").ok()?;
+    let pointer = unsafe { id() };
+    (!pointer.is_null()).then(|| {
+        unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+#[cfg(unix)]
+fn stale_runtime_message(library_path: &std::path::Path, built_from: Option<&str>) -> String {
+    format!(
+        "ry's runtime ({}) is out of date: it has build {}, but this ry is build {RUNTIME_ID}; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)",
+        library_path.display(),
+        built_from.unwrap_or("unknown"),
+    )
+}
+
+fn runtime_entry<T: Copy>(library: &'static RuntimeLibrary, name: &str) -> Result<T, ReplError> {
     let symbol = format!("{name}\0");
     unsafe { library.get::<T>(symbol.as_bytes()) }
         .map(|symbol| *symbol)
         .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
+#[cfg(unix)]
 fn ry_runtime_library() -> Result<PathBuf, ReplError> {
     if let Some(path) = std::env::var_os("RY_LIBR") {
         return Ok(PathBuf::from(path));
@@ -206,17 +299,24 @@ fn ry_runtime_library() -> Result<PathBuf, ReplError> {
     let executable = std::env::current_exe()
         .map_err(|error| ReplError(format!("cannot locate the ry executable: {error}")))?;
     let directory = executable.parent().unwrap_or(std::path::Path::new("."));
+    // `libR.so` on Linux and `libR.dylib` on macOS: the names compiled packages link against.
+    let library = format!(
+        "{}R{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
     for candidate in [
-        directory.join("libR.so"),
-        directory.join("deps").join("libR.so"),
-        directory.join("../lib/ry/libR.so"),
+        directory.join(&library),
+        directory.join("deps").join(&library),
+        directory.join("../lib/ry").join(&library),
     ] {
         if candidate.exists() {
             return Ok(candidate);
         }
     }
     Err(ReplError(format!(
-        "ry's runtime (libR.so) was not found beside {}; build it with `just build` or `cargo build -p libr`, or set RY_LIBR to its path",
+        "ry's runtime ({library}) was not found beside {}; build it with `just build` or \
+         `cargo build -p libr`, or set RY_LIBR to its path",
         executable.display()
     )))
 }

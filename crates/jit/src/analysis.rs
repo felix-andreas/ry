@@ -1129,9 +1129,18 @@ impl Builder<'_> {
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
-            Op::CallGeneric => {
+            Op::CallGeneric | Op::CallRebinding => {
                 let call = self.constant(operand(2));
+                // `x <- f(x, ...)` may move a ry dictionary or set into the call to update it in
+                // place, which only tier 0 does, so the call is inlined only when the variable
+                // cannot hold one.
+                let inlinable = inst.op == Op::CallGeneric
+                    || self
+                        .slot_of
+                        .get(&self.constant(operand(3)))
+                        .is_some_and(|&slot| state.slots[slot].ty.is_plain());
                 let inlined = match state.registers[operand(1)] {
+                    _ if !inlinable => None,
                     Ty::Closure(formals, body) => {
                         self.inline(state, call, formals, body, None, operand(0))
                     }
@@ -2274,7 +2283,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric => {
+        Op::CallGeneric | Op::CallRebinding => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

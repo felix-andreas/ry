@@ -420,10 +420,6 @@ fn dynamic_symbols(library: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-fn libr_path() -> PathBuf {
-    harness::library_dir().join("libR.so")
-}
-
 /// Every function and variable the headers declare is exported, so a package that compiles
 /// against them also links.
 #[test]
@@ -449,7 +445,7 @@ fn every_declared_name_is_exported_by_libr() {
         "the declaration scan finds the headers' variables: {variables:?}"
     );
     declared.extend(variables);
-    let exported = dynamic_symbols(&libr_path());
+    let exported = dynamic_symbols(&harness::library_path());
     let missing: Vec<String> = declared
         .iter()
         // Applic.h and Linpack.h include BLAS.h, so its names reach the scan transitively.

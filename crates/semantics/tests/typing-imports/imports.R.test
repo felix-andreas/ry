@@ -377,6 +377,15 @@ read_description <- function(path) {
 #++++
 read_description: <T> fn(path: T) -> Unknown
 
+#---- a_typed_parameter_named_like_an_unknown_import_calls_the_import
+#namespace import(fs)
+#: fn(path: character) -> Any
+package_file <- function(path) {
+  path(path, "DESCRIPTION")
+}
+#++++
+package_file: fn(path: character) -> Any
+
 #---- a_parameter_applied_to_itself_without_an_import_is_an_infinite_type
 apply_twice <- function(path) path(path)
 #++++

@@ -29,7 +29,7 @@ use {
     },
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
-    std::borrow::Cow,
+    std::{borrow::Cow, cell::RefCell, rc::Rc},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -2358,9 +2358,10 @@ unsafe fn pattern_argument(pattern: Sexp) -> R<Option<String>> {
 /// no part in the match.
 type Groups = Vec<Option<(usize, usize)>>;
 
+#[derive(Clone)]
 enum Matcher {
     Literal(String),
-    Pattern(Regex),
+    Pattern(Rc<Regex>),
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
     /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
     /// leftmost-longest pattern of variable width on its backtracker, which takes exponential
@@ -2368,16 +2369,29 @@ enum Matcher {
     /// starts where the leftmost-first match does, and `longest` (which reports every match end)
     /// searched anchored at that start finds where the longest one ends.
     Automaton {
-        regex: Regex,
+        regex: Rc<Regex>,
         first: meta::Regex,
         longest: meta::Regex,
     },
+}
+
+/// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
+/// same few patterns over and over, and building the automaton costs far more than matching one
+/// short string.
+const PATTERN_CACHE_SIZE: usize = 256;
+
+thread_local! {
+    static PATTERN_CACHE: RefCell<FxHashMap<(String, bool, bool), Matcher>> = RefCell::default();
 }
 
 impl Matcher {
     unsafe fn compile(pattern: &str, options: PatternOptions) -> R<Matcher> {
         if options.fixed {
             return Ok(Matcher::Literal(pattern.to_owned()));
+        }
+        let key = (pattern.to_owned(), options.ignore_case, options.perl);
+        if let Some(matcher) = PATTERN_CACHE.with_borrow(|cache| cache.get(&key).cloned()) {
+            return Ok(matcher);
         }
         let syntax = if options.perl {
             Syntax::Perl
@@ -2415,33 +2429,40 @@ impl Matcher {
                 .syntax(syntax::Config::new().case_insensitive(options.ignore_case))
                 .build(&translated.pattern)
         };
-        match compiled {
+        let matcher = match compiled {
             Ok(regex) if longest => {
+                let regex = Rc::new(regex);
                 match (
                     automaton(MatchKind::LeftmostFirst),
                     automaton(MatchKind::All),
                 ) {
-                    (Ok(first), Ok(longest)) => Ok(Matcher::Automaton {
+                    (Ok(first), Ok(longest)) => Matcher::Automaton {
                         regex,
                         first,
                         longest,
-                    }),
-                    _ => Ok(Matcher::Pattern(regex)),
+                    },
+                    _ => Matcher::Pattern(regex),
                 }
             }
-            Ok(regex) => Ok(Matcher::Pattern(regex)),
+            Ok(regex) => Matcher::Pattern(Rc::new(regex)),
             Err(reason) => {
                 if options.perl {
                     warning(format!("PCRE pattern compilation error\n\t'{reason}'"))?;
-                    Err(error(format!("invalid regular expression '{pattern}'")))
-                } else {
-                    warning(format!("TRE pattern compilation error '{reason}'"))?;
-                    Err(error(format!(
-                        "invalid regular expression '{pattern}', reason '{reason}'"
-                    )))
+                    return Err(error(format!("invalid regular expression '{pattern}'")));
                 }
+                warning(format!("TRE pattern compilation error '{reason}'"))?;
+                return Err(error(format!(
+                    "invalid regular expression '{pattern}', reason '{reason}'"
+                )));
             }
-        }
+        };
+        PATTERN_CACHE.with_borrow_mut(|cache| {
+            if cache.len() >= PATTERN_CACHE_SIZE {
+                cache.clear();
+            }
+            cache.insert(key, matcher.clone());
+        });
+        Ok(matcher)
     }
 
     /// The first match at or after byte `from`, as a byte range.

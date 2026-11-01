@@ -318,6 +318,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// An environment a compiled closure body is running on. The body keeps values in registers
+    /// that do not count as references, which code running on the environment from elsewhere
+    /// must respect before it updates a value in place.
+    pub const COMPILED_FRAME: u16 = 1 << 9;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
     /// compiled code revalidates its lookups only when the epoch moved.
@@ -351,6 +355,9 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
+    /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
+    pub const ARRAY: u8 = 1 << 4;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.
@@ -369,6 +376,17 @@ pub(crate) struct TripleObject {
     pub first: Cell<Sexp>,
     pub second: Cell<Sexp>,
     pub third: Cell<Sexp>,
+}
+
+/// A symbol is a triple (print name, base binding, internal) followed by the state of its lookup
+/// caches, which no collection traces: every reader checks the stamp first, and a cell whose
+/// stamp is current is still bound in an environment on the search path.
+#[repr(C)]
+pub(crate) struct SymbolObject {
+    pub triple: TripleObject,
+    pub epoch: Cell<u64>,
+    pub global_cell: Cell<Option<Sexp>>,
+    pub global_stamp: Cell<u64>,
 }
 
 #[repr(C)]
@@ -515,6 +533,7 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 .checked_add(15)
                 .map(|size| size & !15)
         }
+        Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),
         Shape::Environment => Some(size_of::<EnvironmentObject>()),
         Shape::ExternalPtr => Some(size_of::<ExternalPtrObject>()),
@@ -593,6 +612,14 @@ impl Sexp {
 
     pub unsafe fn set_object(self, on: bool) {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
+    }
+
+    pub unsafe fn is_array(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::ARRAY != 0 }
+    }
+
+    pub unsafe fn set_array(self, on: bool) {
+        unsafe { self.set_flag(flag_bits::ARRAY, on) }
     }
 
     pub unsafe fn is_altrep(self) -> bool {
@@ -769,6 +796,10 @@ impl Sexp {
 
     pub(crate) unsafe fn frame_ptr(self) -> *mut Frame {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
+    }
+
+    pub(crate) unsafe fn symbol_payload(self) -> &'static SymbolObject {
+        unsafe { &*self.0.as_ptr().cast::<SymbolObject>() }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {

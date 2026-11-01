@@ -6,6 +6,7 @@
 == R/main.R
 Unknown
 0..12 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+0..12 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- unsupported_construct_binding_flags_the_binding_name
 #~~~~ R/main.R
@@ -14,6 +15,7 @@ x <- 1L %then% 2L
 == R/main.R
 x: Unknown
 5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+5..17 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- cascade_single_origin_one_origin_used_downstream_flags_once
 #~~~~ R/main.R
@@ -26,6 +28,7 @@ x: Unknown
 y: Unknown
 z: Unknown
 5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+5..17 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- existing_type_error_does_not_also_strict_flag
 #~~~~ R/main.R
@@ -44,6 +47,7 @@ bad: Unknown
 #++++
 == R/main.R
 Any
+14..26 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- cross_file_unknown_global_origin_flagged_once_reference_not_flagged
 #~~~~ R/a.R
@@ -54,6 +58,7 @@ y <- x
 == R/a.R
 x: Unknown
 5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+5..17 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 == R/b.R
 y: Unknown
 
@@ -103,6 +108,7 @@ x <- 1L %then% 2L
 typing mode: On
 x: Unknown
 20..32 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+20..32 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #==== unresolved
 #---- unresolved_name_is_reported
@@ -112,6 +118,7 @@ frobnicate(1L)
 == R/main.R
 Unknown
 0..10 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+0..14 error[strict] strict mode: this calls `frobnicate`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #==== unresolved_escalation
 #---- unknown_namespace_is_an_error_under_strict
@@ -122,6 +129,7 @@ foobar::bazqux(1L)
 Unknown
 0..14 warning[unresolved] unknown package namespace `foobar`.
 0..14 error[strict] strict mode: could not determine the type of `bazqux`; it has no known type
+0..18 error[strict] strict mode: this calls `bazqux`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- strict_off_keeps_unresolved_a_warning
 #~~~~ R/main.R
@@ -132,6 +140,7 @@ frobnicate(1L)
 typing mode: On
 Unknown
 15..25 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+15..29 error[strict] strict mode: this calls `frobnicate`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- s4_slot_read_is_a_strict_origin
 #~~~~ R/main.R
@@ -142,3 +151,18 @@ port <- config@port
 config: integer
 port: Unknown
 21..32 error[strict] strict mode: could not determine the type of `port`; add a type annotation
+
+#---- a_data_frame_column_read_is_a_strict_origin
+#~~~~ R/main.R
+#: fn(df: data.frame) -> double
+total <- function(df) sum(df$amount)
+#: fn(df: data.frame) -> double
+first <- function(df) sum(df[["amount"]])
+#++++
+== R/main.R
+total: fn(df: data.frame) -> double
+first: fn(df: data.frame) -> double
+54..68 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+58..67 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+123..142 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+127..141 error[strict] strict mode: this expression has an undetermined type (`Unknown`)

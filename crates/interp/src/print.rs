@@ -17,7 +17,7 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| unsafe {
+    internal("prmatrix", 6, |call| {
         Err(call.error("prmatrix is not supported"))
     }),
 ];
@@ -122,6 +122,11 @@ unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) 
 /// `PrintValueRec`: prints any value, with `tag` the prefix of the list element being printed.
 pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     match value.kind() {
+        _ if value.is_array() => {
+            for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
+                out(&format!("{line}\n"));
+            }
+        }
         SexpType::Nil => out("NULL\n"),
         SexpType::Symbol if value == values::missing_arg() => out("\n"),
         SexpType::Symbol => {
@@ -280,13 +285,13 @@ pub unsafe fn environment_label(env: Sexp) -> R<String> {
     if env == values::empty_env() {
         return Ok("<environment: R_EmptyEnv>".into());
     }
-    if crate::envir::is_namespace(env) {
-        if let Some(name) = crate::envir::namespace_name(env) {
-            return Ok(format!("<environment: namespace:{name}>"));
-        }
+    if crate::envir::is_namespace(env)
+        && let Some(name) = crate::envir::namespace_name(env)
+    {
+        return Ok(format!("<environment: namespace:{name}>"));
     }
     if crate::envir::is_package_env(env) {
-        let name = get_attr(env, values::install("name")?);
+        let name = get_attr(env, symbols().name);
         if let Some(name) = values::first_string(name) {
             return Ok(format!("<environment: {name}>"));
         }

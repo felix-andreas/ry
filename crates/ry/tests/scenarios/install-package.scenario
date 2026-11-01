@@ -1,0 +1,54 @@
+# A user installs a source package with compiled C code through ry's `R CMD INSTALL`, then
+# calls it from a script on ry's runtime.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: tally
+| Version: 1.0.0
+| Title: Sums numbers in C
+| Description: A small package with compiled code.
+| License: MIT
+file pkg/NAMESPACE
+| useDynLib(tally, .registration = TRUE)
+| export(tally)
+file pkg/R/tally.R
+| tally <- function(values) .Call(tally_sum, as.double(values))
+file pkg/src/tally.c
+| #include <R.h>
+| #include <Rinternals.h>
+| #include <R_ext/Rdynload.h>
+|
+| SEXP tally_sum(SEXP values)
+| {
+|     double total = 0;
+|     const double *data = REAL(values);
+|     for (R_xlen_t i = 0; i < XLENGTH(values); i++)
+|         total += data[i];
+|     return ScalarReal(total);
+| }
+|
+| static const R_CallMethodDef calls[] = {
+|     {"tally_sum", (DL_FUNC) &tally_sum, 1},
+|     {NULL, NULL, 0}
+| };
+|
+| void R_init_tally(DllInfo *info)
+| {
+|     R_registerRoutines(info, NULL, calls, NULL, NULL);
+|     R_useDynamicSymbols(info, FALSE);
+| }
+
+install pkg
+expect exit 0
+expect file library/tally/DESCRIPTION "RyBuilt"
+
+file use.R
+| library(tally, lib.loc = "library")
+| print(tally(c(1, 2, 3.5)))
+| print(tally(1:10))
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 6.5"
+expect stdout "[1] 55"

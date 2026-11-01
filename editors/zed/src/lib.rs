@@ -65,7 +65,8 @@ impl Extension {
             "felix-andreas/ry",
             GithubReleaseOptions {
                 require_assets: true,
-                pre_release: false,
+                // Every ry release so far is a pre-release, and `false` would find only 0.1.1.
+                pre_release: true,
             },
         )?;
 
@@ -80,7 +81,7 @@ impl Extension {
             os = match platform {
                 Os::Mac => "apple-darwin",
                 Os::Linux => "unknown-linux-gnu",
-                Os::Windows => "pc-windows-gnu",
+                Os::Windows => "pc-windows-msvc",
             },
             ext = match platform {
                 Os::Mac | Os::Linux => "tar.gz",

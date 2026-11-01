@@ -45,9 +45,8 @@ two ry columns are measurement noise. The runtime is still incomplete (see [Stat
 ## From plain R to fully typed code in four steps
 
 In the diagram above, your code moves from the blue circle toward the purple one, one step at a
-time. Each step is
-optional, and you can stop after any of them, so you can adopt ry on a large code base without a
-rewrite. Steps 1 and 2 work with GNU R as it is. Steps 3 and 4 use what ry adds, and ry's own data
+time. Each step is optional, and you can stop after any of them, so you can adopt ry on a large
+code base without a rewrite. Steps 1 and 2 work with GNU R as it is. Steps 3 and 4 use what ry adds, and ry's own data
 types run only on ry's runtime, which is still incomplete (see [Status](#status)).
 
 ### 1. Check the code you have
@@ -74,7 +73,7 @@ unresolved
 ```
 
 The same analysis drives [your editor](/guides/editors). `ry fmt` formats the project, and
-`ry R`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
+`ry run`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
 command, so you never call `load_all()` again.
 
 ### 2. Type your code
