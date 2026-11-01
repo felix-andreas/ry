@@ -2189,7 +2189,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   thousands of times), the setup phase was single-threaded, and the drop walked every
   allocation only to exit. Peak memory was about 1 GiB and the cold pass 6 s.
 - **Target shape.**
-  - `hir::Symbol` is a process-wide interned name: `Copy`, two words, leaked `&'static str`. HIR,
+  - `hir::Symbol` is a process-wide interned name: a `Copy` 4-byte index into a sharded table. HIR,
     naming and the check output carry `Symbol`. Project-level maps stay keyed by `String` so their
     lookups keep borrowing `str`, converting at the boundary.
   - HIR lists are boxed slices and `lower_item` shrinks the arena, so a memoized item holds no
@@ -2205,6 +2205,42 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   (the new types compare structurally, so backdating still applies), and edit latency fell from
   3 to 5 ms / 95 to 120 ms to 2 ms / 45 to 55 ms (measured, cause not isolated: the allocator and smaller
   memos both touch the incremental path).
+
+## Syntax trees are evicted, and only small syntax facts are memoized
+
+- **Previous shape.** Every file's rowan tree stayed memoized for the whole process, beside the
+  splice cache's own copy of the previous tree, and `AnalyzedFile` kept a second copy of each
+  file's source. Diagnostics and lints walked the tree directly (error ranges, annotation
+  references, inline-versus-comment agreement, the syntax lints), so dropping a tree meant
+  re-parsing it.
+- **Weakness.** The trees were the largest holder after compaction, retained only for queries that
+  reduce them to a few small facts, and the same text lived twice.
+- **Target shape.**
+  - `parse` (LRU 128), `item_syntax` and `item_annotation_syntax` (LRU 4096) are evictable. Every
+    tree reader is a memoized query with a small result: `file_error_ranges`,
+    `file_annotation_references`, `agreement_candidates`, `lints::file_syntax_lints`, and
+    `item_annotations` (the root and expression annotations of an item, boxed).
+  - A fact that also needs naming or project declarations is split: the memoized syntax half has
+    no such dependency, and a cheap join adds it (`SyntaxLints.unless_redefined`, `SlotPair`'s
+    `same_type` step). Keeping the syntax half naming-free is what lets the cold pass compute it
+    before naming, while the tree is resident.
+  - `ry check` uses `RootDatabase::one_shot` (no splice cache) and runs three passes in batches of
+    16 files per core, calling `trigger_lru_eviction` between batches, which needs no new revision.
+    `diagnostics::derive_from_syntax` lists every tree-derived fact a later pass reads; a new tree
+    reader must be added there, or the cold check re-parses (the one-parse test in
+    `test_incremental.rs` catches it).
+  - Source text lives once, in `SourceFile`; the CLI reads it back with `ProjectAnalysis::source`.
+  - The capacities are set per host, through `limit_resident_trees` (declared `lru = 0`, which is
+    unbounded with no per-fetch bookkeeping). Only `RootDatabase::one_shot` sets them. The server
+    keeps every tree, because eviction measured about 10 ms slower per settled re-check.
+  - The server enters workspace files at `Durability::MEDIUM` and lowers a file to `LOW` on its
+    first edit (restored on close). Settled-wave time was two thirds salsa memo verification;
+    with durability, memos over untouched files verify without walking their dependencies.
+- **Impact.** Peak 795, 789, 813 MiB to 566, 568, 577 MiB on the benchmark code bases, cold check
+  unchanged to slightly faster, JSON findings byte-identical. An evicted memo keeps its dependency
+  edges, so an untouched file revalidates without re-parsing, and the LSP keeps its incremental
+  behavior; only the edited file parses again. Settled LSP re-check went from 48, 63, 47 ms to
+  39, 52, 40 ms (finance, data science, biostatistics), mostly from durability.
 
 # Decision record: the built-in frame
 
@@ -2653,3 +2689,9 @@ first lines R had already read, leaving R mid-command.
 - **String ranks.** Each thread numbers the strings of its slice in a hash map, keyed by the 16-byte view itself for strings of 12 bytes or fewer (no string read), with a small direct-mapped cache in front while the slice has few distinct strings. The distinct strings of all threads sort once by `(first 16 bytes as a big-endian integer, string)`, which is byte order with almost only integer comparisons.
 - **Gathers.** Reordering a frame gathers every column in parallel; a string column gathers its views and shares the original data buffers, so no string bytes move.
 - **Impact.** One kernel serves every ordering operation, so all of them agree on NA placement and ties, and `crates/table/tests/test_table.rs` (`fuzz_sort_unique_and_runs_against_a_reference`) checks them against a reference comparator over random NA, NaN, `-0`, infinities, factors and long shared-prefix strings.
+
+## `object-systems = false` stops class definitions in user code at run time
+
+- **Previous shape.** Only the lint read the option, so `ry run` happily defined S4, Reference and R6 classes in a project that had turned them off.
+- **Target shape.** `ry run` and `ry repl` on ry's runtime pass the option to the interpreter as a run flag (`RUN_FLAG_OBJECT_SYSTEMS`). With it off, `run_closure` calls `refuse_object_system`, which raises the lint's message (one text, `syntax::native_values::object_systems_disabled_message`, and one table of defining functions, `object_system_function`, shared by both) when a call named `setClass`, `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class` (bare or after `::`) runs a closure owned by `methods` or `R6` and its caller's top environment is the global environment.
+- **Scope.** User code is whatever has the global environment as its top level: scripts, the console, and functions defined there. Packages are exempt, installed or loaded with `ry load`, because they must keep loading (`stats4` defines S4 classes when it loads) and a package's classes are the package author's call; the lint still flags a project package's source. Matching by call name keeps the hot path to one flag test when the option is on and one symbol-name lookup per closure call when it is off; a renamed alias (`f <- setClass`) slips through, which is acceptable for a guardrail whose job is to stop deliberate use.

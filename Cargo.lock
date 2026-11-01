@@ -3664,6 +3664,7 @@ dependencies = [
 name = "semantics"
 version = "0.3.2-beta"
 dependencies = [
+ "boxcar",
  "rowan",
  "rustc-hash 2.1.3",
  "salsa",

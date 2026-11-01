@@ -185,6 +185,9 @@ pub struct Interp {
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
+    /// off when the project sets `[check] object-systems = false`.
+    pub object_systems: bool,
 }
 
 struct InterpState {
@@ -282,6 +285,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
+        object_systems: true,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

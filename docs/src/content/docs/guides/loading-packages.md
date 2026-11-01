@@ -54,6 +54,10 @@ are what the interpreter evaluates, so a lazy function is lowered from that tree
 `--runtime gnu-r` (or set `RY_RUNTIME=gnu-r`) to load on GNU R instead. `ry repl` always loads on GNU R, `ry run`
 does unless you pass `--runtime ry`, and `load_all()` in plain R runs on GNU R by definition.
 
+A package that uses ry's own syntax (records, tags, `match`, frames) loads and runs only on ry's
+runtime, because GNU R's parser rejects it (`unexpected ':'` for a tag). Inline annotations alone
+are fine on both.
+
 Median of five runs of the load call itself, in a fresh session without source references, on
 generated packages (`tools/loader-bench` regenerates them). The GNU R numbers are on R 4.3.
 

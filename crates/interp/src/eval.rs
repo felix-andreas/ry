@@ -743,6 +743,9 @@ pub unsafe fn run_closure(
             "evaluation nested too deeply: infinite recursion / options(expressions=)?",
         ));
     }
+    if !state.object_systems {
+        refuse_object_system(call, function, sys_parent)?;
+    }
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
     state.frames.push(Frame {
@@ -791,6 +794,40 @@ pub unsafe fn run_closure(
     state.restarts = restarts;
     state.srcref = caller_srcref;
     result
+}
+
+/// With object systems turned off, a call that defines a class (`setClass`, `setRefClass`,
+/// `R6::R6Class`, ...) fails when user code makes it. User code is whatever runs at the global
+/// environment's top level, which covers scripts and the console. Calls made inside a package, an
+/// installed one or a loaded project package, are exempt, so a package that defines classes of its
+/// own keeps loading. The callee is recognized by the name the call uses (`setClass(...)` or
+/// `methods::setClass(...)`) and by the package that owns the closure, so a local function of the
+/// same name is left alone and a renamed alias (`f <- setClass`) is not caught.
+unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
+    let mut head = call.car();
+    if head.kind() == SexpType::Language
+        && head.car().kind() == SexpType::Symbol
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+    {
+        head = head.cdr().cdr().car();
+    }
+    if head.kind() != SexpType::Symbol {
+        return Ok(());
+    }
+    let name = values::symbol_name(head);
+    let Some((system, defines, home)) = syntax::native_values::object_system_function(&name) else {
+        return Ok(());
+    };
+    let owner = crate::dispatch::top_env(function.tag());
+    if crate::envir::namespace_name(owner).as_deref() != Some(home)
+        || crate::dispatch::top_env(sys_parent) != values::global_env()
+    {
+        return Ok(());
+    }
+    Err(error_in(
+        call,
+        syntax::native_values::object_systems_disabled_message(system, defines, &name),
+    ))
 }
 
 /// A `break` or `next` that leaves the closure frame of `env` had no loop to go to, which is an

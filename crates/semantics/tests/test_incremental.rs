@@ -1,5 +1,6 @@
-use salsa::Setter;
-use semantics::diagnostics::file_diagnostics;
+use salsa::{Database, Durability, Setter};
+use semantics::diagnostics::{derive_from_syntax, file_diagnostics};
+use semantics::lints::{LintConfig, lint_file};
 use semantics::load_index::{PackageFile, PackageSources, package_index};
 use semantics::metadata::{PackageMetadata, attached_union};
 use semantics::stubs::install_shipped_stubs;
@@ -7,7 +8,7 @@ use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
 use semantics::{
     AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme,
-    package_definitions,
+    item_naming, item_tree, limit_resident_trees, package_definitions,
 };
 use std::collections::BTreeMap;
 use std::thread;
@@ -220,6 +221,158 @@ fn editing_an_inline_annotation_rechecks_the_item_and_its_readers_only() {
     db.edit(files[0], "count: double <- 1L\n".to_owned());
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["count", "use_count"]);
+}
+
+#[test]
+fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
+    let mut db = ProbeDatabase::default();
+    let files: Vec<SourceFile> = [
+        "x <- function() 1L\n",
+        "use_x <- function() x()\n",
+        "other <- function() 3L\n",
+    ]
+    .into_iter()
+    .map(|text| {
+        SourceFile::builder(text.to_owned(), DocumentKind::Package)
+            .durability(Durability::MEDIUM)
+            .new(&db)
+    })
+    .collect();
+    let _project = ProjectFiles::builder(files.clone())
+        .durability(Durability::MEDIUM)
+        .new(&db);
+    settle(&db, &files);
+    files[0]
+        .set_text(&mut db)
+        .with_durability(Durability::LOW)
+        .to("x <- function() 2L\n".to_owned());
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(files[0], "x <- function() 3L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.validations_since(&["parse", "item_syntax"]),
+        [0, 0],
+        "the untouched files' trees sit below memos that verify by durability alone"
+    );
+}
+
+/// More files than the tree caches hold, so a cold pass really evicts trees. Each file has
+/// every kind of syntax a later pass reads: a lint, a `#:` comment, and a statement
+/// annotated both ways.
+/// Two files far apart both bind `shared`, so reporting the duplicate reads the other file's
+/// facts after its tree is evicted, and the trailing script reports an unused binding.
+fn evicting_project(db: &ProbeDatabase) -> Vec<SourceFile> {
+    let mut files: Vec<SourceFile> = (0..200)
+        .map(|index| {
+            let mut source = evicting_project_source(index);
+            if index == 0 || index == 199 {
+                source.push_str("shared <- 1L\n");
+            }
+            SourceFile::new(db, source, DocumentKind::Package)
+        })
+        .collect();
+    files.push(SourceFile::new(
+        db,
+        "unused <- 1L\nunused <- 2L\nprint(unused)\n".to_owned(),
+        DocumentKind::Script,
+    ));
+    ProjectFiles::new(db, files.clone());
+    files
+}
+
+/// The order `ry check` runs in: derive from each tree and evict, name every item, then
+/// report.
+fn cold_check(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
+    for &file in files {
+        derive_from_syntax(db, file, lints);
+        db.trigger_lru_eviction();
+    }
+    // `ry check` writes the attached namespaces here, so later passes verify memos over
+    // evicted trees instead of reusing them within one revision.
+    db.synthetic_write(Durability::LOW);
+    for &file in files {
+        for &item in item_tree(db, file) {
+            item_naming(db, item);
+        }
+    }
+    report(db, files, lints);
+}
+
+fn report(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
+    for &file in files {
+        file_diagnostics(db, file);
+        lint_file(db, file, lints);
+        db.trigger_lru_eviction();
+    }
+}
+
+#[test]
+fn a_cold_check_that_evicts_trees_parses_each_file_once() {
+    let mut db = ProbeDatabase::default();
+    limit_resident_trees(&mut db);
+    let files = evicting_project(&db);
+    let lints = LintConfig::default();
+    cold_check(&mut db, &files, &lints);
+    assert_eq!(db.executions_since(&["parse"]), [files.len()]);
+    let codes = |file: SourceFile| -> Vec<&'static str> {
+        file_diagnostics(&db, file)
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    };
+    assert!(
+        codes(files[0]).contains(&"duplicate"),
+        "{:?}",
+        codes(files[0])
+    );
+    assert!(
+        codes(files[200]).contains(&"unused"),
+        "{:?}",
+        codes(files[200])
+    );
+    assert!(
+        lint_file(&db, files[0], &lints)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "object-system"),
+        "the bare `setClass` call is still reported"
+    );
+}
+
+#[test]
+fn an_edit_after_eviction_reparses_and_relints_only_the_edited_file() {
+    let mut db = ProbeDatabase::default();
+    limit_resident_trees(&mut db);
+    let files = evicting_project(&db);
+    let lints = LintConfig::default();
+    cold_check(&mut db, &files, &lints);
+    db.checked_since();
+
+    let edited = evicting_project_source(0).replace("x + 0L", "x + 9L");
+    db.edit(files[0], edited);
+    report(&mut db, &files, &lints);
+    assert_eq!(
+        db.executions_since(&["parse", "file_syntax_lints", "item_check"]),
+        [1, 1, 1]
+    );
+}
+
+fn evicting_project_source(index: usize) -> String {
+    format!(
+        "f{index} <- function(x) x + {index}L\n#: integer\nn{index} <- T\n#: integer\nm{index}: integer <- 1L\nsetClass(\"A{index}\")\n"
+    )
+}
+
+#[test]
+fn a_file_that_defines_set_class_itself_is_not_linted_for_calling_it() {
+    let db = ProbeDatabase::default();
+    let files = db.project(&["setClass <- function(name) name\nsetClass(\"A\")\n"]);
+    assert!(
+        lint_file(&db, files[0], &LintConfig::default())
+            .iter()
+            .all(|diagnostic| diagnostic.code != "object-system")
+    );
 }
 
 fn package(

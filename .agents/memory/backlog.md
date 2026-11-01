@@ -2604,21 +2604,26 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 3.4 s | 760 MiB | 1005 `unused` (genuine) | 2 / 47 ms | 3 / 48 ms |
-| data science | 3.6 s | 756 MiB | none | 2 / 55 ms | 2 / 56 ms |
-| biostatistics | 2.8 s | 790 MiB | none | 2 / 45 ms | 2 / 44 ms |
+| finance | 2.7-2.8 s | 566 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
+| data science | 3.5-3.7 s | 572 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
+| biostatistics | 2.8-2.9 s | 575 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
 
-Before the cold-path work the same machine measured 6.1, 6.7 and 6.2 s, about 1 GiB each, and
-3 to 5 ms / 95 to 120 ms edit latency.
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. Before tree
+eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
+47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak memory is about 1.8 KiB per line with tests, with no single dominant holder left: rowan
-  trees, then per-item naming `BTreeMap`s (`resolutions`, `non_locals`, `bindings`), check memos
-  (`errors`, `selected_overloads`, `masked_reads` as hash maps), and a second copy of each file's
-  source text (`SourceFile` and the checked document). Next steps: dense `Vec`s indexed by `ExprId`
-  for the naming maps, one source copy, `CallArgument.name` and `StrictOriginKind` as `Symbol`, and
-  a smaller `Expression` layout. Salsa's LRU eviction runs only at revision boundaries, so it cannot
-  shrink a single cold CLI pass; the CLI stays at memoize-everything.
+- Peak memory of `ry check` is about 1.4 KiB per line with tests. Trees are evicted
+  (`decisions.md`, "Syntax trees are evicted"), so the holders left are HIR, naming and check memos
+  and salsa's per-memo metadata (about 17 MiB for `file_diagnostics` alone). Next steps: box the
+  rare `ItemNaming`/`ItemCheck` fields, cut the `frame_binder` memo count, `CallArgument.name` and
+  `StrictOriginKind` as `Symbol`, and a smaller `Expression` layout.
+- The server keeps every tree (about 200 MiB on a benchmark code base) because LRU eviction cost
+  about 10 ms per settled re-check. Find which memo values force rebuilding evicted trees in the
+  settled wave; with those memoized, the server could evict too.
+- Interning names as `Symbol` added about 7 ms to the settled re-check (not isolated: `Symbol`
+  hashes and orders through its string). Durability more than recovered it, but the cost is still
+  there to win back.
 - Parses outside salsa remain in `server.rs` range formatting (re-parses the document text per request instead of reading `semantics::parse`) and the `ry debug` dumps; route range formatting through the memoized tree.
 - The CLI forgets the database instead of dropping it (about 0.9 s of frees on these code bases), so
   `check` cannot reuse a process for a second analysis without leaking the first.
@@ -2645,3 +2650,11 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **`ry run` on a debug build is unusable for loops** (a 20M-iteration loop took over three minutes
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
+
+## Open: findings from the developer-workflow round
+
+- **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
+  function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
+  Position[]`; the second member is the vector view of the same element type and adds noise.
+- **A piped `ry repl` prints nothing.** With stdin not a terminal the console reads no commands and
+  exits silently; it should either evaluate stdin or say it needs a terminal.

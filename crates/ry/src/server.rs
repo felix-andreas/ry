@@ -24,7 +24,7 @@ use ide::{
     CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
     HoverDefinition, NavigationTarget, SignatureData, StubTarget,
 };
-use salsa::Setter;
+use salsa::{Durability, Setter};
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::metadata::{
     PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
@@ -544,7 +544,12 @@ impl Worker {
             for path in paths {
                 let text = fs::read_to_string(&path)
                     .expect("reading a workspace source file must succeed");
-                let file = SourceFile::new(&self.db, text, DocumentKind::Package);
+                // Files change at MEDIUM durability until the user edits them, so an edit to
+                // one open file revalidates every memo that reads only the others in O(1)
+                // instead of walking its dependencies.
+                let file = SourceFile::builder(text, DocumentKind::Package)
+                    .durability(Durability::MEDIUM)
+                    .new(&self.db);
                 self.files.insert(path.clone(), file);
                 self.prime_queue.push_back(path);
             }
@@ -560,10 +565,16 @@ impl Worker {
         let files: Vec<SourceFile> = ordered.into_iter().map(|(_, file)| *file).collect();
         match ProjectFiles::try_get(&self.db) {
             Some(project) => {
-                project.set_files(&mut self.db).to(files);
+                project
+                    .set_files(&mut self.db)
+                    .with_durability(Durability::MEDIUM)
+                    .to(files);
             }
             None => {
-                ProjectFiles::new(&self.db, files);
+                // A singleton: queries reach it through `ProjectFiles::get`.
+                let _project = ProjectFiles::builder(files)
+                    .durability(Durability::MEDIUM)
+                    .new(&self.db);
             }
         }
     }
@@ -886,7 +897,9 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let updated = self.apply_content_changes(text, &params.content_changes);
-        file.set_text(&mut self.db).to(updated);
+        file.set_text(&mut self.db)
+            .with_durability(Durability::LOW)
+            .to(updated);
         self.refresh_attached(&path);
         if !self.supports_pull_diagnostics {
             self.publish_first_wave(&path, version);
@@ -968,7 +981,9 @@ impl Worker {
             match fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
-                        file.set_text(&mut self.db).to(text);
+                        file.set_text(&mut self.db)
+                            .with_durability(Durability::MEDIUM)
+                            .to(text);
                     }
                     self.refresh_attached(&path);
                     return;
@@ -1051,11 +1066,15 @@ impl Worker {
                 match fs::read_to_string(&path) {
                     Ok(text) => match self.files.get(&path) {
                         Some(&file) => {
-                            file.set_text(&mut self.db).to(text);
+                            file.set_text(&mut self.db)
+                                .with_durability(Durability::MEDIUM)
+                                .to(text);
                             reloaded_documents.push(path.clone());
                         }
                         None => {
-                            let file = SourceFile::new(&self.db, text, DocumentKind::Package);
+                            let file = SourceFile::builder(text, DocumentKind::Package)
+                                .durability(Durability::MEDIUM)
+                                .new(&self.db);
                             self.files.insert(path.clone(), file);
                             self.rebuild_project_files();
                             reloaded_documents.push(path.clone());
