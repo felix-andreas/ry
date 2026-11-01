@@ -846,7 +846,7 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 101 of the 103 oracle cases match GNU R (`oracle compare --engine ry`); the
+   The interpreter runs. 103 of the 105 oracle cases match GNU R (`oracle compare --engine ry`); the
    other two, `stats__lbfgsb` and `stats__arima_and_kalman`, agree only to about seven digits
    because ry's L-BFGS-B takes a slightly different path to the same optimum. Of GNU R 4.3.3's own
    `tests/*.R`, 41 of 66 end with GNU R's exit status and 13 print exactly GNU R's output. The rest
