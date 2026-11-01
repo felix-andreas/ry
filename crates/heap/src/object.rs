@@ -307,13 +307,12 @@ pub mod gp {
 }
 
 pub(crate) mod gc_bits {
-    /// Reached by the current collection. Marks are sticky between collections, so a marked
-    /// object outside a collection belongs to the old generation.
+    /// The mark of a large object, which lives outside the small-object space and its mark
+    /// bitmaps. Marks are sticky between collections, so a marked object outside a collection
+    /// belongs to the old generation.
     pub const MARK: u8 = 1 << 0;
     /// In the remembered set: an old object that may point at young objects.
     pub const REMEMBERED: u8 = 1 << 1;
-    /// Allocated on its own instead of in a size-class page.
-    pub const LARGE: u8 = 1 << 2;
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;
@@ -369,7 +368,6 @@ pub(crate) struct EnvironmentObject {
     /// allocation and no malloc while its bindings fit the frame's inline cells.
     pub frame: UnsafeCell<Frame>,
     pub enclosure: Cell<Sexp>,
-    pub spare: Cell<usize>,
 }
 
 // Every closure call allocates an environment, so growing the frame past this size class would
@@ -629,10 +627,6 @@ impl Sexp {
         }
     }
 
-    pub(crate) unsafe fn is_marked(self) -> bool {
-        unsafe { self.gc_bits() & gc_bits::MARK != 0 }
-    }
-
     pub(crate) unsafe fn size_class(self) -> u8 {
         unsafe { self.header().size_class.get() }
     }
@@ -777,10 +771,6 @@ impl Sexp {
 
     pub(crate) unsafe fn set_enclosure_unbarriered(self, value: Sexp) {
         unsafe { self.payload::<EnvironmentObject>().enclosure.set(value) }
-    }
-
-    pub(crate) unsafe fn set_environment_spare(self, value: usize) {
-        unsafe { self.payload::<EnvironmentObject>().spare.set(value) }
     }
 
     // External pointers.
@@ -937,11 +927,5 @@ impl Sexp {
 
     pub(crate) unsafe fn set_altrep_flag(self) {
         unsafe { self.set_flag(flag_bits::ALTREP, true) }
-    }
-
-    /// The raw kind byte, read without forming a reference to the header, so it is valid on a
-    /// free slot too.
-    pub(crate) unsafe fn kind_byte(self) -> u8 {
-        unsafe { *(self.0.as_ptr() as *const u8) }
     }
 }

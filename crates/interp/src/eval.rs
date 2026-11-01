@@ -834,7 +834,7 @@ pub unsafe fn apply_closure(
     let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
     heap.root(env);
     env.set_gp_bits(gp::FUNCTION_FRAME, true);
-    let mut bindings: SmallVec<[Formal; 8]> = SmallVec::new();
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     if supplied.is_none() && positional(formals, args) {
         // Most calls pass every argument by position to a function without `...`, which needs no
         // matching table: argument `i` binds formal `i`, and the formals past the last argument
