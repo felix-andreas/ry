@@ -28,25 +28,23 @@ R, with the same results:
 
 | program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
 | --- | ---: | ---: | ---: | ---: |
-| array_dot | 0.218 s | 0.027 s | 0.030 s | 8.1x |
-| array_filter | 0.194 s | 0.036 s | 0.027 s | 5.4x |
-| array_map | 0.309 s | 0.044 s | 0.050 s | 7.0x |
-| array_sum | 0.139 s | 0.028 s | 0.038 s | 5.0x |
-| closures | 0.731 s | 0.434 s | 0.451 s | 1.7x |
-| drawdown | 0.298 s | 0.022 s | 0.021 s | 13.5x |
-| fib | 0.079 s | 0.067 s | 0.071 s | 1.2x |
-| log_rank | 0.098 s | 0.063 s | 0.061 s | 1.6x |
-| loop_sum | 0.244 s | 0.054 s | 0.050 s | 4.5x |
-| vasicek | 0.036 s | 0.050 s | 0.039 s | 0.7x |
-| vector_arith | 0.188 s | 0.164 s | 0.190 s | 1.1x |
+| array_dot | 0.217 s | 0.028 s | 0.028 s | 7.8x |
+| array_filter | 0.186 s | 0.025 s | 0.026 s | 7.4x |
+| array_map | 0.321 s | 0.041 s | 0.044 s | 7.8x |
+| array_sum | 0.141 s | 0.026 s | 0.029 s | 5.4x |
+| closures | 0.707 s | 0.358 s | 0.356 s | 2.0x |
+| drawdown | 0.278 s | 0.031 s | 0.036 s | 9.0x |
+| fib | 0.078 s | 0.065 s | 0.066 s | 1.2x |
+| log_rank | 0.097 s | 0.070 s | 0.069 s | 1.4x |
+| loop_sum | 0.237 s | 0.034 s | 0.035 s | 7.0x |
+| vasicek | 0.037 s | 0.040 s | 0.038 s | 0.9x |
+| vector_arith | 0.182 s | 0.122 s | 0.121 s | 1.5x |
 
 `vasicek` is still slower than GNU R, and call-heavy code (`fib`) is close to parity. Typed code runs
 as fast as untyped code, but not yet faster: every call to a typed function still checks its
 arguments and its result. The typed `array_*` programs store their values in ry's `Array` type,
-which compiles to direct item loads and stores. The typed `array_map` sums with `List.sum` in double
-precision, while GNU R's `sum` uses extended precision, so its last digits differ. The runtime is
-still incomplete (see [Status](#status)), and [How it was measured](#how-it-was-measured) describes
-the benchmark.
+which compiles to direct item loads and stores. The runtime is still incomplete (see
+[Status](#status)), and [How it was measured](#how-it-was-measured) describes the benchmark.
 
 ## From plain R to fully typed code in four steps
 

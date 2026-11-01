@@ -22,7 +22,7 @@ use {
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         records, scope,
         sort::{IdenticalFlags, identical},
         unwind::{R, error},
@@ -1621,12 +1621,7 @@ unsafe fn fold_numbers(
 // with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     fold_numbers(call, 0, i32::checked_add, |start, items| {
-        let mut total = LongDouble::ZERO;
-        total += start;
-        for &item in items {
-            total += item;
-        }
-        total.to_f64()
+        long_double::add_all(LongDouble::from(start), items).to_f64()
     })
 }
 
