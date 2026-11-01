@@ -679,8 +679,8 @@ the nominal identity.
 ##### Opaque nominal types
 
 An *opaque* nominal type has no representation to project. The standard-library stubs declare
-`data.frame`, `factor`, `connection`, `Date`, and other types the grammar cannot describe
-structurally as a bare `@type NAME` (see [stubs](/type-checking/stubs)). For these types:
+`factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
+`@type NAME` (see [stubs](/type-checking/stubs)). For these types:
 
 - `$`, `[`, and `[[` are accepted and give `Unknown`, because the R objects behind these classes
   commonly support access that depends on values, such as `df$amount` and `df[rows, ]`.
@@ -689,6 +689,13 @@ structurally as a bare `@type NAME` (see [stubs](/type-checking/stubs)). For the
 - Arithmetic and every other structural requirement remain type errors, unless the class declares
   the matching [operator method](#operator-methods-on-a-class). The nominal identity itself checks
   like any other nominal type.
+
+`data.frame` is not opaque: the stubs declare it as `@type data.frame {list[named: Any]}`, the
+named list of columns it is at run time. A data frame is therefore accepted wherever a named list
+is, as in `lapply(frame, f)` and `vapply(frame, is.numeric, logical(1))`, and `frame$amount` and
+`frame[["amount"]]` are `Any`. The stubs also declare its methods, so `frame[rows, cols]` is `Any`
+(R keeps the frame or drops it to a column depending on the indices), arithmetic such as
+`frame / 100` keeps the `data.frame`, and a comparison such as `frame > 0.5` is a `matrix`.
 
 #### Type-argument variance
 
