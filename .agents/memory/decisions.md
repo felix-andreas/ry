@@ -4356,3 +4356,63 @@ explicit allocators".
 - **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
+
+## GNU R's public C API is a checked list, not a measured subset
+
+- **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a
+  public name missing from both passed. Diffing GNU R 4.5's `R.dll` export table found such names
+  (`R_findVar`, `R_findVarInFrame`, the `R_GetVarLoc*` family, `Rf_formatReal` and its siblings,
+  `R_AllocStringBuffer`, `utf8clen`, `Rf_mbrtowc`, `R_MissingArgError`).
+- **Target shape.** `crates/libr/tests/headers/r_api_names.txt` lists every name GNU R's public
+  headers declare *and* its `R.dll` exports (declared-only names vary by platform and are often
+  macros), plus an internal section of non-header names packages link. The test fails when ry's
+  headers miss one or `libR` does not export it. Regenerate against a new GNU R release with
+  `RY_GNU_R_INCLUDE`, `RY_GNU_R_EXPORTS` and `RY_UPDATE_API_NAMES=1` (`contributing/testing.md`).
+  GNU R's front-end headers (`ga.h`, `graphapp.h`, `iconv.h`, `libintl.h`) are excluded: packages
+  get gettext's header from Rtools, and the rest is RGui.
+- `R_varloc_t` is a struct holding one pointer, as in GNU R, so `R_findVarLoc` returns the binding
+  cell by value through the same ABI.
+- `VECTOR_PTR` is declared without `NORET`: GNU R declares it as an error stub, ry returns the data
+  pointer, and a `noreturn` declaration would let a compiler drop the code after the call.
+- `NORET` is `[[noreturn]]` only for C23. C++ gets `__attribute__((noreturn))`, because Rcpp writes
+  `inline void NORET stop(...)`, where clang rejects the standard attribute; `Rf_error` and the
+  other no-return entry points carry `[[noreturn]]` directly in C++. A package's own `NORET` wins.
+- **Impact.** A header name GNU R exports can no longer go missing silently on any platform. The
+  265 `R.dll` exports ry still lacks are GNU R internals and RGui entry points that no package in
+  the measured closure uses (`tools/research/data/symbols.csv`).
+
+## Windows `R CMD INSTALL`: the home's `Makeconf` decides the platform
+
+- **Shape.** `rcmd::Platform::of_home` reads `SHLIB_EXT` (and `DYLIB_EXT`) from the R home's
+  `etc/Makeconf`, so the home stays the single source of truth for how its packages build, and a
+  Linux-hosted test can drive the Windows conventions with a Windows `Makeconf`. From it follow
+  the shared-object suffix, `libs/x64/`, `R_ARCH`, and build-file precedence (`.ucrt`, then
+  `.win`, then the portable `Makevars`; `configure` and `Makefile` have no Unix fallback, as in GNU
+  R). `makeconf(root, toolchain, platform)` writes the Rtools ABI for Windows: `-shared
+  -static-libgcc`, no PIC flags, forward-slash paths, `-L"$(R_HOME)/bin/x64" -lR`.
+- **The SHLIB is `<package><ext>`**, the name unchanged, as GNU R links it; data.table's Makevars
+  renames `data.table.dll` to `data_table.dll` itself. Every shared object `src/` holds is
+  installed, so a renamed one is found.
+- **Windows home layout.** `R.dll` and its import library `libR.dll.a` in `bin/x64/`; `bin/R.exe`,
+  `bin/Rscript.exe` and `bin/x64/{R,Rscript,Rcmd}.exe` are copies of `ry-rcmd.exe`, which picks the
+  front end from its file stem and the home from its location (Windows runs no `#!` scripts).
+  Directories are symlinked where Windows allows it and copied otherwise; Wine reports a
+  successful symlink without creating it, so the link is checked for existence.
+- `ry-rcmd` uses `crates/ry/build.rs` as its build script, so both executables get the 64 MiB
+  stack and the UTF-8 manifest from one place; the manifest is `include_str!`-ed so the script works
+  from either package.
+- **Verification limit.** Running MSYS2's `gcc`, `make` or `sh` under Wine is not permitted in the
+  agent environment, so the six packages were installed cross-hosted (`r-runtime.md` section 11)
+  and only loaded under Wine. The release smoke test is the first native Rtools run.
+
+## The Windows session's native encoding is UTF-8
+
+- `init_locale` sets every category from the environment and then, on Windows, swaps a non-UTF-8
+  codeset for UTF-8 (`use_utf8_codeset` in `crates/interp/src/system.rs`), as GNU R from 4.2 does
+  under its manifest. The manifest alone does not suffice where it is ignored (Wine).
+- Locale names report the UTF-8 codeset as `.utf8`, GNU R's spelling, including in the composite
+  `LC_ALL` string; Wine's CRT spells it `.65001`. An explicit `Sys.setlocale` to another code page
+  is honored.
+- `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
+  `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
+

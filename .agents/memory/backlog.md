@@ -2343,13 +2343,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
-- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
-  its R home from symbolic links, which need Developer Mode, and does not drive Rtools, so there is
-  no Windows `R CMD INSTALL` yet (package DLLs have been built by hand against `libR.dll.a`).
-- **C API exports packages may link but `libR` lacks** (found by diffing GNU R 4.5's `R.dll`
-  export table, on every platform): `R_findVar`, `R_findVarInFrame`, `R_findVarLoc`,
-  `R_findVarLocInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its siblings, `Rf_mbrtowc`,
-  `utf8clen`, `R_MissingArgError`. The rest of the 316-name difference is GNU R internals and RGui.
+- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
+  follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
+  `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
+  the Windows runner, and `R CMD config` there needs Rtools' `make` on `PATH`.
 
 ## Explicitly out of scope for now
 

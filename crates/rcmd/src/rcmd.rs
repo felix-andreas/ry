@@ -66,6 +66,95 @@ pub const LIBR_FILE: &str = if cfg!(target_os = "macos") {
     "libR.so"
 };
 
+/// Where ry's libR sits in an R home: `lib/` on Unix, and `bin/x64/` on Windows, where GNU R
+/// keeps `R.dll` beside the import library packages link against.
+pub fn libr_path(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        home.join("bin").join("x64").join(LIBR_FILE)
+    } else {
+        home.join("lib").join(LIBR_FILE)
+    }
+}
+
+/// The operating system an R home builds packages for. It fixes the conventions GNU R follows
+/// there: the shared-object suffix, the architecture directory under `libs/`, and which
+/// platform-specific `Makevars`, `Makefile` and `configure` files take precedence over a
+/// package's portable ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    MacOs,
+    Windows,
+}
+
+impl Platform {
+    pub const HOST: Platform = if cfg!(windows) {
+        Platform::Windows
+    } else if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else {
+        Platform::Linux
+    };
+
+    /// The platform an R home was assembled for, read back from its `etc/Makeconf`, so the
+    /// home stays the one source of truth for how its packages are built.
+    pub fn of_home(home: &Path) -> Platform {
+        let variables = fs::read_to_string(home.join("etc/Makeconf"))
+            .map(|text| make_assignments(&text))
+            .unwrap_or_default();
+        match (
+            variables.get("SHLIB_EXT").map(String::as_str),
+            variables.get("DYLIB_EXT").map(String::as_str),
+        ) {
+            (Some(".dll"), _) => Platform::Windows,
+            (_, Some(".dylib")) => Platform::MacOs,
+            _ => Platform::Linux,
+        }
+    }
+
+    /// The suffix of a package's shared object. macOS uses `.so` too, as GNU R does there.
+    pub fn shlib_ext(self) -> &'static str {
+        match self {
+            Platform::Windows => ".dll",
+            Platform::Linux | Platform::MacOs => ".so",
+        }
+    }
+
+    /// `R_ARCH`: GNU R's Windows build installs a package's libraries under `libs/x64`.
+    pub fn arch(self) -> &'static str {
+        match self {
+            Platform::Windows => "/x64",
+            Platform::Linux | Platform::MacOs => "",
+        }
+    }
+
+    /// The candidates for a build file, most specific first: on Windows `Makevars.ucrt`, then
+    /// `Makevars.win`, then `Makevars`. `configure` and `Makefile` have no portable fallback
+    /// there, because GNU R does not expect a Unix configure script or Makefile to run on
+    /// Windows.
+    fn build_files(self, base: &str) -> Vec<String> {
+        match self {
+            Platform::Windows if matches!(base, "configure" | "Makefile") => {
+                vec![format!("{base}.ucrt"), format!("{base}.win")]
+            }
+            Platform::Windows => vec![
+                format!("{base}.ucrt"),
+                format!("{base}.win"),
+                base.to_owned(),
+            ],
+            Platform::Linux | Platform::MacOs => vec![base.to_owned()],
+        }
+    }
+
+    /// The first of a package's build files `directory` holds.
+    fn build_file(self, directory: &Path, base: &str) -> Option<PathBuf> {
+        self.build_files(base)
+            .into_iter()
+            .map(|name| directory.join(name))
+            .find(|path| path.is_file())
+    }
+}
+
 /// The toolchain an R home is configured with.
 #[derive(Clone, Debug)]
 pub struct Toolchain {
@@ -84,8 +173,12 @@ pub struct Toolchain {
 
 impl Default for Toolchain {
     /// The GNU toolchain with the system's reference BLAS and LAPACK, which is what GNU R's
-    /// Linux builds and the package binaries of the corpus link against.
+    /// Linux builds and the package binaries of the corpus link against. On Windows it is
+    /// [`Toolchain::rtools`].
     fn default() -> Toolchain {
+        if cfg!(windows) {
+            return Toolchain::rtools();
+        }
         Toolchain {
             cc: "gcc".into(),
             cxx: "g++".into(),
@@ -101,6 +194,22 @@ impl Default for Toolchain {
 }
 
 impl Toolchain {
+    /// Rtools, the toolchain CRAN builds Windows packages with and GNU R's Windows installer
+    /// expects: its UCRT GCC on `PATH`, and the BLAS and LAPACK DLLs of the R installation.
+    pub fn rtools() -> Toolchain {
+        Toolchain {
+            cc: "gcc".into(),
+            cxx: "g++".into(),
+            fc: "gfortran".into(),
+            blas_libs: r#"-L"$(R_HOME)/bin/x64" -lRblas"#.into(),
+            lapack_libs: r#"-L"$(R_HOME)/bin/x64" -lRlapack"#.into(),
+            flibs: "-lgfortran -lquadmath".into(),
+            cppflags: String::new(),
+            ldflags: String::new(),
+            openmp: "-fopenmp".into(),
+        }
+    }
+
     /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
     /// On Linux that is [`Toolchain::default`]. On macOS it is the one GNU R's own
     /// `etc/Makeconf` names, because the compilers and libraries vary by installer: CRAN's R
@@ -299,13 +408,22 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     // The headers present the version of the base R the interpreter runs, as `R.version` does,
     // so a package's C code and its R code take the same version branches.
     write(&root.join("include/Rversion.h"), &version.header())?;
-    let libr = root.join("lib").join(LIBR_FILE);
+    let libr = libr_path(root);
+    if let Some(parent) = libr.parent() {
+        fs::create_dir_all(parent).map_err(io_error(parent))?;
+    }
     // Replacing rather than overwriting keeps a running session's mapping of the old file valid.
     remove_file_if_present(&libr)?;
     fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
+    // A Windows linker resolves `-lR` through the import library the build wrote next to R.dll.
+    let import_library = sources.libr.with_file_name("libR.dll.a");
+    if cfg!(windows) && import_library.exists() {
+        let installed = root.join("bin/x64/libR.dll.a");
+        fs::copy(&import_library, &installed).map_err(io_error(&installed))?;
+    }
     write(
         &root.join("etc/Makeconf"),
-        &makeconf(root, &sources.toolchain),
+        &makeconf(root, &sources.toolchain, Platform::HOST),
     )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
@@ -357,6 +475,9 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         if name != "Makeconf" && name != "ldpaths" {
             link(&entry, &root.join("etc").join(name))?;
         }
+    }
+    if cfg!(windows) {
+        return assemble_windows_front_ends(root, sources, gnu);
     }
     for entry in read_directory(&gnu.join("bin"))? {
         let name = entry.file_name().unwrap_or_default();
@@ -458,6 +579,34 @@ exec "$cmd" $extra "$@"
     )
 }
 
+/// The Windows front ends: `bin/R.exe`, `bin/Rscript.exe` and `bin/x64/Rcmd.exe` are copies of
+/// `ry-rcmd`, which reads which one it is from its own file name and finds the home from its
+/// location, because Windows runs no shell scripts. GNU R's own executables are never linked:
+/// ry answers every front end, and the BLAS and LAPACK DLLs are the only binaries taken from
+/// GNU R, for the packages that link them.
+fn assemble_windows_front_ends(root: &Path, sources: &HomeSources<'_>, gnu: &Path) -> Result<()> {
+    for front_end in [
+        "bin/R.exe",
+        "bin/Rscript.exe",
+        "bin/x64/R.exe",
+        "bin/x64/Rscript.exe",
+        "bin/x64/Rcmd.exe",
+    ] {
+        let path = root.join(front_end);
+        remove_file_if_present(&path)?;
+        fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+    }
+    for library in ["Rblas.dll", "Rlapack.dll", "Riconv.dll"] {
+        let from = gnu.join("bin/x64").join(library);
+        if from.exists() {
+            let to = root.join("bin/x64").join(library);
+            remove_file_if_present(&to)?;
+            fs::copy(&from, &to).map_err(io_error(&to))?;
+        }
+    }
+    Ok(())
+}
+
 /// A directory GNU R's `bin/R` wrapper exports as a plain `NAME=value` line. Debian keeps
 /// `share/` and `doc/` under `/usr/share/R` rather than in the R home.
 fn wrapper_directory(gnu_home: &Path, name: &str) -> Option<PathBuf> {
@@ -495,13 +644,23 @@ fn link(target: &Path, link_path: &Path) -> Result<()> {
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link_path).map_err(io_error(link_path))?;
-    // Windows creates symbolic links only with Developer Mode or administrator rights; a
-    // failure says so through the error.
+    // Windows creates symbolic links only with Developer Mode or administrator rights, so
+    // without them the home holds a copy. Wine reports success without creating the link,
+    // which the existence check catches.
     #[cfg(windows)]
-    if target.is_dir() {
-        std::os::windows::fs::symlink_dir(target, link_path).map_err(io_error(link_path))?;
-    } else {
-        std::os::windows::fs::symlink_file(target, link_path).map_err(io_error(link_path))?;
+    {
+        let linked = if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link_path)
+        } else {
+            std::os::windows::fs::symlink_file(target, link_path)
+        };
+        if linked.is_err() || !link_path.exists() {
+            if target.is_dir() {
+                copy_tree(target, link_path)?;
+            } else {
+                fs::copy(target, link_path).map_err(io_error(link_path))?;
+            }
+        }
     }
     Ok(())
 }
@@ -778,9 +937,10 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `etc/Makeconf`: the variables Writing R Extensions documents for `Makevars`, and the
-/// suffix rules that compile a package's sources.
-fn makeconf(root: &Path, toolchain: &Toolchain) -> String {
+/// The `etc/Makeconf` of an R home at `root` that builds packages for `platform`: the variables
+/// Writing R Extensions documents for `Makevars`, and the suffix rules that compile a package's
+/// sources.
+pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> String {
     let Toolchain {
         cc,
         cxx,
@@ -796,61 +956,71 @@ fn makeconf(root: &Path, toolchain: &Toolchain) -> String {
     // it loads, from the libR already in the process, so the same build loads under ry's
     // runtime and under GNU R (`decisions.md`, "macOS packages bind to ry's libR"). On Linux the
     // `libR.so` dependency is satisfied by soname from whichever libR is loaded.
-    let (dylib_ext, shlib_ldflags, libr) = if cfg!(target_os = "macos") {
-        (
+    // On Windows every DLL names the DLLs it imports from, so packages link R.dll's import
+    // library, and position-independent code is the default there.
+    let (dylib_ext, shlib_ldflags, libr, pic) = match platform {
+        Platform::MacOs => (
             ".dylib",
             "-dynamiclib -Wl,-headerpad_max_install_names -undefined dynamic_lookup",
             "",
-        )
-    } else {
-        (".so", "-shared", r#"-L"$(R_HOME)/lib" -lR"#)
+            "-fpic",
+        ),
+        Platform::Linux => (".so", "-shared", r#"-L"$(R_HOME)/lib" -lR"#, "-fpic"),
+        Platform::Windows => (
+            ".dll",
+            "-shared -static-libgcc",
+            r#"-L"$(R_HOME)/bin/x64" -lR"#,
+            "",
+        ),
     };
+    let shlib_ext = platform.shlib_ext();
+    let r_arch = platform.arch();
     format!(
         r#"# ry's build configuration for packages, read by R CMD INSTALL and R CMD SHLIB.
 
 R_HOME = {home}
 R_INCLUDE_DIR = $(R_HOME)/include
 R_SHARE_DIR = $(R_HOME)/share
-R_ARCH =
+R_ARCH = {r_arch}
 SHELL = /bin/sh
 
 CC = {cc}
 CFLAGS = -g -O2
-CPICFLAGS = -fpic
+CPICFLAGS = {pic}
 C99 = $(CC) -std=gnu99
 C11 = $(CC) -std=gnu11
 C17 = $(CC) -std=gnu17
 C23 = $(CC) -std=gnu2x
 CXX = {cxx} -std=gnu++17
 CXXFLAGS = -g -O2
-CXXPICFLAGS = -fpic
+CXXPICFLAGS = {pic}
 CXX11 = {cxx}
 CXX11STD = -std=gnu++11
 CXX11FLAGS = -g -O2
-CXX11PICFLAGS = -fpic
+CXX11PICFLAGS = {pic}
 CXX14 = {cxx}
 CXX14STD = -std=gnu++14
 CXX14FLAGS = -g -O2
-CXX14PICFLAGS = -fpic
+CXX14PICFLAGS = {pic}
 CXX17 = {cxx}
 CXX17STD = -std=gnu++17
 CXX17FLAGS = -g -O2
-CXX17PICFLAGS = -fpic
+CXX17PICFLAGS = {pic}
 CXX20 = {cxx}
 CXX20STD = -std=gnu++20
 CXX20FLAGS = -g -O2
-CXX20PICFLAGS = -fpic
+CXX20PICFLAGS = {pic}
 CXX23 = {cxx}
 CXX23STD = -std=gnu++23
 CXX23FLAGS = -g -O2
-CXX23PICFLAGS = -fpic
+CXX23PICFLAGS = {pic}
 CXXCPP = $(CXX) -E
 CPP = $(CC) -E
 FC = {fc}
 F77 = {fc}
 FFLAGS = -g -O2
 FCFLAGS = -g -O2
-FPICFLAGS = -fpic
+FPICFLAGS = {pic}
 SAFE_FFLAGS = -g -O2 -ffloat-store
 FLIBS = {flibs}
 FCLIBS_XTRA =
@@ -861,7 +1031,7 @@ RANLIB = ranlib
 LDFLAGS = {ldflags}
 CPPFLAGS = {cppflags}
 DYLIB_EXT = {dylib_ext}
-SHLIB_EXT = .so
+SHLIB_EXT = {shlib_ext}
 SHLIB_LD = $(CC)
 SHLIB_LDFLAGS = {shlib_ldflags}
 SHLIB_CXXLD = $(CXX)
@@ -910,7 +1080,9 @@ ALL_LIBS = $(PKG_LIBS) $(SHLIB_LIBADD) $(LIBR) $(LIBINTL)
 .m.o:
 	$(OBJC) $(ALL_CPPFLAGS) $(ALL_OBJCFLAGS) -c $< -o $@
 "#,
-        home = root.display()
+        // GNU make and the MSYS2 shell read a backslash as an escape, so Windows paths use
+        // forward slashes, which Windows accepts too.
+        home = root.display().to_string().replace('\\', "/")
     )
 }
 
@@ -1324,10 +1496,11 @@ fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> 
     }
     let target = library.join(name);
     replace_directory(directory, &target)?;
-    let shared = target
-        .join("libs")
-        .join(format!("{}.so", name.replace('.', "_")));
-    let library_path = [target.join("libs").join(format!("{name}.so")), shared]
+    let platform = Platform::HOST;
+    let libs = libs_directory(&target, platform);
+    let extension = platform.shlib_ext();
+    let shared = libs.join(format!("{}{extension}", name.replace('.', "_")));
+    let library_path = [libs.join(format!("{name}{extension}")), shared]
         .into_iter()
         .find(|path| path.exists());
     Ok(Installed {
@@ -1377,19 +1550,16 @@ fn install_source(
     let staged_library = staging.join("installed");
     let target_staging = staged_library.join(name);
     fs::create_dir_all(&target_staging).map_err(io_error(&target_staging))?;
+    let platform = Platform::of_home(home);
     let paths = library_paths(home, library);
-    let environment = build_environment(home, name, &target_staging, &paths);
-    let configure = build.join("configure");
-    if configure.exists() {
+    let environment = build_environment(home, platform, name, &target_staging, &paths);
+    if let Some(configure) = platform.build_file(&build, "configure") {
         run_command(
-            Command::new("sh")
-                .arg("./configure")
-                .current_dir(&build)
-                .envs(
-                    environment
-                        .iter()
-                        .map(|(key, value)| (key.as_str(), value.as_str())),
-                ),
+            Command::new("sh").arg(&configure).current_dir(&build).envs(
+                environment
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            ),
         )
         .map_err(|error| {
             Error::Package(format!(
@@ -1407,49 +1577,55 @@ fn install_source(
             .filter_map(|dependency| find_package(&paths, dependency))
             .map(|directory| format!("-I\"{}\"", directory.join("include").display()))
             .collect();
-        let library_name = format!("{}.so", name.replace('.', "_"));
-        let built = if src.join("Makefile").exists() {
+        // GNU R links `<package><ext>` with the package name as it is: a package whose name has
+        // a dot renames the result in its Makevars (data.table's `mv $(SHLIB) data_table.dll`).
+        let library_name = format!("{name}{}", platform.shlib_ext());
+        if let Some(makefile) = platform.build_file(&src, "Makefile") {
             run_command(
-                Command::new("make").current_dir(&src).envs(
-                    environment
-                        .iter()
-                        .map(|(key, value)| (key.as_str(), value.as_str())),
-                ),
+                Command::new("make")
+                    .arg("-f")
+                    .arg(&makefile)
+                    .current_dir(&src)
+                    .envs(
+                        environment
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.as_str())),
+                    ),
             )
             .map_err(|error| {
                 Error::Package(format!("compilation failed for package '{name}'\n{error}"))
             })?;
-            src.join(&library_name)
         } else {
             shlib(home, &src, &[], Some(&library_name), &include_flags, &[]).map_err(|error| {
                 Error::Package(format!("compilation failed for package '{name}'\n{error}"))
-            })?
-        };
+            })?;
+        }
         // A package's `src/install.libs.R` installs its own libraries, and runs as R code in
         // the driver; otherwise every shared object `src` holds is installed, as GNU R does.
         if src.join("install.libs.R").exists() {
             install_libs = true;
-        } else if built.exists() {
-            let libs = target_staging.join("libs");
-            fs::create_dir_all(&libs).map_err(io_error(&libs))?;
+        } else {
+            let libs = libs_directory(&target_staging, platform);
             for entry in fs::read_dir(&src).map_err(io_error(&src))? {
                 let path = entry.map_err(io_error(&src))?.path();
-                let Some(file) = path
-                    .file_name()
-                    .filter(|_| path.extension().is_some_and(|extension| extension == "so"))
-                else {
+                let Some(file) = path.file_name().filter(|_| {
+                    path.extension()
+                        .is_some_and(|extension| Some(extension) == extension_of(platform))
+                }) else {
                     continue;
                 };
+                fs::create_dir_all(&libs).map_err(io_error(&libs))?;
                 let installed = libs.join(file);
                 fs::copy(&path, &installed).map_err(io_error(&installed))?;
             }
             let symbols = src.join("symbols.rds");
-            if symbols.exists() {
+            if symbols.exists() && libs.is_dir() {
                 fs::copy(&symbols, libs.join("symbols.rds")).map_err(io_error(&symbols))?;
             }
         }
         shared_object = Some(library_name);
     }
+    let renamed = format!("{}{}", name.replace('.', "_"), platform.shlib_ext());
     // `tools:::.install_package_description` copies the build's DESCRIPTION and adds `Built:`,
     // so the field that marks an installation as ry's goes in first.
     description.set("RyBuilt", env!("CARGO_PKG_VERSION").to_owned());
@@ -1503,9 +1679,12 @@ fn install_source(
         .map_err(io_error(&target))?;
     Ok(Installed {
         name: name.to_owned(),
-        library: shared_object
-            .map(|file| target.join("libs").join(file))
-            .filter(|path| path.exists()),
+        library: shared_object.and_then(|file| {
+            [file, renamed]
+                .into_iter()
+                .map(|file| libs_directory(&target, platform).join(file))
+                .find(|path| path.exists())
+        }),
         directory: target,
     })
 }
@@ -1519,8 +1698,14 @@ fn run_r(
     arguments: &[String],
     r_libs: &str,
 ) -> Result<String> {
+    let platform = Platform::of_home(home);
+    let front_end = if platform == Platform::Windows {
+        home.join("bin").join("R.exe")
+    } else {
+        home.join("bin").join("R")
+    };
     run_command(
-        Command::new(home.join("bin/R"))
+        Command::new(front_end)
             .args(["--vanilla", "--no-echo", "-f"])
             .arg(file)
             .arg("--args")
@@ -1528,25 +1713,45 @@ fn run_r(
             .current_dir(directory)
             .env("R_LIBS", r_libs)
             .env("R_TESTS", "")
+            .env("R_ARCH", platform.arch())
+            .env("SHLIB_EXT", platform.shlib_ext())
             .env("LC_COLLATE", "C"),
     )
+}
+
+/// Where a package's shared objects go: `libs/`, or `libs/x64/` on Windows.
+fn libs_directory(package: &Path, platform: Platform) -> PathBuf {
+    package.join(format!("libs{}", platform.arch()))
+}
+
+fn extension_of(platform: Platform) -> Option<&'static std::ffi::OsStr> {
+    Some(std::ffi::OsStr::new(
+        platform.shlib_ext().trim_start_matches('.'),
+    ))
+}
+
+/// `directory` put in front of the `PATH` this process runs with.
+fn path_with(directory: &Path) -> String {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(
+        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited)),
+    )
+    .map(|joined| joined.to_string_lossy().into_owned())
+    .unwrap_or_else(|_| inherited.to_string_lossy().into_owned())
 }
 
 /// The environment `configure` and `make` run in, as GNU R's installer sets it.
 fn build_environment(
     home: &Path,
+    platform: Platform,
     name: &str,
     target: &Path,
     paths: &[PathBuf],
 ) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
-    let path = std::env::var("PATH").unwrap_or_default();
-    environment.insert(
-        "PATH".to_owned(),
-        format!("{}:{path}", home.join("bin").display()),
-    );
+    environment.insert("PATH".to_owned(), path_with(&home.join("bin")));
     environment.insert("R_HOME".to_owned(), home.display().to_string());
-    environment.insert("R_ARCH".to_owned(), String::new());
+    environment.insert("R_ARCH".to_owned(), platform.arch().to_owned());
     environment.insert("R_PACKAGE_NAME".to_owned(), name.to_owned());
     environment.insert("R_PACKAGE_DIR".to_owned(), target.display().to_string());
     environment.insert(
@@ -1584,10 +1789,8 @@ pub fn shlib(
     include_flags: &[String],
     link_flags: &[String],
 ) -> Result<PathBuf> {
-    let makevars = ["Makevars", "Makevars.in"]
-        .iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.exists() && path.file_name().is_some_and(|name| name == "Makevars"));
+    let platform = Platform::of_home(home);
+    let makevars = platform.build_file(directory, "Makevars");
     let makevars_text = makevars
         .as_ref()
         .map(|path| fs::read_to_string(path).unwrap_or_default())
@@ -1637,7 +1840,7 @@ pub fn shlib(
                 .first()
                 .and_then(|source| source.rsplit_once('.').map(|(stem, _)| stem.to_owned()))
                 .unwrap_or_else(|| "shlib".to_owned());
-            format!("{stem}.so")
+            format!("{stem}{}", platform.shlib_ext())
         },
         str::to_owned,
     );
@@ -1689,14 +1892,7 @@ pub fn shlib(
         command.arg(format!("CLINK_CPPFLAGS={}", include_flags.join(" ")));
     }
     command.env("R_HOME", home);
-    command.env(
-        "PATH",
-        format!(
-            "{}:{}",
-            home.join("bin").display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    );
+    command.env("PATH", path_with(&home.join("bin")));
     run_command(&mut command)?;
     Ok(directory.join(output))
 }
@@ -1803,5 +1999,63 @@ SHLIB_OPENMP_CFLAGS =
             expand_make("-L\"$(R_HOME)/lib\"", &variables, "/My R", 0),
             "-L\"/My R/lib\""
         );
+    }
+
+    #[test]
+    fn windows_homes_build_dlls_under_libs_x64() {
+        let root = std::env::temp_dir().join(format!("ry-rcmd-platform-{}", std::process::id()));
+        fs::create_dir_all(root.join("etc")).expect("create etc");
+        let text = makeconf(Path::new("C:\\R"), &Toolchain::rtools(), Platform::Windows);
+        for line in [
+            "R_HOME = C:/R",
+            "R_ARCH = /x64",
+            "SHLIB_EXT = .dll",
+            "LIBR = -L\"$(R_HOME)/bin/x64\" -lR",
+            "CPICFLAGS = \n",
+            "BLAS_LIBS = -L\"$(R_HOME)/bin/x64\" -lRblas",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in\n{text}");
+        }
+        write(&root.join("etc/Makeconf"), &text).expect("write Makeconf");
+        assert_eq!(Platform::of_home(&root), Platform::Windows);
+        let unix = makeconf(&root, &Toolchain::rtools(), Platform::Linux);
+        write(&root.join("etc/Makeconf"), &unix).expect("write Makeconf");
+        assert_eq!(Platform::of_home(&root), Platform::Linux);
+        assert_eq!(
+            libs_directory(Path::new("pkg"), Platform::Windows),
+            Path::new("pkg/libs/x64")
+        );
+        fs::remove_dir_all(&root).expect("remove home");
+    }
+
+    #[test]
+    fn windows_build_files_prefer_ucrt_then_win() {
+        let package =
+            std::env::temp_dir().join(format!("ry-rcmd-build-files-{}", std::process::id()));
+        fs::create_dir_all(&package).expect("create package");
+        for file in ["Makevars", "Makevars.win", "configure", "Makefile"] {
+            write(&package.join(file), "").expect("write build file");
+        }
+        let windows = Platform::Windows;
+        assert_eq!(
+            windows.build_file(&package, "Makevars"),
+            Some(package.join("Makevars.win"))
+        );
+        write(&package.join("Makevars.ucrt"), "").expect("write Makevars.ucrt");
+        assert_eq!(
+            windows.build_file(&package, "Makevars"),
+            Some(package.join("Makevars.ucrt"))
+        );
+        assert_eq!(windows.build_file(&package, "configure"), None);
+        assert_eq!(windows.build_file(&package, "Makefile"), None);
+        assert_eq!(
+            Platform::Linux.build_file(&package, "Makevars"),
+            Some(package.join("Makevars"))
+        );
+        assert_eq!(
+            Platform::Linux.build_file(&package, "configure"),
+            Some(package.join("configure"))
+        );
+        fs::remove_dir_all(&package).expect("remove package");
     }
 }

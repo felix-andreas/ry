@@ -24,11 +24,30 @@ fn main() -> ExitCode {
             }
         };
     }
-    let Some(home) = std::env::var_os("R_HOME").map(PathBuf::from) else {
+    let front_end = windows_front_end();
+    let Some(home) = std::env::var_os("R_HOME")
+        .map(PathBuf::from)
+        .or_else(|| front_end.as_ref().map(|(_, home)| home.clone()))
+    else {
         eprintln!(
             "ry-rcmd: R_HOME is not set; run it through bin/R of an R home that `rcmd::assemble` created"
         );
         return ExitCode::from(2);
+    };
+    // Windows runs no `bin/R` script to export the home, so the front end exports it for the
+    // tools R CMD INSTALL starts (make, configure, and R itself).
+    if front_end.is_some() {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var("R_HOME", &home) };
+    }
+    let arguments = match front_end.as_ref().map(|(name, _)| name.as_str()) {
+        Some("R") => match arguments.first().map(String::as_str) {
+            Some("CMD" | "RHOME") => arguments,
+            _ => [vec!["R".to_owned()], arguments].concat(),
+        },
+        Some("Rscript") => [vec!["Rscript".to_owned()], arguments].concat(),
+        Some("Rcmd") => [vec!["CMD".to_owned()], arguments].concat(),
+        _ => arguments,
     };
     let result = match arguments.split_first() {
         Some((front, rest)) if front == "R" => {
@@ -49,6 +68,25 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// On Windows, `bin/R.exe`, `bin/Rscript.exe` and `bin/x64/Rcmd.exe` of an R home are copies of
+/// this binary: which front end it is comes from its file name, and the home is the directory
+/// above `bin/` (or `bin/x64/`).
+fn windows_front_end() -> Option<(String, PathBuf)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let executable = std::env::current_exe().ok()?;
+    let name = executable.file_stem()?.to_str()?;
+    let name = ["R", "Rscript", "Rcmd"]
+        .into_iter()
+        .find(|front_end| front_end.eq_ignore_ascii_case(name))?;
+    let mut bin = executable.parent()?;
+    if bin.file_name().is_some_and(|directory| directory == "x64") {
+        bin = bin.parent()?;
+    }
+    Some((name.to_owned(), bin.parent()?.to_path_buf()))
 }
 
 fn assemble(arguments: &[String]) -> rcmd::Result<PathBuf> {
@@ -141,7 +179,7 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
     }
     // With neither a file nor `-e`, `ry_run` reads stdin as a console, one expression at a time.
     let input = expressions.clone();
-    let library_path = home.join("lib").join(rcmd::LIBR_FILE);
+    let library_path = rcmd::libr_path(home);
     // Loading ry's libR globally is what lets compiled packages resolve R's API from it: by
     // soname on Linux, by flat lookup on macOS. On Windows a package DLL imports from "R.dll"
     // by name, which finds the module already loaded.
