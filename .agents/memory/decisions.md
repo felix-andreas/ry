@@ -2979,8 +2979,9 @@ first lines R had already read, leaving R mid-command.
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
   people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
 - **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
-  tab when the JIT benchmark table lands, and a table tab when the `DataFrame` API lands (data.table
-  syntax is compatibility only, so it is not shown as ry's table API). No placeholder tabs.
+  tab when the JIT benchmark table lands. The DataFrame tab shows the Polars-style API, never
+  data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
+  `tools/bench/table` result. No placeholder tabs.
 - **The migration has four steps, each with a real snippet and real output:** check the code you
   have, add types as `#:` comments, switch to inline types, then move data to ry's records, tags
   and tables under strict mode. Each step is optional and reversible, which is what makes adopting
