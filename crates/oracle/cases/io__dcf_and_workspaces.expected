@@ -1,0 +1,31 @@
+[stdout]
+|      Package Description                        Title    A   B             
+| [1,] "a"     "first line\nsecond   line\nthird" "spaced" "2" "cont\n\nmore"
+| [2,] "b"     NA                                 NA       NA  NA            
+|      Extra 
+| [1,] NA    
+| [2,] "x\ny"
+|      Package Description                        Title      A  
+| [1,] "a"     "first line\nsecond   line\nthird" "spaced  " "2"
+| [2,] "b"     NA                                 NA         NA 
+|      B                    Extra   
+| [1,] "\n  cont\n\n  more" NA      
+| [2,] NA                   "x\n  y"
+|      Package Nope
+| [1,] "a"     NA  
+| [2,] "b"     NA  
+| [1] 0 0
+| [1] "malformed"
+| [1] "Package:"
+| [1] " a\n"
+| [1] "answer" "label" 
+| [1] "answer" "label" 
+| [1] 42
+|   x   y 
+| "a" "b" 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c(x = "a", y = "b")

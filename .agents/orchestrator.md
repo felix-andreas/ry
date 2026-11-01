@@ -76,4 +76,4 @@ Nothing queued: every build-order step is in flight.
 Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
-- Run a docs pass after the feature PRs land.
+- Run the next docs pass after the records/tags, JIT and table-in-interpreter PRs land.

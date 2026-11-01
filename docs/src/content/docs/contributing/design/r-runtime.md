@@ -4,12 +4,13 @@ description: "Design draft: how ry runs R, from the C API up to the JIT, the tab
 ---
 
 This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
-and why. Built so far are step 2 of the build order (section 10), the object model and collector in
-`crates/heap` and the C API as `libR.so` in `crates/libr`, and the part of step 4 that needs no
-interpreter: the whole measured C API, ALTREP, connections and package installation in
-`crates/rcmd`. The interpreter is not built, so `ry repl` still drives a GNU R that it loads at
-runtime. The C API measurements in section 2 are real and reproducible. Where section 4 describes
-something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
+and why. Built so far are the object model and collector in `crates/heap`, the C API as `libR.so`
+in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
+`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run --runtime ry`),
+and a table engine in `crates/table`. Not built are the Cranelift JIT, ry's own base R (base R's R
+code still comes from a GNU R installation), and the table type's use from the interpreter. `ry repl`
+and `ry run` still drive GNU R by default. The C API measurements in section 2 are real and
+reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 
 ## 1. The recommendations
@@ -808,8 +809,7 @@ Each step ends with something real running, and each one is a large, whole chang
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 
-   The part that needs no interpreter is done, with evaluation behind a hook the interpreter
-   installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
+   The C API is done, with evaluation behind a hook the interpreter installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
    names the closure uses (the rest of the 792 are types, macros and enum constants in the headers)
    and implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
    are declared in headers and come from the system libraries. Against the corpus library (GNU R
@@ -820,7 +820,8 @@ Each step ends with something real running, and each one is a large, whole chang
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
    Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation waits for the interpreter.
+   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
+   `rcmd` does not run yet, although the interpreter now exists.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
@@ -831,7 +832,7 @@ Each step ends with something real running, and each one is a large, whole chang
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `frame` type exist (section 7); wiring them into the
-   interpreter waits for step 3.
+   interpreter is next.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
