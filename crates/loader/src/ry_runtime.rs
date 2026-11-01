@@ -18,7 +18,7 @@ use {
     interp::{
         builtins::{BuiltinDef, Call, internal, internal_function},
         eval::{define, eval, make_promise},
-        lower::{lower_node, parse_text},
+        lower::{file_srcfile, lower_node, lower_node_in_file, parse_text},
         methods::{DeferredDefinitions, defer_definitions, drop_deferred_definitions},
         scope,
         unwind::{R, error},
@@ -224,7 +224,8 @@ unsafe fn do_bind(call: &Call<'_>) -> R<Sexp> {
                     let source = sources
                         .get(&code.path)
                         .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-                    let handle = source_handle(source.clone())?;
+                    let srcfile = debug_srcfile(&root, &code.path, source)?;
+                    let handle = source_handle(source.clone(), srcfile)?;
                     handles.insert(&code.path, handle);
                     handle
                 }
@@ -262,7 +263,10 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
         (code.clone(), source.clone())
     };
-    let expression = scope(|| lower_range(&source, code.source_start, code.source_end))?;
+    let expression = scope(|| {
+        let srcfile = debug_srcfile(&root, &code.path, &source)?;
+        lower_range(&source, code.source_start, code.source_end, srcfile)
+    })?;
     eval(expression, namespace)?;
     Ok(nil())
 }
@@ -372,7 +376,10 @@ unsafe fn do_run_deferred(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
         (code.clone(), source.clone())
     };
-    let expression = scope(|| lower_range(&source, code.source_start, code.source_end))?;
+    let expression = scope(|| {
+        let srcfile = debug_srcfile(&root, &code.path, &source)?;
+        lower_range(&source, code.source_start, code.source_end, srcfile)
+    })?;
     eval(expression, namespace)?;
     Ok(nil())
 }
@@ -403,41 +410,24 @@ unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
     let (Some(start), Some(end)) = (offset(call.arg(1)), offset(call.arg(2))) else {
         return Err(error("ryLoaderForce needs two byte offsets"));
     };
-    let function = lower_range(source, start, end)?;
+    let function = lower_range(source, start, end, handle.external_protected())?;
     eval(function, call.env)
 }
 
-/// Lowers the code at `start..end` of `source`: the outermost node spanning exactly that range
-/// of a tree, or of text the code alone, parsed on its own. A top-level item parses the same
-/// either way, so a file whose text is all the loader holds is never parsed whole.
-unsafe fn lower_range(source: &Source, start: u32, end: u32) -> R<Sexp> {
+/// Lowers the code at `start..end` of `source`, with source references when `srcfile` is a
+/// srcfile environment. In a tree that is the outermost node spanning exactly that range. In text
+/// it is the code alone, parsed on its own: a top-level item parses the same either way, so a
+/// file whose text is all the loader holds is never parsed whole, except for a debugger, whose
+/// source references need offsets into the whole file.
+unsafe fn lower_range(source: &Source, start: u32, end: u32, srcfile: Sexp) -> R<Sexp> {
     let missing = || error("a definition's code is not in its source file");
-    match source {
-        Source::Tree(tree) => {
-            let root = SyntaxNode::new_root(tree.green().clone());
-            if start > end
-                || !root
-                    .text_range()
-                    .contains_range(TextRange::new(start.into(), end.into()))
-            {
-                return Err(missing());
-            }
-            let range = TextRange::new(TextSize::from(start), TextSize::from(end));
-            let element = root.covering_element(range);
-            let mut node = match element.as_node() {
-                Some(node) => node.clone(),
-                None => element.parent().ok_or_else(missing)?,
-            };
-            while let Some(parent) = node.parent()
-                && parent.text_range() == range
-                && parent != root
-            {
-                node = parent;
-            }
-            if node == root || node.text_range() != range {
-                return Err(missing());
-            }
-            lower_node(&node)
+    let with_srcfile = srcfile.kind() == SexpType::Environment;
+    let parsed;
+    let tree = match source {
+        Source::Tree(tree) => tree,
+        Source::Text(text) if with_srcfile => {
+            parsed = syntax::parse(text);
+            &parsed
         }
         Source::Text(text) => {
             let code = text.get(start as usize..end as usize).ok_or_else(missing)?;
@@ -451,16 +441,63 @@ unsafe fn lower_range(source: &Source, start: u32, end: u32) -> R<Sexp> {
                 .children()
                 .find(|node| node.text_range() == whole)
                 .ok_or_else(missing)?;
-            lower_node(&node)
+            return lower_node(&node);
         }
+    };
+    let root = SyntaxNode::new_root(tree.green().clone());
+    if start > end
+        || !root
+            .text_range()
+            .contains_range(TextRange::new(start.into(), end.into()))
+    {
+        return Err(missing());
+    }
+    let range = TextRange::new(TextSize::from(start), TextSize::from(end));
+    let element = root.covering_element(range);
+    let mut node = match element.as_node() {
+        Some(node) => node.clone(),
+        None => element.parent().ok_or_else(missing)?,
+    };
+    while let Some(parent) = node.parent()
+        && parent.text_range() == range
+        && parent != root
+    {
+        node = parent;
+    }
+    if node == root || node.text_range() != range {
+        return Err(missing());
+    }
+    if with_srcfile {
+        lower_node_in_file(&node, &root.text().to_string(), srcfile)
+    } else {
+        lower_node(&node)
     }
 }
 
-/// An external pointer owning `source`, freed by the collector once no promise references it.
-unsafe fn source_handle(source: Source) -> R<Sexp> {
+/// A debugger can stop only where code has source references, so while one is attached the
+/// loader keeps them, against a srcfile naming the file's absolute path. Otherwise it skips them,
+/// as they cost memory on every statement of every loaded function.
+unsafe fn debug_srcfile(root: &str, path: &str, source: &Source) -> R<Sexp> {
+    if interp::interp().debugger.is_none() {
+        return Ok(nil());
+    }
+    let file = Path::new(root).join(path);
+    let text = match source {
+        Source::Tree(tree) => SyntaxNode::new_root(tree.green().clone())
+            .text()
+            .to_string(),
+        Source::Text(text) => text.to_string(),
+    };
+    file_srcfile(&file.to_string_lossy(), &text)
+}
+
+/// An external pointer owning `source`, freed by the collector once no promise references it. It
+/// protects `srcfile`, which the definitions lowered from the source keep source references
+/// against.
+unsafe fn source_handle(source: Source, srcfile: Sexp) -> R<Sexp> {
     let heap = interp::heap();
     let address = Box::into_raw(Box::new(source)) as *mut c_void;
-    let handle = heap.alloc_external_ptr(address, source_tag()?, nil());
+    let handle = heap.alloc_external_ptr(address, source_tag()?, srcfile);
     let handle = match handle {
         Ok(handle) => handle,
         Err(failure) => {
