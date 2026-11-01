@@ -4494,7 +4494,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its implementation, not from the language. Each is reproduced from observed output (black-box against Rscript), never from GNU R's source.
 
-- **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes.
+- **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes. On x86_64 the slice loops (`long_double::add_all`, `add_differences`, behind `sum`, `mean`, `cov` and `List.sum`) run on the x87 unit through inline assembly, which rounds identically because System V leaves x87 precision control at 64 bits; the software model is about 10x slower (13 ns an element) and stays the fallback on other targets and on Windows, whose x64 CRT sets x87 precision to 53 bits, and for values outside the x87 exponent range.
 - **`%%` and `%/%`** correct the remainder in extended precision, handle a divisor too large for the quotient, and warn past 2^63, matching GNU R's observed results on huge operands.
 - **Invalid UTF-8 bytes** survive text processing as private-use code points (one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. A strings-as-bytes representation would touch every string consumer, so the stand-in keeps the change small. It is not lossless: a string that already holds a real U+F780..U+F7FF character is indistinguishable from an invalid byte and prints as `\xNN` (backlog: byte strings).
 - **`agrep` and `adist`** use an approximate-match NFA over edit costs; `adist`'s `counts` traceback prefers the order GNU R reports (observed, not derived).
@@ -4566,6 +4566,29 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   its uri and selection start instead of serializing ids into `data`, so a stale item never names
   a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
   statement calls first.
+
+## The debugger lives inside the interpreter
+
+- **Previous shape**: none; `browser()` was the only way to stop R code, and only in a console.
+- **Shape**: the Debug Adapter Protocol adapter is `interp::debugger`, inside the interpreter, not
+  a separate process attaching to it. `ry debug-adapter` (`crates/ry/src/debug_adapter.rs`) only
+  frames messages on stdio and reaches the adapter through libR's `ry_debug_adapter`, because the
+  interpreter lives in `libR.so`. A reader thread feeds a channel so the runtime can poll for a
+  `pause` between statements without blocking on stdin.
+- **Hooks**: statements are located by the srcrefs `{` already sets (`Op::SetSrcref` in
+  compiled code, `do_begin`/`eval_all` in the tree walker). Without an attached adapter the hook
+  costs one `Option` check per statement. `SetSrcref` carries a flag, because the one that
+  restores the outer srcref after a block starts no statement and must not stop. `browser()` and
+  the uncaught-error handler stop through the same entry point.
+- **Rooting**: every object the variables view hands out a reference for is rooted until the
+  program resumes, because the debug console can drop its last other reference.
+- **Stdout**: the protocol owns stdout, so the adapter keeps a duplicate of it and points fd 1 at
+  stderr; native code calling `printf` cannot corrupt the protocol.
+- **Package code**: the loader lowers lazy definitions without srcrefs for speed, and only while a
+  debugger is attached does it lower against a whole-file srcfile (`interp::lower::file_srcfile`),
+  held as the tree handle's protected value. Loading stays as fast as before outside the debugger.
+- **Testing**: `interp` `test_debugger` (transcripts and a seeded random client) and the
+  `debug-*.scenario` journeys, which run the real `ry debug-adapter`.
 
 ## A conditional write of a formal covers the paths that run it
 
