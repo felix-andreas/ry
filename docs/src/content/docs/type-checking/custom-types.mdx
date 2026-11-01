@@ -117,9 +117,9 @@ definition and warns when the two disagree.
 
 ## R6 and S4 objects
 
-Existing R6 and S4 classes keep working, but their objects are `Unknown`, and ry warns on each
+Existing R6 and S4 classes keep working, but their objects are [`Unknown`](/type-checking/unknown), and ry warns on each
 class definition (`object-system`) because [records and tags](/type-checking/records-and-tags)
-model data with every field checked. To check who receives one, give it a nominal type over `Any` and wrap its
+model data with every field checked. To check who receives one, give it a nominal type over [`Any`](/type-checking/unknown#any) and wrap its
 constructor:
 
 <Tabs syncKey="annotation-style">

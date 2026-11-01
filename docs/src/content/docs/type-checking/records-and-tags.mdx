@@ -115,34 +115,6 @@ A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The 
 the field's type, and assigning to a field that the record does not have is an error, because a
 record's fields are fixed.
 
-## Passing them to R
-
-R functions and C code do not know these values, so passing one to an R function is an error:
-
-```r
-point <- (x = 1, y = 2)
-sum(point)
-```
-
-```text
-type-mismatch
-
-  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
-```
-
-A few R functions do accept them, such as `length()`, `print()`, `format()`, `identical()` and
-`list()`, and so do the functions your own project defines. If the checker misses a case, the code
-still stops when it runs, with the same fix in the message:
-
-```text
-Error in sum(point) :
-  `point` is a ry record, not an R object; convert it with `as.list()`
-Execution halted
-```
-
-Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
-`as.record()`, `as.tuple()` and `as.tag()` turn a list back.
-
 ## Tags
 
 A tag is a name that starts with `:`, with an optional payload that hugs it: `:None`, `:Some(5L)`,
@@ -340,6 +312,34 @@ works as it does for the structural form: `$` reads a field, `match` checks ever
 union, a pattern binding keeps the nominal type, and a type can take parameters, as in
 `type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`. At run time `@Name(x)` is
 just `x`.
+
+## Passing them to R
+
+R functions and C code do not know these values, so passing one to an R function is an error:
+
+```r
+point <- (x = 1, y = 2)
+sum(point)
+```
+
+```text
+type-mismatch
+
+  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+```
+
+A few R functions do accept them, such as `length()`, `print()`, `format()`, `identical()` and
+`list()`, and so do the functions your own project defines. If the checker misses a case, the code
+still stops when it runs, with the same fix in the message:
+
+```text
+Error in sum(point) :
+  `point` is a ry record, not an R object; convert it with `as.list()`
+Execution halted
+```
+
+Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
+`as.record()`, `as.tuple()` and `as.tag()` turn a list back.
 
 ## In the editor
 

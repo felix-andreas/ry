@@ -65,8 +65,8 @@ shares a namespace, as R loads them, and every other `.R` file is a script read 
 
 The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry R`
 anywhere inside it, as in the transcript above. The console runs the GNU R
-installed on your machine, so it needs R; checking does not. `ry R script.R` runs a script the same
-way, and `ry run script.R` runs it on ry's own, still incomplete runtime ([Console](/guides/console)). In RStudio, put
+installed on your machine, so it needs R; checking does not. `ry R script.R` runs a script on GNU R
+(call `load_all()` in it to load the package), and `ry run script.R` runs it on ry's own, still incomplete runtime ([Console](/guides/console)). In RStudio, put
 `source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as you do today.
 [Loading packages](/guides/loading-packages) has the details.
 
