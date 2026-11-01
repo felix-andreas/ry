@@ -1902,12 +1902,15 @@ there was no evaluator, so there was no previous source of truth.
   the base primitive, falling back to the AST evaluator for the whole expression, so redefining
   `if` or `+` keeps GNU R's semantics instead of GNU R's compiler's assumption that base is not
   shadowed.
-- **Inline caches are validated by one heap counter, the binding epoch,** which moves when a
-  binding is created or removed outside a function frame, or an enclosure changes. Function frames
-  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a cached
-  lookup never resolves through one and the frame itself is probed directly. A function lookup that
-  skipped a non-function binding is not cached, because that binding could later hold a function
-  without moving the epoch.
+- **Inline caches are validated per symbol** (`Heap::lookup_stamp`): each symbol carries an epoch
+  that moves when a binding of that symbol is created or removed outside a function frame, and the
+  stamp adds a heap-wide enclosure epoch that moves when any enclosure changes. A single heap-wide
+  counter was invalidated by every test body evaluated in a fresh environment. Function frames
+  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a
+  cached lookup never resolves through one and the frame itself is probed directly. A function
+  lookup that skipped a non-function binding is not cached, because that binding could later hold
+  a function without moving the stamp. A lookup that reaches the global environment goes through
+  the symbol's cached search-path cell (`Heap::global_cell`), GNU R's global cache.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
@@ -3243,3 +3246,40 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+# Decision record: the interpreter's call path, lookups and allocation
+
+- **Goal.** Per-test time on the three benchmark code bases, without the JIT, at or below GNU R's.
+  The cost was spread over the interpreter core (`step`, frame lookup, argument matching, an
+  allocation per binding and promise), so the fixes are many small cuts rather than one redesign.
+- **A closure call allocates the environment and one cell per formal, nothing else on the Rust
+  heap.** Arguments and matched formals live in inline `SmallVec`s (`eval::Args`, `eval::Matched`),
+  callers fill a vector they own (`promise_args_into`, `evaluate_args_into`), and the frame lives
+  inside the environment object. A formal whose default is atomic or `NULL` binds that value
+  directly with `BINDING_MISSING` set, because a promise of a constant costs an allocation and a
+  force for the same value; `missing()` reads the bit, not the binding's type.
+- **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
+  `identical` has nine formals, and building a map per call cost more than scanning.
+- **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
+  compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
+  a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
+  it as a lazy-load promise, so the guard compares against the forced value); scalar `x[i]` and
+  `x[[i]]` on a plain vector skip general subscript resolution; and a function expression compiles
+  its body once per site, shared by every closure the site creates.
+- **A compiled read of a promise-bound variable forces the promise it found** instead of
+  restarting the lookup through `eval_symbol`; only active, missing and unbound cells take the slow
+  path.
+- **A for loop reuses its scalar** when only the loop binding references it, as GNU R's `STEPFOR`
+  does, and the AST loop releases each iteration's handles instead of rooting them until the end.
+- **Minor collections mark only roots added since the last one** (new symbols, newly preserved
+  objects), because older ones are already marked old. The nursery stays at 8 MB: 32 MB was
+  measured slower, because first touches of fresh pages cost more than the collections saved.
+- **Compiled regular expressions are cached by pattern and flags**, and fixed argument names
+  (`PACKAGE`, `NAOK`, `.Environment` and friends) are interned once in `values::symbols()`.
+- **`inherits()` follows `class()`**: an object with no class attribute inherits from the implicit
+  class `class()` reports (`matrix`/`array`, else the basic class), not the dispatch chain, so
+  `inherits(1L, "numeric")` is `FALSE`, as in GNU R. It compares bytes and allocates nothing.
+- **Listing a hashed frame replays GNU R's table through flat head and next arrays**, and callers
+  that only need the set (`length(env)`, sorted `ls()`, `lockEnvironment`) use
+  `Heap::bound_symbols`, which skips the replay.
+
