@@ -75,3 +75,30 @@ keyed rolling join, written as the same R script for data.table under GNU R and 
 are faster on every group-by question (2 to 39 times), every join (2 to 4 times), and the full and
 added-column `:=` loops (5 to 6 times). A filtered `:=` loop and the keyed rolling join run about
 as fast as data.table. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
+
+`tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers
+on the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums.
+The table engine's numbers are measured from Rust: calls from R reach these kernels only once the
+runtime routes data.table's functions to them, which it does not do yet. Times are in seconds.
+
+| Operation | data.table | ry |
+|---|---|---|
+| `fread` | 2.92 | 1.39 |
+| `fwrite` | 0.87 | 0.70 |
+| `setkey` | 0.42 | 0.46 |
+| `setorder` | 0.97 | 0.69 |
+| `unique` | 0.10 | 0.09 |
+| `uniqueN` | 0.13 | 0.10 |
+| `rbindlist` | 0.88 | 0.29 |
+| `melt` | 1.20 | 0.39 |
+| `dcast` | 0.26 | 0.26 |
+| `shift` | 0.024 | 0.004 |
+| `fifelse` | 0.084 | 0.050 |
+| `fcoalesce` | 0.059 | 0.047 |
+| `nafill` | 0.081 | 0.042 |
+| `rleid` | 0.026 | 0.011 |
+| `between` | 0.018 | 0.013 |
+| `%chin%` | 0.049 | 0.036 |
+| `tstrsplit` | 5.17 | 1.86 |
+
+Each cell is the faster of two runs.
