@@ -224,6 +224,99 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     Ok(result)
 }
 
+/// `object[index]` for a plain logical, integer or double vector and an attribute-free integer,
+/// double or logical subscript, gathered straight from the subscript without first resolving
+/// it to a position list. `None` defers to the general path, which handles every other shape
+/// (negative or zero subscripts, recycled logical subscripts, other element types).
+unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if index == missing_arg() || values::has_attributes(index) || values::has_attributes(object) {
+        return Ok(None);
+    }
+    let kind = object.kind();
+    if !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real) {
+        return Ok(None);
+    }
+    let index = values::materialize(index)?;
+    match index.kind() {
+        SexpType::Integer => {
+            let positions = values::ints(index);
+            // Every subscript must be NA or positive; anything else needs the general rules.
+            if positions
+                .iter()
+                .any(|&position| position <= 0 && position != NA_INTEGER)
+            {
+                return Ok(None);
+            }
+            let position_of = |position: &i32| (*position as u32 as usize).wrapping_sub(1);
+            Ok(Some(gather_kind(
+                object,
+                positions.iter().map(position_of),
+                positions.len(),
+            )?))
+        }
+        SexpType::Real => {
+            let positions = values::reals(index);
+            if positions
+                .iter()
+                .any(|&position| !(position >= 1.0) && !position.is_nan())
+            {
+                return Ok(None);
+            }
+            let position_of = |position: &f64| {
+                if position.is_nan() {
+                    NA_POSITION
+                } else {
+                    position.trunc() as usize - 1
+                }
+            };
+            Ok(Some(gather_kind(
+                object,
+                positions.iter().map(position_of),
+                positions.len(),
+            )?))
+        }
+        SexpType::Logical => {
+            let flags = values::ints(index);
+            if flags.len() != length(object) {
+                return Ok(None);
+            }
+            let selected = flags.iter().filter(|&&flag| flag != 0).count();
+            let positions = flags
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &flag)| match flag {
+                    0 => None,
+                    NA_LOGICAL => Some(NA_POSITION),
+                    _ => Some(position),
+                });
+            Ok(Some(gather_kind(object, positions, selected)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `object[positions]` for a logical, integer or double vector, NA past the end.
+unsafe fn gather_kind(
+    object: Sexp,
+    positions: impl Iterator<Item = usize>,
+    count: usize,
+) -> R<Sexp> {
+    let kind = object.kind();
+    let result = values::alloc_uninit(kind, count)?;
+    if kind == SexpType::Real {
+        let source = values::reals(object);
+        for (slot, position) in values::reals_mut(result).iter_mut().zip(positions) {
+            *slot = source.get(position).copied().unwrap_or(NA_REAL);
+        }
+    } else {
+        let source = values::ints(object);
+        for (slot, position) in values::ints_mut(result).iter_mut().zip(positions) {
+            *slot = source.get(position).copied().unwrap_or(NA_INTEGER);
+        }
+    }
+    Ok(result)
+}
+
 /// `source[indices]` for an atomic vector of plain elements, with NA past the end.
 unsafe fn gather<T: Copy + 'static>(
     kind: SexpType,
@@ -569,6 +662,12 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     let count = length(object);
     let names = values::names(object);
+    if dims.is_none()
+        && names == nil()
+        && let Some(result) = gather_plain(object, index)?
+    {
+        return Ok(result);
+    }
     let (indices, _) = resolve(index, count, names, false, call)?;
     let result = select_elements(object, &indices)?;
     if names != nil() {

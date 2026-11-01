@@ -7,7 +7,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
         conditions,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
         values::{
@@ -379,7 +379,62 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     let outer = if rows { row_count } else { col_count };
     let inner = if rows { col_count } else { row_count };
     let result = alloc(SexpType::Real, outer)?;
+    let finish = |total: LongDouble, counted: usize| {
+        if mean {
+            (total / counted).to_f64()
+        } else {
+            total.to_f64()
+        }
+    };
+    // The x87 kernels give every finite row or column; the loop below redoes the others, whose
+    // NaN and infinities follow `na.rm`.
+    let mut done = vec![false; outer];
+    if matrix.kind() == SexpType::Real && row_count.checked_mul(col_count) == Some(length(matrix)) {
+        let data = values::reals(matrix);
+        let output = values::reals_mut(result);
+        if rows {
+            let divisor = if mean { inner } else { 1 };
+            done = long_double::finite_row_means(data, row_count, divisor, output);
+            done.resize(outer, false);
+        } else if row_count > 0 {
+            for (position, column) in data.chunks_exact(row_count).enumerate() {
+                if let Some(total) = long_double::finite_sum(column) {
+                    output[position] = finish(total, inner);
+                    done[position] = true;
+                }
+            }
+        }
+    } else if matches!(matrix.kind(), SexpType::Logical | SexpType::Integer)
+        && row_count.checked_mul(col_count) == Some(length(matrix))
+    {
+        // Integer totals are exact in a 64-bit significand, which is all a long double adds.
+        let data = values::ints(matrix);
+        let output = values::reals_mut(result);
+        let mut totals = vec![0i64; outer];
+        let mut missing = vec![false; outer];
+        for (index, &value) in data.iter().enumerate() {
+            let position = if rows {
+                index % row_count.max(1)
+            } else {
+                index / row_count.max(1)
+            };
+            if value == NA_INTEGER {
+                missing[position] = true;
+            } else {
+                totals[position] += i64::from(value);
+            }
+        }
+        for position in 0..outer {
+            if !missing[position] {
+                output[position] = finish(LongDouble::from_i64(totals[position]), inner);
+                done[position] = true;
+            }
+        }
+    }
     for position in 0..outer {
+        if done[position] {
+            continue;
+        }
         let mut total = LongDouble::ZERO;
         let mut counted = 0usize;
         for along in 0..inner {
@@ -395,11 +450,7 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             total += value;
             counted += 1;
         }
-        values::reals_mut(result)[position] = if mean {
-            (total / counted).to_f64()
-        } else {
-            total.to_f64()
-        };
+        values::reals_mut(result)[position] = finish(total, counted);
     }
     Ok(result)
 }
@@ -2624,6 +2675,15 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 let mut total = LongDouble::ZERO;
                 let mut na = false;
                 for &item in &items {
+                    let finite = if item.kind() == SexpType::Real {
+                        long_double::finite_sum(values::reals(item))
+                    } else {
+                        None
+                    };
+                    if let Some(item_total) = finite {
+                        total += item_total.to_f64();
+                        continue;
+                    }
                     let mut item_total = LongDouble::ZERO;
                     let mut first_nan = None;
                     for index in 0..length(item) {
@@ -2909,17 +2969,21 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
     let count = length(operand);
     match operand.kind() {
         SexpType::Logical | SexpType::Integer => {
-            let mut total = 0.0;
+            // GNU R divides the long double total, so the quotient rounds once, to double.
+            let mut total: i64 = 0;
             for &value in values::ints(operand) {
                 if value == NA_INTEGER {
                     return scalar_real(NA_REAL);
                 }
-                total += value as f64;
+                total += i64::from(value);
             }
-            scalar_real(total / count as f64)
+            scalar_real((LongDouble::from_i64(total) / count).to_f64())
         }
         SexpType::Real => {
             let data = values::reals(operand);
+            if let Some(total) = long_double::finite_sum(data) {
+                return scalar_real(long_double_mean_from_total(data, total).to_f64());
+            }
             // GNU R sums in x87 long double, where NA's payload outranks a plain NaN's.
             if data.iter().any(|&value| is_na_real(value)) {
                 return scalar_real(NA_REAL);
@@ -2941,6 +3005,27 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             "invalid 'type' ({}) of argument",
             operand.kind().name()
         ))),
+    }
+}
+
+/// `long_double_mean` over a slice, which runs the sums on the x87 kernels when every value is
+/// finite.
+pub fn long_double_slice_mean(data: &[f64]) -> LongDouble {
+    match long_double::finite_sum(data) {
+        Some(total) => long_double_mean_from_total(data, total),
+        None => long_double_mean(data.iter().copied()),
+    }
+}
+
+/// The mean of `data` from its finite long double `total`.
+pub fn long_double_mean_from_total(data: &[f64], total: LongDouble) -> LongDouble {
+    let mean = total / data.len();
+    if !mean.is_finite() {
+        return mean;
+    }
+    match long_double::finite_deviation_sum(data, mean) {
+        Some(deviations) => mean + deviations / data.len(),
+        None => long_double_mean(data.iter().copied()),
     }
 }
 

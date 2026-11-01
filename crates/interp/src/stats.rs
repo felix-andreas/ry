@@ -13,13 +13,14 @@ use {
         builtin_libraries::{NativeCall, NativeFn, c_result},
         coerce::coerce_vector,
         distributions, linalg,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
         stats_optimize, stats_port, stats_spline, stats_tests,
         unwind::{R, error},
         values::{self, length, scalar_bool, scalar_integer, symbols},
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+    std::borrow::Cow,
 };
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
@@ -155,6 +156,15 @@ pub(crate) unsafe fn as_reals(x: Sexp) -> R<Sexp> {
     } else {
         coerce_vector(x, SexpType::Real)
     }
+}
+
+/// The elements of `x` as doubles, borrowed when `x` already stores them. The caller's
+/// argument roots a borrowed vector; a converted one is copied out because nothing roots it.
+pub(crate) unsafe fn real_data(x: Sexp) -> R<Cow<'static, [f64]>> {
+    if x.kind() == SexpType::Real && !x.is_altrep() {
+        return Ok(Cow::Borrowed(values::reals(x)));
+    }
+    Ok(Cow::Owned(real_values(x)?))
 }
 
 /// The elements of `x` as doubles.
@@ -420,7 +430,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             "Calling var(x) on a factor x is defunct.\n  Use something like 'all(duplicated(x)[-1L])' to test for a constant vector.",
         ));
     }
-    let x = real_values(x_argument)?;
+    let x = real_data(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
     let has_y = y_argument != values::nil();
     let (y, y_columns) = if has_y {
@@ -428,22 +438,25 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         if y_rows != n {
             return Err(call.error("incompatible dimensions"));
         }
-        (real_values(y_argument)?, y_columns)
+        (Some(real_data(y_argument)?), y_columns)
     } else {
-        (x.clone(), x_columns)
+        (None, x_columns)
     };
-    let column = |data: &[f64], index: usize| data[index * n..(index + 1) * n].to_vec();
-    let x_data: Vec<Vec<f64>> = (0..x_columns).map(|index| column(&x, index)).collect();
-    let y_data: Vec<Vec<f64>> = (0..y_columns).map(|index| column(&y, index)).collect();
-    let all_columns: Vec<&Vec<f64>> = if has_y {
-        x_data.iter().chain(&y_data).collect()
+    let x_data = matrix_columns(&x, n, x_columns);
+    let y_data: Vec<&[f64]> = match &y {
+        Some(y) => matrix_columns(y, n, y_columns),
+        None => x_data.clone(),
+    };
+    let all_columns: Vec<&[f64]> = if has_y {
+        x_data.iter().chain(&y_data).copied().collect()
     } else {
-        x_data.iter().collect()
+        x_data.clone()
     };
-    let any_missing = all_columns
-        .iter()
-        .any(|data| data.iter().any(|value| value.is_nan()));
-    if policy == MissingPolicy::AllObservations && any_missing {
+    if policy == MissingPolicy::AllObservations
+        && all_columns
+            .iter()
+            .any(|data| data.iter().any(|value| value.is_nan()))
+    {
         return Err(call.error("missing observations in cov/cor"));
     }
     let mut zero_deviation = false;
@@ -458,8 +471,8 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     1.0
                 } else {
                     pair_statistic(
-                        &x_data[i],
-                        &y_data[j],
+                        x_data[i],
+                        y_data[j],
                         &used,
                         correlate,
                         kendall,
@@ -482,39 +495,65 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         if !used.iter().any(|&flag| flag) && policy == MissingPolicy::CompleteObservations {
             return Err(call.error("no complete element pairs"));
         }
-        let has_missing = |data: &Vec<f64>| {
-            data.iter()
+        let used_count = used.iter().filter(|&&flag| flag).count();
+        // Each column's mean, computed once, and whether it holds a used NA. With every row
+        // used, the first summation pass doubles as the NA check: a finite total means no NA.
+        let summarize = |data: &&[f64]| -> (bool, Option<LongDouble>) {
+            if !kendall
+                && used_count == n
+                && let Some(total) = long_double::finite_sum(data)
+            {
+                return (false, Some(arith::long_double_mean_from_total(data, total)));
+            }
+            let missing = data
+                .iter()
                 .zip(&used)
-                .any(|(value, &flag)| flag && value.is_nan())
+                .any(|(value, &flag)| flag && value.is_nan());
+            (missing, None)
         };
-        let missing_x: Vec<bool> = x_data.iter().map(has_missing).collect();
-        let missing_y: Vec<bool> = y_data.iter().map(has_missing).collect();
+        let x_summary: Vec<(bool, Option<LongDouble>)> = x_data.iter().map(summarize).collect();
+        let y_summary: Vec<(bool, Option<LongDouble>)> = if has_y {
+            y_data.iter().map(summarize).collect()
+        } else {
+            x_summary.clone()
+        };
+        let missing_x: Vec<bool> = x_summary.iter().map(|summary| summary.0).collect();
+        let missing_y: Vec<bool> = y_summary.iter().map(|summary| summary.0).collect();
+        let x_means: Vec<Option<LongDouble>> = x_summary.iter().map(|summary| summary.1).collect();
+        let y_means: Vec<Option<LongDouble>> = y_summary.iter().map(|summary| summary.1).collect();
         for i in 0..x_columns {
             for j in 0..y_columns {
                 if !missing_x[i] && !missing_y[j] {
-                    result[i + j * x_columns] =
-                        complete_covariance(&x_data[i], &y_data[j], &used, kendall).to_f64();
+                    result[i + j * x_columns] = complete_covariance(
+                        x_data[i],
+                        y_data[j],
+                        &used,
+                        kendall,
+                        [x_means[i], y_means[j]],
+                    )
+                    .to_f64();
                 }
             }
         }
         if correlate {
-            let scales = |data: &[Vec<f64>], missing: &[bool]| -> Vec<f64> {
+            let scales = |data: &[&[f64]], missing: &[bool], means: &[Option<LongDouble>]| {
                 data.iter()
                     .zip(missing)
-                    .map(|(column, &absent)| {
+                    .zip(means)
+                    .map(|((column, &absent), &mean)| {
                         if absent {
                             NA_REAL
                         } else {
-                            complete_covariance(column, column, &used, kendall)
+                            complete_covariance(column, column, &used, kendall, [mean, mean])
                                 .sqrt()
                                 .to_f64()
                         }
                     })
-                    .collect()
+                    .collect::<Vec<f64>>()
             };
-            let x_scale = scales(&x_data, &missing_x);
+            let x_scale = scales(&x_data, &missing_x, &x_means);
             let y_scale = if has_y {
-                scales(&y_data, &missing_y)
+                scales(&y_data, &missing_y, &y_means)
             } else {
                 x_scale.clone()
             };
@@ -557,6 +596,13 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     Ok(answer)
 }
 
+/// The `count` columns of a column-major matrix with `rows` rows.
+fn matrix_columns(data: &[f64], rows: usize, count: usize) -> Vec<&[f64]> {
+    (0..count)
+        .map(|index| &data[index * rows..(index + 1) * rows])
+        .collect()
+}
+
 unsafe fn column_names(x: Sexp) -> Sexp {
     let dimnames = values::get_attr(x, symbols().dimnames);
     if dimnames.kind() == SexpType::List && length(dimnames) == 2 {
@@ -567,7 +613,14 @@ unsafe fn column_names(x: Sexp) -> Sexp {
 }
 
 /// The covariance of two columns over the used rows, or Kendall's sum of concordance signs.
-fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> LongDouble {
+/// `means` holds each column's mean when the caller already has it, which needs every row used.
+fn complete_covariance(
+    x: &[f64],
+    y: &[f64],
+    used: &[bool],
+    kendall: bool,
+    means: [Option<LongDouble>; 2],
+) -> LongDouble {
     let count = used.iter().filter(|&&flag| flag).count();
     if count < 2 {
         return LongDouble::from(NA_REAL);
@@ -586,8 +639,24 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> Lo
         }
         return sum;
     }
+    if count == x.len() {
+        let [x_mean, y_mean] = [(x, means[0]), (y, means[1])]
+            .map(|(data, mean)| mean.unwrap_or_else(|| arith::long_double_slice_mean(data)));
+        // GNU R keeps the column means in a double array, so they round before the products.
+        let (x_mean, y_mean) = (
+            LongDouble::from(x_mean.to_f64()),
+            LongDouble::from(y_mean.to_f64()),
+        );
+        if let Some(sum) = long_double::finite_cross_deviation_sum(x, y, x_mean, y_mean) {
+            return sum / (count - 1);
+        }
+    }
     let x_mean = arith::long_double_mean(used_values(x, used));
     let y_mean = arith::long_double_mean(used_values(y, used));
+    let (x_mean, y_mean) = (
+        LongDouble::from(x_mean.to_f64()),
+        LongDouble::from(y_mean.to_f64()),
+    );
     for k in 0..x.len() {
         if used[k] {
             sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
@@ -612,12 +681,52 @@ fn pair_statistic(
     kendall: bool,
     zero_deviation: &mut bool,
 ) -> f64 {
-    let covariance = complete_covariance(x, y, used, kendall).to_f64();
+    if !kendall {
+        // GNU R's pairwise loop takes plain long double means, with no refinement pass, and
+        // keeps the correlation in long double until the final rounding.
+        let mut count = 0usize;
+        let (mut x_mean, mut y_mean) = (LongDouble::ZERO, LongDouble::ZERO);
+        for k in (0..x.len()).filter(|&k| used[k]) {
+            count += 1;
+            x_mean += x[k];
+            y_mean += y[k];
+        }
+        if count < 2 {
+            return NA_REAL;
+        }
+        let (x_mean, y_mean) = (x_mean / count, y_mean / count);
+        let (mut sum, mut x_squares, mut y_squares) =
+            (LongDouble::ZERO, LongDouble::ZERO, LongDouble::ZERO);
+        for k in (0..x.len()).filter(|&k| used[k]) {
+            let x_deviation = LongDouble::from(x[k]) - x_mean;
+            let y_deviation = LongDouble::from(y[k]) - y_mean;
+            sum = sum + x_deviation * y_deviation;
+            if correlate {
+                x_squares = x_squares + x_deviation * x_deviation;
+                y_squares = y_squares + y_deviation * y_deviation;
+            }
+        }
+        let degrees = count - 1;
+        if !correlate {
+            return (sum / degrees).to_f64();
+        }
+        if x_squares.to_f64() == 0.0 || y_squares.to_f64() == 0.0 {
+            *zero_deviation = true;
+            return NA_REAL;
+        }
+        let scale = (x_squares / degrees).sqrt() * (y_squares / degrees).sqrt();
+        return ((sum / degrees) / scale).to_f64().clamp(-1.0, 1.0);
+    }
+    let covariance = complete_covariance(x, y, used, kendall, [None, None]).to_f64();
     if !correlate || covariance.is_nan() {
         return covariance;
     }
-    let x_scale = complete_covariance(x, x, used, kendall).sqrt().to_f64();
-    let y_scale = complete_covariance(y, y, used, kendall).sqrt().to_f64();
+    let x_scale = complete_covariance(x, x, used, kendall, [None, None])
+        .sqrt()
+        .to_f64();
+    let y_scale = complete_covariance(y, y, used, kendall, [None, None])
+        .sqrt()
+        .to_f64();
     if x_scale == 0.0 || y_scale == 0.0 {
         *zero_deviation = true;
         return NA_REAL;

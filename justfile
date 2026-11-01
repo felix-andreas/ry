@@ -108,6 +108,11 @@ bench-why *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/bench/why/run.py {{ args }}
 
+# Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
+bench-base *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/base/run.py {{ args }}
+
 # Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
     cargo test -p ry-lang --test test_repl_e2e -- --nocapture

@@ -238,10 +238,23 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
         SexpType::Real => {
             // Plain comparisons, so a NaN stays where it is, as in GNU R. The R wrappers remove
             // NAs before they get here.
-            if decreasing {
-                shell_sort(values::reals_mut(result), |left, right| left < right);
+            let items = values::reals_mut(result);
+            // Without NaN or a negative zero, elements that compare equal are bitwise equal, so
+            // any correct sort gives the shell sort's exact result, and pattern-defeating
+            // quicksort is several times faster.
+            if !items
+                .iter()
+                .any(|item| item.is_nan() || (*item == 0.0 && item.is_sign_negative()))
+            {
+                if decreasing {
+                    items.sort_unstable_by(|left, right| right.total_cmp(left));
+                } else {
+                    items.sort_unstable_by(f64::total_cmp);
+                }
+            } else if decreasing {
+                shell_sort(items, |left, right| left < right);
             } else {
-                shell_sort(values::reals_mut(result), |left, right| left > right);
+                shell_sort(items, |left, right| left > right);
             }
         }
         SexpType::Complex => {
@@ -408,43 +421,85 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             keys[0].kind().name()
         )));
     }
-    let unsupported = Cell::new(None);
-    let mut order: Vec<usize> = (0..count).collect();
     let nas_last = na_last == 1;
-    order.sort_by(|&left, &right| {
-        compare_rows(&columns, &directions, left, right, nas_last, &unsupported)
-    });
-    if let Some(position) = unsupported.get() {
-        return Err(error(format!(
-            "Arg {} is type '{}', not yet supported",
-            position + 1,
-            keys[position].kind().name()
-        )));
-    }
-    let ends = if return_groups {
-        let mut ends = Vec::new();
-        for position in 1..=order.len() {
-            let boundary = position == order.len()
-                || compare_rows(
+    let radix_keys: Option<Vec<Vec<u64>>> = columns
+        .iter()
+        .zip(&directions)
+        .map(|(column, &decreasing)| {
+            column
+                .as_ref()
+                .and_then(|column| sort_keys(column, decreasing, nas_last))
+        })
+        .collect();
+    let (order, ends) = match radix_keys {
+        Some(keys) => {
+            let order = radix_order(&keys, count);
+            let ends = return_groups.then(|| {
+                let mut ends = Vec::new();
+                for position in 1..=order.len() {
+                    if position == order.len()
+                        || keys.iter().any(|key| {
+                            key[order[position - 1] as usize] != key[order[position] as usize]
+                        })
+                    {
+                        ends.push(position as i32);
+                    }
+                }
+                ends
+            });
+            (order, ends)
+        }
+        // A key the radix sort cannot read (a complex vector after the first key) is reported
+        // only when rows tie on every earlier key, so it needs the comparison sort.
+        None => {
+            let unsupported = Cell::new(None);
+            let mut order: Vec<u32> = (0..count as u32).collect();
+            order.sort_by(|&left, &right| {
+                compare_rows(
                     &columns,
                     &directions,
-                    order[position - 1],
-                    order[position],
+                    left as usize,
+                    right as usize,
                     nas_last,
                     &unsupported,
-                ) != Ordering::Equal;
-            if boundary {
-                ends.push(position as i32);
+                )
+            });
+            if let Some(position) = unsupported.get() {
+                return Err(error(format!(
+                    "Arg {} is type '{}', not yet supported",
+                    position + 1,
+                    keys[position].kind().name()
+                )));
             }
+            let ends = return_groups.then(|| {
+                let mut ends = Vec::new();
+                for position in 1..=order.len() {
+                    if position == order.len()
+                        || compare_rows(
+                            &columns,
+                            &directions,
+                            order[position - 1] as usize,
+                            order[position] as usize,
+                            nas_last,
+                            &unsupported,
+                        ) != Ordering::Equal
+                    {
+                        ends.push(position as i32);
+                    }
+                }
+                ends
+            });
+            (order, ends)
         }
-        Some(ends)
-    } else {
-        None
     };
     let mut result: Vec<i32> = order.iter().map(|&index| index as i32 + 1).collect();
     if na_last == NA_LOGICAL {
         for (slot, &index) in result.iter_mut().zip(&order) {
-            if columns.iter().flatten().any(|column| column.is_na(index)) {
+            if columns
+                .iter()
+                .flatten()
+                .any(|column| column.is_na(index as usize))
+            {
                 *slot = 0;
             }
         }
@@ -1039,6 +1094,156 @@ impl Column<'_> {
             }
         }
     }
+}
+
+/// Each element of one radix sort key as an unsigned integer whose natural order is the key's
+/// order: decreasing when `decreasing` is set (except for first-appearance codes, which keep
+/// their order), with every NA equal to every other and placed last or first. `None` for a key
+/// the radix sort does not read.
+fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Vec<u64>> {
+    // Non-NA keys lie strictly between 0 and `top`, so NAs take one end of the range.
+    let place = |key: Option<u64>, top: u64| match key {
+        Some(key) if decreasing => top - key,
+        Some(key) => key,
+        None if na_last => top,
+        None => 0,
+    };
+    match column {
+        Column::Integer(items) => {
+            let top = 1u64 << 32;
+            Some(
+                items
+                    .iter()
+                    .map(|&value| {
+                        let key = (value != NA_INTEGER)
+                            .then(|| (i64::from(value) - i64::from(i32::MIN)) as u64);
+                        place(key, top)
+                    })
+                    .collect(),
+            )
+        }
+        Column::Real(items) => Some(
+            items
+                .iter()
+                .map(|&value| {
+                    // The IEEE bits ordered as unsigned integers, with -0 read as 0. NaN bit
+                    // patterns map past both infinities, so 0 and `u64::MAX` stay free.
+                    let key = (!value.is_nan()).then(|| {
+                        let bits = if value == 0.0 { 0 } else { value.to_bits() };
+                        if bits >> 63 == 1 {
+                            !bits
+                        } else {
+                            bits | 1 << 63
+                        }
+                    });
+                    place(key, u64::MAX)
+                })
+                .collect(),
+        ),
+        Column::Raw(items) => Some(
+            items
+                .iter()
+                .map(|&value| place(Some(u64::from(value) + 1), 257))
+                .collect(),
+        ),
+        Column::Grouped(items) => Some(items.iter().map(|&code| code as u64).collect()),
+        Column::Bytes(items) => {
+            let mut distinct: FxHashMap<&str, u64> = FxHashMap::default();
+            for item in items.iter().flatten() {
+                distinct.entry(item.as_ref()).or_insert(0);
+            }
+            let mut sorted: Vec<&str> = distinct.keys().copied().collect();
+            sorted.sort_unstable();
+            for (rank, text) in sorted.iter().enumerate() {
+                distinct.insert(text, rank as u64 + 1);
+            }
+            let top = sorted.len() as u64 + 1;
+            Some(
+                items
+                    .iter()
+                    .map(|item| place(item.as_deref().map(|text| distinct[text]), top))
+                    .collect(),
+            )
+        }
+        Column::Complex(_) | Column::String(_) => None,
+    }
+}
+
+/// The stable order of `count` rows by `keys`, the first key most significant: a least
+/// significant digit radix sort, one key at a time from the last, each over only the digits
+/// its range spans.
+fn radix_order(keys: &[Vec<u64>], count: usize) -> Vec<u32> {
+    const BITS: u32 = 11;
+    const BUCKETS: usize = 1 << BITS;
+    let mut order: Vec<u32> = (0..count as u32).collect();
+    let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(count);
+    let mut scratch: Vec<(u64, u32)> = Vec::new();
+    let mut histogram = vec![0usize; BUCKETS];
+    for key in keys.iter().rev() {
+        let Some(&low) = key.iter().min() else {
+            continue;
+        };
+        let high = key.iter().copied().max().unwrap_or(low);
+        let span = high - low;
+        if span == 0 {
+            continue;
+        }
+        // A dense key (such as a permutation or small-range integers) sorts in one counting
+        // pass, which beats two or more digit passes over (key, index) pairs.
+        if span < count.max(1 << 16) as u64 {
+            histogram.clear();
+            histogram.resize(span as usize + 2, 0);
+            for &index in &order {
+                histogram[(key[index as usize] - low) as usize + 1] += 1;
+            }
+            for bucket in 1..histogram.len() {
+                histogram[bucket] += histogram[bucket - 1];
+            }
+            let mut sorted = vec![0u32; count];
+            for &index in &order {
+                let bucket = &mut histogram[(key[index as usize] - low) as usize];
+                sorted[*bucket] = index;
+                *bucket += 1;
+            }
+            order = sorted;
+            histogram.clear();
+            histogram.resize(BUCKETS, 0);
+            continue;
+        }
+        pairs.clear();
+        pairs.extend(
+            order
+                .iter()
+                .map(|&index| (key[index as usize] - low, index)),
+        );
+        scratch.resize(count, (0, 0));
+        let digits = (u64::BITS - span.leading_zeros()).div_ceil(BITS);
+        for digit in 0..digits {
+            let shift = digit * BITS;
+            histogram.fill(0);
+            for &(value, _) in &pairs {
+                histogram[((value >> shift) as usize) & (BUCKETS - 1)] += 1;
+            }
+            if histogram.iter().any(|&bucket| bucket == count) {
+                continue;
+            }
+            let mut start = 0;
+            for bucket in histogram.iter_mut() {
+                let size = *bucket;
+                *bucket = start;
+                start += size;
+            }
+            for &pair in &pairs {
+                let bucket = &mut histogram[((pair.0 >> shift) as usize) & (BUCKETS - 1)];
+                scratch[*bucket] = pair;
+                *bucket += 1;
+            }
+            std::mem::swap(&mut pairs, &mut scratch);
+        }
+        order.clear();
+        order.extend(pairs.iter().map(|&(_, index)| index));
+    }
+    order
 }
 
 /// Compares two rows key by key. A key of a type that cannot be ordered is recorded in
