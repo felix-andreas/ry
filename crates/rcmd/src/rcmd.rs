@@ -57,6 +57,13 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> Error + '_ {
     move |error| Error::Io(path.to_path_buf(), error)
 }
 
+/// The file name of ry's libR in an R home's `lib/`: the name compiled packages link against.
+pub const LIBR_FILE: &str = if cfg!(target_os = "macos") {
+    "libR.dylib"
+} else {
+    "libR.so"
+};
+
 /// The toolchain an R home is configured with.
 #[derive(Clone, Debug)]
 pub struct Toolchain {
@@ -66,6 +73,11 @@ pub struct Toolchain {
     pub blas_libs: String,
     pub lapack_libs: String,
     pub flibs: String,
+    pub cppflags: String,
+    pub ldflags: String,
+    /// The compiler flag that enables OpenMP, or empty where the compiler has none (Apple's
+    /// clang), in which case packages build single-threaded as they do under CRAN's R.
+    pub openmp: String,
 }
 
 impl Default for Toolchain {
@@ -79,8 +91,178 @@ impl Default for Toolchain {
             blas_libs: "-lblas".into(),
             lapack_libs: "-llapack".into(),
             flibs: "-lgfortran -lm -lquadmath".into(),
+            cppflags: String::new(),
+            ldflags: String::new(),
+            openmp: "-fopenmp".into(),
         }
     }
+}
+
+impl Toolchain {
+    /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
+    /// On Linux that is [`Toolchain::default`]. On macOS it is the one GNU R's own
+    /// `etc/Makeconf` names, because the compilers and libraries vary by installer: CRAN's R
+    /// uses Apple's clang, the gfortran in `/opt/gfortran` and its own `libRblas`, Homebrew's
+    /// uses Homebrew's gcc and OpenBLAS, and neither has a usable default.
+    pub fn for_gnu_r_home(gnu_r_home: &Path) -> Result<Toolchain> {
+        if !cfg!(target_os = "macos") {
+            return Ok(Toolchain::default());
+        }
+        let path = gnu_r_home.join("etc").join("Makeconf");
+        let text = fs::read_to_string(&path).map_err(io_error(&path))?;
+        Ok(Toolchain::from_makeconf(&text, gnu_r_home))
+    }
+
+    /// Reads a toolchain from the text of GNU R's `Makeconf`, expanding `$(VAR)` references
+    /// against the file's own assignments and `R_HOME` against `gnu_r_home`, since ry's home
+    /// does not hold GNU R's BLAS or LAPACK.
+    pub fn from_makeconf(text: &str, gnu_r_home: &Path) -> Toolchain {
+        let variables = make_assignments(text);
+        let home = gnu_r_home.display().to_string();
+        let get = |name: &str| {
+            expand_make(
+                variables.get(name).map_or("", String::as_str),
+                &variables,
+                &home,
+                0,
+            )
+        };
+        let defaults = Toolchain::default();
+        let or = |value: String, fallback: &str| match value.is_empty() {
+            true => fallback.to_owned(),
+            false => value,
+        };
+        // `CXX17` is the bare compiler; `CXX` may already carry a `-std` flag.
+        let cxx = match get("CXX17") {
+            value if value.is_empty() => get("CXX"),
+            value => value,
+        };
+        Toolchain {
+            cc: or(get("CC"), "clang"),
+            cxx: or(cxx, "clang++"),
+            fc: or(get("FC"), &defaults.fc),
+            blas_libs: or(get("BLAS_LIBS"), "-framework Accelerate"),
+            lapack_libs: or(get("LAPACK_LIBS"), "-framework Accelerate"),
+            flibs: get("FLIBS"),
+            cppflags: get("CPPFLAGS"),
+            ldflags: get("LDFLAGS"),
+            openmp: get("SHLIB_OPENMP_CFLAGS"),
+        }
+    }
+}
+
+/// The `NAME = value` assignments of a makefile, with backslash continuations joined. `+=`
+/// appends and `?=` assigns only once, as make does.
+fn make_assignments(text: &str) -> BTreeMap<String, String> {
+    let mut variables = BTreeMap::new();
+    let mut logical = String::new();
+    for line in text.lines() {
+        // make joins a continuation and the whitespace around it into one space.
+        let line = if logical.is_empty() {
+            line
+        } else {
+            line.trim_start()
+        };
+        if let Some(stripped) = line.strip_suffix('\\') {
+            logical.push_str(stripped.trim_end());
+            logical.push(' ');
+            continue;
+        }
+        logical.push_str(line);
+        let statement = std::mem::take(&mut logical);
+        if statement.starts_with(['\t', '#']) {
+            continue;
+        }
+        let Some((name, value)) = statement.split_once('=') else {
+            continue;
+        };
+        // A `#` starts a comment anywhere on an assignment line, as in make.
+        let value = value.split('#').next().unwrap_or("").trim().to_owned();
+        let (name, operator) = match name.trim_end().strip_suffix(['+', '?', ':']) {
+            Some(stripped) => (stripped.trim(), name.trim_end().chars().last()),
+            None => (name.trim(), None),
+        };
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        match operator {
+            Some('+') => {
+                let entry: &mut String = variables.entry(name.to_owned()).or_default();
+                if !entry.is_empty() {
+                    entry.push(' ');
+                }
+                entry.push_str(&value);
+            }
+            Some('?') => {
+                variables.entry(name.to_owned()).or_insert(value);
+            }
+            _ => {
+                variables.insert(name.to_owned(), value);
+            }
+        }
+    }
+    variables
+}
+
+/// Expands `$(NAME)` and `${NAME}` in `value`, including a name built by a nested reference
+/// (`$(CXX$(STD))`), and `$$` to `$`. An unknown name expands to nothing, as in make, and the
+/// depth bound stops a self-referencing assignment. Whitespace inside the value is kept, so a
+/// quoted path with a space survives.
+fn expand_make(
+    value: &str,
+    variables: &BTreeMap<String, String>,
+    home: &str,
+    depth: usize,
+) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('$') {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let (open, close) = match after.chars().next() {
+            Some('(') => ('(', ')'),
+            Some('{') => ('{', '}'),
+            Some('$') => {
+                expanded.push('$');
+                rest = &after[1..];
+                continue;
+            }
+            _ => {
+                expanded.push('$');
+                rest = after;
+                continue;
+            }
+        };
+        let mut level = 0usize;
+        let end = after.char_indices().find_map(|(index, character)| {
+            if character == open {
+                level += 1;
+            } else if character == close {
+                level -= 1;
+                if level == 0 {
+                    return Some(index);
+                }
+            }
+            None
+        });
+        let Some(end) = end else {
+            expanded.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let name = expand_make(&after[1..end], variables, home, depth + 1);
+        let name = name.as_str();
+        if name == "R_HOME" {
+            expanded.push_str(home);
+        } else if depth < 16
+            && let Some(inner) = variables.get(name)
+        {
+            expanded.push_str(&expand_make(inner, variables, home, depth + 1));
+        }
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    expanded.trim().to_owned()
 }
 
 /// Where the pieces of an R home come from.
@@ -101,7 +283,7 @@ pub struct HomeSources<'a> {
 /// `Rdconv`, `REMOVE` and the rest) is linked, and runs R code through ry's `bin/R`.
 const OWN_SCRIPTS: &[&str] = &["R", "Rscript", "Rcmd", "INSTALL", "SHLIB", "config", "exec"];
 
-/// Creates ry's R home at `root`: `include/`, `lib/libR.so`, `etc/Makeconf`,
+/// Creates ry's R home at `root`: `include/`, `lib/libR.so` (`libR.dylib`), `etc/Makeconf`,
 /// `share/make/shlib.mk` and the `bin/` front ends, with base R's packages in `library/` and
 /// the rest of `share/`, `etc/` and `bin/` linked from GNU R.
 pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
@@ -115,7 +297,7 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     // The headers present the version of the base R the interpreter runs, as `R.version` does,
     // so a package's C code and its R code take the same version branches.
     write(&root.join("include/Rversion.h"), &version.header())?;
-    let libr = root.join("lib/libR.so");
+    let libr = root.join("lib").join(LIBR_FILE);
     // Replacing rather than overwriting keeps a running session's mapping of the old file valid.
     remove_file_if_present(&libr)?;
     fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
@@ -564,7 +746,23 @@ fn makeconf(root: &Path, toolchain: &Toolchain) -> String {
         blas_libs,
         lapack_libs,
         flibs,
+        cppflags,
+        ldflags,
+        openmp,
     } = toolchain;
+    // On macOS a package records no libR at all and resolves R's API with a flat lookup when
+    // it loads, from the libR already in the process, so the same build loads under ry's
+    // runtime and under GNU R (`decisions.md`, "macOS packages bind to ry's libR"). On Linux the
+    // `libR.so` dependency is satisfied by soname from whichever libR is loaded.
+    let (dylib_ext, shlib_ldflags, libr) = if cfg!(target_os = "macos") {
+        (
+            ".dylib",
+            "-dynamiclib -Wl,-headerpad_max_install_names -undefined dynamic_lookup",
+            "",
+        )
+    } else {
+        (".so", "-shared", r#"-L"$(R_HOME)/lib" -lR"#)
+    };
     format!(
         r#"# ry's build configuration for packages, read by R CMD INSTALL and R CMD SHLIB.
 
@@ -618,24 +816,24 @@ OBJC = $(CC)
 OBJCFLAGS = -g -O2
 AR = ar
 RANLIB = ranlib
-LDFLAGS =
-CPPFLAGS =
-DYLIB_EXT = .so
+LDFLAGS = {ldflags}
+CPPFLAGS = {cppflags}
+DYLIB_EXT = {dylib_ext}
 SHLIB_EXT = .so
 SHLIB_LD = $(CC)
-SHLIB_LDFLAGS = -shared
+SHLIB_LDFLAGS = {shlib_ldflags}
 SHLIB_CXXLD = $(CXX)
-SHLIB_CXXLDFLAGS = -shared
+SHLIB_CXXLDFLAGS = {shlib_ldflags}
 SHLIB_FCLD = $(FC)
-SHLIB_FCLDFLAGS = -shared
-SHLIB_OPENMP_CFLAGS = -fopenmp
-SHLIB_OPENMP_CXXFLAGS = -fopenmp
-SHLIB_OPENMP_FFLAGS = -fopenmp
-SHLIB_OPENMP_FCFLAGS = -fopenmp
+SHLIB_FCLDFLAGS = {shlib_ldflags}
+SHLIB_OPENMP_CFLAGS = {openmp}
+SHLIB_OPENMP_CXXFLAGS = {openmp}
+SHLIB_OPENMP_FFLAGS = {openmp}
+SHLIB_OPENMP_FCFLAGS = {openmp}
 BLAS_LIBS = {blas_libs}
 LAPACK_LIBS = {lapack_libs}
 LIBM = -lm
-LIBR = -L"$(R_HOME)/lib" -lR
+LIBR = {libr}
 LIBINTL =
 TCLTK_CPPFLAGS =
 TCLTK_LIBS =
@@ -1425,5 +1623,64 @@ mod tests {
     fn the_cxx_standard_comes_from_makevars() {
         assert_eq!(cxx_standard("CXX_STD = CXX17\n"), Some("CXX17".to_owned()));
         assert_eq!(cxx_standard("PKG_LIBS = -lz\n"), None);
+    }
+
+    /// An excerpt of the `etc/Makeconf` of CRAN's R 4.5 for Apple silicon.
+    const CRAN_MACOS_MAKECONF: &str = "\
+R_ARCH =
+CC = clang -arch arm64
+CXX = clang++ -arch arm64 -std=gnu++17
+CXX17 = clang++ -arch arm64
+CPPFLAGS = -I/opt/R/arm64/include
+LDFLAGS = -L/opt/R/arm64/lib
+FC = /opt/gfortran/bin/gfortran -mtune=native
+FLIBS =  -L/opt/gfortran/lib/gcc/aarch64-apple-darwin20.0/14.2.0 \\
+ -L/opt/gfortran/lib -lgfortran -lemutls_w -lheapt_w -lquadmath
+BLAS_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRblas
+LAPACK_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRlapack
+SHLIB_OPENMP_CFLAGS =
+\tthis line is a recipe = and is skipped
+";
+
+    #[test]
+    fn a_macos_toolchain_comes_from_gnu_r_makeconf() {
+        let home = Path::new("/Library/Frameworks/R.framework/Resources");
+        let toolchain = Toolchain::from_makeconf(CRAN_MACOS_MAKECONF, home);
+        assert_eq!(toolchain.cc, "clang -arch arm64");
+        assert_eq!(toolchain.cxx, "clang++ -arch arm64");
+        assert_eq!(toolchain.fc, "/opt/gfortran/bin/gfortran -mtune=native");
+        assert_eq!(
+            toolchain.flibs,
+            "-L/opt/gfortran/lib/gcc/aarch64-apple-darwin20.0/14.2.0 -L/opt/gfortran/lib \
+             -lgfortran -lemutls_w -lheapt_w -lquadmath"
+        );
+        assert_eq!(
+            toolchain.blas_libs,
+            "-L\"/Library/Frameworks/R.framework/Resources/lib\" -lRblas"
+        );
+        assert_eq!(toolchain.cppflags, "-I/opt/R/arm64/include");
+        assert_eq!(toolchain.ldflags, "-L/opt/R/arm64/lib");
+        assert_eq!(toolchain.openmp, "", "Apple's clang has no OpenMP");
+    }
+
+    #[test]
+    fn make_expansion_appends_and_stops_on_self_reference() {
+        let variables =
+            make_assignments("A = x\nA += y\nB ?= $(A) ${C}\nB ?= no\nLOOP = $(LOOP)\n");
+        assert_eq!(expand_make("$(B)", &variables, "/r", 0), "x y");
+        assert_eq!(
+            expand_make("$(LOOP) $$ $(R_HOME)", &variables, "/r", 0),
+            "$ /r"
+        );
+    }
+
+    #[test]
+    fn make_expansion_nests_drops_comments_and_keeps_quoted_spaces() {
+        let variables = make_assignments("STD = 17 # the default\nCXX17 = clang++\n");
+        assert_eq!(expand_make("$(CXX$(STD))", &variables, "/r", 0), "clang++");
+        assert_eq!(
+            expand_make("-L\"$(R_HOME)/lib\"", &variables, "/My R", 0),
+            "-L\"/My R/lib\""
+        );
     }
 }
