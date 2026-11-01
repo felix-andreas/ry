@@ -744,10 +744,10 @@ getOption("digits", default = 7L)
 Any
 
 #==== untyped_stubs
-#---- grep_is_unknown
+#---- grep_is_any
 grep("a", "banana")
 #++++
-Unknown
+Any
 
 #---- sapply_is_unknown
 sapply(list(1L), is.numeric)

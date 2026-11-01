@@ -69,12 +69,12 @@
 # `Date + Date` is deliberately absent: R rejects it too ("binary + is not
 # defined for Date objects"), and a class that declares an operator but fits no
 # candidate reports a mismatch rather than falling back to the numeric rules.
-+.Date : fn(e1: Date, e2: double) -> Date
-+.Date : fn(e1: double, e2: Date) -> Date
++.Date : fn(e1: Date, e2: double[]) -> Date
++.Date : fn(e1: double[], e2: Date) -> Date
 +.Date : fn(e1: Date, e2: difftime) -> Date
 +.Date : fn(e1: difftime, e2: Date) -> Date
 -.Date : fn(e1: Date, e2: Date) -> difftime
--.Date : fn(e1: Date, e2: double) -> Date
+-.Date : fn(e1: Date, e2: double[]) -> Date
 -.Date : fn(e1: Date, e2: difftime) -> Date
 # A `logical` partner is `NA`, which compares with any class: a field that starts
 # as `NA` and later holds a date reads as `logical | Date`.
@@ -98,12 +98,12 @@ c.factor : fn(...: factor) -> factor
 [.factor : fn(x: factor, ...: Any) -> factor
 [[.factor : fn(x: factor, ...: Any) -> factor
 
-+.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
-+.POSIXct : fn(e1: double, e2: POSIXct) -> POSIXct
++.POSIXct : fn(e1: POSIXct, e2: double[]) -> POSIXct
++.POSIXct : fn(e1: double[], e2: POSIXct) -> POSIXct
 +.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
 +.POSIXct : fn(e1: difftime, e2: POSIXct) -> POSIXct
 -.POSIXct : fn(e1: POSIXct, e2: POSIXct) -> difftime
--.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
+-.POSIXct : fn(e1: POSIXct, e2: double[]) -> POSIXct
 -.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
 Compare.POSIXct : fn(e1: POSIXct | character | logical, e2: POSIXct) -> logical
 Compare.POSIXct : fn(e1: POSIXct, e2: character | logical) -> logical
@@ -276,14 +276,15 @@ prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
 # used); the subject `x` is Any-param. Elementwise results are scalar-claim. `grep` returns indices or
-# values depending on `value =` (value-dependent), and the match-data functions return position
-# structures consumed by `regmatches`, so those stay `Any`.
+# values depending on `value =` (value-dependent). `regexpr` returns one match position per element
+# and `gregexpr` a list of position vectors (both carry match-length attributes, which `regmatches`
+# reads); `regexec`'s per-group structure and `regmatches` itself stay `Any`.
 gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
-grep : @pure Any
-regexpr : @pure Any
-gregexpr : @pure Any
+grep : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [value]: logical, [fixed]: logical, [useBytes]: logical, [invert]: logical) -> Any
+regexpr : @pure fn(pattern: character, text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> integer[]
+gregexpr : @pure fn(pattern: character, text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> list[integer[]]
 regexec : @pure Any
 regmatches : @pure Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer
@@ -515,7 +516,9 @@ outer : Any
 cut : @pure fn(x: Any, [breaks]: Any, [labels]: Any, [include.lowest]: logical, [right]: logical, [dig.lab]: Any, [ordered_result]: logical, ...: Any) -> Any
 split : @pure fn(x: Any, f: Any, [drop]: logical, ...: Any, [sep]: character, [lex.order]: logical) -> list[Any]
 merge : Any
-scale : Any
+# `scale` centres and scales the columns of its argument, and the default method always returns a
+# matrix, even for a plain vector.
+scale : @pure fn(x: Any, [center]: Any, [scale]: Any) -> matrix
 tabulate : @pure fn(bin: Any, [nbins]: Any) -> integer[]
 rowSums : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 colSums : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
@@ -574,7 +577,8 @@ vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any
-tapply : Any
+# `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).
+tapply : @pure fn(X: Any, INDEX: Any, [FUN]: Any, ...: Any, [default]: Any, [simplify]: logical) -> Any
 Negate : @pure Any
 Vectorize : @pure Any
 Recall : Any
@@ -737,7 +741,7 @@ system.time : fn(expr: Any, [gcFirst]: logical) -> Any
 quit : fn([save]: character, [status]: Any, [runLast]: logical) -> Any
 q : fn([save]: character, [status]: Any, [runLast]: logical) -> Any
 # `summary` is an S3 generic whose result shape is class-dependent; `diff` is type-preserving.
-summary : Any
+summary : fn(object: Any, ...: Any) -> Any
 diff : @pure fn(x: Any, [lag]: Any, [differences]: Any, ...: Any) -> Any
 
 # Interactive debugging. All side-effecting; `debug`/`trace` take the function object itself

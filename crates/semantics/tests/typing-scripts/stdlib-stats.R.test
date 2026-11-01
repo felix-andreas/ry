@@ -157,15 +157,15 @@ lm(c(1, 2))
 Any
 3..10 error[type-mismatch] expected `formula`, found `double[]`
 
-#---- prediction_helpers_are_unknown
-# `coef` is declared to return `Any`; the others are bare `Any` values, and calling one is
-# `Unknown`.
+#---- prediction_helpers_are_unchecked
+# `predict`, `coef` and `fitted` are declared to return `Any`; `residuals` is a bare `Any`
+# value, and calling one is `Unknown`.
 predict(1L)
 coef(1L)
 residuals(1L)
 fitted(1L)
 #++++
-Unknown
+Any
 Any
 Unknown
-Unknown
+Any

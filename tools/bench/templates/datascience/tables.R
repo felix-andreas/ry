@@ -3,6 +3,10 @@
 #@ param GROUPS int 3 12
 #@ param THRESHOLD float 0.2 0.8 2
 # Grouped aggregation, joins and reshaping on data.table.
+#: @alias Events@ID@ {data.table{id: integer[], group: character[], amount: double[], flag: logical[]}}
+#: @alias FeaturedEvents@ID@ {data.table{id: integer[], group: character[], amount: double[], flag: logical[], rank_in_group: integer[], size_class: character[], z: double[]}}
+
+#: fn([rows]: integer, [groups]: integer, [seed]: integer) -> Events@ID@
 make_events_@ID@ <- function(rows = @ROWS@L, groups = @GROUPS@L, seed = 1L) {
   set.seed(seed)
   data.table::data.table(
@@ -13,10 +17,12 @@ make_events_@ID@ <- function(rows = @ROWS@L, groups = @GROUPS@L, seed = 1L) {
   )
 }
 
+#: fn(events: Events@ID@) -> data.table{group: character[], n: integer[], total: double[], share_flagged: double[]}
 summarise_groups_@ID@ <- function(events) {
   events[, .(n = .N, total = sum(amount), share_flagged = mean(flag)), by = group][order(-total)]
 }
 
+#: fn(events: Events@ID@) -> FeaturedEvents@ID@
 add_features_@ID@ <- function(events) {
   out <- data.table::copy(events)
   out[, rank_in_group := data.table::frank(-amount, ties.method = "first"), by = group]
@@ -25,12 +31,16 @@ add_features_@ID@ <- function(events) {
   out[]
 }
 
+#: fn(events: Events@ID@, labels: data.table{group: character[], label: character[]}) -> data.table
 join_labels_@ID@ <- function(events, labels) {
   merge(events, labels, by = "group", all.x = TRUE)
 }
 
+#: fn(events: FeaturedEvents@ID@) -> data.table
 reshape_wide_@ID@ <- function(events) {
-  data.table::dcast(events, group ~ size_class, value.var = "amount", fun.aggregate = sum)
+  #: formula
+  shape <- group ~ size_class
+  data.table::dcast(events, shape, value.var = "amount", fun.aggregate = sum)
 }
 #@ test
 test_that("event tables @ID@ aggregate consistently", {

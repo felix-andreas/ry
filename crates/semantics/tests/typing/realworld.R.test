@@ -1200,8 +1200,8 @@ has_op <- function(x, which = FALSE) {
 }
 found <- has_op(c("Op", "Hi"), 1)
 #++++
-has_op: <T, U> fn(x: T, [which]: U) -> Unknown
-found: Unknown
+has_op: <T, U> fn(x: T, [which]: U) -> Any
+found: Any
 
 #---- reassigned_default_keeps_the_parameter_open
 tag <- function(name, class = NULL) {
