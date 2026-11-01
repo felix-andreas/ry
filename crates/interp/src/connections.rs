@@ -280,6 +280,14 @@ impl Table {
                 marker.mark(target.env);
             }
         }
+        // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
+        // `sink(file(path))` is not closed as unused while output still goes to it.
+        for sink in &self.sinks {
+            let id = self.entries.get(sink.slot).and_then(Option::as_ref).and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
+            if let Some(id) = id {
+                marker.mark(id);
+            }
+        }
     }
 }
 
