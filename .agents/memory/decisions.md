@@ -2880,6 +2880,12 @@ first lines R had already read, leaving R mid-command.
   diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
   in the overlap, the union is R++ and the right circle is strict mode. The diagram has one
   source, `docs/src/components/Venn.astro`, used by the landing page and `why-ry.mdx`.
+- **The migration is sold as moving your code into the future, not as switching to ry.** The
+  destination is the future of the code base (typed, checked on every edit, safe for agents to
+  change, fast), and ry is the tool that takes it there, usable today on the code it already has.
+  The pitch avoids "migrate to ry" and "switch to ry", and step 4 is called "Go fully typed" rather
+  than "Move to ry's types". The blue-to-purple Venn story stays and reads as the code moving
+  forward.
 - **The landing page sells features first and the migration last.** Below the hero come three
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
@@ -2903,8 +2909,8 @@ first lines R had already read, leaving R mid-command.
   says so instead of implying that types buy speed. When typed runtime features do get faster, the
   third column shows it without a rewrite of the copy.
 - **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Check the code you
-  have" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Move to ry's
-  types" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.mdx` and the
+  have" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Go fully
+  typed" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.mdx` and the
   sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
   not moved, so every URL and cross-link keeps working.
 - **Rejected:** opening the landing page with the Venn diagram and the migration (it explains a

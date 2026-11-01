@@ -6,8 +6,10 @@ description: One toolchain for R, a type system on top of it, and a path from th
 import Venn from '../../components/Venn.astro';
 
 R code bases that are years old are now being changed by agents, and code an agent writes needs to
-be checked by something other than a person reading every line. A type checker does that on every
-edit. R has none, so ry adds one, and it works on the R code you already have.
+be checked by something other than a person reading every line. The future of such a code base is
+typed, checked on every edit, and safe for an agent to change. R has no type checker, so ry adds
+one. You can use it today on the R code you already have, and it takes that code there one step at
+a time.
 
 With ry you check, format, load and run R from one tool configured by one `ry.toml`. Its type
 system sits on top of R, so plain R stays valid. ry also adds what R lacks: records, tagged unions,
@@ -21,7 +23,8 @@ call R--.
 
 ## From plain R to fully typed code in four steps
 
-Each step is optional, and you can stop after any of them.
+Your code moves from the blue circle toward the purple one. Each step is optional, and you can stop
+after any of them.
 
 ### 1. Check the code you have
 
@@ -104,7 +107,7 @@ GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to
 `ry run` without `--runtime ry` runs the file on GNU R with the annotations erased, but plain
 `Rscript` cannot parse them, so a file with inline types needs ry.
 
-### 4. Move to ry's types
+### 4. Go fully typed
 
 A field read from an R6 object, or from a list built at run time, has a type the checker cannot
 see. ry's own data types have one. [Records, tuples and tagged unions](/type-checking/records-and-tags)

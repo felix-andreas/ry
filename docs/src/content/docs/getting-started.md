@@ -5,8 +5,8 @@ description: What ry is, how to install it, and your first check
 
 ry finds the mistakes R reports only when a line runs (a misspelled name, a wrong argument, a
 `NULL` you forgot) while you type, in the R code you already have. It checks, formats, loads and
-runs R from one tool configured by one `ry.toml`, and it adds a type system on top of R that you can
-adopt one step at a time.
+runs R from one tool configured by one `ry.toml`, and it adds a type system on top of R that takes
+your code, one step at a time, to typed code that is safe to change.
 
 This page covers the first two of the
 [four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,

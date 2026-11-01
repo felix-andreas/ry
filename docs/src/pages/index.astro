@@ -172,7 +172,7 @@ net_price(100, rate)`,
     },
     {
         key: "step-ry",
-        label: "4. Move to ry's types",
+        label: "4. Go fully typed",
         code: `alias Payment = :Paid(amount: double) | :Pending
 
 balance <- function(payment: Payment) -> double {
@@ -663,12 +663,12 @@ const year = new Date().getFullYear();
             <section id="migrate" class="band showband accent-emerald">
                 <div class="band-inner">
                     <header class="band-head">
-                        <h2>From the blue bubble to the purple one</h2>
-                        <p class="lede">Move one step at a time, and stop wherever you like.</p>
+                        <h2>Take your R code into the future</h2>
+                        <p class="lede">Use ry today on the code you have, and move it to typed code one step at a time.</p>
                     </header>
                     <div class="venn"><Venn id="ry-venn-home" /></div>
                     <div class="showcase" data-tabs="migrate">
-                    <div class="seg" role="tablist" aria-label="Migration steps">
+                    <div class="seg" role="tablist" aria-label="Steps">
                         {
                             migrationTabs.map((tab, index) => (
                                 <button
