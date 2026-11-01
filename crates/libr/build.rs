@@ -27,6 +27,8 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         // `DL_FUNC` is cast to the routine's real signature, as GNU R itself does.
         .flag_if_supported("-Wno-cast-function-type")
+        // On Windows `RY_EXPORT` adds dllexport to functions `Rinternals.h` declares plainly.
+        .flag_if_supported("-Wno-dll-attribute-on-redeclaration")
         .warnings(true)
         .compile("ry_native");
 
