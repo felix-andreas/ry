@@ -4267,7 +4267,7 @@ fn target_at<'db>(
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a
 /// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
-    project_global_names(db, files).contains(&Symbol::new(name))
+    Symbol::lookup(name).is_some_and(|name| project_global_names(db, files).contains(&name))
 }
 
 fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occurrence> {

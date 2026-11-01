@@ -38,8 +38,12 @@ macro_rules! dense_id {
         impl $id {
             pub fn new(index: usize) -> $id {
                 // Spans are `u32` offsets into the item's text, so no module comes near
-                // `u32::MAX` entries.
-                $id(NonZeroU32::MIN.saturating_add(index as u32))
+                // `u32::MAX` entries; past it ids would alias, which is worse than stopping.
+                u32::try_from(index)
+                    .ok()
+                    .and_then(|index| NonZeroU32::MIN.checked_add(index))
+                    .map($id)
+                    .expect("an item holds fewer than u32::MAX HIR entries")
             }
 
             pub fn index(self) -> usize {
