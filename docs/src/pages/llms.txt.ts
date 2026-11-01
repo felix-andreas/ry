@@ -1,14 +1,14 @@
 import type { APIRoute } from 'astro';
-import { loadPages, markdownPath, sections, siteSummary } from '../lib/markdown';
+import { loadPages, markdownUrl, sections, siteSummary } from '../lib/markdown';
 
-export const GET: APIRoute = async () => {
+export const GET: APIRoute = async ({ site }) => {
   const pages = await loadPages();
   const lines = ['# ry', '', `> ${siteSummary(pages)}`, ''];
   for (const section of sections(pages)) {
     lines.push(`## ${section.label}`, '');
     for (const page of section.pages) {
       const description = page.data.description ? `: ${page.data.description}` : '';
-      lines.push(`- [${page.data.title}](${markdownPath(page)})${description}`);
+      lines.push(`- [${page.data.title}](${markdownUrl(page, site!)})${description}`);
     }
     lines.push('');
   }
