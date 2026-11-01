@@ -40,15 +40,12 @@ use {
         values::{self, install, is_nil, length, nil, symbols},
     },
     heap::object::{Sexp, SexpType},
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashSet,
     std::{cell::Cell, collections::HashSet},
     table::{
         ColumnType, Schema, Table,
         convert::{self, RVector},
-        polars::prelude::{
-            ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries,
-            NewChunkedArray, PlSmallStr, Series, StringChunked,
-        },
+        polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
         query::{self, Output, Query, Rows, Select},
     },
 };
@@ -680,47 +677,42 @@ unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCod
             None,
         ),
         ColumnType::Character => {
-            // R interns its strings, so a column repeats a few CHARSXPs. Each distinct one
-            // converts once, and the column gathers them, which copies a 16-byte view per row.
+            // R interns its strings, so equal strings are one CHARSXP, and numbering the
+            // distinct CHARSXPs numbers the rows by string without comparing any. The number
+            // goes in the CHARSXP's truelength, negated, as data.table's own C marks strings,
+            // and the saved truelengths are put back before anything else can run.
             let na = values::na_string();
-            let mut positions: FxHashMap<Sexp, IdxSize> = FxHashMap::default();
-            let mut distinct = Vec::new();
-            let mut indices = Vec::with_capacity(length(vector));
-            // The same numbering is the column's grouping codes: R interns its strings, so equal
-            // strings are the same CHARSXP and the codes cost no string comparison.
-            let mut codes = Vec::with_capacity(length(vector));
+            let rows = length(vector);
+            let mut codes = Vec::with_capacity(rows);
             let mut first_rows = Vec::new();
-            let mut has_na = false;
-            for index in 0..length(vector) {
+            let mut saved: Vec<(Sexp, i32)> = Vec::new();
+            for index in 0..rows {
                 let charsxp = vector.element(index);
                 if charsxp == na {
-                    has_na = true;
-                    indices.push(IdxSize::MAX);
                     codes.push(0);
                     continue;
                 }
-                let position = *positions.entry(charsxp).or_insert_with(|| {
-                    distinct.push(values::char_str(charsxp));
-                    first_rows.push(index as u32);
-                    (distinct.len() - 1) as IdxSize
-                });
-                indices.push(position);
-                codes.push(position as u32 + 1);
+                let mark = charsxp.char_truelength();
+                if mark < 0 {
+                    codes.push(mark.unsigned_abs());
+                    continue;
+                }
+                saved.push((charsxp, mark));
+                first_rows.push(index as u32);
+                let code = saved.len() as u32;
+                charsxp.set_char_truelength(-(code as i32));
+                codes.push(code);
             }
-            let indices = if has_na {
-                IdxCa::from_iter_options(
-                    PlSmallStr::EMPTY,
-                    indices
-                        .into_iter()
-                        .map(|index| (index != IdxSize::MAX).then_some(index)),
-                )
-            } else {
-                IdxCa::from_vec(PlSmallStr::EMPTY, indices)
-            };
-            let series = StringChunked::from_iter_values(name, distinct.iter().map(AsRef::as_ref))
-                .take(&indices)
-                .map_err(|failure| error(failure.to_string()))?
-                .into_series();
+            for (charsxp, mark) in &saved {
+                charsxp.set_char_truelength(*mark);
+            }
+            let distinct: Vec<_> = saved
+                .iter()
+                .map(|(charsxp, _)| values::char_str(*charsxp))
+                .collect();
+            let series =
+                convert::strings_from_codes(name, distinct.iter().map(AsRef::as_ref), &codes)
+                    .map_err(|failure| error(failure.to_string()))?;
             (series, Some(ImportedCodes { codes, first_rows }))
         }
         ColumnType::Factor => {

@@ -6,7 +6,7 @@ use {
     syntax::testing::{SplitMix64, fuzz_iterations},
     table::{
         ColumnType, Schema, Table,
-        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        convert::{self, NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
         ffi, io, ops,
         polars::prelude::{IntoColumn, PlSmallStr},
         query::{
@@ -1560,23 +1560,29 @@ fn with_string_key(rng: &mut SplitMix64, mut table: Table) -> Table {
         .collect();
     let mut numbers = std::collections::HashMap::new();
     let mut first_rows = Vec::new();
+    let mut distinct: Vec<&str> = Vec::new();
     let codes: Vec<u32> = values
         .iter()
         .enumerate()
         .map(|(row, value)| match value {
             None => 0,
-            Some(value) => *numbers.entry(value.clone()).or_insert_with(|| {
+            Some(value) => *numbers.entry(value.as_str()).or_insert_with(|| {
                 first_rows.push(row as u32);
+                distinct.push(value);
                 first_rows.len() as u32
             }),
         })
         .collect();
+    let column =
+        convert::strings_from_codes(PlSmallStr::from("g4"), distinct.iter().copied(), &codes)
+            .expect("the codes index the distinct strings");
+    assert_eq!(
+        to_r(&column).expect("a string column converts"),
+        RVector::Character(values.clone()),
+        "strings_from_codes",
+    );
     table
-        .set_column(
-            to_series(PlSmallStr::from("g4"), RVector::Character(values))
-                .expect("a character column converts")
-                .into_column(),
-        )
+        .set_column(column.into_column())
         .expect("the column has the table's height");
     table
         .set_string_codes("g4", codes, first_rows)
