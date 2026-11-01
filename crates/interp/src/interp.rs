@@ -174,6 +174,8 @@ pub struct Interp {
     /// The value of the closure whose `on.exit` code is running, which `returnValue()` reads:
     /// `None` outside exit code and while the closure exits with an error.
     pub exit_value: Option<Sexp>,
+    /// The environments of the loops the tree-walking interpreter is running, innermost last.
+    pub loop_envs: Vec<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
@@ -294,6 +296,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         assignment_call: None,
         exit_value: None,
+        loop_envs: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),

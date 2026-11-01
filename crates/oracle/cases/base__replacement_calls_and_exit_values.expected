@@ -61,10 +61,18 @@
 | <simpleError in var(matrix(numeric(0), 3, 0), use = use): 'x' is empty>
 | [1] "sysname"        "release"        "version"        "nodename"      
 | [5] "machine"        "login"          "user"           "effective_user"
+| [1] 1
+| [1] 3
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] 1
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| c("sysname", "release", "version", "nodename", "machine", "login", 
-| "user", "effective_user")
+double
+| 1

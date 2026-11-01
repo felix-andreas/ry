@@ -59,3 +59,23 @@ for (use in c("everything", "all.obs", "complete.obs", "na.or.complete", "pairwi
 
 # `Sys.info()` names its fields as GNU R does.
 names(Sys.info())
+
+# A `break` or `next` with no loop for its environment is an error `try()` catches.
+try(eval(quote(break)))
+for (i in 1:3) {
+  eval(quote(break))
+  print(i)
+}
+i
+breaks_from_eval <- function() {
+  for (i in 1:5) if (i == 3) eval(quote(break))
+  i
+}
+breaks_from_eval()
+try(lapply(1:2, function(i) break))
+try(eval(quote(next), new.env()))
+
+# A matched string alternative falls through empty ones to an invisible NULL at the end.
+falls_through <- function(type) switch(type, response = 1, link = , terms = )
+withVisible(falls_through("link"))
+falls_through("response")

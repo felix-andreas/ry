@@ -1410,9 +1410,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("{", -1, do_begin).keep_visibility(),
     special("(", 1, do_paren),
     special("if", -1, do_if).keep_visibility(),
-    special("for", -1, do_for).invisible(),
-    special("while", -1, do_while).invisible(),
-    special("repeat", -1, do_repeat).invisible(),
+    special("for", -1, |call| unsafe { in_loop(call, do_for) }).invisible(),
+    special("while", -1, |call| unsafe { in_loop(call, do_while) }).invisible(),
+    special("repeat", -1, |call| unsafe { in_loop(call, do_repeat) }).invisible(),
     special("break", 0, do_break),
     special("next", 0, do_next),
     special("return", -1, do_return),
@@ -1776,12 +1776,41 @@ unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// Runs a loop of the tree-walking interpreter with its environment on the stack of loops a
+/// `break` or `next` can reach.
+unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Sexp> {
+    interp().loop_envs.push(call.env);
+    let result = run(call);
+    interp().loop_envs.pop();
+    result
+}
+
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
+    reachable_loop(call.env)?;
     Err(jump(Jump::Break { env: call.env }))
 }
 
 unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
+    reachable_loop(call.env)?;
     Err(jump(Jump::Next { env: call.env }))
+}
+
+/// GNU R raises a `break` or `next` without a loop for its environment as an error at once, so
+/// `try(eval(quote(break)))` catches it. A loop is reachable when the tree-walking interpreter
+/// runs one in `env`, or when `env` is a closure frame: compiled loops run only in closure
+/// bodies, and a jump that leaves a closure frame without meeting a loop is an error there
+/// (`stray_loop_jump`).
+unsafe fn reachable_loop(env: Sexp) -> R<()> {
+    let state = interp();
+    if state.loop_envs.contains(&env)
+        || state
+            .frames
+            .iter()
+            .any(|frame| frame.env == env && frame.function.kind() == SexpType::Closure)
+    {
+        return Ok(());
+    }
+    Err(error("no loop for break/next, jumping to top level"))
 }
 
 unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
@@ -1933,13 +1962,15 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         if let Some(text) = text {
             for (position, arg) in alternatives.iter().enumerate() {
                 if arg.tag.kind() == SexpType::Symbol && symbol_name(arg.tag) == text.as_ref() {
-                    // Fall through empty alternatives to the next non-empty one.
+                    // Fall through empty alternatives to the next non-empty one, and to an
+                    // invisible NULL when every later one is empty.
                     for later in &alternatives[position..] {
                         if later.value != missing {
                             return eval(later.value, call.env);
                         }
                     }
-                    return Err(error("empty alternative in numeric switch"));
+                    interp().visible = false;
+                    return Ok(nil());
                 }
             }
         }
