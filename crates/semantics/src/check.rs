@@ -17,7 +17,7 @@ use crate::metadata::is_own_package;
 use crate::naming::{
     BindingId, BindingKind, ItemNaming, dot_dot_variable, is_column_update, query_index_arguments,
 };
-use crate::stubs::{namespace_exports, namespace_known, stubs};
+use crate::stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, Parameter, RecordField,
     RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
@@ -180,6 +180,8 @@ pub enum NativeValueKind {
     Record,
     Tuple,
     Tag,
+    Dict,
+    Set,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -604,7 +606,7 @@ fn erase_residual_vars_at<'db>(
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
             Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
-            Constraint::AtomicElement | Constraint::Unconstrained => unknown(db),
+            Constraint::AtomicElement | Constraint::Key | Constraint::Unconstrained => unknown(db),
         };
     }
     if let Some(&rigid) = closer.generalized.get(&var) {
@@ -1471,7 +1473,9 @@ impl<'db> Checker<'db, '_> {
     /// error here too. A value only some of whose types are native may be R data at run time,
     /// so it is not reported.
     fn check_native_arguments(&mut self, callee: ExprId, arguments: &[Argument]) {
-        let function = match &self.module.expression(callee).kind {
+        // A library function accepts ry values, but only a bare name or `ry::` reaches it:
+        // `pkg::List.len` is the package's own function, whatever its name.
+        let (function, may_be_library) = match &self.module.expression(callee).kind {
             ExpressionKind::NameRef(name) => {
                 let deferred = self.naming.deferred_non_locals.contains(&callee);
                 if self.naming.resolutions.contains_key(&callee)
@@ -1481,14 +1485,21 @@ impl<'db> Checker<'db, '_> {
                 {
                     return;
                 }
-                name.as_str()
+                (name.as_str(), true)
             }
             ExpressionKind::Namespace {
-                name: Some(name), ..
-            } => name.as_str(),
+                package,
+                name: Some(name),
+                ..
+            } => (
+                name.as_str(),
+                package.is_some_and(|package| package.as_str() == STANDARD_LIBRARY),
+            ),
             _ => return,
         };
-        if accepts_native(function) {
+        if accepts_native(function)
+            || (may_be_library && namespace_exports(self.db, STANDARD_LIBRARY, function))
+        {
             return;
         }
         for argument in arguments {
@@ -7987,6 +7998,11 @@ fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
         TyKind::NativeRecord(_) => Some(NativeValueKind::Record),
         TyKind::NativeTuple(_) => Some(NativeValueKind::Tuple),
         TyKind::Tag(..) | TyKind::OtherTags => Some(NativeValueKind::Tag),
+        TyKind::Named(name, _) => match name.text(db) {
+            "Dict" if is_ry_type(db, "Dict") => Some(NativeValueKind::Dict),
+            "Set" if is_ry_type(db, "Set") => Some(NativeValueKind::Set),
+            _ => None,
+        },
         TyKind::Union(members) => {
             let mut kinds = members.iter().map(|&member| native_value_kind(db, member));
             let first = kinds.next()??;

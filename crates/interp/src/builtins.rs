@@ -43,6 +43,8 @@ pub enum Generic {
     /// S3 and S4 dispatch on the first argument (`length`, `[`, `as.character`, ...).
     Internal,
     Ops,
+    /// `%*%`, which dispatches on either operand through the `matrixOps` group.
+    MatrixOps,
     Math,
     Summary,
     Complex,
@@ -77,8 +79,9 @@ pub struct BuiltinDef {
     /// Empty arguments reach the builtin as `R_MissingArg` instead of being an error, as `[`
     /// needs for `x[, 1]`.
     pub keep_missing: bool,
-    /// Whether a ry record, tuple or tag may reach the builtin as a top-level argument; set at
-    /// registration from [`ACCEPTS_NATIVE`].
+    /// Whether a ry record, tuple, tag, dictionary or set may reach the builtin as a top-level
+    /// argument: set by [`BuiltinDef::accepting_native`], or at registration from
+    /// [`ACCEPTS_NATIVE`].
     pub accepts_native: bool,
     pub function: BuiltinFn,
     pub object: Option<Sexp>,
@@ -164,6 +167,16 @@ impl BuiltinDef {
         }
     }
 
+    /// Marks a builtin that takes ry values. The standard library's functions use this instead of
+    /// a list in `syntax`, because their declarations in `types/ry.Rtypes` already tell the
+    /// checker the same fact.
+    pub const fn accepting_native(self) -> BuiltinDef {
+        BuiltinDef {
+            accepts_native: true,
+            ..self
+        }
+    }
+
     fn is_internal(&self) -> bool {
         matches!(self.kind, Kind::Internal | Kind::InternalSpecial)
     }
@@ -185,6 +198,7 @@ impl BuiltinDef {
 
 pub(crate) unsafe fn install_all() {
     let mut seen = rustc_hash::FxHashSet::default();
+    let library = crate::standard_library::BUILTINS;
     for table in [
         crate::eval::BUILTINS,
         crate::envir::BUILTINS,
@@ -210,6 +224,7 @@ pub(crate) unsafe fn install_all() {
         crate::native::BUILTINS,
         crate::utils::BUILTINS,
         crate::records::BUILTINS,
+        library,
     ] {
         // `register` lets a later definition replace an earlier one, which the host relies on;
         // within the interpreter's own tables a repeated name is a stale copy shadowing the real
@@ -221,7 +236,13 @@ pub(crate) unsafe fn install_all() {
                 definition.name
             );
         }
-        register(table);
+        // The standard library lives in `package:ry`, not base, so that plain R code which never
+        // names it sees exactly GNU R's base namespace.
+        if std::ptr::eq(table, library) {
+            register_in(table, crate::standard_library::attach());
+        } else {
+            register(table);
+        }
     }
     for name in ACCEPTS_NATIVE {
         assert!(
@@ -232,6 +253,11 @@ pub(crate) unsafe fn install_all() {
 }
 
 pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
+    register_in(definitions, crate::heap().known().base_env);
+}
+
+/// Registers `definitions`, binding the primitives in `env`.
+unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
     let heap = crate::heap();
     heap.inhibit_collection();
     for definition in definitions {
@@ -241,7 +267,8 @@ pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
             let existing = &mut state.builtins[index as usize];
             let object = existing.object;
             *existing = definition.copy();
-            existing.accepts_native = ACCEPTS_NATIVE.contains(&definition.name);
+            existing.accepts_native =
+                definition.accepts_native || ACCEPTS_NATIVE.contains(&definition.name);
             existing.object = object;
             continue;
         }
@@ -259,12 +286,12 @@ pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
         if definition.is_internal() {
             heap.set_tag(symbol, object);
         } else {
-            let base = heap.known().base_env;
-            heap.define(base, symbol, object)
+            heap.define(env, symbol, object)
                 .unwrap_or_else(|failure| panic!("cannot bind `{}`: {failure}", definition.name));
         }
         let mut entry = definition.copy();
-        entry.accepts_native = ACCEPTS_NATIVE.contains(&definition.name);
+        entry.accepts_native =
+            definition.accepts_native || ACCEPTS_NATIVE.contains(&definition.name);
         entry.object = Some(object);
         state.builtins.push(entry);
         state.builtin_index.insert(key, index);

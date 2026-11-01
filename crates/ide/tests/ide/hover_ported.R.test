@@ -39,7 +39,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(argument: T) -> T\n"
   edit 38..38 -> "#: integer\n"
   edit 50..50 -> "#: integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @6: <T> fn(argument: T) -> T
 hint @43: integer
 hint @56: integer
@@ -239,7 +239,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: NULL\n"
-completion (92): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (102): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 
@@ -334,7 +334,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (8): La.svd, La_library, La_version, LakeHuron, LETTERS, LifeCycleSavings, Loblolly, Logic
+completion (60): La.svd, La_library, La_version, LakeHuron, LETTERS, LifeCycleSavings, List.all, List.any
 hint @5: integer
 
 #==== hover_annotated
@@ -348,7 +348,7 @@ definition 11..18
 references: 11..18*
 rename: 1 edit(s)
 signature: none
-completion (87): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
+completion (96): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
 
 #---- if_unknown_annotation
 frame <- data.frame(a = 1)
@@ -362,7 +362,7 @@ definition 51..56
 references: 51..56*
 rename: 1 edit(s)
 signature: none
-completion (46): maybe, makePrototypeFromClassDef, mapply, mauchly.test, .mapply, simplify2array, Summary, summary
+completion (47): maybe, makePrototypeFromClassDef, mapply, mauchly.test, .mapply, simplify2array, Summary, summary
 
 #---- trust_annotation
 #: @trust integer
@@ -374,7 +374,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (68): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (76): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -388,7 +388,7 @@ definition 56..62
 references: 56..62*
 rename: 1 edit(s)
 signature: none
-completion (120): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (125): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 
 #---- new_annotation_unknown_value_use
 #: @type Person {list{name: character}}
@@ -408,7 +408,7 @@ action: Add inferred type annotation for `touch`
   edit 80..80 -> "#: fn() -> Person\n"
 action: Add inferred type annotations for the whole file
   edit 80..80 -> "#: fn() -> Person\n"
-completion (120): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (125): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 hint @85: fn() -> Person
 
 #---- alias_declaration_tag
@@ -474,7 +474,7 @@ action: Add inferred type annotation for `wrapper`
   edit 0..0 -> "#: fn(flag: logical) -> integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn(flag: logical) -> integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn(flag: logical) -> integer
 hint @45: integer
 
@@ -569,7 +569,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer | character\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer | character\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer | character
 
 #---- for_element_union
@@ -596,7 +596,7 @@ rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-completion (58): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
+completion (60): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
 hint @6: <T> fn(x: T) -> T
 
 #---- two_type_variables
@@ -626,7 +626,7 @@ rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
-completion (65): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
+completion (66): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
 hint @7: <T: numeric> fn(x: T) -> T
 
 #---- partially_inferred_function
@@ -657,7 +657,7 @@ action: Add inferred type annotation for `wrap`
   edit 0..0 -> "#: <T, U> fn(first: T, second: U) -> U\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(first: T, second: U) -> U\n"
-completion (128+): second, ts.intersect, InsectSprays, chooseCRANmirror, intersect, .leap.seconds, se.contrast, sealClass
+completion (128+): second, Set.intersection, ts.intersect, InsectSprays, chooseCRANmirror, intersect, .leap.seconds, se.contrast
 hint @4: <T, U> fn(first: T, second: U) -> U
 
 #==== hover_unknown
@@ -671,7 +671,7 @@ definition 0..5
 references: 0..5*, 24..29
 rename: 2 edit(s)
 signature: none
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 
 #---- uninferable_call
 unde$0fined_fn(1L)
@@ -681,7 +681,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (19): undebug, undebugcall, packageNotFoundError, unique.data.frame, unique.default, units.difftime, unloadNamespace, unRematchDefinition
+completion (20): undebug, undebugcall, packageNotFoundError, unique.data.frame, unique.default, units.difftime, unloadNamespace, unRematchDefinition
 
 #==== hover_stubs
 #---- overloaded_stub_name

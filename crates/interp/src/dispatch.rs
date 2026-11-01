@@ -5,10 +5,10 @@
 
 use crate::{
     Frame,
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, special},
+    builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
     eval::{self, apply_closure, call_builtin, forced_promise, value_of},
     interp,
-    unwind::{R, error, error_in},
+    unwind::{R, error},
     values::{
         self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
         symbol_name, symbols, unbound,
@@ -26,7 +26,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("unclass", 1, do_unclass),
     internal("inherits", 3, do_inherits),
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
-    builtin(".cache_class", -1, |call| unsafe { Ok(call.arg(1)) }),
+    builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
     builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
     builtin("isS4", 1, |call| unsafe { values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT)) }),
     internal("setS4Object", 3, do_set_s4_object),
@@ -50,11 +50,15 @@ pub unsafe fn class_of(object: Sexp) -> R<Sexp> {
     scalar_string(basic_class(object, false))
 }
 
-/// The class `UseMethod` dispatches on: the class attribute, or the implicit class, which adds
-/// `matrix`/`array`, and for numbers both the type and `numeric`.
+/// The class `UseMethod` dispatches on: for an S4 object, its class and every class it
+/// extends; otherwise the class attribute, or the implicit class, which adds `matrix`/`array`,
+/// and for numbers both the type and `numeric`.
 pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
     let class = values::class_attr(object);
     if class != nil() && length(class) > 0 {
+        if object.has_gp(gp::S4_OBJECT) {
+            return s4_extends(class);
+        }
         return Ok(class);
     }
     let mut classes: Vec<&str> = Vec::new();
@@ -71,6 +75,47 @@ pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
         _ => classes.push(basic_class(object, true)),
     }
     string_vector(&classes)
+}
+
+/// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class
+/// name as GNU R does. Without the methods package the class attribute stands alone.
+unsafe fn s4_extends(class: Sexp) -> R<Sexp> {
+    let name = class.element(0).bytes();
+    if let Some(&extends) = interp().globals.s4_extends.get(name) {
+        return Ok(extends);
+    }
+    let namespace = interp().globals.methods_namespace;
+    if namespace == nil() {
+        return Ok(class);
+    }
+    let function = eval::value_of(eval::find_var_in_frame(
+        values::install(".extendsForS3")?,
+        namespace,
+    )?)?;
+    if !values::is_function(function) {
+        return Ok(class);
+    }
+    let call = values::call(function, &[class])?;
+    let extends = eval::eval(call, values::base_env())?;
+    interp().globals.s4_extends.insert(name.into(), extends);
+    Ok(extends)
+}
+
+/// `.cache_class(class, extends)`: records the S3 class vector of an S4 class, or with
+/// `extends = NULL` forgets it.
+unsafe fn do_cache_class(call: &Call<'_>) -> R<Sexp> {
+    let class = call.arg(0);
+    let extends = call.arg(1);
+    if class.kind() != SexpType::String || length(class) < 1 {
+        return Err(call.error("invalid class argument to internal .class_cache"));
+    }
+    let name: Box<[u8]> = class.element(0).bytes().into();
+    if extends == nil() {
+        interp().globals.s4_extends.remove(&name);
+    } else {
+        interp().globals.s4_extends.insert(name, extends);
+    }
+    Ok(extends)
 }
 
 unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
@@ -581,7 +626,17 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     let next_classes = class_suffix(classes, (next_index + 1).min(class_names.len()))?;
     values::set_attr(next_classes, symbols.previous, classes)?;
-    let method_string = scalar_string(&symbol_name(method_name))?;
+    // For a group generic `.Method` has one entry per operand, empty for an operand that did
+    // not dispatch; the next method keeps that shape, as `Ops.factor` relies on.
+    let method_string = if group_name.is_some() && current != unbound() && current.kind() == SexpType::String && length(current) > 1 {
+        let name = symbol_name(method_name).into_owned();
+        let entries: Vec<String> = (0..length(current))
+            .map(|index| if char_str(current.element(index)).is_empty() { String::new() } else { name.clone() })
+            .collect();
+        string_vector(&entries)?
+    } else {
+        scalar_string(&symbol_name(method_name))?
+    };
     let vars = dispatch_vars(
         &generic_name,
         next_classes,
@@ -595,27 +650,27 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         SexpType::Closure => apply_closure(new_call, method, &args, method_env, Some(&vars)),
         _ => {
             let definition = eval::builtin_def(method)?;
-            // A special such as `$<-` evaluates its arguments itself, so it gets them quoted,
-            // and its call is named `<generic>.default`, which tells it not to dispatch again,
-            // as GNU R does. A dispatch-or-eval special's function already takes values.
-            let quote = method.kind() == SexpType::Special && !definition.is_dispatch_or_eval();
+            // A special evaluates its arguments itself, so it gets the promises, which
+            // evaluate to their values without running a value that is a call. A
+            // dispatch-or-eval special's function takes values, so it gets them forced.
+            let special = matches!(definition.kind, Kind::Special | Kind::InternalSpecial)
+                && !definition.is_dispatch_or_eval();
             let mut forced = Vec::with_capacity(args.len());
             for arg in &args {
-                let mut value = if arg.value == missing_arg() {
+                let value = if arg.value == missing_arg() || special {
                     arg.value
                 } else {
                     value_of(arg.value)?
                 };
-                if quote && value != missing_arg() {
-                    value = eval::quote_value(value)?;
-                }
                 forced.push(Arg {
                     tag: arg.tag,
                     value,
                 });
             }
-            let head = if quote { format!("{generic_name}.default") } else { generic_name.clone() };
-            let primitive_call = renamed_call(frame_call, values::install(&head)?)?;
+            // The call names the default method, as in GNU R's "Error in `[.default`(x, 5)",
+            // which also tells a special that dispatches internally not to dispatch again.
+            let default_name = format!("{generic_name}.default");
+            let primitive_call = renamed_call(frame_call, values::install(&default_name)?)?;
             call_builtin(definition, primitive_call, method, &forced, method_env)
         }
     }
@@ -646,9 +701,11 @@ pub unsafe fn try_builtin_dispatch(
             {
                 return Ok(Some(value));
             }
-            internal_dispatch(definition.name, call, args, env)
+            // `seq.int` is the primitive behind the `seq` generic, so it finds `seq` methods.
+            let generic = if definition.name == "seq.int" { "seq" } else { definition.name };
+            internal_dispatch(generic, call, args, env)
         }
-        Generic::Ops => {
+        Generic::Ops | Generic::MatrixOps => {
             let any_object = args.iter().take(2).any(|arg| arg.value.is_object());
             if !any_object {
                 return Ok(None);
@@ -658,7 +715,8 @@ pub unsafe fn try_builtin_dispatch(
             {
                 return Ok(Some(value));
             }
-            group_dispatch("Ops", definition.name, call, args, env)
+            let group = if definition.generic == Generic::Ops { "Ops" } else { "matrixOps" };
+            group_dispatch(group, definition.name, call, args, env)
         }
         Generic::Summary => {
             // GNU R's `fixup_NaRm` moves `na.rm` last, adding `na.rm = FALSE` when the call has
@@ -845,12 +903,14 @@ unsafe fn apply_internal_method(
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
+        srcref: state.srcref,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars);
     let state = interp();
+    // The frame's saved stack, which `.addGlobHands` may have rewritten.
+    state.handlers = state.frames[depth - 1].handlers.clone();
     state.frames.truncate(depth - 1);
-    state.handlers = handlers;
     state.restarts = restarts;
     result
 }
@@ -862,7 +922,8 @@ unsafe fn group_dispatch(
     args: &[Arg],
     env: Sexp,
 ) -> R<Option<Sexp>> {
-    let operands = if group == "Ops" { args.len().min(2) } else { 1 };
+    let binary = group == "Ops" || group == "matrixOps";
+    let operands = if binary { args.len().min(2) } else { 1 };
     let mut found: Vec<Option<Found>> = Vec::new();
     for arg in args.iter().take(operands) {
         if arg.value.is_object() {
@@ -871,13 +932,17 @@ unsafe fn group_dispatch(
             found.push(None);
         }
     }
-    let (chosen, position) = match (found.first(), found.get(1)) {
+    let (_, position) = match (found.first(), found.get(1)) {
         (Some(Some(left)), Some(Some(right))) => {
-            if left.method != right.method {
+            if left.method == right.method {
+                (0, 0)
+            } else if choose_ops_method(call, args, left, right, false)? {
+                (0, 0)
+            } else if choose_ops_method(call, args, right, left, true)? {
+                (1, 1)
+            } else {
                 let left_name = symbol_name(left.method_name).into_owned();
                 let right_name = symbol_name(right.method_name).into_owned();
-                // Different methods for the two operands: GNU R warns and uses the builtin, except
-                // that one of the two being the builtin's own group default is not a conflict.
                 crate::conditions::warning_call(
                     call,
                     format!(
@@ -886,18 +951,16 @@ unsafe fn group_dispatch(
                 )?;
                 return Ok(None);
             }
-            (0, 0)
         }
         (Some(Some(_)), _) => (0, 0),
         (_, Some(Some(_))) => (1, 1),
         _ => return Ok(None),
     };
-    let _ = chosen;
     let Some(found_method) = found.into_iter().nth(position).flatten() else {
         return Ok(None);
     };
     let mut vars = found_method.vars;
-    if group == "Ops" {
+    if binary {
         // `.Method` names the method for each operand, with "" for the other.
         let method_name = symbol_name(found_method.method_name).into_owned();
         let methods: Vec<String> = (0..operands)
@@ -926,6 +989,27 @@ unsafe fn group_dispatch(
     let promised = promised_args(call, args)?;
     let new_call = renamed_call(call, found_method.method_name)?;
     apply_method(new_call, found_method.method, &promised, env, &vars).map(Some)
+}
+
+/// Asks `chooseOpsMethod(x, y, mx, my, cl, reverse)` whether `chosen`, the method found for
+/// one operand, should win over `other`, the method found for the other operand. `reverse`
+/// says that `chosen` belongs to the right operand.
+unsafe fn choose_ops_method(call: Sexp, args: &[Arg], chosen: &Found, other: &Found, reverse: bool) -> R<bool> {
+    let (Some(left), Some(right)) = (args.first(), args.get(1)) else {
+        return Ok(false);
+    };
+    let (x, y) = if reverse { (right.value, left.value) } else { (left.value, right.value) };
+    let function = eval::find_fun(values::install("chooseOpsMethod")?, values::base_namespace())?;
+    let reverse = values::scalar_bool(reverse)?;
+    crate::heap().root(reverse);
+    let chooser_call = values::lcons(values::install("chooseOpsMethod")?, nil())?;
+    crate::heap().root(chooser_call);
+    let chooser_args: Vec<Arg> = [x, y, chosen.method, other.method, call, reverse]
+        .into_iter()
+        .map(|value| Arg { tag: nil(), value })
+        .collect();
+    let answer = eval::apply(chooser_call, function, &chooser_args, values::global_env())?;
+    Ok(values::as_logical_scalar(answer) == 1)
 }
 
 unsafe fn find_group_method(
@@ -1075,8 +1159,7 @@ pub unsafe fn deferred_default_marker() -> R<Sexp> {
     values::install("__Deferred_Default_Marker__")
 }
 
-unsafe fn do_is_methods_dispatch_on(call: &Call<'_>) -> R<Sexp> {
-    let _ = call;
+unsafe fn do_is_methods_dispatch_on(_call: &Call<'_>) -> R<Sexp> {
     values::scalar_bool(interp().globals.methods_dispatch)
 }
 
@@ -1176,6 +1259,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let value = call.arg(1);
     if object == nil() {
+        // Removing the class of NULL is a no-op, which `arima` relies on.
+        if value == nil() {
+            return Ok(nil());
+        }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable(object)?;
@@ -1259,7 +1346,9 @@ unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
             }
         )));
     }
-    let copy = modifiable(object)?;
+    // Unlike a replacement function, unclass may not reuse a value any variable still holds:
+    // `lapply(unclass(x), f, oldClass(x))` reads the class of `x` afterwards.
+    let copy = if object.refcount() > 0 { values::shallow_duplicate(object)? } else { object };
     set_class_attribute(copy, nil())?;
     Ok(copy)
 }

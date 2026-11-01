@@ -335,8 +335,17 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     }
 }
 
+/// Defers a warning without a call to the end of the top-level call, as the interpreter's own
+/// warnings are, so there is one list of pending warnings.
 pub fn warn(message: impl Into<String>) {
-    runtime().warnings.push(message.into());
+    if !interp::is_installed() {
+        return;
+    }
+    let warnings = &mut interp::interp().warnings;
+    // GNU R keeps at most 50 deferred warnings.
+    if warnings.len() < 50 {
+        warnings.push((runtime().nil(), message.into()));
+    }
 }
 
 /// Prints an unwind the way R's top level does and records it for `R_curErrorBuf`.
@@ -457,10 +466,8 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
             None => format!("Warning: {message}\n"),
         };
         write_console(text.as_bytes(), true);
-        warn(message);
         return;
     }
-    runtime().warnings.push(message.clone());
     if !interp::is_installed() {
         return;
     }

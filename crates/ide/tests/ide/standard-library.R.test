@@ -1,0 +1,62 @@
+#==== standard_library
+#---- hover_on_a_library_function
+doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
+#++++
+hover 11..19: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
+hover-definition: package ry (1 declaration(s), declared in stub source 11 at `List.map`)
+definition: stub source 11 at `List.map`
+references: none
+rename: none
+signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
+parameters: [list: list[integer]] | f: fn(integer) -> integer
+action: Add inferred type annotation for `doubled`
+  edit 0..0 -> "#: list[integer]\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: list[integer]\n"
+completion (10): List.map, List.map2, List.map_try, List.map_with_index, List.max, List.min, List.from_vector, List.is_empty
+hint @7: list[integer]
+
+#---- completion_after_a_module_prefix
+parsed <- Str.to_$0
+
+#++++
+hover 10..17: Str.to_: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (3): Str.to_double, Str.to_integer, Str.to_utf8
+
+#---- hover_on_a_dict_value
+d <- Dict.from_list(list(("a", 1)))
+got <- Dict.ge$0t(d, "a")
+#++++
+hover 43..51: Dict.get: fn(
+hover 43..51:   dict: Dict<character, double>,
+hover 43..51:   key: character,
+hover 43..51: ) -> :Ok(double) | :Err(:KeyNotFound)
+hover-definition: package ry (1 declaration(s), declared in stub source 11 at `Dict.get`)
+definition: stub source 11 at `Dict.get`
+references: none
+rename: none
+signature: fn(dict: Dict<character, double>, key: character) -> :Ok(double) | :Err(:KeyNotFound)
+parameters: [dict: Dict<character, double>] | key: character
+action: Add inferred type annotation for `got`
+  edit 36..36 -> "#: :Ok(double) | :Err(:KeyNotFound)\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Dict<character, double>\n"
+  edit 36..36 -> "#: :Ok(double) | :Err(:KeyNotFound)\n"
+completion (2): Dict.get, Dict.single
+hint @1: Dict<character, double>
+hint @39: :Ok(double) | :Err(:KeyNotFound)
+
+#---- annotation_completion_offers_library_types
+#: Res$0
+x <- :Ok(1L)
+#++++
+hover 3..6: Res
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): Result

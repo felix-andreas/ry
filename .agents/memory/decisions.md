@@ -1866,6 +1866,47 @@ there was no evaluator, so there was no previous source of truth.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
+- **Top-level task callbacks live in libr's C, behind two interpreter hooks**
+  (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
+  through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
+  same list through the routine hook rather than keeping a second list in `interp`.
+  `session::run_toplevel` runs them after printing the task's warnings, as GNU R does.
+- **S4 objects get their S3 class vector from a cache keyed by class name** (`Globals::s4_extends`,
+  filled by `.cache_class` or by calling methods' `.extendsForS3` on a miss). This is GNU R's
+  `R_S4_extends_table`: without it, S3 dispatch on an S4 object sees only its own class and misses
+  methods for the classes it contains.
+- **`.External2` routines get GNU R's four-argument convention** `(call, op, args, env)`, which
+  rlang's `ffi_eval` relies on to evaluate in the caller's environment.
+
+# Decision record: one connection table, in the interpreter
+
+- **Previous sources of truth.** There were two connection tables. `libr::connections` held GNU R's
+  `struct Rconn` table (128 slots, the devices, custom connections, the C entry points) and an R
+  function table (`PRIMITIVES`) that nothing registered once the interpreter was installed.
+  `interp::connections` held a second, simpler table (its own connection records and class enum)
+  with the sinks, `cat` and every connection builtin the interpreter actually ran. A connection that
+  R code opened was therefore invisible to `R_GetConnection`, and a custom connection a package
+  created could not be read with `readLines`.
+- **What was duplicated.** The table, the slot numbering, the R-level connection object, every
+  device kind and the read and write paths existed twice, and the libr copy was dead code apart from
+  the C entry points. Warnings were also kept twice: libr's `Runtime.warnings` beside the
+  interpreter's deferred list.
+- **Target shape.** `interp::connections` owns the `#[repr(C)] Rconn`, the table, the devices, the
+  sinks and every connection internal, registered with GNU R 4.3.3's arities. A package's own C
+  method is called through the `Hooks::connection_method` hook, which libr implements with the
+  `native.c` trampolines under a native scope, and ry's methods that C calls enter through
+  `Hooks::enter_from_native`, libr's `enter`, so an R error becomes the `longjmp` C expects. The
+  default `vfprintf` is native code, so its address comes in as `Hooks::connection_vfprintf`. libr
+  keeps only `R_new_custom_connection`, `R_GetConnection`, `R_ReadConnection`, `R_WriteConnection`
+  and `ry_connection_count`. The interpreter's root source traces what the table holds (a text
+  output connection's variable and environment), replacing preserve and release. libr's
+  `boundary::warn` defers onto the interpreter's warning list, which the test exports read.
+- **Impact.** One table means R code and C code see the same connections, which makes the custom
+  connections of curl and processx readable from R. The interpreter still builds and tests
+  without libR, because native calls go through hooks whose defaults error, and the merged table
+  is about 750 lines smaller than the two were.
+- **`closeAllConnections` is not an internal.** GNU R defines it as a base closure over
+  `getAllConnections` and `close`, so ry registers no internal for it.
 
 # Decision record: the full C API surface and package installation
 
@@ -2090,19 +2131,40 @@ graphical parameters, `file.append` and anonymous `file()` buffers.
 
 The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by package in
 `builtin_libraries::implementation`. Each behavior was derived from GNU R's documentation and its
-observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
-never from its C source.
+observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
+`utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices are a table of records that hold state but draw nothing.** Device 1 is the null
-  device; `pdf()` opens a record with its size, its display-list flag and its graphical parameters
-  (`graphics::Device`), which `dev.off()` releases. The parameters are an R list built from GNU R's
-  documented `pdf` defaults and rooted with `Heap::preserve`, so `par()` reads and writes R values
-  directly. Setting `mar`, `oma`, `mex`, `mfrow` or `mfcol` recomputes `mai` and the layout's `cex`
-  as GNU R does; `cex` alone does not. `recordPlot()` gets an empty snapshot tagged with engine
-  version 16. Every routine without an entry in the tables fails with "graphics devices are not
-  supported in ry yet" (`graphics::no_devices`), which is where drawing lands today. `cairoProps`
-  reports no cairo, so the default device is `pdf` and `bitmapType` is `"Xlib"`, as in a headless
-  build.
+- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
+  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
+  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
+  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
+  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
+  write per finished page. Drawing routines check their arguments and a started plot, then return.
+  A real renderer would slot in behind the same table; nothing else reads pixels today.
+- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
+  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
+  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
+  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
+  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
+  and that belongs with real drawing, when the display list holds the calls to replay.
+- **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
+  (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
+  are rebound from the table after every change, `dev.set(1)` starts the default device but
+  reports device 1 as GNU R does, and any routine that needs a device opens
+  `getOption("device")` first, which is how a script with no device gets `pdf("Rplots.pdf")`.
+- **One copy of `par`.** GNU R keeps default and current parameters so a high-level call's inline
+  parameters apply for its duration; ry reads inline parameters from the call instead, so a single
+  `Pars` is the source of truth.
+- **Regions remember the unit they were set in** (`Margins`, `OuterMargins`, `PlotRegion`,
+  `FigureRegion` enums). Base graphics recomputes the others from that one when the device, `cex`,
+  `mex` or the layout changes, so `par(mai = ...)` followed by `par(cex = 2)` keeps the inches and
+  moves `mar`, and storing all units would let them drift apart.
+- **Text metrics are Helvetica's published AFM widths** (regular and bold; the oblique faces share
+  them) at the nearest whole point size, with the cap height for `strheight`. That matches the pdf
+  device's numbers exactly; bitmap devices in GNU R measure with cairo fonts and can differ.
+- **`cairoProps` reports cairo**, so `capabilities()` lists png, jpeg and tiff and the bitmap
+  devices take the cairo path, which needs no display.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
   low byte), because only the colour routines read it and the interpreter is single-threaded.
 - **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`
@@ -2432,6 +2494,35 @@ first lines R had already read, leaving R mid-command.
   calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+
+# Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
+
+- **Previous shape:** none. Results were a user-declared `@alias`, and the only stdlib was the stubs
+  for R's own packages (the first record in this file), so every project re-declared `Result` and
+  wrote its own helpers over plain lists.
+- **Names:** plain qualified names such as `List.map` are ordinary R symbols with a dot, bound in a
+  `package:ry` environment attached just above `package:base` (`standard_library::attach`). There
+  is no static dispatch, so a call is a symbol lookup and the checker reads one stub per name. A
+  definition in the user's code shadows a library name like any R binding, and
+  `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so
+  plain R cannot change meaning. Module names are Roc's; a Roc name that already means something
+  else in R is renamed (`Result.try` is `Result.and_then`).
+- **One source of truth per side:** the types live once in `types/ry.Rtypes` (namespace `ry`,
+  always active), and the runtime functions live once in `crates/interp/src/standard_library.rs`,
+  registered with `BuiltinDef::accepting_native`. A test asserts the two name sets are equal and
+  that every declared parameter name is accepted at run time.
+- **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
+  with value semantics, insertion order and an open-addressing index, because a named list
+  matches partially and allows duplicates, and an environment has reference semantics.
+  `identical()` ignores order, as Roc's equality does. Updates copy, which makes a growing loop
+  quadratic until the compiler can reuse a value it owns (backlog).
+- **Errors are tags, not conditions:** a function that can fail returns `:Ok(x) | :Err(:Tag)`, and a
+  wrong argument type raises an R error that names the parameter, so a misuse is loud and a domain
+  failure is a value.
+- **Impact:** no change for plain R (no shipped name collides, and all names are new symbols). The
+  checker, hover, completion and goto-definition read the stub file like any other, so incremental
+  analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
+  the draft with open questions is `contributing/design/standard-library.md`.
 
 ## The benchmark harness compares test by test through `ry load`
 

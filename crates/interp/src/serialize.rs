@@ -4,7 +4,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, builtin, internal},
-    eval, heap, interp,
+    eval,
     unwind::{R, error},
     values::{self, alloc, length, nil, symbols},
 };
@@ -507,8 +507,8 @@ impl Reader<'_> {
 
     /// A GNU R byte-code object. Only its source expression (the first constant) is kept.
     unsafe fn bytecode(&mut self, reps: Sexp) -> R<Sexp> {
-        let code = self.item()?;
-        let _ = code;
+        // The code vector: ry recompiles from the source expression instead.
+        self.item()?;
         let count = self.integer()? as usize;
         let constants = alloc(SexpType::List, count)?;
         for index in 0..count {
@@ -1129,7 +1129,7 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
-    let bytes = crate::connections::read_all_bytes(call.arg(0))?;
+    let bytes = crate::connections::read_binary(call.arg(0))?;
     unserialize(&bytes, call.arg(1))
 }
 
@@ -1140,11 +1140,15 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     if env.kind() != SexpType::Environment {
         return Err(call.error("invalid 'envir' argument"));
     }
-    let bytes = crate::connections::read_all_bytes(call.arg(0))?;
-    if !bytes.starts_with(b"RD") {
-        return Err(call.error("the input does not start with a magic number compatible with loading from a connection"));
-    }
-    let mut bindings = unserialize(&bytes, nil())?;
+    let bytes = crate::connections::read_binary(call.arg(0))?;
+    let body = match bytes.get(..5) {
+        Some(b"RDX2\n" | b"RDX3\n") => &bytes[5..],
+        Some(b"RDA2\n" | b"RDA3\n" | b"RDB2\n" | b"RDB3\n") => {
+            return Err(call.error("load() supports only the XDR workspace format save() writes by default"));
+        }
+        _ => return Err(call.error("the input does not start with a magic number compatible with loading from a connection")),
+    };
+    let mut bindings = unserialize(body, nil())?;
     crate::heap().root(bindings);
     let mut names = Vec::new();
     while bindings.kind() == SexpType::Pairlist {
@@ -1174,7 +1178,7 @@ unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
     crate::heap().root(bindings);
     let mut bytes = b"RDX3\n".to_vec();
     bytes.extend(serialize(bindings)?);
-    crate::connections::write_bytes(call.arg(1), &bytes)?;
+    crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
 }
 
@@ -1280,7 +1284,7 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
 
 unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
     let bytes = serialize(call.arg(0))?;
-    crate::connections::write_bytes(call.arg(1), &bytes)?;
+    crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
 }
 
@@ -1290,7 +1294,7 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
         let bytes = values::raws(source).to_vec();
         return unserialize(&bytes, call.arg(1));
     }
-    let bytes = crate::connections::read_all_bytes(source)?;
+    let bytes = crate::connections::read_binary(source)?;
     unserialize(&bytes, call.arg(1))
 }
 
@@ -1302,10 +1306,6 @@ unsafe fn do_serialize(call: &Call<'_>) -> R<Sexp> {
         values::raws_mut(result).copy_from_slice(&bytes);
         return Ok(result);
     }
-    crate::connections::write_bytes(connection, &bytes)?;
+    crate::connections::write_binary(connection, &bytes)?;
     Ok(nil())
-}
-
-pub fn unused() {
-    let _ = interp;
 }

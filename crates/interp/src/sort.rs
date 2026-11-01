@@ -9,7 +9,7 @@ use crate::{
     builtins::{BuiltinDef, Call, internal},
     coerce::{coerce_vector, factor_as_character},
     conditions::warning,
-    eval,
+    eval, records, standard_library,
     subset::select_elements,
     unwind::{R, error},
     values::{
@@ -17,8 +17,9 @@ use crate::{
         symbols,
     },
 };
-use heap::object::{
-    NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+use heap::{
+    object::{NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real},
+    records::NativeKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::{
@@ -1491,6 +1492,9 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         }
         SexpType::Char => chars_equal(x, y),
         SexpType::Object => true,
+        SexpType::Record if matches!(records::native_kind(x), NativeKind::Dict | NativeKind::Set) => {
+            x.record_layout() == y.record_layout() && standard_library::collections_identical(x, y, flags)
+        }
         SexpType::Record => {
             x.record_layout() == y.record_layout()
                 && (0..x.record_slot_count()).all(|index| match (x.record_slot(index), y.record_slot(index)) {

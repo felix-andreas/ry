@@ -70,7 +70,6 @@ pub struct Runtime {
     pub parked: FxHashMap<Sexp, Unwind>,
     /// The last error message, as `R_curErrorBuf` returns it.
     pub error_buffer: Vec<u8>,
-    pub warnings: Vec<String>,
     pub dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
     /// `TRUELENGTH` values set on objects whose storage has no field for one: strings and
@@ -145,7 +144,6 @@ impl Runtime {
             pending: None,
             parked: FxHashMap::default(),
             error_buffer: Vec::new(),
-            warnings: Vec::new(),
             dlls: Vec::new(),
             c_callables: FxHashMap::default(),
             truelengths: FxHashMap::default(),

@@ -4,7 +4,7 @@
 use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     coerce::{self, coerce_vector},
-    conditions,
+    conditions, distributions,
     unwind::{R, error},
     values::{
         self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -215,32 +215,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(":", 2, do_colon),
     builtin("seq_len", 1, do_seq_len),
     builtin("seq_along", 1, do_seq_along),
-    builtin("seq.int", -1, do_seq_int),
+    builtin("seq.int", -1, do_seq_int).generic(Generic::Internal),
     builtin("rep", -1, do_rep).generic(Generic::Internal),
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),
     internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
-    internal("choose", 2, |call| unsafe { math2(call, choose) }),
-    internal("lchoose", 2, |call| unsafe {
-        math2(call, |n, k| choose(n, k).abs().ln())
-    }),
-    internal("beta", 2, |call| unsafe {
-        math2(call, |a, b| {
-            (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()
-        })
-    }),
-    internal("lbeta", 2, |call| unsafe {
-        math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b))
-    }),
-    internal("bitwiseAnd", 2, |call| unsafe {
-        bitwise(call, |a, b| a & b)
-    }),
-    internal("bitwiseOr", 2, |call| unsafe {
-        bitwise(call, |a, b| a | b)
-    }),
-    internal("bitwiseXor", 2, |call| unsafe {
-        bitwise(call, |a, b| a ^ b)
-    }),
+    internal("choose", 2, |call| unsafe { math2(call, distributions::choose) }),
+    internal("lchoose", 2, |call| unsafe { math2(call, distributions::lchoose) }),
+    internal("beta", 2, |call| unsafe { math2(call, |a, b| (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()) }),
+    internal("lbeta", 2, |call| unsafe { math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)) }),
+    internal("bitwiseAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
+    internal("bitwiseOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
+    internal("bitwiseXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
     internal("bitwiseNot", 1, do_bitw_not),
     internal("bitwiseShiftL", 2, |call| unsafe {
         bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32)
@@ -255,9 +241,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("Arg", 1, |call| unsafe { complex_part(call, 3) }).generic(Generic::Complex),
     builtin("Conj", 1, |call| unsafe { complex_part(call, 4) }).generic(Generic::Complex),
     internal("complex", 3, do_complex),
-    internal("polyroot", 1, |call| unsafe {
-        Err(call.error("polyroot is not supported"))
-    }),
+    internal("polyroot", 1, do_polyroot),
     internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
     internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
     internal("cumall", 1, |call| unsafe { Ok(call.arg(0)) }),
@@ -448,12 +432,13 @@ pub fn pretty(
     let small = if range == 0.0 && scale == 0.0 {
         true
     } else {
-        let candidate = if (count as f64) < 1.0 {
-            1.0
-        } else {
-            count as f64
-        };
-        range < scale * candidate * f64::EPSILON * 3.0 || range == 0.0
+        let bias = 1.0
+            + if five_bias >= 1.5 * high_bias + 0.5 {
+                1.0 / (1.0 + high_bias)
+            } else {
+                1.5 / (1.0 + five_bias)
+            };
+        range < scale * bias * count.max(1) as f64 * f64::EPSILON * 3.0
     };
     let mut cell;
     if small {
@@ -510,12 +495,13 @@ pub fn pretty(
     let mut steps = (0.5 + end - start) as i32;
     if steps < min_count {
         let missing = min_count - steps;
+        let (half, rest) = ((missing / 2) as f64, (missing % 2) as f64);
         if start >= 0.0 {
-            end += missing as f64 / 2.0;
-            start -= (missing as f64 / 2.0 + missing as f64 % 2.0).floor();
+            end += half;
+            start -= half + rest;
         } else {
-            start -= missing as f64 / 2.0;
-            end += (missing as f64 / 2.0 + missing as f64 % 2.0).floor();
+            start -= half;
+            end += half + rest;
         }
         steps = min_count;
     }
@@ -627,9 +613,16 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     }
     let result = match operand.kind() {
         SexpType::Logical => {
-            let converted = coerce_vector(operand, SexpType::Integer)?;
-            let result = values::duplicate(converted)?;
-            values::copy_most_attributes(operand, result, true)?;
+            // Coercing to integer makes a new kind of value, so like `!` on a number it keeps
+            // only the structural attributes: `+x` of a logical time series is no time series.
+            let result = alloc(SexpType::Integer, length(operand))?;
+            values::ints_mut(result).copy_from_slice(values::ints(operand));
+            for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
+                let value = get_attr(operand, symbol);
+                if value != nil() {
+                    values::set_attr(result, symbol, value)?;
+                }
+            }
             result
         }
         SexpType::Integer | SexpType::Real | SexpType::Complex => {
@@ -875,15 +868,48 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
     }
 }
 
-/// `^` with R's special cases: `1^y` and `x^0` are 1 even for `NA`.
+/// `^` with R's special cases, which C's `pow` leaves to the platform: `1^y` and `x^0` are 1
+/// even for `NA`, and an infinite operand gives a defined limit or `NaN` (`(-Inf)^0.5`).
 pub fn power(base: f64, exponent: f64) -> f64 {
     if base == 1.0 || exponent == 0.0 {
         return 1.0;
     }
-    if is_na_real(base) || is_na_real(exponent) {
-        return NA_REAL;
+    if base == 0.0 {
+        return if exponent > 0.0 {
+            0.0
+        } else if exponent < 0.0 {
+            f64::INFINITY
+        } else {
+            exponent
+        };
     }
-    base.powf(exponent)
+    if base.is_finite() && exponent.is_finite() {
+        return if exponent == 2.0 { base * base } else { base.powf(exponent) };
+    }
+    if base.is_nan() || exponent.is_nan() {
+        // GNU R's result carries the exponent's payload when both are NaN, so `NA^NaN` is
+        // `NaN` and `NaN^NA` is `NA`; x86 addition keeps its first operand's payload.
+        return exponent + base;
+    }
+    if base.is_infinite() {
+        if base > 0.0 {
+            return if exponent < 0.0 { 0.0 } else { f64::INFINITY };
+        }
+        if exponent.is_finite() && exponent == exponent.floor() {
+            return if exponent < 0.0 {
+                0.0
+            } else if exponent % 2.0 != 0.0 {
+                base
+            } else {
+                -base
+            };
+        }
+    }
+    if exponent.is_infinite() && base >= 0.0 {
+        let grows = if exponent > 0.0 { base >= 1.0 } else { base < 1.0 };
+        return if grows { f64::INFINITY } else { 0.0 };
+    }
+    f64::NAN
 }
 
 pub fn real_modulo(a: f64, b: f64) -> f64 {
@@ -1399,55 +1425,6 @@ pub fn gamma_fn(value: f64) -> f64 {
     unsafe { tgamma(value) }
 }
 
-fn digamma(mut x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    let mut result = 0.0;
-    if x <= 0.0 && x == x.floor() {
-        return f64::NAN;
-    }
-    if x < 0.0 {
-        // Reflection.
-        return digamma(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
-    }
-    while x < 6.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let inverse2 = inverse * inverse;
-    result + x.ln()
-        - 0.5 * inverse
-        - inverse2
-            * (1.0 / 12.0
-                - inverse2
-                    * (1.0 / 120.0
-                        - inverse2 * (1.0 / 252.0 - inverse2 * (1.0 / 240.0 - inverse2 / 132.0))))
-}
-
-fn trigamma(mut x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    let mut result = 0.0;
-    if x <= 0.0 && x == x.floor() {
-        return f64::INFINITY;
-    }
-    while x < 6.0 {
-        result += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let inverse2 = inverse * inverse;
-    result
-        + inverse
-        + inverse2 / 2.0
-        + inverse
-            * inverse2
-            * (1.0 / 6.0 - inverse2 * (1.0 / 30.0 - inverse2 * (1.0 / 42.0 - inverse2 / 30.0)))
-}
-
 fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
     match function {
@@ -1506,9 +1483,19 @@ fn math_value(function: Math, x: f64) -> f64 {
             }
         }
         Math::Tanpi => {
-            let reduced = x % 1.0;
+            // Reducing into (-1/2, 1/2] is exact, so values one period apart agree exactly.
+            let mut reduced = x % 1.0;
+            if reduced > 0.5 {
+                reduced -= 1.0;
+            } else if reduced <= -0.5 {
+                reduced += 1.0;
+            }
             if reduced == 0.0 {
                 0.0
+            } else if reduced == 0.5 {
+                f64::NAN
+            } else if reduced == 0.25 || reduced == -0.25 {
+                reduced * 4.0
             } else {
                 (PI * reduced).tan()
             }
@@ -1524,8 +1511,8 @@ fn math_value(function: Math, x: f64) -> f64 {
         Math::Atanh => x.atanh(),
         Math::Gamma => gamma_fn(x),
         Math::Lgamma => gamma_ln(x),
-        Math::Digamma => digamma(x),
-        Math::Trigamma => trigamma(x),
+        Math::Digamma => distributions::psigamma(x, 0.0),
+        Math::Trigamma => distributions::psigamma(x, 1.0),
     }
 }
 
@@ -1760,9 +1747,7 @@ pub fn signif_digits(x: f64, digits: i32) -> f64 {
         return x;
     }
     let digits = digits.max(1);
-    let magnitude = x.abs().log10().floor() as i32;
     let text = format!("{:.*e}", (digits - 1) as usize, x);
-    let _ = magnitude;
     text.parse().unwrap_or(x)
 }
 
@@ -1987,7 +1972,8 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
     for arg in call.args {
         if arg.tag == symbols().na_rm {
             na_rm = values::as_logical_scalar(arg.value) == 1;
-        } else {
+        } else if arg.value != nil() {
+            // NULL holds no values, and reading its elements as integers would see garbage.
             items.push(values::materialize(arg.value)?);
         }
     }
@@ -2022,7 +2008,9 @@ impl CompensatedSum {
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (items, na_rm) = summary_args(call)?;
+    let (mut items, na_rm) = summary_args(call)?;
+    // NULL contributes no values, and the typed loops below read vectors' payloads directly.
+    items.retain(|item| *item != nil());
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String
@@ -2868,28 +2856,6 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
 
 // Two-argument math.
 
-fn choose(n: f64, k: f64) -> f64 {
-    let k = k.round();
-    if k < 0.0 {
-        return 0.0;
-    }
-    if k == 0.0 {
-        return 1.0;
-    }
-    if n == n.round() && k < 30.0 {
-        let mut result = 1.0;
-        for index in 0..k as i64 {
-            result = result * (n - index as f64) / (index as f64 + 1.0);
-        }
-        return result.round();
-    }
-    let mut result = 1.0;
-    for index in 0..k as i64 {
-        result = result * (n - index as f64) / (index as f64 + 1.0);
-    }
-    result
-}
-
 unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;
     let right = values::materialize(call.arg(1))?;
@@ -3270,4 +3236,79 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
             Ok(result)
         }
     }
+}
+
+/// `polyroot(z)`: the roots of the polynomial with coefficients `z` in increasing order, by
+/// the Aberth-Ehrlich simultaneous iteration, listed by increasing modulus (the order in which
+/// Jenkins and Traub's deflation tends to find them).
+unsafe fn do_polyroot(call: &Call<'_>) -> R<Sexp> {
+    let input = coerce_vector(call.arg(0), SexpType::Complex)?;
+    let coefficients: Vec<Rcomplex> = values::complexes(input).to_vec();
+    if coefficients.iter().any(|value| !value.r.is_finite() || !value.i.is_finite()) {
+        return Err(call.error("invalid polynomial coefficient"));
+    }
+    let Some(degree) = coefficients.iter().rposition(|value| value.r != 0.0 || value.i != 0.0) else {
+        return alloc(SexpType::Complex, 0);
+    };
+    type C = (f64, f64);
+    let mul = |a: C, b: C| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+    let div = |a: C, b: C| {
+        let d = b.0 * b.0 + b.1 * b.1;
+        ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+    };
+    let zeros_at_origin = coefficients.iter().take_while(|value| value.r == 0.0 && value.i == 0.0).count();
+    let polynomial: Vec<C> = coefficients[zeros_at_origin..=degree].iter().map(|value| (value.r, value.i)).collect();
+    let n = polynomial.len() - 1;
+    let lead = polynomial[n];
+    let monic: Vec<C> = polynomial.iter().map(|&value| div(value, lead)).collect();
+    let evaluate = |x: C| -> (C, C) {
+        let mut value = monic[n];
+        let mut derivative = (0.0, 0.0);
+        for k in (0..n).rev() {
+            derivative = mul(derivative, x);
+            derivative = (derivative.0 + value.0, derivative.1 + value.1);
+            value = mul(value, x);
+            value = (value.0 + monic[k].0, value.1 + monic[k].1);
+        }
+        (value, derivative)
+    };
+    let radius = 1.0 + monic[..n].iter().map(|value| value.0.hypot(value.1)).fold(0.0, f64::max);
+    let mut roots: Vec<C> = (0..n)
+        .map(|k| {
+            let angle = 2.0 * std::f64::consts::PI * k as f64 / n as f64 + 0.4;
+            (0.5 * radius * angle.cos(), 0.5 * radius * angle.sin())
+        })
+        .collect();
+    for _ in 0..500 {
+        let mut largest_step = 0.0_f64;
+        for k in 0..n {
+            let (value, derivative) = evaluate(roots[k]);
+            if value == (0.0, 0.0) {
+                continue;
+            }
+            let ratio = div(value, derivative);
+            let mut sum = (0.0, 0.0);
+            for j in 0..n {
+                if j != k {
+                    let inverse = div((1.0, 0.0), (roots[k].0 - roots[j].0, roots[k].1 - roots[j].1));
+                    sum = (sum.0 + inverse.0, sum.1 + inverse.1);
+                }
+            }
+            let denominator = (1.0 - (ratio.0 * sum.0 - ratio.1 * sum.1), -(ratio.0 * sum.1 + ratio.1 * sum.0));
+            let step = div(ratio, denominator);
+            roots[k] = (roots[k].0 - step.0, roots[k].1 - step.1);
+            largest_step = largest_step.max(step.0.hypot(step.1) / roots[k].0.hypot(roots[k].1).max(1e-300));
+        }
+        if largest_step < 1e-15 {
+            break;
+        }
+    }
+    let mut all: Vec<C> = vec![(0.0, 0.0); zeros_at_origin];
+    all.extend(roots);
+    all.sort_by(|a, b| a.0.hypot(a.1).total_cmp(&b.0.hypot(b.1)));
+    let result = alloc(SexpType::Complex, all.len())?;
+    for (slot, root) in values::complexes_mut(result).iter_mut().zip(all) {
+        *slot = Rcomplex { r: root.0, i: root.1 };
+    }
+    Ok(result)
 }

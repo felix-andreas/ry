@@ -1,0 +1,58 @@
+[stdout]
+| [1]   1  -2 300
+| [1] 1 0
+| [1] TRUE
+| [1]  1.50 -2.25
+| [1] "text"
+| [1] 01 02 03 04
+| [1] 7
+| [1] 258
+| integer(0)
+| [1] 28
+| [1] 28
+| [1] 1.5
+| [1] 28
+| [1] "AB"
+| [1] 3
+| [1] "CD"
+| [1] 5
+| [1] 41 42 0a
+| [1] 3
+| raw(0)
+|  [1] 01 00 00 00 02 00 00 00 68 65 79 6c 69 6e 65 0a
+| [1] 16
+| [1] 01 00 00 00 02 00 00 00
+| [1] 61 62 63 64 65
+| [1] "h"   "ell"
+| [1] "one" "two"
+| [1] "one" "two"
+| [1] "one"          "two"          "partial line"
+| [1] "one"          "two"          "partial line" "three"       
+| [1] "local"
+| [1] "l1"
+| [1] 2
+| [1] "p1"
+| [1] "qp2" "l2"  "l3" 
+| [1] FALSE
+| [1] FALSE
+| Error in seek.connection(input, 1) : 
+|   seek is not relevant for text connection
+| [1] 0
+| [1] "[1] 1"     "[1] 1 2 3" "cat"       "stdout"   
+| both
+| [1] "both"
+| [1] TRUE
+| [1] FALSE
+| [1] "w"
+| [1] FALSE
+| [1] "abc"
+| [1] FALSE
+| Error in getConnection(99) : there is no connection 99
+| [1] "terminal"   "connection"
+| [1] "stderr"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "stderr"

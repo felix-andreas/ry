@@ -787,50 +787,32 @@ SOURCE_FILE@0..361
   NEWLINE@167..168 "\n"
   COMMENT@168..183 "# Decimal point"
   NEWLINE@183..184 "\n"
-  ERROR@184..186
-    ERROR_TOKEN@184..186 "0x"
-  ERROR@186..187
-    IDENT@186..187 "."
+  ERROR@184..187
+    ERROR_TOKEN@184..187 "0x."
   NEWLINE@187..188 "\n"
-  LITERAL@188..191
-    DOUBLE@188..191 "0x1"
-  ERROR@191..192
-    IDENT@191..192 "."
+  ERROR@188..192
+    ERROR_TOKEN@188..192 "0x1."
   NEWLINE@192..193 "\n"
-  ERROR@193..195
-    ERROR_TOKEN@193..195 "0x"
-  ERROR@195..197
-    DOUBLE@195..197 ".1"
+  ERROR@193..197
+    ERROR_TOKEN@193..197 "0x.1"
   NEWLINE@197..198 "\n"
-  LITERAL@198..201
-    DOUBLE@198..201 "0x1"
-  ERROR@201..203
-    DOUBLE@201..203 ".1"
+  ERROR@198..203
+    ERROR_TOKEN@198..203 "0x1.1"
   NEWLINE@203..204 "\n"
   NEWLINE@204..205 "\n"
   COMMENT@205..234 "# Decimal point with exponent"
   NEWLINE@234..235 "\n"
-  ERROR@235..237
-    ERROR_TOKEN@235..237 "0x"
-  ERROR@237..240
-    IDENT@237..240 ".p1"
+  LITERAL@235..240
+    DOUBLE@235..240 "0x.p1"
   NEWLINE@240..241 "\n"
-  LITERAL@241..244
-    DOUBLE@241..244 "0x1"
-  ERROR@244..247
-    IDENT@244..247 ".p1"
+  LITERAL@241..247
+    DOUBLE@241..247 "0x1.p1"
   NEWLINE@247..248 "\n"
-  ERROR@248..250
-    ERROR_TOKEN@248..250 "0x"
-  ERROR@250..254
-    DOUBLE@250..252 ".1"
-    IDENT@252..254 "p1"
+  LITERAL@248..254
+    DOUBLE@248..254 "0x.1p1"
   NEWLINE@254..255 "\n"
-  LITERAL@255..258
-    DOUBLE@255..258 "0x1"
-  ERROR@258..262
-    DOUBLE@258..260 ".1"
-    IDENT@260..262 "p1"
+  LITERAL@255..262
+    DOUBLE@255..262 "0x1.1p1"
   NEWLINE@262..263 "\n"
   NEWLINE@263..264 "\n"
   COMMENT@264..277 "# As integers"
@@ -859,37 +841,33 @@ SOURCE_FILE@0..361
   LITERAL@330..337
     INTEGER@330..337 "0x0p-0L"
   NEWLINE@337..338 "\n"
-  ERROR@338..340
-    ERROR_TOKEN@338..340 "0x"
-  ERROR@340..342
-    IDENT@340..342 ".L"
+  ERROR@338..341
+    ERROR_TOKEN@338..341 "0x."
+  ERROR@341..342
+    IDENT@341..342 "L"
   NEWLINE@342..343 "\n"
-  LITERAL@343..346
-    DOUBLE@343..346 "0x1"
-  ERROR@346..348
-    IDENT@346..348 ".L"
+  ERROR@343..347
+    ERROR_TOKEN@343..347 "0x1."
+  ERROR@347..348
+    IDENT@347..348 "L"
   NEWLINE@348..349 "\n"
-  ERROR@349..351
-    ERROR_TOKEN@349..351 "0x"
-  ERROR@351..354
-    INTEGER@351..354 ".1L"
+  ERROR@349..353
+    ERROR_TOKEN@349..353 "0x.1"
+  ERROR@353..354
+    IDENT@353..354 "L"
   NEWLINE@354..355 "\n"
-  LITERAL@355..358
-    DOUBLE@355..358 "0x1"
-  ERROR@358..361
-    INTEGER@358..361 ".1L"
-err: 184..186: missing digits after `0x`
-err: 191..192: unexpected identifier after this expression; expected a newline or `;`
-err: 193..195: missing digits after `0x`
-err: 201..203: unexpected number after this expression; expected a newline or `;`
-err: 235..237: missing digits after `0x`
-err: 244..247: unexpected identifier after this expression; expected a newline or `;`
-err: 248..250: missing digits after `0x`
-err: 258..260: unexpected number after this expression; expected a newline or `;`
-err: 338..340: missing digits after `0x`
-err: 346..348: unexpected identifier after this expression; expected a newline or `;`
-err: 349..351: missing digits after `0x`
-err: 358..361: unexpected integer literal after this expression; expected a newline or `;`
+  ERROR@355..360
+    ERROR_TOKEN@355..360 "0x1.1"
+  ERROR@360..361
+    IDENT@360..361 "L"
+err: 184..187: a hexadecimal fraction needs a `p` exponent
+err: 188..192: a hexadecimal fraction needs a `p` exponent
+err: 193..197: a hexadecimal fraction needs a `p` exponent
+err: 198..203: a hexadecimal fraction needs a `p` exponent
+err: 338..341: a hexadecimal fraction needs a `p` exponent
+err: 343..347: a hexadecimal fraction needs a `p` exponent
+err: 349..353: a hexadecimal fraction needs a `p` exponent
+err: 355..360: a hexadecimal fraction needs a `p` exponent
 
 #---- scientific_notation_floats
 1e322
@@ -950,11 +928,11 @@ SOURCE_FILE@0..38
   LITERAL@28..32
     COMPLEX@28..32 "0x1i"
   NEWLINE@32..33 "\n"
-  ERROR@33..35
-    ERROR_TOKEN@33..35 "0x"
-  ERROR@35..38
-    COMPLEX@35..38 ".1i"
-err: 33..35: missing digits after `0x`
+  ERROR@33..37
+    ERROR_TOKEN@33..37 "0x.1"
+  ERROR@37..38
+    IDENT@37..38 "i"
+err: 33..37: a hexadecimal fraction needs a `p` exponent
 
 #---- dot_dot_i
 ..1
