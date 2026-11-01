@@ -2592,9 +2592,9 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 2.6 s | 566 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
-| data science | 3.3 s | 572 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
-| biostatistics | 2.7 s | 575 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
+| finance | 2.7-2.8 s | 566 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
+| data science | 3.5-3.7 s | 572 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
+| biostatistics | 2.8-2.9 s | 575 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
 
 The `object-system` warnings are the intended lint on the generated R6 and S4 classes. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
