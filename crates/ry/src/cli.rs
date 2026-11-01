@@ -12,7 +12,7 @@ use {
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
     rustc_hash::FxHashSet,
-    salsa::{Database, Durability},
+    salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax},
@@ -366,13 +366,12 @@ pub(crate) fn analyze_project(
     let mut by_size: Vec<usize> = (0..files.len()).collect();
     by_size.sort_by_cached_key(|&index| Reverse(files[index].text(&db).len()));
 
-    // Trees are evicted batch by batch, so everything later phases read from them is
-    // derived while they are resident.
+    // Everything later passes read from a tree is derived here, across all cores, so a check
+    // that reaches another file never walks that file's tree on its own thread.
     let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
     let mut used_tokens = FxHashSet::default();
-    let tree_batch = workers * FILES_PER_WORKER_BATCH;
-    for (_, tokens) in in_batches(&mut db, workers, &by_size, tree_batch, |db, index| {
+    for (_, tokens) in in_parallel(&db, workers, &by_size, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
         let mut tokens = FxHashSet::default();
@@ -395,28 +394,17 @@ pub(crate) fn analyze_project(
 
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim.
-    // This pass reads no tree and holds nothing evictable, so it runs as one batch with no
-    // barriers.
-    in_batches(&mut db, workers, &by_size, by_size.len(), |db, index| {
+    in_parallel(&db, workers, &by_size, |db, index| {
         let file = files[index];
         for &item in semantics::item_tree(db, file) {
             semantics::item_naming(db, item);
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    // Reads no tree either, but evicting between larger batches still bounds the peak on a
-    // project with many findings.
-    let diagnostics_batch = tree_batch * 4;
-    for (index, diagnostics) in in_batches(
-        &mut db,
-        workers,
-        &by_size,
-        diagnostics_batch,
-        |db, index| {
-            let rendered = document_diagnostics(db, files[index], &config);
-            apply_suppressions(rendered, files[index].text(db))
-        },
-    ) {
+    for (index, diagnostics) in in_parallel(&db, workers, &by_size, |db, index| {
+        let rendered = document_diagnostics(db, files[index], &config);
+        apply_suppressions(rendered, files[index].text(db))
+    }) {
         per_file[index] = diagnostics;
     }
     // Computed last so the `unused-import` lint sees the whole package.
@@ -471,53 +459,39 @@ pub(crate) fn analyze_project(
     })
 }
 
-/// Runs `work` for every index in `order` across `workers` threads, `batch_len` indices at
-/// a time. Between batches the least recently used trees are evicted, so a cold pass holds
-/// about a batch of them instead of the whole project's. Nothing is evicted after the last
-/// batch: the next call evicts before its second batch, and the check exits after the last.
-fn in_batches<T: Send>(
-    db: &mut RootDatabase,
+/// Runs `work` for every index in `order` across `workers` threads.
+fn in_parallel<T: Send>(
+    db: &RootDatabase,
     workers: usize,
     order: &[usize],
-    batch_len: usize,
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for (number, batch) in order.chunks(batch_len.max(1)).enumerate() {
-        if number > 0 {
-            db.trigger_lru_eviction();
+    // Shared rather than dealt out: check times vary by orders of magnitude per file.
+    let next = AtomicUsize::new(0);
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers.min(order.len()))
+            .map(|_| {
+                let db = db.clone();
+                let (next, work) = (&next, &work);
+                thread::Builder::new()
+                    .stack_size(crate::ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, move || {
+                        let mut done = Vec::new();
+                        while let Some(&index) = order.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            done.push((index, work(&db, index)));
+                        }
+                        done
+                    })
+                    .expect("check worker thread should spawn")
+            })
+            .collect();
+        for handle in handles {
+            results.extend(handle.join().expect("check worker should not panic"));
         }
-        // Shared rather than dealt out: check times vary by orders of magnitude per file.
-        let next = AtomicUsize::new(0);
-        thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers.min(batch.len()))
-                .map(|_| {
-                    let db = db.clone();
-                    let (next, work) = (&next, &work);
-                    thread::Builder::new()
-                        .stack_size(crate::ANALYSIS_STACK_SIZE)
-                        .spawn_scoped(scope, move || {
-                            let mut done = Vec::new();
-                            while let Some(&index) = batch.get(next.fetch_add(1, Ordering::Relaxed))
-                            {
-                                done.push((index, work(&db, index)));
-                            }
-                            done
-                        })
-                        .expect("check worker thread should spawn")
-                })
-                .collect();
-            for handle in handles {
-                results.extend(handle.join().expect("check worker should not panic"));
-            }
-        });
-    }
+    });
     results
 }
-
-/// Large enough that a batch's thread start-up is noise, small enough that a batch's
-/// trees stay a small part of the project's.
-const FILES_PER_WORKER_BATCH: usize = 16;
 
 /// An empty tree exits clean: a monorepo stage with no R in it yet must not fail a pipeline.
 fn report_check_summary(n_files: usize, n_diagnostics: usize) {

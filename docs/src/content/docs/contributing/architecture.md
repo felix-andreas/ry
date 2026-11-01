@@ -120,31 +120,29 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees are evicted
+### Syntax trees stay resident
 
-Rowan trees are the largest thing the analysis holds, and nothing past lowering needs them, so a
-cold pass does not retain them. `limit_resident_trees` gives `parse` and the per-item `item_syntax`
-and `item_annotation_syntax` salsa LRU capacities, and every query that reads a tree is a memoized
-query whose result is small: the
-item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references
-and agreement candidates in `diagnostics.rs`, `item_name_range`, and `lints::file_syntax_lints`. An evicted memo keeps
-its dependency edges, so revalidating an untouched file after an edit elsewhere never re-parses it;
-only a file whose text changed is parsed again. A finding that also needs naming or the project's
-declarations is split in two: the syntax-only half is memoized, and a cheap step joins it with the
-rest (a bare `setClass` call is reported only when the file does not bind `setClass` itself, and
-two annotations disagree only when their types differ once aliases expand).
+Every host keeps every rowan tree. Salsa's LRU would bound memory, but each read of an LRU query
+records its use under one mutex per query, and the cold check reads `item_syntax` often enough
+on all cores that the lock cost about a sixth of its wall time, for about 80 MB saved on a
+300,000-line package. Every query that reads a tree is still a memoized query whose result is
+small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
+annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
+`lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
+the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
+joins it with the rest (a bare `setClass` call is reported only when the file does not bind
+`setClass` itself, and two annotations disagree only when their types differ once aliases
+expand).
 
-The CLI's cold check leans on this to cap its peak. It runs three passes over the files, largest
-first, spread over the cores. The first pass works in batches and calls `trigger_lru_eviction`
-between them: `diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is
-resident, including each file's share of the project-wide maps (`warm_project_folds`). The second
-pass names every item, so that two threads checking files that reach the same item do not block on
-one claim, and the third assembles the diagnostics. Neither later pass reads a tree. Naming runs as one batch
-with no barriers, and the diagnostics pass evicts between larger batches, which bounds the peak on
-a project with many findings. Each file is therefore parsed exactly once, and at most a few batches of trees
-are alive at a time. `RootDatabase::one_shot` also turns
-off the splice cache, which would otherwise keep the previous tree of every file. A
-`test_incremental.rs` case pins the one-parse property.
+The CLI's cold check runs three passes over the files, largest first, spread over the cores.
+The first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each
+file's share of the project-wide maps (`warm_project_folds`), so that no later check derives
+another file's facts on its own thread. The second names every item, so that two threads
+checking files that reach the same item do not block on one claim, and the third assembles the
+diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
+previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
+once.
 
 Most tree readers look for a handful of node kinds in a large file, and a red-tree walk pays for a
 red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
@@ -164,7 +162,9 @@ wall time. Several of them are worth knowing:
   `test_name` take only the name and read `ProjectFiles` themselves.
 - `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
   64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
-  compare and reading the kind is a field load. The entry stores the type's size, which the
+  compare and reading the kind is a field load. A direct-mapped per-thread cache sits in front of
+  the shards, because checkers intern the same few types over and over and those land on the same
+  shard mutexes. The entry stores the type's size, which the
   inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
@@ -175,13 +175,9 @@ wall time. Several of them are worth knowing:
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
-  huge pages that a short-lived process never touched.
-
-The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
-bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
-tree must be rebuilt whenever a memo's value is needed. The memory it saves matters less in a
-long-lived process, so the server never calls `limit_resident_trees`, and the tree queries' `lru = 0`
-default leaves them unbounded with no per-fetch bookkeeping.
+  huge pages that a short-lived process never touched. What allocation still costs is mostly
+  setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
+  and huge-page options measured no difference.
 
 ### From item to scheme
 

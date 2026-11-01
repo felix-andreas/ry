@@ -48,32 +48,17 @@ pub struct RootDatabase {
 }
 
 impl RootDatabase {
-    /// For a single cold pass, such as `ry check`. Trees are evicted whenever the host calls
-    /// `trigger_lru_eviction`, and no file is parsed twice from an edit, so splice caching
-    /// would only hold a second copy of every text and of recent trees.
-    ///
-    /// The default database keeps every tree: an editor host pays for eviction in latency
-    /// (about 10 ms per settled re-check on the benchmark code bases) more than it gains in
-    /// memory.
+    /// For a single cold pass, such as `ry check`. No file is parsed twice from an edit, so
+    /// splice caching would only hold a second copy of every text and of recent trees.
     pub fn one_shot() -> RootDatabase {
-        let mut db = RootDatabase {
+        RootDatabase {
             storage: salsa::Storage::default(),
             splice_cache: Arc::new(SpliceCache {
                 entries: Mutex::default(),
                 enabled: false,
             }),
-        };
-        limit_resident_trees(&mut db);
-        db
+        }
     }
-}
-
-/// Lets `trigger_lru_eviction` drop all but the most recently used syntax trees.
-pub fn limit_resident_trees(db: &mut dyn Db) {
-    parse::set_lru_capacity(db, 128);
-    file_item_annotations::set_lru_capacity(db, 128);
-    item_syntax::set_lru_capacity(db, 4096);
-    item_annotation_syntax::set_lru_capacity(db, 4096);
 }
 
 #[salsa::db]
@@ -117,10 +102,7 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-/// Trees are the largest memos and cheap to rebuild, so a cold pass keeps only recent ones
-/// resident (see [`RootDatabase::one_shot`]); everything derived from them is memoized
-/// item-relative and survives eviction.
-#[salsa::tracked(returns(clone), lru = 0)]
+#[salsa::tracked(returns(clone))]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
@@ -237,9 +219,8 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
-/// from it stay item-relative until the rendering edge. Holds part of the file's tree, so
-/// it is evicted alongside `parse`.
-#[salsa::tracked(returns(clone), lru = 0)]
+/// from it stay item-relative until the rendering edge.
+#[salsa::tracked(returns(clone))]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
@@ -541,7 +522,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone), lru = 0)]
+#[salsa::tracked(returns(clone))]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
@@ -549,7 +530,7 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref), lru = 0)]
+#[salsa::tracked(returns(ref))]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -584,7 +565,7 @@ pub struct ItemAnnotations<'db> {
 }
 
 /// Memoized so the checker reads lowered annotations instead of the item's tree: once
-/// lowering is done, nothing on the check path needs syntax, and trees can be evicted.
+/// lowering is done, nothing on the check path needs syntax.
 #[salsa::tracked(returns(ref))]
 pub fn item_annotations<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemAnnotations<'db> {
     ItemAnnotations {
@@ -2230,8 +2211,8 @@ fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashS
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
-/// `setGeneric` name string. Memoized so that a cold check reads it from another file without
-/// reparsing that file's evicted tree.
+/// `setGeneric` name string. Memoized so that a check reads it from another file without
+/// walking that file's tree.
 #[salsa::tracked(returns(copy))]
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let node = item_node(db, item)?;

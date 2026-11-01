@@ -2801,14 +2801,18 @@ eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak memory of `ry check` is about 1.4 KiB per line with tests. Trees are evicted
-  (`decisions.md`, "Syntax trees are evicted"), so the holders left are HIR, naming and check memos
+- Peak memory of `ry check` is about 1.6 KiB per line with tests. Trees stay resident
+  (`decisions.md`, "every host keeps every tree"); the other holders are HIR, naming and check memos
   and salsa's per-memo metadata (about 17 MiB for `file_diagnostics` alone). Next steps: box the
   rare `ItemNaming`/`ItemCheck` fields, cut the `frame_binder` memo count, `CallArgument.name` and
   `StrictOriginKind` as `Symbol`, and a smaller `Expression` layout.
-- The server keeps every tree (about 200 MiB on a benchmark code base) because LRU eviction cost
-  about 10 ms per settled re-check. Find which memo values force rebuilding evicted trees in the
-  settled wave; with those memoized, the server could evict too.
+- Every host keeps every tree (about 80 MiB of `ry check`'s peak on a benchmark code base),
+  because salsa's LRU takes a mutex per read. Bounding tree memory again needs eviction without
+  per-read bookkeeping, for example dropping a file's trees explicitly once its facts are derived.
+- The cold check's remaining waits are salsa claims on project-wide queries
+  (`duplicate_binding_map`, `project_arithmetic_classes`, `project_type_definitions`) computed by
+  one thread while the others need them; deriving them before the diagnostics pass, or as
+  per-file folds, would let the pass run without them.
 - Interning names as `Symbol` added about 7 ms to the settled re-check (not isolated: `Symbol`
   hashes and orders through its string). Durability more than recovered it, but the cost is still
   there to win back.

@@ -2288,6 +2288,9 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 
 ## Syntax trees are evicted, and only small syntax facts are memoized
 
+Tree eviction itself is superseded: see "Decision record: every host keeps every tree" below.
+The small memoized syntax facts remain.
+
 - **Previous shape.** Every file's rowan tree stayed memoized for the whole process, beside the
   splice cache's own copy of the previous tree, and `AnalyzedFile` kept a second copy of each
   file's source. Diagnostics and lints walked the tree directly (error ranges, annotation
@@ -3580,6 +3583,33 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+# Decision record: every host keeps every tree
+
+- **Previous source.** `limit_resident_trees` gave `parse`, `file_item_annotations`,
+  `item_syntax` and `item_annotation_syntax` salsa LRU capacities in `RootDatabase::one_shot`,
+  and `ry check` ran its passes in batches with `trigger_lru_eviction` between them. The server
+  already kept every tree.
+- **Weakness.** Salsa records each read of an LRU query under one mutex per query. On four cores
+  the cold check's reads of `item_syntax` and `parse` queued on those mutexes; a gdb sample of
+  the worker threads found them the largest single wait. Removing the item-level capacities
+  alone removed the cost and the memory saving together, because item green subtrees are most of
+  a file's tree.
+- **Target shape.** No query has an LRU capacity and no host evicts. `ry check` keeps its three
+  passes (derive from syntax, name, report), each one plain parallel loop (`in_parallel` in
+  `crates/ry/src/cli.rs`). Tree readers stay memoized queries with small results, so a check
+  never walks another file's tree. The type interner (`crates/semantics/src/types.rs`) gained a
+  direct-mapped per-thread cache in front of its 64 shard mutexes, which sampling showed
+  contended on hot types.
+- **Correctness.** Findings are identical on the three benchmark code bases (2337, 1853, 784).
+- **Simplicity.** The batching driver, `limit_resident_trees` and the eviction-only comments are
+  gone.
+- **Performance.** Cold `ry check` went from about 2.2 to 2.5 s to about 1.6 to 1.8 s on the
+  benchmark code bases; peak RSS rose from about 485 to 565 MB. mimalloc's remaining time is
+  fresh-page setup, and its purge and huge-page options measured no difference.
+- **Incremental.** Unchanged: the server never evicted. The remaining waits in the cold check are
+  salsa claims on project-wide queries (`duplicate_binding_map`, `project_arithmetic_classes`,
+  `project_type_definitions`) that one thread computes while others need them.
 
 # Decision record: HIR as struct-of-arrays, lowered from the green tree
 

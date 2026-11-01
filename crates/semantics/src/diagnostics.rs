@@ -75,9 +75,9 @@ pub struct RelatedLocation {
     pub message: &'static str,
 }
 
-/// Derives every fact a later pass reads from the file's tree, while the tree is resident.
-/// A cold pass that evicts trees between batches calls this first, so checking a file never
-/// re-parses another one: past this point only the file's own diagnostics read its tree.
+/// Derives every fact a later pass reads from the file's tree. A cold pass calls this for
+/// every file across all cores first, so a later check that reaches another file finds its
+/// facts memoized instead of walking that file's tree on the checking thread.
 pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = crate::metadata::file_attached_namespaces(db, file);
     let _ = file_error_ranges(db, file);
@@ -785,8 +785,7 @@ struct AnnotationReferences<'db> {
 
 /// Every annotation in the file lowered with file ranges (the `#:` blocks, and the inline
 /// sites unless inline annotations are turned off), keeping only those that reference a
-/// type or report a typing error. Memoized because it reads the tree, which a cold check
-/// evicts after its first pass.
+/// type or report a typing error. Memoized so that diagnostics never walk the tree again.
 #[salsa::tracked(returns(ref))]
 fn file_annotation_references<'db>(
     db: &'db dyn Db,
@@ -939,8 +938,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
 }
 
 /// A disagreement between a statement's inline annotation and its `#:` comment, found from
-/// syntax alone. Memoized because it reads the tree, which a cold check evicts after its
-/// first pass.
+/// syntax alone. Memoized so that diagnostics never walk the tree again.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum AgreementCandidate<'db> {
     /// Compared as written (a type-parameter constraint, a definition's kind or arity), so
