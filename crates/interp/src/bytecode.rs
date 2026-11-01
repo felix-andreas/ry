@@ -1863,8 +1863,9 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
 }
 
 /// What every instruction of an activation reads, loaded once instead of once per instruction.
-/// None of it changes while the activation runs: the code object is rooted and never patched,
-/// and the register window was reserved on entry in a file that never reallocates.
+/// None of these addresses changes while the activation runs: the code object is rooted and
+/// never patched, its vectors are never resized, and the register window was reserved on entry
+/// in a file that never reallocates. What they point at (registers, cache slots) does change.
 #[derive(Clone, Copy)]
 struct Decoded<'a> {
     code: &'a [i32],
