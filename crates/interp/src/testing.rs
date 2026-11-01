@@ -75,6 +75,9 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
         "2147483647L",
         "0",
         "NA_integer_",
+        "[3L]",
+        "[-2.5, 1]",
+        "[TRUE]",
     ];
     let a = arguments[entropy.below(arguments.len())];
     let b = arguments[entropy.below(arguments.len())];

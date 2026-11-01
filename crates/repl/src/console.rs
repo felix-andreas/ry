@@ -175,6 +175,7 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
         *slot.borrow_mut() = Some(Console {
             editor,
             pending,
+            hook_bytes: 0,
             batch: options.batch,
             completer,
             hooks: options.hooks,
@@ -212,6 +213,10 @@ struct Console {
     editor: Reedline,
     /// Accepted input R has not consumed; handed over in buffer-sized chunks.
     pending: VecDeque<u8>,
+    /// How many bytes at the front of `pending` are a hook's code, which R must receive as a
+    /// chunk of its own: ry's runtime parses a chunk whole, so a syntax error in the typed line
+    /// would otherwise cancel the hook's code too, and shift the line's error position.
+    hook_bytes: usize,
     /// End the session (EOF) once `pending` is exhausted instead of prompting.
     batch: bool,
     completer: Option<SharedSessionCompleter>,
@@ -310,6 +315,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                         && let Some(hooks) = console.hooks.as_mut()
                         && let Some(code) = hooks.before_command()
                     {
+                        console.hook_bytes = code.len() + 1;
                         console.pending.extend(code.into_bytes());
                         console.pending.push_back(b'\n');
                     }
@@ -333,7 +339,11 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 Ok(Signal::CtrlD) | Err(_) => return 0,
             }
         }
-        let written = capacity.min(console.pending.len());
+        let mut written = capacity.min(console.pending.len());
+        if console.hook_bytes > 0 {
+            written = written.min(console.hook_bytes);
+            console.hook_bytes -= written;
+        }
         for (index, byte) in console.pending.drain(..written).enumerate() {
             unsafe { *buffer.add(index) = byte };
         }

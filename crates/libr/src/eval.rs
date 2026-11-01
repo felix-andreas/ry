@@ -1114,6 +1114,9 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return 0;
     }
+    if report_missing_r_home() {
+        return 2;
+    }
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         vanilla: true,
@@ -1157,6 +1160,9 @@ pub unsafe extern "C" fn ry_run(
         command_args.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
     }
     runtime();
+    if report_missing_r_home() {
+        return 2;
+    }
     let options = interp::session::StartOptions {
         command_args,
         vanilla: true,
@@ -1200,6 +1206,18 @@ pub unsafe extern "C" fn ry_run(
     }
 }
 
+/// Prints why no GNU R installation was found, and says whether one is missing. Base R's own R
+/// code comes from that installation, so a session cannot start without it.
+fn report_missing_r_home() -> bool {
+    match interp::system::missing_r_home() {
+        Some(message) => {
+            crate::boundary::write_console(message.as_bytes(), true);
+            true
+        }
+        None => false,
+    }
+}
+
 /// `ry_run` and `ry_repl` flag: inline type annotations become checks at function
 /// boundaries. Off when the project turns inline annotations off.
 pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
@@ -1221,12 +1239,19 @@ unsafe fn apply_flags(flags: c_int) {
 /// GNU R's `R_ReadConsole` hook without its history flag.
 pub type ReadConsole = unsafe extern "C" fn(*const c_char, *mut u8, c_int) -> c_int;
 
-/// Runs ry's runtime as an interactive console: starts the session, then reads input through
-/// `read` and evaluates it until the input ends. Returns 0, or 2 when the session could not
-/// start. This is `ry repl --runtime ry`'s entry point.
+/// Runs ry's runtime as an interactive console: starts the session, attaches the package
+/// loader as `tools:ry`, evaluates `startup` (null for none; an error in it is reported and the
+/// console still opens), then reads input through `read` and evaluates it until the input
+/// ends. Returns 0, or 2 when the session could not start. This is `ry run`'s console entry
+/// point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
+pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flags: c_int) -> c_int {
     apply_flags(flags);
+    if report_missing_r_home() {
+        return 2;
+    }
+    let startup = (!startup.is_null())
+        .then(|| String::from_utf8_lossy(crate::strings::c_bytes(startup)).into_owned());
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         vanilla: false,
@@ -1237,7 +1262,17 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
+    if let Err(unwind) = loader::ry_runtime::attach() {
+        interp::session::report_toplevel(unwind);
+        crate::boundary::write_console(b"ry: the package loader did not load\n", true);
+        return 2;
+    }
     install_interrupt_handler();
+    if let Some(startup) = &startup {
+        // `run_text` reports an error itself, and a failed startup load still leaves a console
+        // the user can fix the package from.
+        interp::session::run_text(startup, "<startup>");
+    }
     let mut buffer = vec![0u8; 64 * 1024];
     interp::session::run_console(|prompt| {
         use std::io::Write;
@@ -1272,6 +1307,13 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
+}
+
+/// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0
+/// otherwise. ry's console asks before each command and reloads with `.ry_autoreload()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_loader_changed() -> c_int {
+    c_int::from(loader::ry_runtime::changed())
 }
 
 /// While the console reads input its terminal is raw, so Ctrl-C reaches the line editor; while

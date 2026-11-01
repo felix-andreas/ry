@@ -33,6 +33,8 @@ const SEEDS: &[&str] = &[
     "repeat { k <- k + 1; next }",
     "h <- \\(a) a |> sum(na.rm = TRUE)",
     "if (a) b else if (c) d else { e; f }",
+    "xs <- [1, 2.5, -3]; nested <- [[1L], [], [(x = 1,)]]",
+    "total <- function(v: Array<double>) -> double sum([v[[1]], 2][xs > 1])",
 ];
 
 #[test]

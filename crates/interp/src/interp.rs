@@ -24,6 +24,7 @@
 
 pub mod annotations;
 pub mod arith;
+pub mod arrays;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
