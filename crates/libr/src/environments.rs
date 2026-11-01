@@ -412,11 +412,18 @@ pub unsafe extern "C" fn R_IsPackageEnv(env: Sexp) -> Rboolean {
     })
 }
 
-/// `Rf_GetOption1`: the value of an option, or `NULL`. Options live in an environment the
-/// runtime owns.
+/// `Rf_GetOption1`: the value of an option, or `NULL`. Under the interpreter, options are the
+/// ones R code sets with `options()`, so packages that configure their C code from R (as
+/// data.table does with `datatable.alloccol`) see the same values; without it, they live in an
+/// environment the runtime owns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_GetOption1(tag: Sexp) -> Sexp {
     enter(|| {
+        if interp::is_installed() && tag.kind() == SexpType::Symbol {
+            if let Ok(name) = std::str::from_utf8(tag.car().bytes()) {
+                return Ok(interp::envir::get_option(name));
+            }
+        }
         let runtime = runtime();
         let value = frame_value(runtime.options, tag);
         if value == runtime.heap.known().unbound {

@@ -203,9 +203,10 @@ enum Op {
     /// `dst formals body`
     Closure,
     /// `function src dst call target`: when `function` is the `[` builtin and `src` holds a
-    /// frame, runs `call` as a frame query into `dst` and jumps to `target`. The query reads the
-    /// remaining arguments unevaluated, because they name columns.
-    FrameQuery,
+    /// frame or an object with an S3 `[` method, runs `call` as a frame query or that method
+    /// into `dst` and jumps to `target`. Both read the remaining arguments unevaluated, because
+    /// a query names columns in them.
+    SubsetDispatch,
 }
 
 const OPS: [Op; 21] = [
@@ -229,7 +230,7 @@ const OPS: [Op; 21] = [
     Op::LogicLeft,
     Op::LogicRight,
     Op::Closure,
-    Op::FrameQuery,
+    Op::SubsetDispatch,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -752,7 +753,7 @@ impl Compiler {
                 self.allocate();
             }
             let subset = head == symbols().bracket;
-            let mut frame_query = None;
+            let mut subset_dispatch = None;
             for (index, (_, value)) in args.iter().enumerate() {
                 if *value == missing_arg() {
                     let constant = self.constant(missing_arg());
@@ -760,8 +761,8 @@ impl Compiler {
                 } else {
                     self.expression(*value, base + index as u32)?;
                     if subset && index == 0 && args.len() > 1 {
-                        frame_query = Some(self.emit_patchable(
-                            Op::FrameQuery,
+                        subset_dispatch = Some(self.emit_patchable(
+                            Op::SubsetDispatch,
                             &[function, base, dst, call_constant, 0],
                         ));
                     }
@@ -772,7 +773,7 @@ impl Compiler {
             self.patch(generic);
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
             self.patch(done);
-            if let Some(position) = frame_query {
+            if let Some(position) = subset_dispatch {
                 self.patch(position);
             }
         } else {
@@ -807,7 +808,7 @@ fn operand_count(op: Op) -> usize {
         Op::LogicLeft => 5,
         Op::LogicRight => 5,
         Op::Closure => 3,
-        Op::FrameQuery => 5,
+        Op::SubsetDispatch => 5,
     }
 }
 
@@ -923,15 +924,21 @@ unsafe fn step(
             let function = lookup_function(symbol, env, constants, caches, operand(2))?;
             set(operand(0), function);
         }
-        Op::FrameQuery => {
+        Op::SubsetDispatch => {
             let function = register(operand(0));
             let subject = register(operand(1));
-            if crate::frame::is_frame(subject) && eval::builtin_def(function)?.name == "[" {
+            if subject.is_object() && eval::builtin_def(function)?.name == "[" {
                 let call = constants.element(operand(3));
-                let value = crate::frame::run(call, subject, env)?;
-                set(operand(2), value);
-                *pc = operand(4);
-                return Ok(None);
+                let value = if crate::frame::is_frame(subject) {
+                    Some(crate::frame::run(call, subject, env)?)
+                } else {
+                    crate::dispatch::dispatch_subset(call, call.cdr(), subject, env)?
+                };
+                if let Some(value) = value {
+                    set(operand(2), value);
+                    *pc = operand(4);
+                    return Ok(None);
+                }
             }
         }
         Op::BranchUnlessBuiltin => {

@@ -2087,11 +2087,13 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   column is cast back to `i`'s type.
 - **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
   `group_by_stable` and a sort.
-- **ALTREP lives in the `table` crate behind the `runtime` feature**, which links `libr` and `heap`.
-  The dependency points from the engine to the runtime so that `libr`, which every native package
-  loads, never compiles Polars. An exposed column's `data1` owns the Arrow array and `data2` holds
-  R's layout once something needs it; a column that R never materialized comes back from
-  `import_column` as the same buffer.
+- **ALTREP column exposure lives in `libr` (`crates/libr/src/frame_altrep.rs`), and `libr` links
+  Polars.** It once lived in `table` behind a `runtime` feature so that `libr` never compiled
+  Polars, but frames are now interpreter values, so `interp` depends on `table` and `libr` (which
+  depends on `interp`) links Polars either way. The dependency now points from the runtime to the
+  engine, and `libR.so` grows by the engine's size. An exposed column's `data1` owns the Arrow
+  array and `data2` holds R's layout once something needs it; a column that R never materialized
+  comes back from `import_column` as the same buffer.
 - **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
   layouts, which is what makes the zero-copy paths possible.
 
@@ -2169,3 +2171,47 @@ filter holds an unfinished command and releases it whole. "Unfinished" is
 or raised with only trivia left), which the parser knows and a range check cannot, because an error
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
+
+## Frames as runtime values
+
+- **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`
+  and classed `"frame"` alone** (`crates/interp/src/frame.rs`). A weak reference with a C
+  finalizer drops the box. The table is the only copy of the data: a column becomes an R vector
+  when R code reads it (`$`, `[[`, `as.list`, a data mask). It is no longer a `data.frame` (the
+  class was `c("frame", "data.frame")`), because nothing about a data.frame's list layout or row
+  names holds for it, and the checker agrees: a frame fails a `data.frame` parameter but passes a
+  `list` one, because `as.list` gives its columns.
+- **`x[i, j, by]` on a frame never reaches the `[` primitive.** The evaluator's builtin branch and
+  the bytecode's `SubsetDispatch` op evaluate only the subject, and when it is a frame hand the
+  unevaluated call to `frame::run`. Dispatching through `[.frame` would be too late, because a
+  builtin's arguments are evaluated before dispatch and `i`, `j` and `by` name columns. `[.frame`
+  still exists for calls that arrive with evaluated arguments (`do.call`, `Map`).
+- **`[` dispatches to S3 methods lazily, as GNU R's `DispatchOrEval` does.** For any other object
+  subject, `dispatch::dispatch_subset` passes the remaining arguments to the method as promises
+  (`...` expanded from its `DOTSXP`). Previously `[` evaluated every argument before dispatch, so
+  `[.data.table` received values instead of expressions and `DT[, sum(x), by = g]` failed with
+  "object 'x' not found". Builtins other than `[` still evaluate first; `[[` and `$` methods that
+  need unevaluated arguments would take the same path.
+- **`Rf_GetOption1` reads the interpreter's `options()` when the interpreter is installed.** libr
+  kept a separate options environment, so C code saw no option R code had set, and data.table's
+  `alloccol` failed with "Has getOption('datatable.alloccol') somehow become unset?". The
+  `.Options` pairlist in base is the one source of truth; libr's own environment serves only
+  standalone use without the interpreter.
+- **Lowering first, R second.** `Lowering` turns `i`, `j` and `by` into the engine's IR; any part
+  that returns `None` runs as R in a data mask that binds only the columns the expression
+  mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
+  for the grouping (row indices per group) and evaluates once per group.
+- **Copy-on-modify, not by-reference.** `:=` updates in place when the frame's refcount is at most
+  one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
+  call named, searching enclosing scopes, so a global updated inside a function is rebound where
+  it lives. An alias taken before the update keeps the old columns, as the checker models.
+  `setkey` always forks and rebinds.
+- **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
+  `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
+  so `ry::setkey` works after data.table masks the bare name. It holds the user-facing functions;
+  `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
+  delegate to data.table for anything that is not a frame. S3 methods for generics outside the
+  package (`as.data.frame.frame`) are defined in base, because method lookup from the global
+  environment skips attached packages, as in GNU R. The checker's stubs are `types/ry.Rtypes`
+  and `types/ry.exports`, an always-active namespace.
+

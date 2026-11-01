@@ -741,8 +741,8 @@ mod tests {
     fn conditional_manifest_names_stay_dark_without_activation() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        // `setkey` is a data.table manifest name with no typed declaration.
-        assert!(!package_scheme_exists(&db, "setkey"));
+        // `alloc.col` is a data.table manifest name with no typed declaration.
+        assert!(!package_scheme_exists(&db, "alloc.col"));
         let active = RootDatabase::default();
         install_shipped_stubs(&active);
         PackageMetadata::new(
@@ -752,7 +752,7 @@ mod tests {
             Default::default(),
             None,
         );
-        assert!(package_scheme_exists(&active, "setkey"));
+        assert!(package_scheme_exists(&active, "alloc.col"));
     }
 
     #[test]

@@ -289,7 +289,8 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         SexpType::Builtin => {
             let definition = builtin_def(function)?;
-            // A frame query names columns in `i`, `j` and `by`, so it must see them unevaluated.
+            // A frame query and S3 methods such as data.table's see `[`'s arguments after the
+            // subject unevaluated, because they name columns.
             let args = if definition.name == "[" {
                 match crate::frame::intercept(call, arguments, env, definition.keep_missing)? {
                     crate::frame::Intercepted::Value(value) => return Ok(value),

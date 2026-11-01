@@ -66,6 +66,38 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("tail.frame", -1, do_tail),
 ];
 
+/// A registered namespace in the shape `loadNamespace` builds, so `ry::setkey` and
+/// `asNamespace("ry")` work like they do for an installed package.
+const NAMESPACE: &str = r#"
+local({
+  ns <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
+  info <- new.env(hash = TRUE, parent = baseenv())
+  assign(".__NAMESPACE__.", info, envir = ns)
+  info$spec <- c(name = "ry", version = "0.0.0")
+  info$path <- ""
+  info$imports <- list(base = TRUE)
+  info$dynlibs <- character()
+  info$S3methods <- matrix(NA_character_, 0L, 4L)
+  info$lazydata <- new.env(hash = TRUE, parent = baseenv())
+  .Internal(registerNamespace("ry", ns))
+  ns
+})
+"#;
+
+/// Exports every function of the namespace and attaches them as `package:ry` at position 2.
+const ATTACH: &str = r#"
+local({
+  ns <- asNamespace("ry")
+  functions <- ls(ns)
+  exports <- new.env(hash = TRUE, parent = baseenv())
+  for (name in functions) assign(name, name, envir = exports)
+  assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
+  env <- attach(NULL, pos = 2L, name = "package:ry")
+  for (name in functions) assign(name, get(name, envir = ns), envir = env)
+  invisible(NULL)
+})
+"#;
+
 /// The user-facing functions, attached as `package:ry` right after the default packages so that
 /// `frame` wins over `graphics::frame`, which it still calls when given no arguments.
 const PACKAGE: &str = r#"
@@ -110,10 +142,9 @@ as.data.table.frame <- function(x, ...) data.table::setDT(as.data.frame.frame(x)
 
 /// Attaches `package:ry` at position 2 of the search path.
 pub unsafe fn attach_package() -> R<()> {
-    let attach = "attach(NULL, pos = 2L, name = \"package:ry\")";
-    let env = crate::session::eval_text(attach, values::global_env())?;
-    heap().root(env);
-    crate::session::eval_text(PACKAGE, env)?;
+    let namespace = crate::session::eval_text(NAMESPACE, values::global_env())?;
+    crate::session::eval_text(PACKAGE, namespace)?;
+    crate::session::eval_text(ATTACH, values::global_env())?;
     crate::session::eval_text(METHODS, values::base_env())?;
     Ok(())
 }
@@ -810,7 +841,8 @@ unsafe fn render(table: &mut Table) -> R<String> {
         _ => return Err(error("printing a frame did not select rows")),
     };
     let labels: Vec<String> = positions.iter().map(|position| format!("{}:", position + 1)).collect();
-    let label_width = labels.iter().map(|label| label.len()).max().unwrap_or(0).max(3);
+    let separator_width = if split.is_some() { 3 } else { 0 };
+    let label_width = labels.iter().map(|label| label.len()).max().unwrap_or(0).max(separator_width);
     let mut lines: Vec<String> = vec![" ".repeat(label_width), " ".repeat(label_width)];
     for label in &labels {
         lines.push(format!("{label:>label_width$}"));
@@ -985,13 +1017,15 @@ unsafe fn tag_name(tag: Sexp) -> Option<String> {
     (!is_nil(tag) && tag.kind() == SexpType::Symbol).then(|| symbol_name(tag).into_owned())
 }
 
-/// Hands a `[` call to [`query`] when its subject evaluates to a frame, and otherwise returns the
-/// evaluated arguments for the `[` primitive, without evaluating the subject twice.
+/// What [`intercept`] did with a `[` call.
 pub enum Intercepted {
     Value(Sexp),
     Args(Vec<Arg>),
 }
 
+/// Evaluates a `[` call's subject once, then hands the call to [`query`] when it is a frame or to
+/// an S3 method with the other arguments unevaluated, and otherwise returns every argument
+/// evaluated for the `[` primitive.
 pub unsafe fn intercept(call: Sexp, arguments: Sexp, env: Sexp, keep_missing: bool) -> R<Intercepted> {
     let first = arguments.car();
     if arguments.kind() != SexpType::Pairlist || first == symbols().dots || first == missing_arg() {
@@ -1000,6 +1034,9 @@ pub unsafe fn intercept(call: Sexp, arguments: Sexp, env: Sexp, keep_missing: bo
     let subject = eval::eval(first, env)?;
     if is_frame(subject) {
         return run(call, subject, env).map(Intercepted::Value);
+    }
+    if let Some(value) = crate::dispatch::dispatch_subset(call, arguments, subject, env)? {
+        return Ok(Intercepted::Value(value));
     }
     let mut args = vec![Arg {
         tag: arguments.tag(),

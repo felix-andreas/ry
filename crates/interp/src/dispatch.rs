@@ -715,13 +715,66 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
         return Ok(None);
     };
     let promised = promised_args(call, args)?;
+    apply_internal_method(call, &found, &promised, env).map(Some)
+}
+
+/// S3 dispatch of `[` the way GNU R's `DispatchOrEval` does it: only the subject is evaluated,
+/// and a method receives the other arguments as promises. data.table's `[` must see `j` and
+/// `by` unevaluated, because they name columns. `None` means no S3 method applies, and the
+/// caller evaluates the other arguments for the builtin.
+pub unsafe fn dispatch_subset(call: Sexp, arguments: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
+    if !subject.is_object() || subject.has_gp(gp::S4_OBJECT) {
+        return Ok(None);
+    }
+    let Some(found) = find_s3_method("[", subject, env, values::base_namespace(), None)? else {
+        return Ok(None);
+    };
+    let heap = crate::heap();
+    let first = forced_promise(arguments.car(), subject)?;
+    heap.root(first);
+    let mut promised = vec![Arg {
+        tag: arguments.tag(),
+        value: first,
+    }];
+    let mut cell = arguments.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        if expression == symbols().dots {
+            let mut item = eval::find_var(symbols().dots, env)?;
+            while matches!(item.kind(), SexpType::Dots | SexpType::Pairlist) {
+                promised.push(Arg {
+                    tag: item.tag(),
+                    value: item.car(),
+                });
+                item = item.cdr();
+            }
+        } else if expression == missing_arg() {
+            promised.push(Arg {
+                tag: cell.tag(),
+                value: expression,
+            });
+        } else {
+            let promise = eval::make_promise(expression, env)?;
+            heap.root(promise);
+            promised.push(Arg {
+                tag: cell.tag(),
+                value: promise,
+            });
+        }
+        cell = cell.cdr();
+    }
+    apply_internal_method(call, &found, &promised, env).map(Some)
+}
+
+/// Runs an S3 method found for a builtin generic, with its arguments already promised.
+unsafe fn apply_internal_method(call: Sexp, found: &Found, promised: &[Arg], env: Sexp) -> R<Sexp> {
     let new_call = renamed_call(call, found.method_name)?;
     // GNU R evaluates the method inside a context of the builtin's own call, which shows in
     // `sys.calls()`.
     let state = interp();
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
-    let promargs = eval::args_pairlist(&promised)?;
+    let promargs = eval::args_pairlist(promised)?;
     state.frames.push(Frame {
         call,
         function: found.method,
@@ -733,12 +786,12 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
         restarts: restarts.clone(),
     });
     let depth = state.frames.len();
-    let result = apply_method(new_call, found.method, &promised, env, &found.vars);
+    let result = apply_method(new_call, found.method, promised, env, &found.vars);
     let state = interp();
     state.frames.truncate(depth - 1);
     state.handlers = handlers;
     state.restarts = restarts;
-    result.map(Some)
+    result
 }
 
 unsafe fn group_dispatch(
