@@ -3537,36 +3537,60 @@ impl<'db> Checker<'db, '_> {
         let inferred = self.infer(operand);
         let resolved = self.structural(inferred);
         match resolved.kind(self.db) {
-            // `!` coerces a numeric operand as a condition does (`!0` is TRUE).
-            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {
-                scalar(self.db, Atomic::Logical)
-            }
-            TyKind::Vector(element) | TyKind::NamedVector(element)
+            TyKind::Any | TyKind::Unknown => return unknown(self.db),
+            TyKind::Var(_)
                 if matches!(
-                    element.kind(self.db),
-                    TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
-                        | TyKind::Var(_)
-                        | TyKind::Any
-                        | TyKind::Unknown
+                    self.table.open_constraint(self.db, resolved),
+                    Some(Constraint::Numeric | Constraint::ScalarNumeric)
                 ) =>
             {
-                Ty::new(self.db, TyKind::Vector(scalar(self.db, Atomic::Logical)))
+                return scalar(self.db, Atomic::Logical);
             }
-            TyKind::Any | TyKind::Unknown => unknown(self.db),
             TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.unify_or_report(operand_range, scalar(self.db, Atomic::Logical), resolved);
-                scalar(self.db, Atomic::Logical)
+                return scalar(self.db, Atomic::Logical);
             }
-            _ => {
-                self.errors.push(TypeError {
-                    range: operand_range,
-                    kind: TypeErrorKind::InvalidOperand {
-                        expected: OperandExpectation::Logical,
-                        found: resolved,
-                    },
-                });
-                unknown(self.db)
+            _ => {}
+        }
+        let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
+            TyKind::Union(members) => members.clone(),
+            _ => vec![resolved],
+        };
+        // `!` coerces a numeric operand as a condition does (`!0` is TRUE), and `!NULL` is an
+        // empty logical vector, so a value that may be `NULL` negates without error.
+        let mut vector = false;
+        for &member in &members {
+            match member.kind(self.db) {
+                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {}
+                TyKind::Null => vector = true,
+                TyKind::Vector(element) | TyKind::NamedVector(element)
+                    if matches!(
+                        element.kind(self.db),
+                        TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+                            | TyKind::Var(_)
+                            | TyKind::Any
+                            | TyKind::Unknown
+                    ) =>
+                {
+                    vector = true;
+                }
+                TyKind::Any | TyKind::Unknown => return unknown(self.db),
+                _ => {
+                    self.errors.push(TypeError {
+                        range: operand_range,
+                        kind: TypeErrorKind::InvalidOperand {
+                            expected: OperandExpectation::Logical,
+                            found: resolved,
+                        },
+                    });
+                    return unknown(self.db);
+                }
             }
+        }
+        if vector {
+            Ty::new(self.db, TyKind::Vector(scalar(self.db, Atomic::Logical)))
+        } else {
+            scalar(self.db, Atomic::Logical)
         }
     }
 
@@ -3955,10 +3979,37 @@ impl<'db> Checker<'db, '_> {
             let whole_literal = self.is_whole_double(operand);
             let inferred = self.infer(operand);
             let resolved = self.structural(inferred);
+            // R takes a logical endpoint as a number, and a vector endpoint by its first element.
+            // A vector type carries no length, so only a literal `c()` of several elements is
+            // known to be too long.
+            let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
+                TyKind::Union(members) => members.clone(),
+                _ => vec![resolved],
+            };
+            let atomics: Option<Vec<Atomic>> = members
+                .iter()
+                .map(|member| match member.kind(self.db) {
+                    TyKind::Scalar(atomic) => Some(*atomic),
+                    TyKind::Vector(element) => match element.kind(self.db) {
+                        TyKind::Scalar(atomic) => Some(*atomic),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            if let Some(atomics) = atomics
+                && !atomics.is_empty()
+                && !self.is_long_combine(operand)
+                && atomics.iter().all(|atomic| {
+                    matches!(atomic, Atomic::Logical | Atomic::Integer | Atomic::Double)
+                })
+            {
+                if atomics.contains(&Atomic::Double) && !whole_literal {
+                    result_atomic = Atomic::Double;
+                }
+                continue;
+            }
             match resolved.kind(self.db) {
-                TyKind::Scalar(Atomic::Integer) => {}
-                TyKind::Scalar(Atomic::Double) if whole_literal => {}
-                TyKind::Scalar(Atomic::Double) => result_atomic = Atomic::Double,
                 TyKind::Any | TyKind::Unknown => return unknown(self.db),
                 TyKind::Var(var) => {
                     if let Err(error) =

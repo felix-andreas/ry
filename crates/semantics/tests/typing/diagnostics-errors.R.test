@@ -267,8 +267,7 @@ logical
 #---- negation_null
 !NULL
 #++++
-Unknown
-1..5 error[type-mismatch] expected a `logical` value, found `NULL`
+logical[]
 
 #---- call_null_as_function
 NULL()

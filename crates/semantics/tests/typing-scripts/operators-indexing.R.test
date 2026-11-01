@@ -70,8 +70,7 @@ logical[]
 #---- not_null_rejected
 !NULL
 #++++
-Unknown
-1..5 error[type-mismatch] expected a `logical` value, found `NULL`
+logical[]
 
 #---- and_numeric_operand_coerces
 1L && TRUE
