@@ -365,8 +365,9 @@ tables and queries and checks the native kernels against the Polars plans
 iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
-`tools/bench/table/run.sh <dir> [rows]` runs the db-benchmark questions under data.table and the
-engine, each printing rows, columns and a checksum, so the answers compare line by line.
+`just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
+data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
+data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
 
 ### Coverage-guided fuzzing
 

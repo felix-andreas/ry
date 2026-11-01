@@ -2086,6 +2086,10 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **A CSV read peaks far above the table it makes.** A 5e7-row `groupby.csv` (2.6 GB) peaks at
+  10 GB resident, 2.6 GB of it the mapped file, for a 1.7 GB table: Polars parses the three id
+  columns as strings (16-byte views per row) before `strings_as_factors` codes them. Parsing a
+  column that will become a factor straight into codes would cut the peak by about 2.4 GB.
 - **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
   a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
   the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
@@ -2093,11 +2097,17 @@ The end-to-end guard rests on the corpus suites.
   to never (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory"), because
   refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
   Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
-- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
-  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
-  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
-  31 s for the same file. A factor representation that keeps the levels as a plain string array
-  and maps them only on demand would remove the 6 s.
+- **A factor build is bound by Polars' Enum interning.** `string_to_factor`
+  (`crates/table/src/convert.rs`) hashes, deduplicates and sorts the levels itself in parallel
+  (1.8 s for `join_big.csv`'s 9.95 million distinct `id6` values on 4 cores), then hands the sorted
+  levels to Polars' `FrozenCategories::new`, which inserts them one at a time into a concurrent
+  table that copies and hashes each key again: 9.6 s for those 9.95 million levels, 3.1 s to build
+  and 2.4 s to drop for 6.3 million. The whole factor conversion is 0.9 s for `groupby.csv`, 7.3 s
+  for `join_x.csv` and 12.3 s for `join_big.csv`, against data.table's `fread(stringsAsFactors =
+  TRUE)` at 5.3 s, 31 s and 37 s (1e7 rows, parse included on both sides). Removing the rest needs
+  a factor type outside Polars (codes plus a plain levels array, mapped to an Enum only when a
+  Polars plan needs one), which every kernel and the lazy planner must handle (`decisions.md`,
+  "Factors stay Polars Enums").
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`

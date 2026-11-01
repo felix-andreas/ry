@@ -3976,15 +3976,72 @@ check` releases its trees once, and memoized records are compact" below).
   left join's unmatched rows), so the column type would have to be tracked per verb and an
   `NA`-holding column would need a second representation. One column type keeps the schema the
   single source of truth. `as.Array(df$x)` is the checked way back, and it fails on an `NA`.
+- A narrower rule was also rejected: reading an Array only when the checker can prove no step put
+  an `NA` in (no left or outer join, no `NA`-producing expression). An Array changes how R
+  arithmetic behaves (no recycling, no `integer`/`double` mixing), so the same `df$units *
+  df$price` would pass or stop with an error depending on which verbs ran before it, and a
+  refactor that adds a join would break unrelated arithmetic. The rule is in `type-system.mdx`
+  ("DataFrames").
 
-## mimalloc's purge delay stays at its default
+## The engine's workers return freed memory at large frame boundaries
 
-- Raising `MIMALLOC_PURGE_DELAY` (or calling `mi_option_set` for `purge_delay` in
-  `crates/libr/src/libr.rs`) keeps freed pages resident. Measured on the whole db-benchmark script
-  with lazy arena commit (`LAZY_ARENA_COMMIT` in the same file), never purging was 7% faster and
-  raised peak memory by 1.4 GB. The option is process-wide, so every R program would pay the
-  memory for a gain that lies mostly in CSV loading. The numbers are in the backlog item "Large
-  allocations page-fault on every query"; revisit with a per-query arena, which keeps the gain without the global cost.
+- **Before.** Nothing returned memory that the engine's worker threads had allocated. libR's
+  allocator is mimalloc, which queues a block freed on another thread for its owning thread and
+  processes the queue only when that thread allocates again. Polars' and rayon's workers allocate
+  a table's columns, the R thread frees them, and the pools then sit idle, so a 5e7-row
+  `DataFrame.read_csv(strings_as_factors = TRUE)` left 9 GB resident for a 1.7 GB table, and the
+  db-benchmark group-by script ran out of memory on a 15 GB machine where data.table peaked at
+  6.4 GB.
+- **Shape.** `table::on_every_worker` runs a closure on every thread of both pools;
+  `interp::frame::release_worker_memory` runs `mi_collect(true)` there and on the R thread. It runs
+  when a frame of at least 2^22 cells is wrapped or finalized, and in `gc()`. The size floor keeps
+  loops over smaller frames from paying for a broadcast per iteration.
+- **Trap.** A broadcast waits for every pool thread, and a forked child has none of its parent's
+  threads, so a child that drops a large frame or calls `gc()` would hang. Whoever implements
+  `fork` (`mcparallel`, `mclapply`) must skip the broadcast in the child.
+- **With libR's purge delay at never** ("libR keeps freed memory"), `mi_collect(true)` returns no
+  pages to the kernel. What it still does is drain each thread's queue of blocks freed elsewhere,
+  so their pages become reusable, and that reuse is what bounds the peak.
+- **Rejected.** `MIMALLOC_PURGE_DELAY=0` only purges pages already freed, so it left 5.9 GB; a
+  per-query arena would also fix it but needs every kernel to allocate through it.
+
+## Group codes wider than 64 bits are ranked, not handed to Polars
+
+- The group-by kernels code the keys as one mixed-radix u64 per row. db-benchmark's six-key
+  question at 5e7 rows needs about 2.6e19 codes, so the kernel used to decline, and Polars' own
+  multi-key group-by then took more than 12 GB.
+- `row_codes` (`crates/table/src/group.rs`) now replaces the codes so far by their rank among the
+  distinct codes before a key column that would overflow. A rank keeps the code order, so `keyby`
+  stays sorted, and it is below the row count, so any number of key columns fits as long as each
+  fits on top of the row count. The question takes 7 s at a 6.2 GB peak; data.table takes 10.5 s.
+
+## Double sums group by code range, one scan per thread
+
+- A double `sum` or `mean` adds each group's values in row order, as data.table does, so the
+  dense group-by kernel cannot split the rows into chunks and merge partial sums (the result would
+  round differently and depend on the thread count). It used to run such a query on one thread,
+  which at 5e7 rows and 500,000 groups missed cache on almost every row and lost db-benchmark's
+  q3 and q5 to data.table.
+- `dense_by_code` (`crates/table/src/group.rs`) gives each thread a contiguous range of codes; the
+  thread scans every row, keeps its own in ascending order, and the threads' states concatenate in
+  code order. The same path serves any dense grouping whose per-thread states would outnumber
+  the rows.
+- Rejected: scattering the rows into many code-range partitions first, as the hashed path does.
+  A partition's rows are spread over the whole table either way, so each partition reads every
+  cache line of every value column, and the scatter is a pass of its own. Measured from the Rust
+  driver at 5e7: q3 1.42 s scattered against 1.18 s scanned, q4 1.71 s against 1.19 s. Keeping
+  one thread below a cache-sized slot count was slower too (q4 1.42 s).
+
+## Factors stay Polars Enums
+
+- A factor column is a Polars `Enum` with u8, u16 or u32 codes; `string_to_factor` builds the
+  levels itself (parallel hash partitions, byte-order sort) and calls `FrozenCategories::new` once.
+- Replacing the Enum with ry's own codes-plus-levels type would remove the interning cost that
+  dominates high-cardinality reads (backlog, "A factor build is bound by Polars' Enum
+  interning"), but the Enum is the factor type in every kernel (`Codes::of`), the joins, group-by,
+  the lazy planner and the readers. That change is a factor type of its own, worth doing only once
+  a real workload reads multi-million-level factors; at db-benchmark's sizes the conversion
+  already beats `fread` by 3x to 6x.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 

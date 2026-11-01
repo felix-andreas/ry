@@ -1814,6 +1814,7 @@ dependencies = [
  "jiff",
  "jpeg-encoder",
  "libc",
+ "libmimalloc-sys",
  "lzma-rust2",
  "memchr",
  "regex",
@@ -4366,6 +4367,7 @@ name = "table"
 version = "0.4.0-beta"
 dependencies = [
  "foldhash 0.2.0",
+ "hashbrown 0.17.1",
  "itoa",
  "memmap2",
  "polars",

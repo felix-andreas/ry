@@ -776,36 +776,60 @@ columns as ALTREP vectors to native code. The user guide is [DataFrames](/guides
 
 The claim that the frame outperforms data.table rests on a benchmark of its own
 (`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
-DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
-same machine against data.table with all threads.
+DuckDB Labs maintains), `:=` update loops and a keyed rolling join, run on the same machine against
+data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a table below (it
+generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
 `ry run` beat data.table under GNU R on every question, and all three runs give the
 same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
 driven from Rust, without R.
 
+<!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.151 | 0.022 | 0.034 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.192 | 0.020 | 0.044 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.272 | 0.096 | 0.110 |
-| groupby q4: three means by `id4` | 0.357 | 0.158 | 0.175 |
-| groupby q5: three sums by `id6` | 0.291 | 0.089 | 0.157 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.692 | 0.091 | 0.146 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.714 | 0.053 | 0.081 |
-| groupby q8: the two largest `v3` by `id6` | 0.759 | 0.177 | 0.235 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.769 | 0.041 | 0.099 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.733 | 1.033 | 0.896 |
-| `:=` on a whole column, 100 times | 5.349 | 0.291 | 2.081 |
-| `:=` on 1% of rows, 100 times | 3.803 | 1.112 | 0.891 |
-| `:=` adding a column, 100 times | 5.159 | 0.744 | 2.666 |
-| join q1: small, on `id1` | 0.356 | 0.110 | 0.149 |
-| join q2: medium, on `id2` | 0.522 | 0.131 | 0.229 |
-| join q3: medium, left, on `id2` | 0.612 | 0.179 | 0.192 |
-| join q4: medium, on factor `id5` | 0.499 | 0.119 | 0.230 |
-| join q5: big, on `id3` | 3.797 | 0.664 | 1.028 |
-| keyed rolling join, 1e6 trades | 0.130 | 0.094 | 0.100 |
-| total | 26.16 | 5.22 | 9.54 |
+| groupby q1: `sum(v1)` by `id1` | 0.131 | 0.062 | 0.152 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.186 | 0.063 | 0.151 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.289 | 0.148 | 0.289 |
+| groupby q4: three means by `id4` | 0.319 | 0.181 | 0.281 |
+| groupby q5: three sums by `id6` | 0.319 | 0.171 | 0.247 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.668 | 0.186 | 0.291 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.749 | 0.090 | 0.158 |
+| groupby q8: the two largest `v3` by `id6` | 0.666 | 0.253 | 0.322 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.932 | 0.105 | 0.199 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.909 | 0.856 | 0.902 |
+| `:=` on a whole column, 100 times | 5.204 | 0.310 | 2.005 |
+| `:=` on 1% of rows, 100 times | 3.857 | 0.809 | 0.906 |
+| `:=` adding a column, 100 times | 4.997 | 0.773 | 1.428 |
+| join q1: small, on `id1` | 0.372 | 0.219 | 0.133 |
+| join q2: medium, on `id2` | 0.486 | 0.250 | 0.238 |
+| join q3: medium, left, on `id2` | 0.622 | 0.266 | 0.188 |
+| join q4: medium, on factor `id5` | 0.489 | 0.221 | 0.241 |
+| join q5: big, on `id3` | 3.588 | 1.193 | 0.947 |
+| keyed rolling join | 0.127 | 0.115 | 0.083 |
+| total | 25.91 | 6.27 | 9.16 |
+<!-- /bench-table:1e7 -->
+
+At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
+that adds 100 columns needs more than this machine's 15 GB. db-benchmark's 5 GB size (1e8 rows) is
+out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 GB and data.table's q10
+at 6.4 GB, and both grow with the row count.
+
+<!-- bench-table:5e7 -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 0.737 | 0.285 | 0.656 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.898 | 0.306 | 0.629 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.182 | 0.869 | 1.083 |
+| groupby q4: three means by `id4` | 1.525 | 0.854 | 1.170 |
+| groupby q5: three sums by `id6` | 1.265 | 0.919 | 1.136 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.816 | 0.883 | 1.285 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 5.071 | 0.665 | 1.065 |
+| groupby q8: the two largest `v3` by `id6` | 3.424 | 1.500 | 1.994 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.247 | 0.476 | 0.901 |
+| groupby q10: `sum(v3)`, count by all six ids | 9.675 | 5.070 | 6.053 |
+| total | 29.84 | 11.83 | 15.97 |
+<!-- /bench-table:5e7 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
