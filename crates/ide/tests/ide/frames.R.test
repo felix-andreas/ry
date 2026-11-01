@@ -108,6 +108,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
+hint @84df =
 
 #---- hover_on_a_column_string_in_a_verb
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
@@ -127,6 +128,7 @@ action: Add inferred type annotations for the whole file
 completion (1): team
 hint @5: DataFrame{team: character[], amount: double[]}
 hint @64: GroupBy{team: character[]; amount: double[]}
+hint @68df =
 
 #---- completion_in_a_verb_string_after_a_pipe
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
@@ -142,3 +144,4 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
 completion (2): amount, team
 hint @5: DataFrame{team: character[], amount: double[]}
+hint @64df =

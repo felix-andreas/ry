@@ -703,15 +703,182 @@ pub fn rename(
     (!occurrences.is_empty()).then_some(occurrences)
 }
 
+/// A project function in a call hierarchy, or the top-level statement or value a call sits in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallHierarchyItem {
+    pub name: String,
+    pub detail: Option<String>,
+    pub is_function: bool,
+    pub file: SourceFile,
+    pub range: TextRange,
+    pub selection: TextRange,
+}
+
+/// For incoming calls `item` is the caller, for outgoing calls the callee. `ranges` are the
+/// called names in the caller's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallHierarchyCall {
+    pub item: CallHierarchyItem,
+    pub ranges: Vec<TextRange>,
+}
+
+/// The project's top-level function named at `offset`, by its definition or any use. A function
+/// from a package has no callers in the project worth listing apart from its references, and no
+/// body to list calls from, so it is not an item.
+pub fn call_hierarchy_item(
+    db: &dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<CallHierarchyItem> {
+    let Target::Global(name) = target_at(db, files, file, offset)? else {
+        return None;
+    };
+    project_function_item(db, files, &name)
+}
+
+/// Grouped by caller in the order the references walk finds them. Only calls count: passing the
+/// function as a value, as in `lapply(xs, f)`, is a reference but not a call.
+pub fn incoming_calls(
+    db: &dyn Db,
+    files: ProjectFiles,
+    callee: &CallHierarchyItem,
+) -> Vec<CallHierarchyCall> {
+    let mut calls: Vec<CallHierarchyCall> = Vec::new();
+    for occurrence in occurrences(db, files, &Target::Global(callee.name.clone())) {
+        if occurrence.is_declaration || !is_call_head(db, occurrence.file, occurrence.range) {
+            continue;
+        }
+        let Some(caller) = enclosing_item(db, occurrence.file, occurrence.range.start()) else {
+            continue;
+        };
+        match calls.iter_mut().find(|call| call.item == caller) {
+            Some(call) => call.ranges.push(occurrence.range),
+            None => calls.push(CallHierarchyCall {
+                item: caller,
+                ranges: vec![occurrence.range],
+            }),
+        }
+    }
+    calls
+}
+
+/// The project functions `caller` calls by name, in the order of their first call.
+pub fn outgoing_calls(
+    db: &dyn Db,
+    files: ProjectFiles,
+    caller: &CallHierarchyItem,
+) -> Vec<CallHierarchyCall> {
+    let root = semantics::parse(db, caller.file).syntax_node();
+    let Some(body) = root
+        .descendants()
+        .find(|node| node.text_range() == caller.range)
+    else {
+        return Vec::new();
+    };
+    let mut calls: Vec<CallHierarchyCall> = Vec::new();
+    for call in body.descendants().filter(|node| node.kind() == CALL_EXPR) {
+        let Some(head) = call.first_child().filter(|head| head.kind() == NAME) else {
+            continue;
+        };
+        let range = head.text_range();
+        let Some(Target::Global(name)) = target_at(db, files, caller.file, range.start()) else {
+            continue;
+        };
+        let Some(callee) = project_function_item(db, files, &name) else {
+            continue;
+        };
+        match calls.iter_mut().find(|existing| existing.item == callee) {
+            Some(existing) => existing.ranges.push(range),
+            None => calls.push(CallHierarchyCall {
+                item: callee,
+                ranges: vec![range],
+            }),
+        }
+    }
+    calls
+}
+
+fn project_function_item(
+    db: &dyn Db,
+    files: ProjectFiles,
+    name: &str,
+) -> Option<CallHierarchyItem> {
+    let &item = package_definitions(db, files).get(&Symbol::lookup(name)?)?;
+    if !matches!(*item.kind(db), ItemKind::Function) {
+        return None;
+    }
+    hierarchy_item(db, item)
+}
+
+/// The top-level item around `offset`. A statement has no name of its own, so it is listed as
+/// the top level of its file.
+fn enclosing_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<CallHierarchyItem> {
+    let item = item_tree(db, file)
+        .iter()
+        .copied()
+        .find(|item| item_node(db, *item).is_some_and(|node| node.text_range().contains(offset)))?;
+    hierarchy_item(db, item)
+}
+
+fn hierarchy_item(db: &dyn Db, item: Item<'_>) -> Option<CallHierarchyItem> {
+    let node = item_node(db, item)?;
+    let range = node.text_range();
+    let is_function = matches!(*item.kind(db), ItemKind::Function);
+    Some(CallHierarchyItem {
+        name: item
+            .name(db)
+            .clone()
+            .unwrap_or_else(|| "(top level)".to_owned()),
+        detail: if is_function {
+            function_detail(&node)
+        } else {
+            None
+        },
+        is_function,
+        file: *item.file(db),
+        range,
+        selection: item_name_range(db, item).unwrap_or(range),
+    })
+}
+
+/// Whether the name at `range` is the head of a call, `f` in `f(x)`.
+fn is_call_head(db: &dyn Db, file: SourceFile, range: TextRange) -> bool {
+    let root = semantics::parse(db, file).syntax_node();
+    if !root.text_range().contains_range(range) {
+        return false;
+    }
+    let name = match root.covering_element(range) {
+        SyntaxElement::Node(node) => Some(node),
+        SyntaxElement::Token(token) => token.parent(),
+    };
+    name.filter(|name| name.kind() == NAME)
+        .and_then(|name| {
+            let call = name.parent()?;
+            (call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&name)).then_some(())
+        })
+        .is_some()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlayHint {
     pub offset: TextSize,
     pub label: String,
+    pub kind: InlayHintKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlayHintKind {
+    /// `: T` after an assigned name or a loop variable.
+    Type,
+    /// `name = ` before a positional argument.
+    Parameter,
 }
 
 /// A function type is hinted when it contains no `Unknown`; any other type must be fully
 /// concrete, so partially inferred values show nothing.
 pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -> Vec<InlayHint> {
+    let text = file.text(db);
     let mut hints = Vec::new();
     for &item in item_tree(db, file) {
         let Some(node) = item_node(db, item) else {
@@ -756,6 +923,34 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                     hints.push(InlayHint {
                         offset: variable_range.end() + node.text_range().start(),
                         label: format!(": {}", TypeRenderer::default().render(db, ty)),
+                        kind: InlayHintKind::Type,
+                    });
+                }
+                continue;
+            }
+            // The one argument of a one-argument call is obvious from the call itself.
+            if let ExpressionKind::Call { callee, arguments } = kind
+                && hir[*arguments]
+                    .iter()
+                    .filter(|argument| argument.name.is_none() && argument.value.is_some())
+                    .count()
+                    > 1
+                && let Some(&callee_type) = check.expression_types.get(callee)
+                && let TyKind::Function(function) = callee_type.kind(db)
+            {
+                let offset = node.text_range().start();
+                for (value, name) in positional_parameters(db, function, &hir[*arguments], hir) {
+                    let range = hir.range(value) + offset;
+                    let written = text
+                        .get(usize::from(range.start())..usize::from(range.end()))
+                        .unwrap_or_default();
+                    if parameter_hint_is_noise(name, written) {
+                        continue;
+                    }
+                    hints.push(InlayHint {
+                        offset: range.start(),
+                        label: format!("{name} = "),
+                        kind: InlayHintKind::Parameter,
                     });
                 }
                 continue;
@@ -780,11 +975,67 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             hints.push(InlayHint {
                 offset: hir.range(*target).end() + node.text_range().start(),
                 label: format!(": {label}"),
+                kind: InlayHintKind::Type,
             });
         }
     }
     hints.sort_by_key(|hint| hint.offset);
     hints
+}
+
+/// Each positional argument with the named parameter it fills, by R's matching: named arguments
+/// take their parameters first, by exact name and then by unique prefix, and the positional ones
+/// fill the remaining parameters in order. Parameters after `...` match by name only, and
+/// positional arguments past the last fillable parameter go to `...`.
+fn positional_parameters<'db>(
+    db: &'db dyn Db,
+    function: &FunctionType<'db>,
+    arguments: &[Argument],
+    hir: &Module,
+) -> Vec<(ExprId, &'db str)> {
+    let names: Vec<&str> = function
+        .named
+        .iter()
+        .map(|parameter| parameter.name.text(db))
+        .collect();
+    let mut taken = vec![false; names.len()];
+    let written: Vec<Symbol> = arguments
+        .iter()
+        .filter_map(|argument| hir.argument_name(argument))
+        .collect();
+    for name in &written {
+        if let Some(slot) = names.iter().position(|parameter| *parameter == &**name) {
+            taken[slot] = true;
+        }
+    }
+    for name in &written {
+        let mut prefixed = names
+            .iter()
+            .enumerate()
+            .filter(|(slot, parameter)| !taken[*slot] && parameter.starts_with(&**name));
+        if let (Some((slot, _)), None) = (prefixed.next(), prefixed.next()) {
+            taken[slot] = true;
+        }
+    }
+    let fillable = function.variadic.as_ref().map_or(names.len(), |variadic| {
+        variadic.preceding_named.min(names.len())
+    });
+    let mut open = (0..fillable).filter(|slot| !taken[*slot]);
+    arguments
+        .iter()
+        .filter(|argument| argument.name.is_none())
+        .skip(function.positional.len())
+        .map_while(|argument| Some((argument.value, open.next()?)))
+        .filter_map(|(value, slot)| Some((value?, *names.get(slot)?)))
+        .collect()
+}
+
+/// A hint that tells the reader nothing: a one-letter parameter such as `x` or `.f`, or an
+/// argument that already spells the parameter's name.
+fn parameter_hint_is_noise(parameter: &str, argument: &str) -> bool {
+    parameter.trim_start_matches('.').chars().count() <= 1
+        || argument == parameter
+        || argument.ends_with(&format!("${parameter}"))
 }
 
 /// A value that already names its own type: a nominal constructor `@Money(1)`, whose hint would

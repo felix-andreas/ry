@@ -4090,3 +4090,17 @@ explicit allocators".
 - The server keeps each open document's settled fix-bearing findings with the text they were computed
   for (`published_fixes` in `server.rs`). `codeAction` reuses them while the text matches, so a
   request per cursor move costs no analysis, and the offered fixes are the findings on screen.
+
+## Parameter hints and call hierarchy follow R's own call rules
+
+- Parameter-name inlay hints (`inlay_hints` in `ide.rs`) map arguments to parameters the way R
+  does: exact names, then unique prefixes, then positional fill, and parameters after `...` match
+  only by name. They show only in calls with at least two positional arguments, and skip one-letter
+  parameters and arguments whose text already names the parameter (`years` or `x$years`), because a
+  hint that repeats what is on screen is noise.
+- The call hierarchy is limited to project top-level functions (the `package_definitions` index),
+  because those are the items a reader navigates between and the index is already per-name tracked.
+  Only call heads count as calls, so passing `f` to `lapply` is a reference, not a call. A caller
+  that is a top-level statement is grouped as "(top level)". The server re-resolves an item from its
+  uri and selection start instead of serializing ids into `data`, so a stale item from the client
+  never names a wrong function.

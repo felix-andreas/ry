@@ -3012,9 +3012,16 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 ## Open: editor parity
 
 - More quick fixes: a missing `library()` for a namespaced name.
-- Semantic tokens: a `defaultLibrary` modifier for stub-declared functions, and coloring of
-  `$` fields and frame columns.
-- The outline does not show sections inside function bodies (folding does).
+- Semantic tokens: coloring of `$` fields and frame columns.
+- Call hierarchy covers project top-level functions only; a local helper or a library function
+  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+- Not done from rust-analyzer's list, with the reason:
+  - Code lens (run test, references count): needs client commands the VS Code extension does not
+    register yet; add them together.
+  - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
+  - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
+    are where they help.
+  - Document highlight already exists.
 
 ## Open: editor latency at 300,000 lines
 

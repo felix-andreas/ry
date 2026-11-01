@@ -1124,6 +1124,41 @@ impl Worker {
         self.to_range(&text, range)
     }
 
+    fn convert_hierarchy_item(
+        &self,
+        item: ide::CallHierarchyItem,
+    ) -> Option<lsp_types::CallHierarchyItem> {
+        let path = self.path_of(item.file)?;
+        Some(lsp_types::CallHierarchyItem {
+            name: item.name,
+            kind: if item.is_function {
+                lsp_types::SymbolKind::FUNCTION
+            } else {
+                lsp_types::SymbolKind::VARIABLE
+            },
+            tags: None,
+            detail: item.detail,
+            uri: self.document_uri(path),
+            range: self.to_range_in(item.file, item.range),
+            selection_range: self.to_range_in(item.file, item.selection),
+            data: None,
+        })
+    }
+
+    /// The client hands back an item from an earlier answer, and the function is found again at
+    /// its name.
+    fn resolve_hierarchy_item(
+        &mut self,
+        item: &lsp_types::CallHierarchyItem,
+    ) -> Option<ide::CallHierarchyItem> {
+        let (file, text) = self.document(&item.uri)?;
+        let offset = self.to_offset(&text, item.selection_range.start);
+        let files = ProjectFiles::get(&self.db);
+        self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
+            .ok()
+            .flatten()
+    }
+
     fn path_of(&self, file: SourceFile) -> Option<&PathBuf> {
         self.files
             .iter()
@@ -1955,6 +1990,7 @@ fn initialize_result(
             }),
             references_provider: Some(lsp_types::OneOf::Left(true)),
             document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+            call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
             folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
             selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(
                 true,
@@ -2190,6 +2226,89 @@ impl LanguageServer for ServerState {
         })
     }
 
+    fn prepare_call_hierarchy(
+        &mut self,
+        params: lsp_types::CallHierarchyPrepareParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyItem>>, Self::Error>> {
+        self.read(move |worker| {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position_params)
+            else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let item = worker
+                .cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
+                .unwrap_or_default();
+            Ok(item
+                .and_then(|item| worker.convert_hierarchy_item(item))
+                .map(|item| vec![item]))
+        })
+    }
+
+    fn incoming_calls(
+        &mut self,
+        params: lsp_types::CallHierarchyIncomingCallsParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyIncomingCall>>, Self::Error>>
+    {
+        self.read(move |worker| {
+            let Some(item) = worker.resolve_hierarchy_item(&params.item) else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let calls = worker
+                .cancellable(|worker| ide::incoming_calls(&worker.db, files, &item))
+                .unwrap_or_default();
+            Ok(Some(
+                calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let from_ranges = call
+                            .ranges
+                            .iter()
+                            .map(|range| worker.to_range_in(call.item.file, *range))
+                            .collect();
+                        Some(lsp_types::CallHierarchyIncomingCall {
+                            from: worker.convert_hierarchy_item(call.item)?,
+                            from_ranges,
+                        })
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
+    fn outgoing_calls(
+        &mut self,
+        params: lsp_types::CallHierarchyOutgoingCallsParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyOutgoingCall>>, Self::Error>>
+    {
+        self.read(move |worker| {
+            let Some(item) = worker.resolve_hierarchy_item(&params.item) else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let calls = worker
+                .cancellable(|worker| ide::outgoing_calls(&worker.db, files, &item))
+                .unwrap_or_default();
+            Ok(Some(
+                calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let from_ranges = call
+                            .ranges
+                            .iter()
+                            .map(|range| worker.to_range_in(item.file, *range))
+                            .collect();
+                        Some(lsp_types::CallHierarchyOutgoingCall {
+                            to: worker.convert_hierarchy_item(call.item)?,
+                            from_ranges,
+                        })
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
     fn document_highlight(
         &mut self,
         params: lsp_types::DocumentHighlightParams,
@@ -2321,7 +2440,10 @@ impl LanguageServer for ServerState {
                     .map(|hint| lsp_types::InlayHint {
                         position: worker.to_position(&text, hint.offset),
                         label: lsp_types::InlayHintLabel::String(hint.label),
-                        kind: Some(lsp_types::InlayHintKind::TYPE),
+                        kind: Some(match hint.kind {
+                            ide::InlayHintKind::Type => lsp_types::InlayHintKind::TYPE,
+                            ide::InlayHintKind::Parameter => lsp_types::InlayHintKind::PARAMETER,
+                        }),
                         text_edits: None,
                         tooltip: None,
                         padding_left: Some(false),
