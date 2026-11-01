@@ -60,6 +60,8 @@ futures.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+# The scenario runner assembles ry's R home to script package installs.
+rcmd = { path = "../rcmd" }
 async-lsp.workspace = true
 unicode-width.workspace = true
 indoc.workspace = true

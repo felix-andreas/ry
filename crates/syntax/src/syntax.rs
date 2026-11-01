@@ -19,7 +19,7 @@ pub use {
     rowan::{TextRange, TextSize},
 };
 use {
-    rowan::{GreenNode, GreenNodeData, Language, NodeOrToken, WalkEvent},
+    rowan::{GreenNode, GreenNodeData, GreenTokenData, Language, NodeOrToken, WalkEvent},
     std::{mem, ptr, sync::Arc},
 };
 
@@ -257,7 +257,8 @@ pub fn is_green_inline_annotation(kind: SyntaxKind, parent: Option<SyntaxKind>) 
         SyntaxKind::TYPE_ASCRIPTION
         | SyntaxKind::RETURN_TYPE
         | SyntaxKind::TYPE_DEFINITION
-        | SyntaxKind::NEW_TYPE => true,
+        | SyntaxKind::NEW_TYPE
+        | SyntaxKind::PURE_MARKER => true,
         SyntaxKind::TYPE_BINDER_LIST => parent == Some(SyntaxKind::FUNCTION_DEF),
         _ => false,
     }
@@ -304,6 +305,124 @@ impl<'a> GreenRef<'a> {
             (Some(NodeOrToken::Token(token)), None) => Some(token.text()),
             _ => None,
         }
+    }
+}
+
+/// A green node and where it starts. Ranges come out exactly as the matching [`SyntaxNode`]'s
+/// would, but walking it allocates nothing: a red node is heap-allocated and reference counted
+/// on every step, while this is two words copied.
+#[derive(Clone, Copy)]
+pub struct GreenNodeAt<'a> {
+    green: &'a GreenNodeData,
+    start: TextSize,
+}
+
+/// A token of a [`GreenNodeAt`].
+#[derive(Clone, Copy)]
+pub struct GreenTokenAt<'a> {
+    pub kind: SyntaxKind,
+    pub text: &'a str,
+    pub range: TextRange,
+}
+
+#[derive(Clone, Copy)]
+pub enum GreenElementAt<'a> {
+    Node(GreenNodeAt<'a>),
+    Token(GreenTokenAt<'a>),
+}
+
+impl<'a> GreenNodeAt<'a> {
+    pub fn new(green: &'a GreenNodeData, start: TextSize) -> GreenNodeAt<'a> {
+        GreenNodeAt { green, start }
+    }
+
+    pub fn kind(self) -> SyntaxKind {
+        RLanguage::kind_from_raw(self.green.kind())
+    }
+
+    pub fn range(self) -> TextRange {
+        TextRange::at(self.start, self.green.text_len())
+    }
+
+    pub fn green(self) -> GreenRef<'a> {
+        GreenRef(self.green)
+    }
+
+    /// Children in source order, tokens included.
+    pub fn children(self) -> GreenChildrenAt<'a> {
+        GreenChildrenAt {
+            children: self.green.children(),
+            start: self.start,
+            end: self.start + self.green.text_len(),
+        }
+    }
+
+    pub fn child_nodes(self) -> impl DoubleEndedIterator<Item = GreenNodeAt<'a>> {
+        self.children().filter_map(|child| match child {
+            GreenElementAt::Node(node) => Some(node),
+            GreenElementAt::Token(_) => None,
+        })
+    }
+
+    pub fn child_tokens(self) -> impl DoubleEndedIterator<Item = GreenTokenAt<'a>> {
+        self.children().filter_map(|child| match child {
+            GreenElementAt::Token(token) => Some(token),
+            GreenElementAt::Node(_) => None,
+        })
+    }
+
+    /// The first token in preorder, found the way [`SyntaxNode::first_token`] finds it, so an
+    /// empty first child node ends the search.
+    pub fn first_token(self) -> Option<GreenTokenAt<'a>> {
+        match self.children().next()? {
+            GreenElementAt::Token(token) => Some(token),
+            GreenElementAt::Node(node) => node.first_token(),
+        }
+    }
+}
+
+/// The children of a [`GreenNodeAt`]. A forward step places a child at `start` and a backward
+/// step places it before `end`, so both directions give exact ranges.
+pub struct GreenChildrenAt<'a> {
+    children: rowan::Children<'a>,
+    start: TextSize,
+    end: TextSize,
+}
+
+impl<'a> Iterator for GreenChildrenAt<'a> {
+    type Item = GreenElementAt<'a>;
+
+    fn next(&mut self) -> Option<GreenElementAt<'a>> {
+        let child = self.children.next()?;
+        let start = self.start;
+        self.start += child.text_len();
+        Some(place(child, start))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.children.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for GreenChildrenAt<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let child = self.children.next_back()?;
+        self.end -= child.text_len();
+        Some(place(child, self.end))
+    }
+}
+
+fn place<'a>(
+    child: NodeOrToken<&'a GreenNodeData, &'a GreenTokenData>,
+    start: TextSize,
+) -> GreenElementAt<'a> {
+    match child {
+        NodeOrToken::Node(green) => GreenElementAt::Node(GreenNodeAt { green, start }),
+        NodeOrToken::Token(token) => GreenElementAt::Token(GreenTokenAt {
+            kind: RLanguage::kind_from_raw(token.kind()),
+            text: token.text(),
+            range: TextRange::at(start, token.text_len()),
+        }),
     }
 }
 
@@ -507,7 +626,19 @@ fn materialize(stack: &mut [GreenFrame<'_>]) -> Option<SyntaxNode> {
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length
 /// in `new_text`; the result always equals `parse(new_text)`.
 pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSize) -> Parse {
-    reparse::try_splice(old, new_text, deleted, inserted).unwrap_or_else(|| parse(new_text))
+    let Some(spliced) = reparse::try_splice(old, new_text, deleted, inserted) else {
+        return parse(new_text);
+    };
+    if testing::invariants_enabled() {
+        let full = parse(new_text);
+        assert!(
+            spliced == full,
+            "a splice reparse differs from a full parse\nold text: {:?}\nnew text: {:?}\ndeleted: {deleted:?}\ninserted: {inserted:?}",
+            old.syntax_node().text().to_string(),
+            new_text,
+        );
+    }
+    spliced
 }
 
 fn dump_node(out: &mut String, node: &SyntaxNode, depth: usize) {

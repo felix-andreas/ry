@@ -6,6 +6,10 @@
 # "value <token>" is one result, "print <line>" one line the case printed, and
 # "pretty <lo> <up> <n> <min.n> <shrink> <high.u.bias> <u5.bias> <f.min> <eps.correct> <bounds>
 # <lo'> <up'> <n'>" one call of R_pretty through pretty()'s internal.
+#
+# The LINPACK cases call the system BLAS, so their last bits depend on the BLAS build (this
+# recording comes from OpenBLAS 0.3.26; reference BLAS differs by about one ulp). The tests
+# compare values with a tolerance, so either build may record them.
 args <- commandArgs(trailingOnly = TRUE)
 dyn.load(args[[1]])
 lines <- character()

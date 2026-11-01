@@ -1119,7 +1119,8 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     }
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
-        vanilla: true,
+        site_profile: false,
+        user_profile: false,
         interactive: false,
     };
     match interp::session::start(options) {
@@ -1131,9 +1132,18 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     }
 }
 
+/// The hash of the sources this library was built from, as a NUL-terminated string. The `ry`
+/// executable compares it with its own right after loading, because cargo builds `libR.so`
+/// separately and a stale one would otherwise run old code without any sign.
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_runtime_id() -> *const c_char {
+    concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
+}
+
 /// Runs R on ry's runtime the way `Rscript` does: starts the session (base R and the default
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
-/// `input` and then the file at `path` (either may be null), and returns the exit status: 0 on
+/// `input` and then the file at `path` (either may be null, and with both null it reads R code
+/// from stdin, running each expression once it is complete), and returns the exit status: 0 on
 /// success, 1 after an error, 2 when the session could not start. `arguments` are what
 /// `commandArgs(trailingOnly = TRUE)` returns, and `flags` are the [`RUN_FLAGS`] bits. This is
 /// the entry point of `ry run --runtime ry` and `ry load`.
@@ -1165,7 +1175,8 @@ pub unsafe extern "C" fn ry_run(
     }
     let options = interp::session::StartOptions {
         command_args,
-        vanilla: true,
+        site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
+        user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: false,
     };
     if let Err(unwind) = interp::session::start(options) {
@@ -1178,9 +1189,36 @@ pub unsafe extern "C" fn ry_run(
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return 2;
     }
+    if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
+        runtime().heap.policy_mut().stress = heap::GcStress::EveryAllocation;
+    }
     let mut outcome = interp::session::Outcome::Completed;
     if let Some(input) = &input {
         outcome = interp::session::run_text(input, "<input>");
+    } else if path.is_none() {
+        // Each expression runs as soon as it is complete, not once stdin ends: callr drives `R`
+        // this way, writing a command and waiting for its result before it writes the next.
+        let mut stdin = std::io::stdin().lock();
+        outcome = interp::session::run_console(
+            |_prompt| {
+                use std::io::{BufRead, Write};
+                if let Err(error) = std::io::stdout().flush() {
+                    let message = format!("ry: cannot write output: {error}\n");
+                    crate::boundary::write_console(message.as_bytes(), true);
+                }
+                let mut line = Vec::new();
+                match stdin.read_until(b'\n', &mut line) {
+                    Ok(0) => None,
+                    Ok(_) => Some(String::from_utf8_lossy(&line).into_owned()),
+                    Err(error) => {
+                        let message = format!("ry: cannot read R input from stdin: {error}\n");
+                        crate::boundary::write_console(message.as_bytes(), true);
+                        None
+                    }
+                }
+            },
+            true,
+        );
     }
     if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
         outcome = match std::fs::read_to_string(path) {
@@ -1222,13 +1260,29 @@ pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
 /// Set when S4, R6 and Reference Class definitions in user code are allowed.
 pub const RUN_FLAG_OBJECT_SYSTEMS: c_int = 1 << 1;
 
+/// Set when the project is in strict mode, so the package loader binds pure constants lazily.
+pub const RUN_FLAG_STRICT: c_int = 1 << 2;
+
+/// `ry_run` flag: source the site profile, as GNU R does without `--vanilla` or
+/// `--no-site-file`. `ry run` leaves it off; ry's R home's `bin/R` and `bin/Rscript` set it.
+pub const RUN_FLAG_SITE_PROFILE: c_int = 1 << 3;
+
+/// `ry_run` flag: source the user profile, as GNU R does without `--vanilla` or
+/// `--no-init-file`.
+pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 4;
+
 /// Every flag `ry_run` and `ry_repl` understand.
-pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS;
+pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
+    | RUN_FLAG_OBJECT_SYSTEMS
+    | RUN_FLAG_STRICT
+    | RUN_FLAG_SITE_PROFILE
+    | RUN_FLAG_USER_PROFILE;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
     interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
+    loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Reads one chunk of console input after showing `prompt`: writes at most `length - 1` bytes
@@ -1251,7 +1305,8 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         .then(|| String::from_utf8_lossy(crate::strings::c_bytes(startup)).into_owned());
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
-        vanilla: false,
+        site_profile: true,
+        user_profile: true,
         interactive: true,
     };
     if let Err(unwind) = interp::session::start(options) {
@@ -1271,36 +1326,40 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         interp::session::run_text(startup, "<startup>");
     }
     let mut buffer = vec![0u8; 64 * 1024];
-    interp::session::run_console(|prompt| {
-        use std::io::Write;
-        if let Err(error) = std::io::stdout().flush() {
-            crate::boundary::write_console(
-                format!("ry: cannot write output: {error}\n").as_bytes(),
-                true,
-            );
-        }
-        // A prompt never holds a NUL, so the empty fallback is unreachable.
-        let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-        let mut input = Vec::new();
-        // A line longer than the buffer arrives in several chunks; only the last one ends the
-        // line, and the text is decoded once it is whole, so no character is split.
-        loop {
-            if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
-                return (!input.is_empty()).then(|| String::from_utf8_lossy(&input).into_owned());
+    interp::session::run_console(
+        |prompt| {
+            use std::io::Write;
+            if let Err(error) = std::io::stdout().flush() {
+                crate::boundary::write_console(
+                    format!("ry: cannot write output: {error}\n").as_bytes(),
+                    true,
+                );
             }
-            let end = buffer
-                .iter()
-                .position(|&byte| byte == 0)
-                .unwrap_or(buffer.len());
-            input.extend_from_slice(&buffer[..end]);
-            // A reader may stop one byte short of the contract's limit, so a chunk is taken as
-            // cut off whenever it comes within two bytes of the buffer's end.
-            if end + 2 < buffer.len() || input.ends_with(b"\n") {
-                return Some(String::from_utf8_lossy(&input).into_owned());
+            // A prompt never holds a NUL, so the empty fallback is unreachable.
+            let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
+            let mut input = Vec::new();
+            // A line longer than the buffer arrives in several chunks; only the last one ends the
+            // line, and the text is decoded once it is whole, so no character is split.
+            loop {
+                if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
+                    return (!input.is_empty())
+                        .then(|| String::from_utf8_lossy(&input).into_owned());
+                }
+                let end = buffer
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(buffer.len());
+                input.extend_from_slice(&buffer[..end]);
+                // A reader may stop one byte short of the contract's limit, so a chunk is taken as
+                // cut off whenever it comes within two bytes of the buffer's end.
+                if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                    return Some(String::from_utf8_lossy(&input).into_owned());
+                }
+                prompt = std::ffi::CString::default();
             }
-            prompt = std::ffi::CString::default();
-        }
-    });
+        },
+        false,
+    );
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0

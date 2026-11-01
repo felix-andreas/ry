@@ -1202,7 +1202,6 @@ fn strict_reports_a_read_the_attached_package_tolerance_silenced() {
             "library(someunknownpkg)
 
 bare <- mystery_thing
-print(bare)
 ",
         ),
         (

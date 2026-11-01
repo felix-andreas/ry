@@ -1965,11 +1965,16 @@ unsafe fn read_char(con: Rconnection) -> R<c_int> {
     Ok(character)
 }
 
+/// Whether pushback or a saved look-ahead character is still waiting to be read.
+unsafe fn has_buffered_input(con: Rconnection) -> bool {
+    (*con).save2 != NO_SAVE || (*con).nPushBack > 0 || (*con).save != NO_SAVE
+}
+
 /// Everything a text read would still see, as [`read_char`] would deliver it. A built-in
 /// device is read in bulk once the pushback and look-ahead are used up.
 unsafe fn read_text_rest(con: Rconnection) -> R<Vec<u8>> {
     let mut text = Vec::new();
-    while (*con).save2 != NO_SAVE || (*con).nPushBack > 0 || (*con).save != NO_SAVE {
+    while has_buffered_input(con) {
         let character = read_char(con)?;
         if character == EOF {
             return Ok(text);

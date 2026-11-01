@@ -115,6 +115,23 @@ formal resolves normally. `@masked` requires a variadic function type. The typin
 specifies the details under
 [data frames and non-standard evaluation](/reference/type-system#data-frames-and-non-standard-evaluation).
 
+### Pure functions
+
+The `@pure` attribute declares that calling the function has no effect beyond returning a value,
+whatever its arguments:
+
+```
+paste0 : @pure fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+```
+
+Under strict mode, a constant at the top level of a package file may call only pure functions (see
+[a package file's top level](/reference/type-system#a-package-files-top-level)). Purity belongs to
+the name: marking any candidate of an overload set marks the name, and a later source that redeclares
+the name without the marker clears it. `@pure` and `@masked` may appear in either order. Mark a
+function only when no argument can make it read or change state outside its result: `cat`,
+`Sys.time` and `options` are not pure, and neither is a function that calls back into an argument it
+was given, such as `lapply`.
+
 ## Overloads and generics
 
 Declaring the same name more than once in one file builds an ordered *overload set*, with each
@@ -321,6 +338,8 @@ source:
   [overload sets](#overloads-and-generics)).
 - `nominals` is the set of `@type` names.
 - `masked` maps each `@masked` name to the formals declared before its `...`.
+- `pure` holds each `@pure` name, and `pure_by_namespace` the same names per declaring namespace,
+  for `pkg::name` calls.
 - `exports_by_namespace` maps a namespace to the names it declares.
 - `declarations` maps a name to the source index and range of its winning declaration. The declaring
   namespace is derived from the source index rather than stored, so the two can never disagree.

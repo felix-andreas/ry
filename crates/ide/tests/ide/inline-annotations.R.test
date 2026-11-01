@@ -67,7 +67,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (17): Any, character, complex, double, fn, integer, list, logical
+completion (17): Money, Any, character, complex, double, fn, integer, list
 
 #---- completion_after_a_binding_colon_before_the_type_exists
 #: @type Money {double}

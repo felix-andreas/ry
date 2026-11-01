@@ -33,12 +33,12 @@ command, so you never call `load_all()` or restart R:
 
 ```text
 $ ry run
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 5 ms.
 ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 > count_words("the  quick fox")     # after editing R/count.R
-Reloaded tally: 1 function rebound, in 3 ms.
+Reloaded tally: 1 definition rebound, in 3 ms.
 [1] 3
 ```
 
@@ -54,6 +54,9 @@ then turning on types.
 - **Command line:** download the binary for your platform from
   [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta), or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
+
+- **From a clone of the repository:** `just try` builds ry and its runtime, then runs each command
+  on this page, and more, in a demo project.
 
 [Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 

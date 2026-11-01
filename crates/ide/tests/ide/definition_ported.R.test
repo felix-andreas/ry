@@ -2,7 +2,7 @@
 #---- parameter_declaration_position
 f <- function(para$0meter) parameter
 #++++
-hover 5..34: fn(parameter: T) -> T
+hover 14..23: parameter: T
 definition 14..23
 references: 14..23*, 25..34
 rename: 2 edit(s)

@@ -64,7 +64,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     for (&expression, &binding) in &naming.resolutions {
         let mut line = format!(
             "  {} {} {} b{}",
-            span(module.expression(expression).range),
+            span(module.range(expression)),
             name_at(module, expression),
             if targets.contains(&expression) {
                 "<-"
@@ -82,20 +82,14 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
         reads.push((start_of(module, expression), line));
     }
     for (&expression, name) in &naming.non_locals {
-        let mut line = format!(
-            "  {} {name} -> non-local",
-            span(module.expression(expression).range)
-        );
+        let mut line = format!("  {} {name} -> non-local", span(module.range(expression)));
         if naming.deferred_non_locals.contains(&expression) {
             line.push_str(" deferred");
         }
         reads.push((start_of(module, expression), line));
     }
     for (&expression, name) in &naming.quiet_reads {
-        let mut line = format!(
-            "  {} {name} -> quiet",
-            span(module.expression(expression).range)
-        );
+        let mut line = format!("  {} {name} -> quiet", span(module.range(expression)));
         if naming.deferred_quiet_reads.contains(&expression) {
             line.push_str(" deferred");
         }
@@ -110,7 +104,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
             start_of(module, expression),
             format!(
                 "  {} {}{separator}{name} -> namespace",
-                span(module.expression(expression).range),
+                span(module.range(expression)),
                 read.package
             ),
         ));
@@ -150,7 +144,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     for &expression in &naming.masked_subsets {
         output.push_str(&format!(
             "  masked-subset {}\n",
-            span(module.expression(expression).range)
+            span(module.range(expression))
         ));
     }
 }
@@ -164,13 +158,13 @@ fn render_set<'a>(output: &mut String, label: &str, values: impl Iterator<Item =
 
 fn assignment_targets(module: &Module) -> BTreeSet<ExprId> {
     module
-        .expressions
+        .kinds()
         .iter()
-        .flat_map(|expression| match &expression.kind {
+        .flat_map(|kind| match kind {
             ExpressionKind::Assign { target, .. } => vec![*target],
-            ExpressionKind::Match { arms, .. } => arms
+            ExpressionKind::Match { arms, .. } => module[arms]
                 .iter()
-                .flat_map(|arm| arm.bindings.iter().copied())
+                .flat_map(|arm| module[arm.bindings].iter().copied())
                 .collect(),
             _ => Vec::new(),
         })
@@ -179,7 +173,7 @@ fn assignment_targets(module: &Module) -> BTreeSet<ExprId> {
 
 /// A quoted target (`"x" <- 1`) lowers to a string literal, so it renders as its kind.
 fn name_at(module: &Module, expression: ExprId) -> String {
-    match &module.expression(expression).kind {
+    match module.kind(expression) {
         ExpressionKind::NameRef(name) => name.to_string(),
         other => format!("{other:?}")
             .split(['(', ' '])
@@ -190,7 +184,7 @@ fn name_at(module: &Module, expression: ExprId) -> String {
 }
 
 fn start_of(module: &Module, expression: ExprId) -> u32 {
-    module.expression(expression).range.start().into()
+    module.range(expression).start().into()
 }
 
 fn span(range: TextRange) -> String {

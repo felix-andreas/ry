@@ -6,7 +6,6 @@
 
 use std::{
     ffi::{CString, c_char, c_int},
-    io::Read,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -111,9 +110,14 @@ fn assemble(arguments: &[String]) -> rcmd::Result<PathBuf> {
 /// Runs a session on ry's runtime, the `libR.so` of the R home, which also holds the
 /// interpreter.
 fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
-    let (file, expressions, arguments, default_packages) = match session {
+    let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session
+    {
         rcmd::Session::Print(text) => {
             print!("{text}");
+            return Ok(0);
+        }
+        rcmd::Session::Version => {
+            print!("{}", rcmd::version_text(home)?);
             return Ok(0);
         }
         rcmd::Session::Run {
@@ -121,22 +125,23 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
             expressions,
             arguments,
             default_packages,
-        } => (file, expressions, arguments, default_packages),
+            site_profile,
+            user_profile,
+        } => (
+            file,
+            expressions,
+            arguments,
+            default_packages,
+            *site_profile,
+            *user_profile,
+        ),
     };
     if let Some(packages) = default_packages {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("R_DEFAULT_PACKAGES", packages) };
     }
-    let mut input = expressions.clone();
-    if file.is_none() && input.is_none() {
-        let mut text = String::new();
-        std::io::stdin()
-            .read_to_string(&mut text)
-            .map_err(|error| {
-                rcmd::Error::Usage(format!("cannot read R input from stdin: {error}"))
-            })?;
-        input = Some(text);
-    }
+    // With neither a file nor `-e`, `ry_run` reads stdin as a console, one expression at a time.
+    let input = expressions.clone();
     let library_path = home.join("lib/libR.so");
     // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
     // dynamic linker satisfy them from it.
@@ -183,8 +188,10 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
             .as_ref()
             .map_or(std::ptr::null(), |value| value.as_ptr())
     };
-    // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults.
-    let flags = 0b11;
+    // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults;
+    // the profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
+    let flags =
+        0b11 | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
     let status = unsafe {
         run(
             pointer(&file),

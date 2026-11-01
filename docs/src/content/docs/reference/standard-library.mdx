@@ -47,7 +47,7 @@ List.sum(parse_ids("3, 1, 2"))
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `list[T]`, found `:Ok(list[integer]) | :Err(:InvalidNumStr)`
@@ -59,7 +59,13 @@ checker catches: the result has to be unwrapped, with `match` or `Result.with_de
 list can be summed.
 
 The library runs only on ry's runtime, so run such a script with `ry run`, not `ry R`. GNU R does
-not have these functions, and a script that calls one fails there with "could not find function".
+not have these functions, and under `ry R` a call to one stops with an error that says so:
+
+```text
+Error: `List.map()` is part of ry's standard library, which only ry's runtime provides, and this session runs on GNU R; run the code with `ry run` or `ry load` instead
+```
+
+Plain `Rscript` knows nothing of ry, so there the call fails with "could not find function".
 
 ## Conventions
 
@@ -103,7 +109,7 @@ ry's records and tags. `typeof()` is `"dict"` or `"set"`, and the class is `ry_d
 Both keep insertion order, print as the call that rebuilds them, and compare with `identical()`
 regardless of order:
 
-```r
+```r ry run runtime=ry
 d <- Dict.from_list(list(("b", 2), ("a", 1)))
 d
 #> Dict.from_list(list(("b", 2), ("a", 1)))
@@ -147,10 +153,40 @@ function copies first, so `old` never changes. The semantics are the same either
 differs. `List.reserve`, `Dict.reserve` and `Set.reserve` set aside room ahead of a known number of
 insertions.
 
+A collection inside a list updates in place too, when both sides name it through the same `$` or
+`[[` path and nothing else holds the lists on that path:
+
+```r
+state <- list(seen = Dict.empty(), count = 0L)
+for (i in 1:100000) state$seen <- Dict.insert(state$seen, i, TRUE)
+```
+
+A helper function that updates a collection it receives copies it, as in GNU R, because the
+caller's variable still holds the value and must not change. Loop inside the helper, or keep the
+update in the loop that owns the variable:
+
+```r
+remember_all <- function(seen, keys) {
+  for (key in keys) seen <- Dict.insert(seen, key, TRUE)
+  seen
+}
+```
+
+Here only the first insertion copies, so the whole call is linear.
+
 ## Checking
 
-A lookup with a key of another type finds nothing at run time: `Dict.get(d, 1L)` on a dictionary
-with `character` keys is `:Err(:KeyNotFound)`. With `typing = true`, the checker reports it first:
+A collection holds keys of one type, so a key of another type is an error at run time rather than a
+missing key. On a dictionary with `character` keys, `Dict.get(d, "z")` is `:Err(:KeyNotFound)`, but
+`Dict.get(d, 1L)` stops:
+
+```text
+Error in Dict.get(d, 1L) :
+  the dict's keys are character, and this one is integer; a collection holds one type
+```
+
+Integer and double keys are the one exception: they compare as numbers, so `1L` finds the key `1`.
+With `typing = true`, the checker reports a mismatched key before the code runs:
 
 ```text
 type-mismatch
@@ -181,7 +217,7 @@ A result is `:Ok(value)` or `:Err(error)`, typed `Result<T, E>`. The alias is bu
 
 Whether the result is `:Ok`.
 
-```r
+```r ry run runtime=ry dput
 Result.is_ok(:Ok(1L))
 #> TRUE
 ```
@@ -194,7 +230,7 @@ Result.is_ok(:Ok(1L))
 
 Whether the result is `:Err`.
 
-```r
+```r ry run runtime=ry dput
 Result.is_err(:Ok(1L))
 #> FALSE
 ```
@@ -207,7 +243,7 @@ Result.is_err(:Ok(1L))
 
 The `:Ok` value, or `default` for an `:Err`.
 
-```r
+```r ry run runtime=ry dput
 Result.with_default(:Err(:Missing), 0L)
 #> 0L
 ```
@@ -220,7 +256,7 @@ Result.with_default(:Err(:Missing), 0L)
 
 Applies `f` to an `:Ok` value and leaves an `:Err` alone.
 
-```r
+```r ry run runtime=ry dput
 Result.map(:Ok(2L), function(x) x * 10L)
 #> :Ok(20L)
 ```
@@ -233,7 +269,7 @@ Result.map(:Ok(2L), function(x) x * 10L)
 
 Applies `f` to an `:Err` value and leaves an `:Ok` alone.
 
-```r
+```r ry run runtime=ry dput
 Result.map_err(:Err("disk full"), function(e) :IoError(e))
 #> :Err(:IoError("disk full"))
 ```
@@ -246,7 +282,7 @@ Result.map_err(:Err("disk full"), function(e) :IoError(e))
 
 Applies `on_ok` to an `:Ok` value or `on_err` to an `:Err` value.
 
-```r
+```r ry run runtime=ry dput
 Result.map_both(:Err(404L), function(x) x, function(code) Str.concat("HTTP ", Num.to_str(code)))
 #> :Err("HTTP 404")
 ```
@@ -273,7 +309,7 @@ Result.map2(Str.to_integer("6"), Str.to_integer("7"), function(a, b) a * b)
 Chains a step that can fail: `f` gets the `:Ok` value and returns the next result. The error type
 of the chain joins both, so a step can fail with a reason of its own.
 
-```r
+```r ry run runtime=ry dput
 Result.and_then(Str.to_integer("-3"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
 #> :Err(:NotPositive)
 ```
@@ -286,7 +322,7 @@ Result.and_then(Str.to_integer("-3"), function(n) if (n > 0L) :Ok(n) else :Err(:
 
 Recovers from an `:Err`: `f` gets the error and returns the next result.
 
-```r
+```r ry run runtime=ry dput
 Result.on_err(Str.to_integer("x"), function(e) :Ok(0L))
 #> :Ok(0L)
 ```
@@ -310,7 +346,7 @@ type error. The signatures below show the list form.
 
 The elements of an atomic vector as a list.
 
-```r
+```r ry run runtime=ry dput
 List.from_vector(c(3L, 1L, 2L))
 #> list(3L, 1L, 2L)
 ```
@@ -323,7 +359,7 @@ List.from_vector(c(3L, 1L, 2L))
 
 The elements of a list as an atomic vector; every element must be a scalar of one type.
 
-```r
+```r ry run runtime=ry dput
 List.to_vector(list(3L, 1L, 2L))
 #> c(3L, 1L, 2L)
 ```
@@ -336,7 +372,7 @@ List.to_vector(list(3L, 1L, 2L))
 
 The number of elements.
 
-```r
+```r ry run runtime=ry dput
 List.len(list("a", "b"))
 #> 2L
 ```
@@ -349,7 +385,7 @@ List.len(list("a", "b"))
 
 Whether the list has no elements.
 
-```r
+```r ry run runtime=ry dput
 List.is_empty(list())
 #> TRUE
 ```
@@ -362,7 +398,7 @@ List.is_empty(list())
 
 The element at a 1-based position, or `:Err(:OutOfBounds)`.
 
-```r
+```r ry run runtime=ry dput
 List.get(list("a", "b"), 3L)
 #> :Err(:OutOfBounds)
 ```
@@ -375,7 +411,7 @@ List.get(list("a", "b"), 3L)
 
 Replaces the element at a position; a position out of range leaves the list unchanged.
 
-```r
+```r ry run runtime=ry dput
 List.set(list("a", "b"), 2L, "z")
 #> list("a", "z")
 ```
@@ -388,7 +424,7 @@ List.set(list("a", "b"), 2L, "z")
 
 Replaces the element at a position with `f` of it.
 
-```r
+```r ry run runtime=ry dput
 List.update(list(1L, 2L), 1L, function(x) x + 10L)
 #> list(11L, 2L)
 ```
@@ -427,7 +463,7 @@ List.replace(list("a", "b"), 2L, "z")
 
 Adds an element at the end.
 
-```r
+```r ry run runtime=ry dput
 List.append(list(1L, 2L), 3L)
 #> list(1L, 2L, 3L)
 ```
@@ -453,7 +489,7 @@ List.append_if_ok(list(1L), Str.to_integer("2"))
 
 Adds an element at the start.
 
-```r
+```r ry run runtime=ry dput
 List.prepend(list(1L, 2L), 0L)
 #> list(0L, 1L, 2L)
 ```
@@ -479,7 +515,7 @@ List.prepend_if_ok(list(1L), Str.to_integer("x"))
 
 The elements of `first` followed by those of `second`.
 
-```r
+```r ry run runtime=ry dput
 List.concat(list(1L), list(2L, 3L))
 #> list(1L, 2L, 3L)
 ```
@@ -505,7 +541,7 @@ List.concat_utf8(list(104L), "i")
 
 A list of one element.
 
-```r
+```r ry run runtime=ry dput
 List.single("only")
 #> list("only")
 ```
@@ -518,7 +554,7 @@ List.single("only")
 
 A list of `count` copies of `value`.
 
-```r
+```r ry run runtime=ry dput
 List.repeat("x", 3L)
 #> list("x", "x", "x")
 ```
@@ -557,7 +593,7 @@ List.reserve(list(1L, 2L), 100L)
 
 The elements in reverse order.
 
-```r
+```r ry run runtime=ry dput
 List.reverse(list(1L, 2L, 3L))
 #> list(3L, 2L, 1L)
 ```
@@ -570,7 +606,7 @@ List.reverse(list(1L, 2L, 3L))
 
 Concatenates a list of lists.
 
-```r
+```r ry run runtime=ry dput
 List.join(list(list(1L), list(), list(2L, 3L)))
 #> list(1L, 2L, 3L)
 ```
@@ -583,7 +619,7 @@ List.join(list(list(1L), list(), list(2L, 3L)))
 
 Applies `f` to every element.
 
-```r
+```r ry run runtime=ry dput
 List.map(list(1L, 2L, 3L), function(x) x * 2L)
 #> list(2L, 4L, 6L)
 ```
@@ -596,7 +632,7 @@ List.map(list(1L, 2L, 3L), function(x) x * 2L)
 
 Applies `f` to every element and its 1-based position.
 
-```r
+```r ry run runtime=ry dput
 List.map_with_index(list("a", "b"), function(x, i) Str.concat(x, Num.to_str(i)))
 #> list("a1", "b2")
 ```
@@ -609,7 +645,7 @@ List.map_with_index(list("a", "b"), function(x, i) Str.concat(x, Num.to_str(i)))
 
 Applies `f` to the elements of two lists pairwise, stopping at the shorter one.
 
-```r
+```r ry run runtime=ry dput
 List.map2(list(1L, 2L, 3L), list(10L, 20L), function(a, b) a + b)
 #> list(11L, 22L)
 ```
@@ -648,7 +684,7 @@ List.map4(list(1L), list(2L), list(3L), list(4L), function(a, b, c, d) a * b * c
 
 Applies `f`, which returns a list, to every element and concatenates the results.
 
-```r
+```r ry run runtime=ry dput
 List.join_map(list(1L, 2L), function(x) list(x, x))
 #> list(1L, 1L, 2L, 2L)
 ```
@@ -661,7 +697,7 @@ List.join_map(list(1L, 2L), function(x) list(x, x))
 
 The elements for which `predicate` is `TRUE`.
 
-```r
+```r ry run runtime=ry dput
 List.keep_if(list(1L, 5L, 2L), function(x) x > 1L)
 #> list(5L, 2L)
 ```
@@ -674,7 +710,7 @@ List.keep_if(list(1L, 5L, 2L), function(x) x > 1L)
 
 The elements for which `predicate` is `FALSE`.
 
-```r
+```r ry run runtime=ry dput
 List.drop_if(list(1L, 5L, 2L), function(x) x > 1L)
 #> list(1L)
 ```
@@ -687,7 +723,7 @@ List.drop_if(list(1L, 5L, 2L), function(x) x > 1L)
 
 Applies `f` to every element and keeps the `:Ok` values.
 
-```r
+```r ry run runtime=ry dput
 List.keep_oks(list("1", "x", "3"), Str.to_integer)
 #> list(1L, 3L)
 ```
@@ -700,7 +736,7 @@ List.keep_oks(list("1", "x", "3"), Str.to_integer)
 
 Applies `f` to every element and keeps the `:Err` values.
 
-```r
+```r ry run runtime=ry dput
 List.keep_errs(list("1", "x"), Str.to_integer)
 #> list(:InvalidNumStr)
 ```
@@ -713,7 +749,7 @@ List.keep_errs(list("1", "x"), Str.to_integer)
 
 Applies `f` to every element and stops at the first `:Err`.
 
-```r
+```r ry run runtime=ry dput
 List.map_try(list("1", "2"), Str.to_integer)
 #> :Ok(list(1L, 2L))
 ```
@@ -726,7 +762,7 @@ List.map_try(list("1", "2"), Str.to_integer)
 
 Folds from the first element: `f` gets the state and an element and returns the next state.
 
-```r
+```r ry run runtime=ry dput
 List.walk(list(1L, 2L, 3L), 0L, function(total, x) total + x)
 #> 6L
 ```
@@ -739,7 +775,7 @@ List.walk(list(1L, 2L, 3L), 0L, function(total, x) total + x)
 
 Folds from the last element.
 
-```r
+```r ry run runtime=ry dput
 List.walk_backwards(list("a", "b", "c"), "", function(text, x) Str.concat(text, x))
 #> "cba"
 ```
@@ -752,7 +788,7 @@ List.walk_backwards(list("a", "b", "c"), "", function(text, x) Str.concat(text, 
 
 Folds until `f` returns `:Break(state)`; `:Continue(state)` goes on.
 
-```r
+```r ry run runtime=ry dput
 List.walk_until(list(1L, 2L, 3L, 4L), 0L, function(total, x) if (total >= 3L) :Break(total) else :Continue(total + x))
 #> 3L
 ```
@@ -870,7 +906,7 @@ List.for_each_try(list(1L, -2L, 3L), function(x) if (x < 0L) :Err(:Negative(x)) 
 
 Whether `predicate` is `TRUE` for some element.
 
-```r
+```r ry run runtime=ry dput
 List.any(list(1L, 5L), function(x) x > 4L)
 #> TRUE
 ```
@@ -883,7 +919,7 @@ List.any(list(1L, 5L), function(x) x > 4L)
 
 Whether `predicate` is `TRUE` for every element; `TRUE` for an empty list.
 
-```r
+```r ry run runtime=ry dput
 List.all(list(1L, 5L), function(x) x > 4L)
 #> FALSE
 ```
@@ -896,7 +932,7 @@ List.all(list(1L, 5L), function(x) x > 4L)
 
 Whether some element is `identical()` to `value`.
 
-```r
+```r ry run runtime=ry dput
 List.contains(list("a", "b"), "b")
 #> TRUE
 ```
@@ -909,7 +945,7 @@ List.contains(list("a", "b"), "b")
 
 The number of elements for which `predicate` is `TRUE`.
 
-```r
+```r ry run runtime=ry dput
 List.count_if(list(1L, 5L, 7L), function(x) x > 4L)
 #> 2L
 ```
@@ -922,7 +958,7 @@ List.count_if(list(1L, 5L, 7L), function(x) x > 4L)
 
 The first element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 
-```r
+```r ry run runtime=ry dput
 List.find_first(list(1L, 5L, 7L), function(x) x > 4L)
 #> :Ok(5L)
 ```
@@ -935,7 +971,7 @@ List.find_first(list(1L, 5L, 7L), function(x) x > 4L)
 
 The last element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 
-```r
+```r ry run runtime=ry dput
 List.find_last(list(1L, 5L, 7L), function(x) x > 4L)
 #> :Ok(7L)
 ```
@@ -948,7 +984,7 @@ List.find_last(list(1L, 5L, 7L), function(x) x > 4L)
 
 The position of the first match, or `:Err(:NotFound)`.
 
-```r
+```r ry run runtime=ry dput
 List.find_first_index(list(1L, 5L, 7L), function(x) x > 4L)
 #> :Ok(2L)
 ```
@@ -961,7 +997,7 @@ List.find_first_index(list(1L, 5L, 7L), function(x) x > 4L)
 
 The position of the last match, or `:Err(:NotFound)`.
 
-```r
+```r ry run runtime=ry dput
 List.find_last_index(list(1L, 5L, 7L), function(x) x > 9L)
 #> :Err(:NotFound)
 ```
@@ -974,7 +1010,7 @@ List.find_last_index(list(1L, 5L, 7L), function(x) x > 9L)
 
 The first element, or `:Err(:ListWasEmpty)`.
 
-```r
+```r ry run runtime=ry dput
 List.first(list("a", "b"))
 #> :Ok("a")
 ```
@@ -987,7 +1023,7 @@ List.first(list("a", "b"))
 
 The last element, or `:Err(:ListWasEmpty)`.
 
-```r
+```r ry run runtime=ry dput
 List.last(list())
 #> :Err(:ListWasEmpty)
 ```
@@ -1000,7 +1036,7 @@ List.last(list())
 
 The first `count` elements, or all of them if there are fewer.
 
-```r
+```r ry run runtime=ry dput
 List.take_first(list(1L, 2L, 3L), 2L)
 #> list(1L, 2L)
 ```
@@ -1013,7 +1049,7 @@ List.take_first(list(1L, 2L, 3L), 2L)
 
 The last `count` elements.
 
-```r
+```r ry run runtime=ry dput
 List.take_last(list(1L, 2L, 3L), 2L)
 #> list(2L, 3L)
 ```
@@ -1026,7 +1062,7 @@ List.take_last(list(1L, 2L, 3L), 2L)
 
 Everything but the first `count` elements.
 
-```r
+```r ry run runtime=ry dput
 List.drop_first(list(1L, 2L, 3L), 2L)
 #> list(3L)
 ```
@@ -1039,7 +1075,7 @@ List.drop_first(list(1L, 2L, 3L), 2L)
 
 Everything but the last `count` elements.
 
-```r
+```r ry run runtime=ry dput
 List.drop_last(list(1L, 2L, 3L), 2L)
 #> list(1L)
 ```
@@ -1052,7 +1088,7 @@ List.drop_last(list(1L, 2L, 3L), 2L)
 
 Removes the element at a position.
 
-```r
+```r ry run runtime=ry dput
 List.drop_at(list("a", "b", "c"), 2L)
 #> list("a", "c")
 ```
@@ -1065,7 +1101,7 @@ List.drop_at(list("a", "b", "c"), 2L)
 
 `count` elements starting at position `start`.
 
-```r
+```r ry run runtime=ry dput
 List.sublist(list(1L, 2L, 3L, 4L), 2L, 2L)
 #> list(2L, 3L)
 ```
@@ -1078,7 +1114,7 @@ List.sublist(list(1L, 2L, 3L, 4L), 2L, 2L)
 
 The first `count` elements as `before` and the rest as `others`.
 
-```r
+```r ry run runtime=ry dput
 List.split_at(list(1L, 2L, 3L), 1L)
 #> (before = list(1L), others = list(2L, 3L))
 ```
@@ -1143,7 +1179,7 @@ List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))
 
 Groups of `size` elements; the last group may be shorter.
 
-```r
+```r ry run runtime=ry dput
 List.chunks_of(list(1L, 2L, 3L), 2L)
 #> list(list(1L, 2L), list(3L))
 ```
@@ -1156,7 +1192,7 @@ List.chunks_of(list(1L, 2L, 3L), 2L)
 
 Puts `separator` between every two elements.
 
-```r
+```r ry run runtime=ry dput
 List.intersperse(list("a", "b", "c"), "-")
 #> list("a", "-", "b", "-", "c")
 ```
@@ -1169,7 +1205,7 @@ List.intersperse(list("a", "b", "c"), "-")
 
 A stable sort by `compare`, which returns `:LT`, `:EQ` or `:GT`.
 
-```r
+```r ry run runtime=ry dput
 List.sort_with(list(3L, 1L, 2L), Num.compare)
 #> list(1L, 2L, 3L)
 ```
@@ -1209,7 +1245,7 @@ List.sort_desc(list(1.5, 3, 2))
 The sum of the elements; `0L` for an empty list. An `integer` sum that overflows is an error, so
 sum doubles, or fold with `Num.add_checked` to get `:Err(:Overflow)` instead.
 
-```r
+```r ry run runtime=ry dput
 List.sum(list(1L, 2L, 3L))
 #> 6L
 ```
@@ -1223,7 +1259,7 @@ List.sum(list(1L, 2L, 3L))
 The product of the elements; `1L` for an empty list. An `integer` product that overflows is an
 error, as for `List.sum`.
 
-```r
+```r ry run runtime=ry dput
 List.product(list(2, 2.5))
 #> 5
 ```
@@ -1236,7 +1272,7 @@ List.product(list(2, 2.5))
 
 The smallest element, or `:Err(:ListWasEmpty)`.
 
-```r
+```r ry run runtime=ry dput
 List.min(list(3L, 1L, 2L))
 #> :Ok(1L)
 ```
@@ -1249,7 +1285,7 @@ List.min(list(3L, 1L, 2L))
 
 The largest element, or `:Err(:ListWasEmpty)`.
 
-```r
+```r ry run runtime=ry dput
 List.max(list())
 #> :Err(:ListWasEmpty)
 ```
@@ -1262,7 +1298,7 @@ List.max(list())
 
 Whether the list begins with the elements of `prefix`.
 
-```r
+```r ry run runtime=ry dput
 List.starts_with(list(1L, 2L, 3L), list(1L, 2L))
 #> TRUE
 ```
@@ -1275,7 +1311,7 @@ List.starts_with(list(1L, 2L, 3L), list(1L, 2L))
 
 Whether the list ends with the elements of `suffix`.
 
-```r
+```r ry run runtime=ry dput
 List.ends_with(list(1L, 2L, 3L), list(2L))
 #> FALSE
 ```
@@ -1292,7 +1328,7 @@ fn(string: character) -> logical
 
 Whether the string is `""`.
 
-```r
+```r ry run runtime=ry dput
 Str.is_empty("")
 #> TRUE
 ```
@@ -1305,7 +1341,7 @@ fn(first: character, second: character) -> character
 
 `first` followed by `second`.
 
-```r
+```r ry run runtime=ry dput
 Str.concat("snake", "_case")
 #> "snake_case"
 ```
@@ -1318,7 +1354,7 @@ fn(strings: list[character], separator: character) -> character
 
 Joins a list of strings with `separator` between them.
 
-```r
+```r ry run runtime=ry dput
 Str.join_with(list("a", "b", "c"), ", ")
 #> "a, b, c"
 ```
@@ -1331,7 +1367,7 @@ fn(string: character, separator: character) -> list[character]
 
 Splits at every occurrence of `separator`.
 
-```r
+```r ry run runtime=ry dput
 Str.split_on("a,b,,c", ",")
 #> list("a", "b", "", "c")
 ```
@@ -1344,7 +1380,7 @@ fn(string: character, count: integer) -> character
 
 `count` copies of the string.
 
-```r
+```r ry run runtime=ry dput
 Str.repeat("ab", 3L)
 #> "ababab"
 ```
@@ -1357,7 +1393,7 @@ fn(string: character, prefix: character) -> logical
 
 Whether the string begins with `prefix`.
 
-```r
+```r ry run runtime=ry dput
 Str.starts_with("report.csv", "report")
 #> TRUE
 ```
@@ -1370,7 +1406,7 @@ fn(string: character, suffix: character) -> logical
 
 Whether the string ends with `suffix`.
 
-```r
+```r ry run runtime=ry dput
 Str.ends_with("report.csv", ".R")
 #> FALSE
 ```
@@ -1383,7 +1419,7 @@ fn(string: character, part: character) -> logical
 
 Whether `part` occurs in the string, matched literally.
 
-```r
+```r ry run runtime=ry dput
 Str.contains("a.b", ".")
 #> TRUE
 ```
@@ -1396,7 +1432,7 @@ fn(string: character) -> character
 
 Removes leading and trailing whitespace.
 
-```r
+```r ry run runtime=ry dput
 Str.trim("  hi  ")
 #> "hi"
 ```
@@ -1409,7 +1445,7 @@ fn(string: character) -> character
 
 Removes leading whitespace.
 
-```r
+```r ry run runtime=ry dput
 Str.trim_start("  hi  ")
 #> "hi  "
 ```
@@ -1422,7 +1458,7 @@ fn(string: character) -> character
 
 Removes trailing whitespace.
 
-```r
+```r ry run runtime=ry dput
 Str.trim_end("  hi  ")
 #> "  hi"
 ```
@@ -1435,7 +1471,7 @@ fn(string: character, prefix: character) -> character
 
 Removes `prefix` if the string begins with it.
 
-```r
+```r ry run runtime=ry dput
 Str.drop_prefix("v1.2", "v")
 #> "1.2"
 ```
@@ -1448,7 +1484,7 @@ fn(string: character, suffix: character) -> character
 
 Removes `suffix` if the string ends with it.
 
-```r
+```r ry run runtime=ry dput
 Str.drop_suffix("data.csv", ".csv")
 #> "data"
 ```
@@ -1461,7 +1497,7 @@ fn(string: character, prefix: character) -> character
 
 Puts `prefix` in front of the string.
 
-```r
+```r ry run runtime=ry dput
 Str.with_prefix("world", "hello ")
 #> "hello world"
 ```
@@ -1474,7 +1510,7 @@ fn(string: character, pattern: character, replacement: character) -> character
 
 Replaces every occurrence of `pattern`, matched literally.
 
-```r
+```r ry run runtime=ry dput
 Str.replace_each("a.b.c", ".", "-")
 #> "a-b-c"
 ```
@@ -1487,7 +1523,7 @@ fn(string: character, pattern: character, replacement: character) -> character
 
 Replaces the first occurrence of `pattern`.
 
-```r
+```r ry run runtime=ry dput
 Str.replace_first("a.b.c", ".", "-")
 #> "a-b.c"
 ```
@@ -1500,7 +1536,7 @@ fn(string: character, pattern: character, replacement: character) -> character
 
 Replaces the last occurrence of `pattern`.
 
-```r
+```r ry run runtime=ry dput
 Str.replace_last("a.b.c", ".", "-")
 #> "a.b-c"
 ```
@@ -1513,7 +1549,7 @@ fn(string: character, separator: character) -> Result<Record{before: character, 
 
 Splits at the first `separator` into `before` and `after`, or `:Err(:NotFound)`.
 
-```r
+```r ry run runtime=ry dput
 Str.split_first("key=value=more", "=")
 #> :Ok((after = "value=more", before = "key"))
 ```
@@ -1526,7 +1562,7 @@ fn(string: character, separator: character) -> Result<Record{before: character, 
 
 Splits at the last `separator`.
 
-```r
+```r ry run runtime=ry dput
 Str.split_last("key=value=more", "=")
 #> :Ok((after = "more", before = "key=value"))
 ```
@@ -1539,7 +1575,7 @@ fn(string: character) -> integer
 
 The number of bytes in the string's UTF-8 encoding.
 
-```r
+```r ry run runtime=ry dput
 Str.count_utf8_bytes("hé")
 #> 3L
 ```
@@ -1552,7 +1588,7 @@ fn(string: character) -> list[integer]
 
 The bytes of the string's UTF-8 encoding.
 
-```r
+```r ry run runtime=ry dput
 Str.to_utf8("hé")
 #> list(104L, 195L, 169L)
 ```
@@ -1565,7 +1601,7 @@ fn(bytes: list[integer]) -> Result<character, :BadUtf8>
 
 The string a list of bytes encodes, or `:Err(:BadUtf8)`.
 
-```r
+```r ry run runtime=ry dput
 Str.from_utf8(list(104L, 105L))
 #> :Ok("hi")
 ```
@@ -1591,7 +1627,7 @@ fn(string: character) -> Result<integer, :InvalidNumStr>
 
 Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`.
 
-```r
+```r ry run runtime=ry dput
 Str.to_integer("4.2")
 #> :Err(:InvalidNumStr)
 ```
@@ -1604,7 +1640,7 @@ fn(string: character) -> Result<double, :InvalidNumStr>
 
 Parses a decimal number, or `:Err(:InvalidNumStr)`; `NA` and `NaN` are not numbers.
 
-```r
+```r ry run runtime=ry dput
 Str.to_double("4.5e1")
 #> :Ok(45)
 ```
@@ -1617,7 +1653,7 @@ fn(string: character) -> character
 
 Lowercases the ASCII letters and leaves every other character alone.
 
-```r
+```r ry run runtime=ry dput
 Str.with_ascii_lowercased("Straße ABC")
 #> "straße abc"
 ```
@@ -1630,7 +1666,7 @@ fn(string: character) -> character
 
 Uppercases the ASCII letters.
 
-```r
+```r ry run runtime=ry dput
 Str.with_ascii_uppercased("straße abc")
 #> "STRAßE ABC"
 ```
@@ -1686,7 +1722,7 @@ Functions over single numbers, `integer` or `double`. A checked operation return
 
 The number as text, with up to 15 significant digits.
 
-```r
+```r ry run runtime=ry dput
 Num.to_str(1 / 3)
 #> "0.333333333333333"
 ```
@@ -1699,7 +1735,7 @@ Num.to_str(1 / 3)
 
 `:LT`, `:EQ` or `:GT`, comparing `first` with `second`.
 
-```r
+```r ry run runtime=ry dput
 Num.compare(2L, 1L)
 #> :GT
 ```
@@ -1712,7 +1748,7 @@ Num.compare(2L, 1L)
 
 The smaller number.
 
-```r
+```r ry run runtime=ry dput
 Num.min(2L, 1L)
 #> 1L
 ```
@@ -1725,7 +1761,7 @@ Num.min(2L, 1L)
 
 The larger number.
 
-```r
+```r ry run runtime=ry dput
 Num.max(2.5, 1)
 #> 2.5
 ```
@@ -1803,7 +1839,7 @@ Num.is_approx_eq(0.1 + 0.2, 0.3)
 
 Whether the number is zero.
 
-```r
+```r ry run runtime=ry dput
 Num.is_zero(-0)
 #> TRUE
 ```
@@ -1816,7 +1852,7 @@ Num.is_zero(-0)
 
 Whether the number is greater than zero.
 
-```r
+```r ry run runtime=ry dput
 Num.is_positive(0L)
 #> FALSE
 ```
@@ -1829,7 +1865,7 @@ Num.is_positive(0L)
 
 Whether the number is less than zero.
 
-```r
+```r ry run runtime=ry dput
 Num.is_negative(-1)
 #> TRUE
 ```
@@ -1842,7 +1878,7 @@ Num.is_negative(-1)
 
 Whether the number is a whole, even number.
 
-```r
+```r ry run runtime=ry dput
 Num.is_even(4L)
 #> TRUE
 ```
@@ -1855,7 +1891,7 @@ Num.is_even(4L)
 
 Whether the number is a whole, odd number.
 
-```r
+```r ry run runtime=ry dput
 Num.is_odd(-3L)
 #> TRUE
 ```
@@ -2050,7 +2086,7 @@ Num.atan(1) * 4
 
 The sum, or `:Err(:Overflow)`.
 
-```r
+```r ry run runtime=ry dput
 Num.add_checked(.Machine$integer.max, 1L)
 #> :Err(:Overflow)
 ```
@@ -2063,7 +2099,7 @@ Num.add_checked(.Machine$integer.max, 1L)
 
 The difference, or `:Err(:Overflow)`.
 
-```r
+```r ry run runtime=ry dput
 Num.sub_checked(10L, 3L)
 #> :Ok(7L)
 ```
@@ -2076,7 +2112,7 @@ Num.sub_checked(10L, 3L)
 
 The product, or `:Err(:Overflow)`; a finite double that would become infinite overflows too.
 
-```r
+```r ry run runtime=ry dput
 Num.mul_checked(1e308, 10)
 #> :Err(:Overflow)
 ```
@@ -2128,7 +2164,7 @@ Num.mul_saturated(100000L, 100000L)
 
 The quotient as a double, or `:Err(:DivByZero)`.
 
-```r
+```r ry run runtime=ry dput
 Num.div_checked(7L, 2L)
 #> :Ok(3.5)
 ```
@@ -2141,7 +2177,7 @@ Num.div_checked(7L, 2L)
 
 The quotient rounded toward zero, or `:Err(:DivByZero)`.
 
-```r
+```r ry run runtime=ry dput
 Num.div_trunc_checked(-7L, 2L)
 #> :Ok(-3L)
 ```
@@ -2167,7 +2203,7 @@ Num.div_ceil_checked(7L, 2L)
 
 The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`.
 
-```r
+```r ry run runtime=ry dput
 Num.rem_checked(-7L, 2L)
 #> :Ok(-1L)
 ```
@@ -2180,7 +2216,7 @@ Num.rem_checked(-7L, 2L)
 
 The square root, or `:Err(:SqrtOfNegative)`.
 
-```r
+```r ry run runtime=ry dput
 Num.sqrt_checked(-1)
 #> :Err(:SqrtOfNegative)
 ```
@@ -2193,7 +2229,7 @@ Num.sqrt_checked(-1)
 
 The natural logarithm, or `:Err(:LogNeedsPositive)`.
 
-```r
+```r ry run runtime=ry dput
 Num.log_checked(exp(2))
 #> :Ok(2)
 ```
@@ -2236,7 +2272,7 @@ A dictionary maps keys to values, typed `Dict<K, V>`. See [Dictionaries and sets
 
 A dictionary with no entries.
 
-```r
+```r ry run runtime=ry dput
 Dict.empty()
 #> Dict.empty()
 ```
@@ -2249,7 +2285,7 @@ Dict.empty()
 
 A dictionary with one entry.
 
-```r
+```r ry run runtime=ry dput
 Dict.single("a", 1)
 #> Dict.from_list(list(("a", 1)))
 ```
@@ -2262,7 +2298,7 @@ Dict.single("a", 1)
 
 A dictionary from `(key, value)` tuples; a later tuple replaces an earlier one with the same key.
 
-```r
+```r ry run runtime=ry dput
 Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
 #> Dict.from_list(list(("a", 3), ("b", 2)))
 ```
@@ -2275,7 +2311,7 @@ Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
 
 The entries as `(key, value)` tuples, in insertion order.
 
-```r
+```r ry run runtime=ry dput
 Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
 #> list(("a", 1), ("b", 2))
 ```
@@ -2288,7 +2324,7 @@ Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
 
 The number of entries.
 
-```r
+```r ry run runtime=ry dput
 Dict.len(Dict.single("a", 1))
 #> 1L
 ```
@@ -2301,7 +2337,7 @@ Dict.len(Dict.single("a", 1))
 
 Whether the dictionary has no entries.
 
-```r
+```r ry run runtime=ry dput
 Dict.is_empty(Dict.empty())
 #> TRUE
 ```
@@ -2314,7 +2350,7 @@ Dict.is_empty(Dict.empty())
 
 The value for `key`, or `:Err(:KeyNotFound)`.
 
-```r
+```r ry run runtime=ry dput
 Dict.get(Dict.single("a", 1), "a")
 #> :Ok(1)
 ```
@@ -2327,7 +2363,7 @@ Dict.get(Dict.single("a", 1), "a")
 
 Whether the dictionary has an entry for `key`.
 
-```r
+```r ry run runtime=ry dput
 Dict.contains(Dict.single("a", 1), "b")
 #> FALSE
 ```
@@ -2340,7 +2376,7 @@ Dict.contains(Dict.single("a", 1), "b")
 
 Adds an entry, or replaces the value of an existing key in place.
 
-```r
+```r ry run runtime=ry dput
 Dict.insert(Dict.single("a", 1), "b", 2)
 #> Dict.from_list(list(("a", 1), ("b", 2)))
 ```
@@ -2353,7 +2389,7 @@ Dict.insert(Dict.single("a", 1), "b", 2)
 
 Removes the entry for `key`, if there is one.
 
-```r
+```r ry run runtime=ry dput
 Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
 #> Dict.from_list(list(("b", 2)))
 ```
@@ -2366,7 +2402,7 @@ Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
 
 Sets the entry for `key` from `f`, which gets `:Ok(value)` or `:Err(:Missing)` and returns either; `:Err` removes the entry.
 
-```r
+```r ry run runtime=ry dput
 Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default(r, 0L) + 1L))
 #> Dict.from_list(list(("hits", 2L)))
 ```
@@ -2379,7 +2415,7 @@ Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default
 
 The keys, in insertion order.
 
-```r
+```r ry run runtime=ry dput
 Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
 #> list("a", "b")
 ```
@@ -2392,7 +2428,7 @@ Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
 
 The values, in insertion order.
 
-```r
+```r ry run runtime=ry dput
 Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
 #> list(1, 2)
 ```
@@ -2405,7 +2441,7 @@ Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
 
 Folds over the entries: `f` gets the state, a key and its value.
 
-```r
+```r ry run runtime=ry dput
 Dict.walk(Dict.from_list(list(("a", 1), ("b", 2))), 0, function(total, k, v) total + v)
 #> 3
 ```
@@ -2431,7 +2467,7 @@ Dict.walk_until(Dict.from_list(list(("a", 1L), ("b", 5L), ("c", 2L))), 0L, funct
 
 Replaces every value with `f` of its key and value.
 
-```r
+```r ry run runtime=ry dput
 Dict.map(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v * 10)
 #> Dict.from_list(list(("a", 10), ("b", 20)))
 ```
@@ -2457,7 +2493,7 @@ Dict.join_map(Dict.from_list(list(("a", 1L), ("b", 2L))), function(k, v) Dict.si
 
 The entries for which `predicate` of the key and value is `TRUE`.
 
-```r
+```r ry run runtime=ry dput
 Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 #> Dict.from_list(list(("b", 2)))
 ```
@@ -2470,7 +2506,7 @@ Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 
 The entries for which `predicate` is `FALSE`.
 
-```r
+```r ry run runtime=ry dput
 Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 #> Dict.from_list(list(("a", 1)))
 ```
@@ -2483,7 +2519,7 @@ Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 
 The entries of both; where a key is in both, `second`'s value wins.
 
-```r
+```r ry run runtime=ry dput
 Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
 #> Dict.from_list(list(("a", 5), ("b", 2)))
 ```
@@ -2496,7 +2532,7 @@ Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
 
 The entries of `first` whose key and value are both in `second`.
 
-```r
+```r ry run runtime=ry dput
 Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list(("a", 1), ("b", 0))))
 #> Dict.from_list(list(("a", 1)))
 ```
@@ -2509,7 +2545,7 @@ Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list((
 
 The entries of `first` whose key is not in `second`.
 
-```r
+```r ry run runtime=ry dput
 Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
 #> Dict.from_list(list(("b", 2)))
 ```
@@ -2552,7 +2588,7 @@ A set of distinct keys, typed `Set<T>`.
 
 A set with no elements.
 
-```r
+```r ry run runtime=ry dput
 Set.empty()
 #> Set.empty()
 ```
@@ -2565,7 +2601,7 @@ Set.empty()
 
 A set with one element.
 
-```r
+```r ry run runtime=ry dput
 Set.single("a")
 #> Set.from_list(list("a"))
 ```
@@ -2578,7 +2614,7 @@ Set.single("a")
 
 A set of the list's elements, without duplicates, in first-seen order.
 
-```r
+```r ry run runtime=ry dput
 Set.from_list(list(2L, 1L, 2L))
 #> Set.from_list(list(2L, 1L))
 ```
@@ -2591,7 +2627,7 @@ Set.from_list(list(2L, 1L, 2L))
 
 The elements, in insertion order.
 
-```r
+```r ry run runtime=ry dput
 Set.to_list(Set.from_list(list("b", "a")))
 #> list("b", "a")
 ```
@@ -2604,7 +2640,7 @@ Set.to_list(Set.from_list(list("b", "a")))
 
 The number of elements.
 
-```r
+```r ry run runtime=ry dput
 Set.len(Set.from_list(list(1L, 1L, 2L)))
 #> 2L
 ```
@@ -2617,7 +2653,7 @@ Set.len(Set.from_list(list(1L, 1L, 2L)))
 
 Whether the set has no elements.
 
-```r
+```r ry run runtime=ry dput
 Set.is_empty(Set.empty())
 #> TRUE
 ```
@@ -2630,7 +2666,7 @@ Set.is_empty(Set.empty())
 
 Whether `element` is in the set.
 
-```r
+```r ry run runtime=ry dput
 Set.contains(Set.from_list(list(1L, 2L)), 2L)
 #> TRUE
 ```
@@ -2643,7 +2679,7 @@ Set.contains(Set.from_list(list(1L, 2L)), 2L)
 
 Adds an element.
 
-```r
+```r ry run runtime=ry dput
 Set.insert(Set.single(1L), 2L)
 #> Set.from_list(list(1L, 2L))
 ```
@@ -2656,7 +2692,7 @@ Set.insert(Set.single(1L), 2L)
 
 Removes an element, if it is there.
 
-```r
+```r ry run runtime=ry dput
 Set.remove(Set.from_list(list(1L, 2L)), 1L)
 #> Set.from_list(list(2L))
 ```
@@ -2669,7 +2705,7 @@ Set.remove(Set.from_list(list(1L, 2L)), 1L)
 
 The elements of either set.
 
-```r
+```r ry run runtime=ry dput
 Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #> Set.from_list(list(1L, 2L, 3L))
 ```
@@ -2682,7 +2718,7 @@ Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 
 The elements of both sets.
 
-```r
+```r ry run runtime=ry dput
 Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #> Set.from_list(list(2L))
 ```
@@ -2695,7 +2731,7 @@ Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 
 The elements of `first` that are not in `second`.
 
-```r
+```r ry run runtime=ry dput
 Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #> Set.from_list(list(1L))
 ```
@@ -2708,7 +2744,7 @@ Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 
 Folds over the elements.
 
-```r
+```r ry run runtime=ry dput
 Set.walk(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) total + x)
 #> 6L
 ```
@@ -2734,7 +2770,7 @@ Set.walk_until(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) if (x > 2
 
 The set of `f` of every element.
 
-```r
+```r ry run runtime=ry dput
 Set.map(Set.from_list(list(1L, 2L, 3L)), function(x) x %% 2L)
 #> Set.from_list(list(1L, 0L))
 ```
@@ -2760,7 +2796,7 @@ Set.join_map(Set.from_list(list(1L, 2L)), function(x) Set.from_list(list(x, x * 
 
 The elements for which `predicate` is `TRUE`.
 
-```r
+```r ry run runtime=ry dput
 Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 #> Set.from_list(list(2L, 3L))
 ```
@@ -2773,7 +2809,7 @@ Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 
 The elements for which `predicate` is `FALSE`.
 
-```r
+```r ry run runtime=ry dput
 Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 #> Set.from_list(list(1L))
 ```
