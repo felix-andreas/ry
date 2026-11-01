@@ -52,7 +52,7 @@ const lspFeatures = [
     },
 ];
 
-// Every snippet below was run through the real binary (`ry check`, `ry run --runtime ry`), and
+// Every snippet below was run through the real binary (`ry check`, `ry run`), and
 // its output is pasted verbatim; re-run rather than hand-edit.
 type Sample = {
     key: string;
@@ -62,6 +62,7 @@ type Sample = {
     command: string;
     output: string;
     note?: string;
+    caption?: string;
 };
 
 const runtimeTabs: Sample[] = [
@@ -120,7 +121,7 @@ hole: Hole <- @Shape(:Circle(radius = 1))`,
 
 ada$name
 ada$email`,
-        command: "ry run --runtime ry people.R",
+        command: "ry run people.R",
         output: `[1] "ada"
 Error in ada$email :
   the record has no field \`email\`; its fields are \`age\`, \`name\``,
@@ -138,7 +139,7 @@ sales |>
   DataFrame.filter(col("units") > 1L) |>
   DataFrame.group_by("region") |>
   GroupBy.agg(revenue = (col("units") * col("price")) |> Expr.sum())`,
-        command: "ry run --runtime ry sales.R",
+        command: "ry run sales.R",
         output: `   region revenue
    <char>   <num>
 1:     eu    12.5
@@ -153,7 +154,7 @@ sales |>
 loud <- List.map(words, Str.with_ascii_uppercased)
 
 Str.join_with(loud, " ")`,
-        command: "ry run --runtime ry words.R",
+        command: "ry run words.R",
         output: `[1] "RY CHECKS R"`,
     },
 ];
@@ -174,11 +175,14 @@ const benchmarkScale = Math.ceil(Math.max(...benchmarks.map((row) => row.speedup
 const migrationTabs: Sample[] = [
     {
         key: "step-check",
+        caption: "Works with the code you have today",
         label: "1. Check the code you have",
         file: "R/pricing.R",
         code: `net_price <- function(price, rate) {
   price * (1 - ratee)
-}`,
+}
+
+net_price(100, 0.2)`,
         command: "ry check",
         output: `unresolved
 
@@ -186,10 +190,12 @@ const migrationTabs: Sample[] = [
    --[R/pricing.R:2:16]
  1 | net_price <- function(price, rate) {
  2 |   price * (1 - ratee)
-   |                ^^^^^`,
+   |                ^^^^^
+ 3 | }`,
     },
     {
         key: "step-comments",
+        caption: "Adjust your code, still backwards compatible",
         label: "2. Type your code",
         file: "R/pricing.R",
         code: `#: fn(price: double, rate: double) -> double
@@ -209,26 +215,26 @@ net_price(100, "0.2")`,
     },
     {
         key: "step-inline",
+        caption: "Use what ry adds, and run it on ry",
         label: "3. Switch to inline types",
-        file: "pricing.R",
-        code: `net_price <- function(
-  price: double,
-  rate: double
-) -> double {
+        file: "R/pricing.R",
+        code: `net_price <- function(price: double, rate: double) {
   price * (1 - rate)
 }
 
+net_price(100, 0.2)
 net_price(100, "0.2")`,
-        command: "ry run --runtime ry pricing.R",
-        output: `Error in net_price(100, "0.2") :
+        command: "ry run R/pricing.R",
+        output: `[1] 80
+Error in net_price(100, "0.2") :
   argument \`rate\` must be \`double\`, not \`character\``,
     },
     {
         key: "step-ry",
+        caption: "Strict mode (R--): only this circle",
         label: "4. Go fully typed",
         file: "R/pricing.R",
         code: `# typing: strict
-
 show_price <- function(price: double, label) {
   message(label, ": ", price)
 }`,
@@ -236,11 +242,11 @@ show_price <- function(price: double, label) {
         output: `strict
 
   x strict mode: parameter \`label\` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in \`label: TYPE\`
-   --[R/pricing.R:3:39]
- 2 |
- 3 | show_price <- function(price: double, label) {
+   --[R/pricing.R:2:39]
+ 1 | # typing: strict
+ 2 | show_price <- function(price: double, label) {
    |                                       ^^^^^
- 4 |   message(label, ": ", price)`,
+ 3 |   message(label, ": ", price)`,
     },
 ];
 
@@ -338,7 +344,8 @@ const ideCode = `<div class="cl" data-line="1"><span class="ln" aria-hidden="tru
 <div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"></span></div>
 <div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-id">label</span><span class="t-op">)</span></span></div>`;
 
-// The same file twice: plain R, then with one `#:` annotation, which finds a second bug.
+// The same file twice: plain R with one bug, then that bug fixed and one `#:` annotation, which finds
+// a second. Each mode shows one diagnostic, so the two outputs are the same height.
 const checkerCode = `fee_rate <- function(region) {
   if (region == "north") 0.18 else 0.22
 }
@@ -367,7 +374,7 @@ const checkerModes = [
         key: "typed",
         label: "Typed",
         code: `#: fn(region: character) -> double
-${checkerCode}`,
+${checkerCode.replace('message("fee: " + fee)', 'message("fee: ", fee)')}`,
         output: `type-mismatch
 
   x expected \`character\`, found \`double\`
@@ -375,36 +382,43 @@ ${checkerCode}`,
  6 | quote <- list(region = "north", amount = 1240.5)
  7 | fee <- quote$amount * fee_rate(quote$amount)
    |                                ^^^^^^^^^^^^
- 8 | message("fee: " + fee)
+ 8 | message("fee: ", fee)
 
-type-mismatch
-
-  x expected a numeric value (\`integer\` or \`double\`), found \`character\`
-   --[R/pricing.R:8:9]
- 7 | fee <- quote$amount * fee_rate(quote$amount)
- 8 | message("fee: " + fee)
-   |         ^^^^^^^
-
-2 problems in 1 file`,
-        lead: "#:",
-        caption: "comments are type annotations. R skips them as comments, so the file still runs on GNU R.",
+1 problem in 1 file`,
+        caption: "With that bug fixed, one `#:` comment finds the next. R reads it as a comment, so the file still runs on GNU R.",
         link: { href: "/type-checking/annotations", label: "Annotations" },
     },
 ];
 
-const formatterCode = {
-    braces: {
-        before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-kw">for</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> </span><span class="t-kw">in</span><span class="t-op"> </span><span class="t-id">regions</span><span class="t-op">) </span><span class="t-fn">accumulate</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-kw">if</span><span class="t-op">(</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">)==</span><span class="t-num">0</span><span class="t-op">)</span></span></div>
-<div class="cl" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="ws">··</span><span class="t-fn">warning</span><span class="t-op">(</span><span class="t-str">"no rows"</span><span class="t-op">)</span></span></div>`,
-        after: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-kw">for</span><span class="t-op"> (</span><span class="t-id">region</span><span class="t-op"> </span><span class="t-kw">in</span><span class="t-op"> </span><span class="t-id">regions</span><span class="t-op">) {</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="ws">··</span><span class="t-fn">accumulate</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">) == </span><span class="t-num">0</span><span class="t-op">) {</span></span></div>
-<div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="ws">··</span><span class="t-fn">warning</span><span class="t-op">(</span><span class="t-str">"no rows"</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:5"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">}</span></span></div>`,
-    },
+// Captured from `ry fmt --diff`; `changed` lists the lines the diff marks on each side.
+const formatterSample = {
+    before: `summarise <- function(sales, min_units = 1) {
+  big<-sales[sales$units>=min_units,]
+  if(nrow(big)==0){
+  warning("no rows")
+  return(NULL)}
+  for(region in unique(big$region)) report(big,region)
+  invisible(big)
+}`,
+    beforeChanged: [2, 3, 4, 5, 6],
+    after: `summarise <- function(sales, min_units = 1) {
+  big <- sales[sales$units >= min_units, ]
+  if (nrow(big) == 0) {
+    warning("no rows")
+    return(NULL)
+  }
+  for (region in unique(big$region)) {
+    report(big, region)
+  }
+  invisible(big)
+}`,
+    afterChanged: [2, 3, 4, 5, 6, 7, 8, 9],
 };
+const markChanged = (html: string, changed: number[]) =>
+    html
+        .split("\n")
+        .map((line, index) => (changed.includes(index + 1) ? line.replace('class="cl"', 'class="cl is-changed"') : line))
+        .join("\n");
 
 const year = new Date().getFullYear();
 ---
@@ -621,7 +635,7 @@ const year = new Date().getFullYear();
                                                 </div>
                                             </div>
                                             <p class="stage-foot">
-                                                <span>{mode.lead && <><code>{mode.lead}</code> </>}{mode.caption}</span>
+                                                <span set:html={escapeHtml(mode.caption).replace(/`([^`]+)`/g, "<code>$1</code>")} />
                                                 <a href={mode.link.href}>{mode.link.label}</a>
                                             </p>
                                         </div>
@@ -630,12 +644,15 @@ const year = new Date().getFullYear();
                             </div>
                         </div>
                         <div class="stage split fmt" role="tabpanel" id="panel-formatter" aria-labelledby="tab-formatter" tabindex="0" hidden>
+                            <div class="stage-head">
+                                <span class="ftabs"><span class="ftab is-active">R/summarise.R</span></span>
+                            </div>
                             <div class="stage-body">
                                 <div class="pane pane-src">
-                                    <div class="code" set:html={formatterCode.braces.before} />
+                                    <div class="code" set:html={markChanged(highlightR(formatterSample.before), formatterSample.beforeChanged)} />
                                 </div>
                                 <div class="pane pane-out">
-                                    <div class="code" set:html={formatterCode.braces.after} />
+                                    <div class="code" set:html={markChanged(highlightR(formatterSample.after), formatterSample.afterChanged)} />
                                 </div>
                             </div>
                             <p class="stage-foot"><span></span><a href="/guides/formatting">Formatting guide</a></p>
@@ -829,7 +846,21 @@ const year = new Date().getFullYear();
                         <p class="lede">Use ry today on the code you have, and move it to typed code one step at a time.</p>
                     </header>
                     <div class="showcase reveal path" data-tabs="migrate">
-                    <div class="venn"><Venn id="ry-venn-home" step={1} /></div>
+                    <div class="venn">
+                        <Venn id="ry-venn-home" step={1} />
+                        <div class="venn-foot">
+                            <div class="venn-dots" aria-hidden="true">
+                                {migrationTabs.map((tab, index) => (
+                                    <button type="button" tabindex="-1" class:list={["venn-dot", { "is-on": index === 0 }]} data-index={index} />
+                                ))}
+                            </div>
+                            <p class="venn-captions" aria-live="polite">
+                                {migrationTabs.map((tab, index) => (
+                                    <span class:list={["venn-caption", { "is-on": index === 0 }]}>{tab.caption}</span>
+                                ))}
+                            </p>
+                        </div>
+                    </div>
                     <div class="seg seg-steps" role="tablist" aria-label="Steps">
                         {
                             migrationTabs.map((tab, index) => (
@@ -1891,6 +1922,10 @@ ry check .</code></pre>
                 let revealed = !reveal || typeof IntersectionObserver === "undefined";
                 if (!revealed) root.classList.add("is-waiting");
                 const venn = root.querySelector(":scope > .venn .venn-svg");
+                const vennDots = Array.from(root.querySelectorAll(":scope > .venn .venn-dot")) as HTMLElement[];
+                const vennCaptions = Array.from(root.querySelectorAll(":scope > .venn .venn-caption"));
+                // The dots repeat the step tabs for pointer users, so they act through the tabs.
+                vennDots.forEach((dot, i) => dot.addEventListener("click", () => tabs[i]?.click()));
                 const indicator = document.createElement("span");
                 indicator.className = "seg-ind";
                 indicator.setAttribute("aria-hidden", "true");
@@ -1957,6 +1992,8 @@ ry check .</code></pre>
                         }
                     }
                     if (venn) venn.setAttribute("data-step", String(index + 1));
+                    vennDots.forEach((dot, i) => dot.classList.toggle("is-on", i === index));
+                    vennCaptions.forEach((caption, i) => caption.classList.toggle("is-on", i === index));
                     if (tablist && tablist.scrollWidth > tablist.clientWidth) {
                         const tab = tabs[index];
                         tablist.scrollTo({
@@ -3195,9 +3232,9 @@ ry check .</code></pre>
                 visibility: hidden;
                 pointer-events: none;
             }
-            /* On a phone the panels stack and the tallest one would leave a screen of empty frame
-               under the short ones, so each frame fits its own panel there. */
-            @media (max-width: 640px) {
+            /* Once code and output stack, panel heights differ by hundreds of pixels, and the tallest
+               would leave empty frame under the rest, so each frame fits its own panel there. */
+            @media (max-width: 900px) {
                 .showcase > [role="tabpanel"][hidden] {
                     display: none;
                 }
@@ -3512,7 +3549,8 @@ ry check .</code></pre>
                 position: relative;
                 display: grid;
                 grid-template-rows: 1fr;
-                min-height: 322px;
+                /* Tall enough for the completion popup under line 6, and no taller. */
+                min-height: 244px;
             }
             .ide-body [data-for] {
                 display: none;
@@ -4015,7 +4053,7 @@ ry check .</code></pre>
                     --code-size: 12px;
                 }
                 .ide-body {
-                    min-height: 314px;
+                    min-height: 236px;
                 }
             }
             @media (max-width: 640px) {
@@ -4035,7 +4073,7 @@ ry check .</code></pre>
                     left: 14px;
                 }
                 .ide-body {
-                    min-height: 296px;
+                    min-height: 222px;
                 }
                 .stage-head,
                 .stage-foot {
@@ -4165,6 +4203,33 @@ ry check .</code></pre>
             }
             .checker .stage-body {
                 flex: 1;
+            }
+            /* On wide frames the feature tabs join the header row too, as the checker's toggle does. */
+            @media (min-width: 1024px) {
+                .ide {
+                    gap: 0;
+                }
+                .ide > .seg {
+                    grid-row: 1;
+                    grid-column: 1;
+                    justify-self: end;
+                    align-self: start;
+                    z-index: 3;
+                    margin: 4px 6px 0 0;
+                    padding: 2px;
+                    border-radius: 8px;
+                }
+                .ide > .seg [role="tab"] {
+                    font-size: 12px;
+                    padding: 0.2rem 0.65rem;
+                    border-radius: 6px;
+                }
+                .ide > .seg .seg-ind {
+                    border-radius: 6px;
+                }
+                .ide > .stage {
+                    grid-row: 1;
+                }
             }
             .seg-mini {
                 padding: 2px;
@@ -4366,6 +4431,63 @@ ry check .</code></pre>
                 text-align: left;
                 white-space: normal;
             }
+            /* The caption below names strict mode on step 4, so the diagram's own label would repeat it. */
+            .path .v-strict {
+                display: none;
+            }
+            .venn-foot {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 0.35rem;
+                margin-top: 0.25rem;
+            }
+            .venn-dots {
+                display: flex;
+            }
+            /* The bar is 4px tall, so the padding gives it a finger-sized hit area. */
+            .venn-dot {
+                width: 38px;
+                height: 20px;
+                padding: 8px 3px;
+                border: 0;
+                background: oklch(1 0 0 / 0.16);
+                background-clip: content-box;
+                border-radius: 4px;
+                cursor: pointer;
+                transition: background-color var(--switch-duration) var(--switch-ease);
+            }
+            .venn-dot:hover {
+                background-color: oklch(1 0 0 / 0.3);
+            }
+            .venn-dot.is-on {
+                background-color: color-mix(in oklch, var(--cap) 85%, white);
+            }
+            .venn-captions {
+                display: grid;
+                margin: 0;
+                text-align: center;
+                font-size: 15px;
+                color: var(--foreground);
+            }
+            .venn-caption {
+                grid-area: 1 / 1;
+                opacity: 0;
+                transform: translateY(6px);
+                transition:
+                    opacity var(--switch-duration) var(--switch-ease),
+                    transform var(--switch-duration) var(--switch-ease);
+            }
+            .venn-caption.is-on {
+                opacity: 1;
+                transform: none;
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .venn-caption,
+                .venn-dot {
+                    transition: none;
+                }
+            }
             .step-where {
                 flex: none;
                 padding: 0.12rem 0.5rem;
@@ -4401,7 +4523,7 @@ ry check .</code></pre>
                     grid-column: 1;
                 }
                 .path .seg-steps [role="tab"] {
-                    padding: 0.8rem 1rem;
+                    padding: 0.6rem 1rem;
                 }
                 .showcase.path > .stage {
                     grid-row: 2;
@@ -4410,9 +4532,7 @@ ry check .</code></pre>
                 .path > .venn {
                     grid-row: 1 / 3;
                     grid-column: 2;
-                    align-self: start;
-                    position: sticky;
-                    top: 6rem;
+                    align-self: center;
                 }
                 /* Half the frame is too narrow for code beside output, so the output sits below the code. */
                 .path > .stage .stage-body {
