@@ -40,6 +40,7 @@ pub mod envir;
 pub mod eval;
 pub mod format;
 pub mod frame;
+pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_render;
 pub mod linalg;

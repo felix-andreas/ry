@@ -3096,6 +3096,13 @@ first lines R had already read, leaving R mid-command.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
 - **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
 
+## A computed function that may be `NULL` is called as the function
+
+- **Previous shape.** Calling a value typed `fn | NULL` was a `type-mismatch` finding wherever the `NULL` came from, including a local set by a `switch` without a default (testthat's `load <- switch(style, ...)` after `arg_match(style)`) or by an `if` whose other branch is correlated with the call's guard (nloptr's `eval_g_ineq_wrapper`). A union of functions and plain values (shiny's `ns <- NS(namespace)`) was "not a function".
+- **Target shape.** `infer_ordinary_call` drops `NULL` beside function members unless the callee names a parameter, and `dispatch_call` checks a union of functions and values against its function members only, with an `Unknown` result. A parameter's `NULL` comes from its default or its declared type, so the caller supplies it and the call is still reported.
+- **Why.** The rule in "The checker presumes R code is correct": the `NULL` path of a computed function is one the code presumably rules out, and R fails only on that path.
+- **Impact.** Loses the true positive of a `switch` on an unvalidated value. Incremental analysis is unchanged: the rule reads the item's own naming.
+
 # Decision record: editor features for ry's own syntax
 
 - **The checker records pattern types.** `ItemCheck::pattern_types` maps each `match` pattern to
@@ -3796,3 +3803,43 @@ explicit allocators".
   agree. Edits to crates `libr` does not link (the formatter, the IDE layer) leave it alone.
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
+
+## macOS packages bind to ry's libR
+
+- **Before.** `crates/libr/build.rs` set the export list and soname for Linux only, so a macOS
+  `libR.dylib` exported nothing from the C layer and had no stable install name, and nothing made
+  a GNU R package binary call into it. On Linux the problem never arises: a package records
+  `libR.so` by soname, and ry's library, loaded first with `RTLD_GLOBAL`, satisfies it.
+- **The macOS problem.** Mach-O uses a two-level namespace: every undefined symbol in a package
+  binary is bound to one named library. CRAN's binaries link `-framework R` and name
+  `/Library/Frameworks/R.framework/Versions/4.x-<arch>/Resources/lib/libR.dylib`; Homebrew's
+  link `-lR` and name Homebrew's `libR.dylib`. dyld would load GNU R's libR beside ry's, and the
+  package would run against GNU R's heap.
+- **Options weighed.** Forcing a flat namespace (`DYLD_FORCE_FLAT_NAMESPACE`) needs an environment
+  variable set before ry starts, is stripped by SIP for protected binaries, and changes binding for
+  every library in the process. Interposing (`DYLD_INSERT_LIBRARIES`) has the same launch problem.
+  Rebuilding every package from source gives up CRAN's binaries.
+- **Shape.** ry's `libR.dylib` has the install name `@rpath/libR.dylib`, and its exports are
+  rustc's list plus a second `-exported_symbols_list` naming the `RY_EXPORT` C symbols (ld64 and
+  ld64.lld merge the two lists). When `dyn.load` opens a Mach-O library whose load commands name
+  GNU R's libR (`crates/libr/src/macho.rs`), it opens a copy instead, with that load command
+  rewritten in place to `@rpath/libR.dylib` and re-signed ad hoc with `codesign --force --sign -`,
+  because arm64 refuses to map a modified, unsigned image. The rewrite also zeroes the compatibility version the
+  load command records (GNU R links libR with its own version, and ry's libR has none, so dyld
+  would refuse it). dyld satisfies a load command from an
+  already loaded image whose install name matches, so the copy binds to ry's library. The copy is
+  cached under the user cache directory keyed by the rewrite's version (`REBIND_VERSION` in
+  `dynload.rs`, bumped whenever the rewrite changes), path, size and mtime, and a library that names no
+  libR is recorded with a marker so it is read once. The DLL record keeps the original path.
+- **ry-built packages.** `rcmd` links with `-undefined dynamic_lookup` and an empty `LIBR`, so the
+  binary records no libR and resolves R's API in the flat lookup that falls back to every loaded
+  image. The same build then loads under ry and under GNU R, and needs no rewriting.
+- **Known gaps.** A package that loads a sibling dylib through `@loader_path` breaks in the
+  rebound copy, because the copy lives outside the package's `libs/`. A failed load of a rebound copy says so in its error. CRAN's own `libRblas.dylib`
+  could pull in GNU R's libR if a package links it directly; unobserved. The install-name match is
+  reasoned from dyld's source and verified only once the release smoke test runs on a Mac.
+- **Windows (designed, not built).** Name the library `R.dll`: the loader reuses an already loaded
+  module with the same base name, so Rtools-built package DLLs bind to ry's copy with no
+  rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
+  `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
+  The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).

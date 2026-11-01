@@ -349,14 +349,11 @@ pub fn missing_r_home() -> Option<String> {
     located_r_home().as_ref().err().cloned()
 }
 
+/// GNU R's usual home on the platform, which `R.home()` reports when no installation was found.
+#[cfg(target_os = "macos")]
+const FALLBACK_R_HOME: &str = "/Library/Frameworks/R.framework/Resources";
+#[cfg(not(target_os = "macos"))]
 const FALLBACK_R_HOME: &str = "/usr/lib/R";
-
-const CANDIDATE_R_HOMES: &[&str] = &[
-    "/usr/lib/R",
-    "/usr/local/lib/R",
-    "/opt/R/lib/R",
-    "/usr/lib64/R",
-];
 
 fn located_r_home() -> &'static Result<String, String> {
     static HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
@@ -380,11 +377,12 @@ fn find_r_home() -> Result<String, String> {
         ));
     }
     let mut searched = vec!["R_HOME (not set)".to_owned()];
-    for candidate in CANDIDATE_R_HOMES {
-        if usable(candidate) {
-            return Ok((*candidate).to_owned());
+    for candidate in crate::gnu_r_home::candidate_r_homes() {
+        let candidate = candidate.to_string_lossy().into_owned();
+        if usable(&candidate) {
+            return Ok(candidate);
         }
-        searched.push((*candidate).to_owned());
+        searched.push(candidate);
     }
     match std::process::Command::new("R").arg("RHOME").output() {
         Ok(output) if output.status.success() => {
@@ -2406,14 +2404,27 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
-    let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
+    // GNU R's own platform strings, which packages match on (`grepl("darwin", R.version$os)`).
+    // CRAN's macOS builds target Darwin 20, the first release with Apple silicon.
+    let os = if cfg!(target_os = "macos") {
+        "darwin20"
+    } else {
+        "linux-gnu"
+    };
+    let vendor = if cfg!(target_os = "macos") {
+        "apple"
+    } else {
+        "pc"
+    };
+    let arch = std::env::consts::ARCH;
+    let platform = format!("{arch}-{vendor}-{os}");
     let version = r_version();
     let date = format!("{}-{}-{}", version.year, version.month, version.day);
     let fields: Vec<(&str, String)> = vec![
         ("platform", platform.clone()),
-        ("arch", std::env::consts::ARCH.to_owned()),
-        ("os", "linux-gnu".to_owned()),
-        ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
+        ("arch", arch.to_owned()),
+        ("os", os.to_owned()),
+        ("system", format!("{arch}, {os}")),
         ("status", String::new()),
         ("major", version.major.clone()),
         ("minor", version.minor.clone()),
@@ -3128,13 +3139,24 @@ pub unsafe fn init_locale() {
         libc::LC_TIME,
         libc::LC_MONETARY,
         libc::LC_MESSAGES,
-        libc::LC_PAPER,
-        libc::LC_MEASUREMENT,
+        LC_PAPER,
+        LC_MEASUREMENT,
     ] {
         libc::setlocale(category, c"".as_ptr());
     }
     crate::sort::refresh_collation();
 }
+
+/// macOS's C library has no paper or measurement category. `setlocale` rejects an unknown
+/// category, so on macOS these read as `""` and cannot be set, as in GNU R there.
+#[cfg(target_os = "linux")]
+const LC_PAPER: libc::c_int = libc::LC_PAPER;
+#[cfg(target_os = "linux")]
+const LC_MEASUREMENT: libc::c_int = libc::LC_MEASUREMENT;
+#[cfg(not(target_os = "linux"))]
+const LC_PAPER: libc::c_int = -1;
+#[cfg(not(target_os = "linux"))]
+const LC_MEASUREMENT: libc::c_int = -1;
 
 /// The C library category for `Sys.setlocale`'s category number, which indexes
 /// `c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
@@ -3148,8 +3170,8 @@ fn locale_category(number: i32) -> Option<libc::c_int> {
         5 => libc::LC_NUMERIC,
         6 => libc::LC_TIME,
         7 => libc::LC_MESSAGES,
-        8 => libc::LC_PAPER,
-        9 => libc::LC_MEASUREMENT,
+        8 => LC_PAPER,
+        9 => LC_MEASUREMENT,
         _ => return None,
     })
 }
