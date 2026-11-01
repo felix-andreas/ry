@@ -1,9 +1,9 @@
 # ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, and the
-# frame functions.
+# DataFrame API.
 #
 # The functions run only on ry's runtime, which binds them in the `ry` namespace and attaches it as
 # `package:ry`. `crates/interp/src/standard_library.rs` implements the modules and
-# `crates/interp/src/frame.rs` the frame functions, and a test keeps this file's names and the
+# `crates/interp/src/frame.rs` and `dataframe.rs` the DataFrame API, and a test keeps this file's names and the
 # runtime's equal. The user contract is
 # `docs/src/content/docs/reference/standard-library.mdx`.
 #
@@ -79,7 +79,7 @@ List.drop_first : <T> fn(list: list[T], count: integer) -> list[T]
 List.drop_last : <T> fn(list: list[T], count: integer) -> list[T]
 List.drop_at : <T> fn(list: list[T], index: integer) -> list[T]
 List.sublist : <T> fn(list: list[T], start: integer, count: integer) -> list[T]
-List.split_at : <T> fn(list: list[T], count: integer) -> record{before: list[T], others: list[T]}
+List.split_at : <T> fn(list: list[T], count: integer) -> Record{before: list[T], others: list[T]}
 List.chunks_of : <T> fn(list: list[T], size: integer) -> list[list[T]]
 List.intersperse : <T> fn(list: list[T], separator: T) -> list[T]
 List.sort_with : <T> fn(list: list[T], compare: fn(T, T) -> :LT | :EQ | :GT) -> list[T]
@@ -109,8 +109,8 @@ Str.with_prefix : fn(string: character, prefix: character) -> character
 Str.replace_each : fn(string: character, pattern: character, replacement: character) -> character
 Str.replace_first : fn(string: character, pattern: character, replacement: character) -> character
 Str.replace_last : fn(string: character, pattern: character, replacement: character) -> character
-Str.split_first : fn(string: character, separator: character) -> Result<record{before: character, after: character}, :NotFound>
-Str.split_last : fn(string: character, separator: character) -> Result<record{before: character, after: character}, :NotFound>
+Str.split_first : fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+Str.split_last : fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
 Str.count_utf8_bytes : fn(string: character) -> integer
 Str.to_utf8 : fn(string: character) -> list[integer]
 Str.from_utf8 : fn(bytes: list[integer]) -> Result<character, :BadUtf8>
@@ -143,8 +143,8 @@ Num.log_checked : <T: scalar numeric> fn(number: T) -> Result<double, :LogNeedsP
 
 Dict.empty : <K: key, V> fn() -> Dict<K, V>
 Dict.single : <K: key, V> fn(key: K, value: V) -> Dict<K, V>
-Dict.from_list : <K: key, V> fn(pairs: list[tuple{K, V}]) -> Dict<K, V>
-Dict.to_list : <K: key, V> fn(dict: Dict<K, V>) -> list[tuple{K, V}]
+Dict.from_list : <K: key, V> fn(pairs: list[Tuple{K, V}]) -> Dict<K, V>
+Dict.to_list : <K: key, V> fn(dict: Dict<K, V>) -> list[Tuple{K, V}]
 Dict.len : <K: key, V> fn(dict: Dict<K, V>) -> integer
 Dict.is_empty : <K: key, V> fn(dict: Dict<K, V>) -> logical
 Dict.get : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
@@ -181,15 +181,65 @@ Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
 Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 
-# Frames
+# DataFrame
 #
-# `frame()` itself is typed structurally by the checker, and so are queries on a frame
-# (`f[i, j, by]`). These declarations cover the conversions and file IO around them.
+# A Polars-style table API. The checker types the verbs structurally: the schema flows through
+# `select`, `with_columns`, `filter`, `group_by`, `agg`, `sort`, `join`, `head` and `collect`, and a
+# string that names a column must name one the frame has. These declarations give the shapes the
+# checker refines and cover the conversions and file IO.
 
-as.frame : fn(x: Any) -> frame
-is.frame : fn(x: Any) -> logical
-frame_type : fn(x: frame) -> character
-frame_read_csv : fn(path: character, [strings_as_factors]: logical) -> frame
-frame_read_parquet : fn(path: character) -> frame
-frame_write_csv : fn(x: frame, path: character) -> frame
-frame_write_parquet : fn(x: frame, path: character) -> frame
+@type Expr
+
+DataFrame : fn(...: Any) -> DataFrame
+as.DataFrame : fn(x: Any) -> DataFrame
+is.DataFrame : fn(x: Any) -> logical
+DataFrame.schema : fn(df: DataFrame) -> character
+DataFrame.height : fn(df: DataFrame) -> integer
+DataFrame.width : fn(df: DataFrame) -> integer
+DataFrame.columns : fn(df: DataFrame) -> character
+DataFrame.read_csv : fn(path: character) -> DataFrame
+DataFrame.read_parquet : fn(path: character) -> DataFrame
+DataFrame.write_csv : fn(df: DataFrame, path: character) -> DataFrame
+DataFrame.write_parquet : fn(df: DataFrame, path: character) -> DataFrame
+DataFrame.select : fn(df: DataFrame, ...: Expr | character) -> DataFrame
+DataFrame.with_columns : fn(df: DataFrame, ...: Expr | character) -> DataFrame
+DataFrame.filter : fn(df: DataFrame, ...: Expr) -> DataFrame
+DataFrame.group_by : fn(df: DataFrame, ...: Expr | character) -> GroupBy
+DataFrame.sort : fn(df: DataFrame, ...: Expr | character, [descending]: logical) -> DataFrame
+DataFrame.head : fn(df: DataFrame, [n]: integer | double) -> DataFrame
+DataFrame.tail : fn(df: DataFrame, [n]: integer | double) -> DataFrame
+DataFrame.join : fn(df: DataFrame, other: DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> DataFrame
+DataFrame.lazy : fn(df: DataFrame) -> LazyFrame
+GroupBy.agg : fn(group: GroupBy, ...: Expr) -> DataFrame
+LazyFrame.scan_csv : fn(path: character) -> LazyFrame
+LazyFrame.scan_parquet : fn(path: character) -> LazyFrame
+LazyFrame.select : fn(lf: LazyFrame, ...: Expr | character) -> LazyFrame
+LazyFrame.with_columns : fn(lf: LazyFrame, ...: Expr | character) -> LazyFrame
+LazyFrame.filter : fn(lf: LazyFrame, ...: Expr) -> LazyFrame
+LazyFrame.group_by : fn(lf: LazyFrame, ...: Expr | character) -> LazyGroupBy
+LazyFrame.sort : fn(lf: LazyFrame, ...: Expr | character, [descending]: logical) -> LazyFrame
+LazyFrame.head : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
+LazyFrame.tail : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
+LazyFrame.join : fn(lf: LazyFrame, other: LazyFrame | DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> LazyFrame
+LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
+LazyFrame.explain : fn(lf: LazyFrame) -> character
+LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
+
+col : fn(x: character, [as.factor]: logical) -> Expr
+col : fn(x: Any, [as.factor]: logical) -> Any
+lit : fn(value: Any) -> Expr
+Expr.alias : fn(expr: Expr, name: character) -> Expr
+Expr.sum : fn(expr: Expr) -> Expr
+Expr.mean : fn(expr: Expr) -> Expr
+Expr.min : fn(expr: Expr) -> Expr
+Expr.max : fn(expr: Expr) -> Expr
+Expr.first : fn(expr: Expr) -> Expr
+Expr.last : fn(expr: Expr) -> Expr
+Expr.median : fn(expr: Expr) -> Expr
+Expr.std : fn(expr: Expr) -> Expr
+Expr.var : fn(expr: Expr) -> Expr
+Expr.count : fn(expr: Expr) -> Expr
+Expr.is_null : fn(expr: Expr) -> Expr
+Expr.len : fn() -> Expr
+Expr.if_else : fn(test: Expr, yes: Any, no: Any) -> Expr
+Expr.cor : fn(first: Expr, second: Expr) -> Expr

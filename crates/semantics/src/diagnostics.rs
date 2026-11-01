@@ -17,7 +17,7 @@ use crate::metadata::{
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
+    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
     TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
@@ -1396,7 +1396,12 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
     "complex",
     "character",
     "raw",
-    "frame",
+    "DataFrame",
+    "LazyFrame",
+    "GroupBy",
+    "LazyGroupBy",
+    "Record",
+    "Tuple",
 ];
 
 #[salsa::tracked(returns(ref))]
@@ -2525,7 +2530,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             )
         }
         TypeErrorKind::BadRowIndex { found } => {
-            let hint = if matches!(found.kind(db), TyKind::Frame(_)) {
+            let hint = if matches!(found.kind(db), TyKind::Frame(..)) {
                 ". To join two frames, add `on =`."
             } else {
                 ""
@@ -2702,10 +2707,16 @@ impl<'db> TypeRenderer<'db> {
                 }
             }
             TyKind::OtherTags => "..".to_owned(),
-            TyKind::Frame(Some(columns)) => {
-                format!("frame{{{}}}", self.render_fields(db, columns))
+            TyKind::Frame(kind @ FrameKind::GroupBy { keys, .. }, Some(columns)) if *keys > 0 => {
+                let (keys, rest) = columns.split_at((*keys as usize).min(columns.len()));
+                let keys = self.render_fields(db, keys);
+                let rest = self.render_fields(db, rest);
+                format!("{}{{{keys}; {rest}}}", kind.head())
             }
-            TyKind::Frame(None) => "frame".to_owned(),
+            TyKind::Frame(kind, Some(columns)) => {
+                format!("{}{{{}}}", kind.head(), self.render_fields(db, columns))
+            }
+            TyKind::Frame(kind, None) => kind.head().to_owned(),
             TyKind::Function(function) => self.render_function(db, function),
             TyKind::Union(members) => {
                 let members: Vec<String> = members

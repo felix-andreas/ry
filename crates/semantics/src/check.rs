@@ -19,7 +19,7 @@ use crate::naming::{
 };
 use crate::stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, Parameter, RecordField,
+    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, Parameter, RecordField,
     RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
     contains_inference_var, erase_vars, for_each_child_type, map_child_types, native_record, null,
     scalar, substitute_rigid, type_size, union_of, unknown,
@@ -2707,7 +2707,7 @@ impl<'db> Checker<'db, '_> {
                     Ty::new(self.db, TyKind::Record(fields))
                 }
                 // R's `f$x <- NULL` drops the column, as `:=` does.
-                TyKind::Frame(Some(mut columns)) => {
+                TyKind::Frame(kind @ (FrameKind::DataFrame | FrameKind::DataTable), Some(mut columns)) => {
                     let position = columns
                         .iter()
                         .position(|column| column.name.text(self.db) == field_name);
@@ -2727,7 +2727,7 @@ impl<'db> Checker<'db, '_> {
                             optional: false,
                         }),
                     }
-                    Ty::new(self.db, TyKind::Frame(Some(columns)))
+                    Ty::new(self.db, TyKind::Frame(kind, Some(columns)))
                 }
                 // `x <- NULL; x$a <- 1` and `list()` both grow into a one-field list.
                 TyKind::Null => Ty::new(
@@ -5268,7 +5268,7 @@ impl<'db> Checker<'db, '_> {
                 "switch" => Some(self.infer_switch(range, arguments)),
                 "structure" => self.infer_structure(id, arguments),
                 "return" => Some(self.infer_return(range, arguments)),
-                "frame" => self.infer_frame_constructor(callee, arguments),
+                "DataFrame" => self.infer_frame_constructor(callee, arguments),
                 family @ ("lapply" | "sapply" | "vapply" | "Reduce") => {
                     self.infer_apply(id, callee, family, arguments)
                 }
@@ -5504,24 +5504,22 @@ impl<'db> Checker<'db, '_> {
             | TyKind::NativeRecord(_)
             | TyKind::Tag(..)
             | TyKind::OtherTags
-            | TyKind::Frame(_) => Callable::No,
+            | TyKind::Frame(..) => Callable::No,
         }
     }
 
-    /// `frame(id = 1:3, price = c(1, 2, 3))` builds `frame{id: integer[], price: double[]}`.
-    /// A call with no arguments is graphics' `frame()` (a new plot page), and a project's
-    /// own `frame` shadows the builtin, so both fall through to the ordinary call.
+    /// `DataFrame(id = 1:3, price = c(1, 2, 3))` builds `DataFrame{id: integer[], price: double[]}`.
+    /// A project's own `DataFrame` shadows the builtin, so it falls through to the ordinary call.
     fn infer_frame_constructor(
         &mut self,
         callee: ExprId,
         arguments: &[Argument],
     ) -> Option<Ty<'db>> {
         let deferred = self.naming.deferred_non_locals.contains(&callee);
-        if arguments.is_empty()
-            || self.naming.resolutions.contains_key(&callee)
+        if self.naming.resolutions.contains_key(&callee)
             || self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project("frame", deferred))
+                .is_some_and(|globals| globals.defined_in_project("DataFrame", deferred))
         {
             return None;
         }
@@ -5550,7 +5548,7 @@ impl<'db> Checker<'db, '_> {
                 _ => columns = None,
             }
         }
-        Some(Ty::new(self.db, TyKind::Frame(columns)))
+        Some(Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, columns)))
     }
 
     /// The data.table function a call names, when the name reaches its stub: a local or
@@ -5624,8 +5622,20 @@ impl<'db> Checker<'db, '_> {
     fn frame_columns_of(&mut self, value: ExprId) -> Option<Vec<RecordField<'db>>> {
         let ty = *self.recorded.get(&value)?;
         match self.structural(ty).kind(self.db) {
-            TyKind::Frame(Some(columns)) => Some(columns.clone()),
+            TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, Some(columns)) => Some(columns.clone()),
             _ => None,
+        }
+    }
+
+    /// The kind of the frame an argument evaluated to: a data.table function that changes its
+    /// argument by reference keeps the argument's kind.
+    fn frame_kind_of(&mut self, value: ExprId) -> FrameKind {
+        let Some(&ty) = self.recorded.get(&value) else {
+            return FrameKind::DataTable;
+        };
+        match self.structural(ty).kind(self.db) {
+            TyKind::Frame(kind, _) => *kind,
+            _ => FrameKind::DataTable,
         }
     }
 
@@ -5633,7 +5643,7 @@ impl<'db> Checker<'db, '_> {
     /// sniffed them; `fread(text = "...")` and an input holding a line break sniff the literal
     /// itself. Arguments that change the columns ry does not model leave them unknown.
     fn fread_type(&mut self, arguments: &[Argument]) -> Ty<'db> {
-        let unknown_columns = Ty::new(self.db, TyKind::Frame(None));
+        let unknown_columns = Ty::new(self.db, TyKind::Frame(FrameKind::DataTable, None));
         let module = self.module;
         let matched = match_formals(arguments, &["input", "file", "text", "cmd"]);
         let literal = |position: usize| {
@@ -5724,7 +5734,7 @@ impl<'db> Checker<'db, '_> {
                 *column = name;
             }
         }
-        frame_of(db, columns)
+        frame_of(db, FrameKind::DataTable, columns)
     }
 
     fn data_file(&self, path: &str) -> Option<sniff::Layout> {
@@ -5740,6 +5750,7 @@ impl<'db> Checker<'db, '_> {
         let matched = match_formals(arguments, &["x", "old", "new", "skip_absent"]);
         let subject = matched[0]?;
         let columns = self.frame_columns_of(subject)?;
+        let kind = self.frame_kind_of(subject);
         let old_value = matched[1]?;
         let old = literal_strings(module, old_value)?;
         let frame = variable_name(module, subject);
@@ -5757,7 +5768,7 @@ impl<'db> Checker<'db, '_> {
                             columns: names.len(),
                         },
                     });
-                    return Some(Ty::new(db, TyKind::Frame(None)));
+                    return Some(Ty::new(db, TyKind::Frame(kind, None)));
                 }
                 for ((column, _), (name, _)) in names.iter_mut().zip(old) {
                     *column = name;
@@ -5766,7 +5777,7 @@ impl<'db> Checker<'db, '_> {
             Some(new_value) => {
                 let new = literal_strings(module, new_value)?;
                 if new.len() != old.len() {
-                    return Some(Ty::new(db, TyKind::Frame(None)));
+                    return Some(Ty::new(db, TyKind::Frame(kind, None)));
                 }
                 let skip_absent = matched[3].is_some_and(|value| {
                     matches!(
@@ -5786,7 +5797,7 @@ impl<'db> Checker<'db, '_> {
                 }
             }
         }
-        Some(frame_of(db, names))
+        Some(frame_of(db, kind, names))
     }
 
     /// `setcolorder(f, c("b", "a"))` moves the named columns to the front, in that order.
@@ -5799,6 +5810,7 @@ impl<'db> Checker<'db, '_> {
         }
         let subject = matched[0]?;
         let columns = self.frame_columns_of(subject)?;
+        let kind = self.frame_kind_of(subject);
         let order = literal_strings(module, matched[1]?)?;
         let frame = variable_name(module, subject);
         let mut moved: Vec<(String, Ty<'db>)> = Vec::with_capacity(columns.len());
@@ -5820,7 +5832,7 @@ impl<'db> Checker<'db, '_> {
                 moved.push((name.to_owned(), column.ty));
             }
         }
-        Some(frame_of(db, moved))
+        Some(frame_of(db, kind, moved))
     }
 
     /// `setkey(f, id, date)` and `setorder(f, -price)` name columns as bare names, which
@@ -5896,7 +5908,7 @@ impl<'db> Checker<'db, '_> {
     fn rbind_list_type(&mut self, arguments: &[Argument]) -> Ty<'db> {
         let module = self.module;
         let db = self.db;
-        let unknown_columns = Ty::new(db, TyKind::Frame(None));
+        let unknown_columns = Ty::new(db, TyKind::Frame(FrameKind::DataTable, None));
         let matched = match_formals(arguments, &["l", "use.names", "fill", "idcol"]);
         let Some(list) = matched[0] else {
             return unknown_columns;
@@ -5972,7 +5984,7 @@ impl<'db> Checker<'db, '_> {
                 None => return unknown_columns,
             }
         }
-        frame_of(db, columns)
+        frame_of(db, FrameKind::DataTable, columns)
     }
 
     /// `fifelse(test, yes, no, na)` is a vector as long as `test` whose type `yes`, `no` and
@@ -6125,7 +6137,7 @@ impl<'db> Checker<'db, '_> {
         };
         result.push((variable, variable_ty));
         result.push((value, widest_column(db, &measure_types, false)?));
-        Some(frame_of(db, result))
+        Some(frame_of(db, FrameKind::DataTable, result))
     }
 
     /// `None` unless every non-`NULL` argument is one nominal whose class declares `c.Class`.
@@ -7690,7 +7702,7 @@ impl<'db> Checker<'db, '_> {
     ) -> Ty<'db> {
         let target_ty = self.infer(target);
         let subject = self.structural(target_ty);
-        let is_query = !double && matches!(subject.kind(self.db), TyKind::Frame(_));
+        let is_query = !double && matches!(subject.kind(self.db), TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, _));
         let result = if is_query {
             self.query_depth += 1;
             let result = self.infer_frame_query(id, target, subject, arguments);
@@ -7853,6 +7865,10 @@ impl<'db> Checker<'db, '_> {
     ) -> Ty<'db> {
         let module = self.module;
         let db = self.db;
+        let kind = match subject.kind(db) {
+            TyKind::Frame(kind, _) => *kind,
+            _ => FrameKind::DataFrame,
+        };
         let named = |formal: &str| {
             arguments
                 .iter()
@@ -7884,7 +7900,7 @@ impl<'db> Checker<'db, '_> {
                 self.structural(ty)
             });
             source_columns = match joined.map(|joined| joined.kind(db)) {
-                Some(TyKind::Frame(joined_columns)) => {
+                Some(TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, joined_columns)) => {
                     // Under `.EACHI`, `i.col` reads one row of `i`, like a bare column of `i`.
                     join = Some(JoinSides {
                         x: subject_columns.clone(),
@@ -7950,7 +7966,7 @@ impl<'db> Checker<'db, '_> {
                         columns: None,
                         frame,
                         bracket,
-                        subset_data: Ty::new(db, TyKind::Frame(None)),
+                        subset_data: Ty::new(db, TyKind::Frame(kind, None)),
                         callees,
                         join: None,
                     });
@@ -7987,7 +8003,7 @@ impl<'db> Checker<'db, '_> {
             columns: scope_columns,
             frame,
             bracket,
-            subset_data: Ty::new(db, TyKind::Frame(None)),
+            subset_data: Ty::new(db, TyKind::Frame(kind, None)),
             callees,
             join,
         });
@@ -8041,7 +8057,7 @@ impl<'db> Checker<'db, '_> {
             }),
             (None, None) => None,
         };
-        let subset_data = Ty::new(db, TyKind::Frame(subset_columns));
+        let subset_data = Ty::new(db, TyKind::Frame(kind, subset_columns));
         if let Some(scope) = self.column_scopes.last_mut() {
             scope.subset_data = subset_data;
         }
@@ -8057,7 +8073,7 @@ impl<'db> Checker<'db, '_> {
         let result = match j_value {
             Some(_) if let Some(update) = update => Ty::new(
                 db,
-                TyKind::Frame(self.column_update(
+                TyKind::Frame(kind, self.column_update(
                     update,
                     subject_columns,
                     i_value.is_some() || by.is_some(),
@@ -8073,12 +8089,12 @@ impl<'db> Checker<'db, '_> {
                     ) =>
             {
                 self.infer(value);
-                Ty::new(db, TyKind::Frame(None))
+                Ty::new(db, TyKind::Frame(kind, None))
             }
             Some(value) => {
-                self.query_result(id, value, source_columns.as_deref(), groups, by.is_some())
+                self.query_result(id, kind, value, source_columns.as_deref(), groups, by.is_some())
             }
-            None => Ty::new(db, TyKind::Frame(source_columns)),
+            None => Ty::new(db, TyKind::Frame(kind, source_columns)),
         };
         for argument in arguments {
             let handled = [i, j, by, on, named(".SDcols")]
@@ -8520,7 +8536,7 @@ impl<'db> Checker<'db, '_> {
         }
         let subset_data = self.column_scopes.last()?.subset_data;
         let columns = match subset_data.kind(db) {
-            TyKind::Frame(Some(columns)) if !columns.is_empty() => columns.clone(),
+            TyKind::Frame(_, Some(columns)) if !columns.is_empty() => columns.clone(),
             _ => {
                 self.infer(value);
                 return Some(None);
@@ -8851,6 +8867,7 @@ impl<'db> Checker<'db, '_> {
     fn query_result(
         &mut self,
         id: ExprId,
+        kind: FrameKind,
         j: ExprId,
         source_columns: Option<&[RecordField<'db>]>,
         groups: Option<Vec<RecordField<'db>>>,
@@ -8869,7 +8886,7 @@ impl<'db> Checker<'db, '_> {
                         .all(|other| other.name != column.name)
                 })
             });
-            Ty::new(db, TyKind::Frame(columns))
+            Ty::new(db, TyKind::Frame(kind, columns))
         };
         if let Some(applied) = self.subset_apply(j) {
             return frame_of(groups.zip(applied).map(|(mut groups, applied)| {
@@ -8920,7 +8937,7 @@ impl<'db> Checker<'db, '_> {
                 | TyKind::Vector(_)
                 | TyKind::NamedVector(_)
                 | TyKind::Null
-                | TyKind::Frame(_)
+                | TyKind::Frame(..)
                 | TyKind::Unknown => resolved,
                 _ if bare_column.is_some() => resolved,
                 _ => {
@@ -8940,7 +8957,7 @@ impl<'db> Checker<'db, '_> {
             (None, TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_)) => {
                 columns.push(self.column_field("V1", resolved));
             }
-            (None, TyKind::Frame(Some(computed))) => columns.extend(computed.iter().cloned()),
+            (None, TyKind::Frame(_, Some(computed))) => columns.extend(computed.iter().cloned()),
             (None, TyKind::Record(fields)) => {
                 for field in fields.clone() {
                     let name = field.name.text(db).to_owned();
@@ -9217,8 +9234,8 @@ impl<'db> Checker<'db, '_> {
                 },
                 None => Ok(union_of(self.db, items.iter().copied())),
             },
-            TyKind::Frame(None) => Ok(unknown(self.db)),
-            TyKind::Frame(Some(columns)) => match (literal_position, literal_name) {
+            TyKind::Frame(_, None) => Ok(unknown(self.db)),
+            TyKind::Frame(_, Some(columns)) => match (literal_position, literal_name) {
                 (Some(position), _) => match columns.get(position) {
                     Some(column) => Ok(column.ty),
                     None => Err(TypeError {
@@ -9332,7 +9349,7 @@ impl<'db> Checker<'db, '_> {
                 self.db,
                 TyKind::NamedList(union_of(self.db, fields.iter().map(|field| field.ty))),
             )),
-            TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Frame(_) => {
+            TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Frame(..) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(unknown(self.db))
             }
@@ -9396,7 +9413,7 @@ impl<'db> Checker<'db, '_> {
             | TyKind::NativeRecord(_)
             | TyKind::Tag(..)
             | TyKind::OtherTags
-            | TyKind::Frame(_)
+            | TyKind::Frame(..)
             | TyKind::Function(_) => Err(TypeError {
                 range,
                 kind: TypeErrorKind::BadVectorIndex { index },
@@ -9490,8 +9507,8 @@ impl<'db> Checker<'db, '_> {
             {
                 Ok(*element)
             }
-            TyKind::Frame(None) => Ok(unknown(self.db)),
-            TyKind::Frame(Some(columns)) => {
+            TyKind::Frame(_, None) => Ok(unknown(self.db)),
+            TyKind::Frame(_, Some(columns)) => {
                 match columns
                     .iter()
                     .find(|column| column.name.text(self.db) == name)
@@ -9894,7 +9911,7 @@ fn is_literal(module: &Module, id: ExprId) -> bool {
 
 fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<RecordField<'db>>> {
     match ty.kind(db) {
-        TyKind::Frame(columns) => columns.clone(),
+        TyKind::Frame(_, columns) => columns.clone(),
         _ => None,
     }
 }
@@ -9949,7 +9966,7 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
         TyKind::Vector(element) | TyKind::List(element) => (vec![*element], false),
         TyKind::NamedVector(element) | TyKind::NamedList(element) => (vec![*element], true),
         TyKind::Tuple(items) => (items.clone(), false),
-        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => {
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
             (fields.iter().map(|field| field.ty).collect(), true)
         }
         TyKind::Scalar(_) => (vec![x], false),
@@ -10060,11 +10077,11 @@ fn decode_escapes(text: &str) -> Option<String> {
 }
 
 /// A frame from named columns, or a frame with unknown columns when two share a name.
-fn frame_of<'db>(db: &'db dyn Db, columns: Vec<(String, Ty<'db>)>) -> Ty<'db> {
+fn frame_of<'db>(db: &'db dyn Db, kind: FrameKind, columns: Vec<(String, Ty<'db>)>) -> Ty<'db> {
     let mut fields: Vec<RecordField<'db>> = Vec::with_capacity(columns.len());
     for (name, ty) in columns {
         if fields.iter().any(|field| field.name.text(db) == name) {
-            return Ty::new(db, TyKind::Frame(None));
+            return Ty::new(db, TyKind::Frame(kind, None));
         }
         fields.push(RecordField {
             name: Name::new(db, name),
@@ -10072,7 +10089,7 @@ fn frame_of<'db>(db: &'db dyn Db, columns: Vec<(String, Ty<'db>)>) -> Ty<'db> {
             optional: false,
         });
     }
-    Ty::new(db, TyKind::Frame(Some(fields)))
+    Ty::new(db, TyKind::Frame(kind, Some(fields)))
 }
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
@@ -10168,7 +10185,7 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         | TyKind::NativeRecord(_)
         | TyKind::Tag(..)
         | TyKind::OtherTags
-        | TyKind::Frame(_)
+        | TyKind::Frame(..)
         | TyKind::Function(_) => false,
     }
 }

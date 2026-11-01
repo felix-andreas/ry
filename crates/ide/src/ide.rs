@@ -268,7 +268,7 @@ fn member_at<'db>(
 
 fn field_type<'db>(db: &'db dyn Db, ty: Ty<'db>, name: &str) -> Option<Ty<'db>> {
     match ty.kind(db) {
-        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
             .iter()
             .find(|field| field.name.text(db) == name)
             .map(|field| field.ty),
@@ -290,7 +290,7 @@ fn updated_column_at<'db>(
     arguments: &[Argument],
     relative: TextSize,
 ) -> Option<Member<'db>> {
-    let TyKind::Frame(Some(columns)) = check.expression_types.get(&query)?.kind(db) else {
+    let TyKind::Frame(_, Some(columns)) = check.expression_types.get(&query)?.kind(db) else {
         return None;
     };
     let column_ty = |name: &str| {
@@ -2382,7 +2382,7 @@ fn string_subscript_completion(
             }
             _ => None,
         })?;
-    let (TyKind::Record(fields) | TyKind::Frame(Some(fields))) =
+    let (TyKind::Record(fields) | TyKind::Frame(_, Some(fields))) =
         check.expression_types.get(&target)?.kind(db)
     else {
         return None;
@@ -2609,7 +2609,7 @@ fn dollar_completions(
             .min_by_key(|(range, _)| range.len())?;
         let target_ty = *check.expression_types.get(&target)?;
         let fields: Vec<(&str, Ty<'_>)> = match target_ty.kind(db) {
-            TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+            TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
                 .iter()
                 .map(|field| (field.name.text(db), field.ty))
                 .collect(),
@@ -2997,7 +2997,7 @@ fn frame_query_completions(
             })
             .min_by_key(|(length, _)| *length)
             .map(|(_, target)| target)?;
-        let TyKind::Frame(Some(columns)) = check.expression_types.get(&target)?.kind(db) else {
+        let TyKind::Frame(_, Some(columns)) = check.expression_types.get(&target)?.kind(db) else {
             return None;
         };
         let mut renderer = TypeRenderer::default();
@@ -3433,7 +3433,7 @@ fn is_impossible_vector(db: &dyn Db, ty: Ty<'_>) -> bool {
                 | TyKind::Tuple(_)
                 | TyKind::List(_)
                 | TyKind::NamedList(_)
-                | TyKind::Frame(_)
+                | TyKind::Frame(..)
                 | TyKind::Function(_)
         )
     };
@@ -3469,10 +3469,10 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::Tuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),
-        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
             .iter()
             .all(|field| is_hintable(db, field.ty, variables_allowed)),
-        TyKind::Frame(None) => true,
+        TyKind::Frame(_, None) => true,
         TyKind::Union(members) => members
             .iter()
             .all(|&member| is_hintable(db, member, variables_allowed)),

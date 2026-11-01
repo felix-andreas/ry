@@ -740,7 +740,8 @@ impl Parser<'_, '_> {
                 }
                 // Inline, a body may follow a return type, so `list {` and `fn (` with a
                 // space start the body; only the hugging spelling is the type.
-                "list" | "frame" | "record" | "tuple"
+                "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy" | "data.table"
+                | "Record" | "Tuple"
                     if self.ann_next_significant(end) == Some(L_BRACE)
                         && (!self.inline_type || self.next_token_is(L_BRACE)) =>
                 {
@@ -901,9 +902,12 @@ impl Parser<'_, '_> {
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
         let noun = match self.token_str(self.pos) {
-            "frame" => "frame type",
-            "record" => "record type",
-            "tuple" => "tuple type",
+            "DataFrame" => "DataFrame type",
+            "LazyFrame" => "LazyFrame type",
+            "GroupBy" | "LazyGroupBy" => "GroupBy type",
+            "data.table" => "data.table type",
+            "Record" => "Record type",
+            "Tuple" => "Tuple type",
             _ => "list type",
         };
         self.wrap(NAME);
@@ -940,7 +944,8 @@ impl Parser<'_, '_> {
                 self.ann_type(end, false);
             }
             self.ann_trivia(end);
-            if self.ann_at(COMMA, end) {
+            // `GroupBy{g: character[]; x: double[]}` lists the group keys before the `;`.
+            if self.ann_at(COMMA, end) || (noun == "GroupBy type" && self.ann_at(SEMICOLON, end)) {
                 self.bump();
             } else if self.ann_at(R_BRACE, end) {
                 self.bump();
