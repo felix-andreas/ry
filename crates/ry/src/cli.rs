@@ -120,8 +120,7 @@ pub fn check(
         let analysis = analyze_project(&root, config, &requested)?;
         n_failures += analysis.failures;
         for (path, source, problems) in &analysis.stub_problems {
-            n_diagnostics +=
-                render_findings(output, min_severity, path, source, problems, &|_| None);
+            n_diagnostics += render_findings(output, min_severity, path, source, problems, &|_| None);
         }
         let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
         for file in analysis.files.iter().filter(|file| file.requested) {
@@ -136,8 +135,7 @@ pub fn check(
             );
         }
         if let Some((path, source, problems)) = &analysis.namespace {
-            n_diagnostics +=
-                render_findings(output, min_severity, path, source, problems, &|_| None);
+            n_diagnostics += render_findings(output, min_severity, path, source, problems, &|_| None);
         }
         // Freeing every memo one by one costs close to a second on a large project, and the
         // process is about to exit.
@@ -183,10 +181,7 @@ pub(crate) struct AnalyzedFile {
 impl ProjectAnalysis {
     /// Resolves a related range against the document it lives in, which is often another file.
     pub fn related_note(&self, related: &RelatedLocation) -> Option<RelatedNote<'_>> {
-        let analyzed = self
-            .files
-            .iter()
-            .find(|analyzed| analyzed.file == related.file)?;
+        let analyzed = self.files.iter().find(|analyzed| analyzed.file == related.file)?;
         Some(RelatedNote {
             path: &analyzed.path,
             source: &analyzed.source,
@@ -431,8 +426,9 @@ pub(crate) fn analyze_project(
         let mut problems =
             namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
         let defines = |name: &str| {
-            ProjectFiles::try_get(&db)
-                .is_some_and(|files| semantics::package_definitions(&db, files).contains_key(name))
+            ProjectFiles::try_get(&db).is_some_and(|files| {
+                semantics::package_definitions(&db, files).contains_key(name)
+            })
         };
         problems.extend(namespace::namespace_export_problems(
             &parse_namespace_exports(namespace_source),
@@ -450,15 +446,13 @@ pub(crate) fn analyze_project(
         .zip(files)
         .zip(reported)
         .zip(per_file)
-        .map(
-            |((((path, source), file), requested), diagnostics)| AnalyzedFile {
-                path,
-                source,
-                file,
-                requested,
-                diagnostics,
-            },
-        )
+        .map(|((((path, source), file), requested), diagnostics)| AnalyzedFile {
+            path,
+            source,
+            file,
+            requested,
+            diagnostics,
+        })
         .collect();
     Ok(ProjectAnalysis {
         db,

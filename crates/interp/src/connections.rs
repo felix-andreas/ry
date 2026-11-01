@@ -207,13 +207,9 @@ fn read_file_bytes(path: &str, gzip: bool) -> R<Vec<u8>> {
     // `usethis::use_data()` write bzip2 or xz `.rda` files through it.
     let mut decoded = Vec::new();
     let result = if bytes.starts_with(&[0x1f, 0x8b]) {
-        MultiGzDecoder::new(&bytes[..])
-            .read_to_end(&mut decoded)
-            .map(drop)
+        MultiGzDecoder::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
     } else if bytes.starts_with(b"BZh") {
-        bzip2_rs::DecoderReader::new(&bytes[..])
-            .read_to_end(&mut decoded)
-            .map(drop)
+        bzip2_rs::DecoderReader::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
     } else if bytes.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
         lzma_rs::xz_decompress(&mut &bytes[..], &mut decoded)
             .map_err(|failure| std::io::Error::other(failure.to_string()))

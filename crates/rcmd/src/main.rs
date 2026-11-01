@@ -6,9 +6,7 @@ use std::{path::PathBuf, process::ExitCode};
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let Some(home) = std::env::var_os("R_HOME").map(PathBuf::from) else {
-        eprintln!(
-            "ry-rcmd: R_HOME is not set; run it through bin/R of an R home that `rcmd::assemble` created"
-        );
+        eprintln!("ry-rcmd: R_HOME is not set; run it through bin/R of an R home that `rcmd::assemble` created");
         return ExitCode::from(2);
     };
     match rcmd::run(&home, &arguments) {

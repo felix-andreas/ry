@@ -1137,12 +1137,7 @@ impl<'db> Lowering<'db> {
 
     /// `@trust TYPE`, `@if-unknown TYPE` or `@new Name<ARGS>`, from a `#:` directive, an
     /// inline binding's directive, or the head of `@Name(value)`.
-    fn lower_coercion(
-        &mut self,
-        annotation: &mut Annotation<'db>,
-        node: &SyntaxNode,
-        directive: &str,
-    ) {
+    fn lower_coercion(&mut self, annotation: &mut Annotation<'db>, node: &SyntaxNode, directive: &str) {
         match directive {
             "trust" | "if-unknown" => {
                 if directive == "trust" {

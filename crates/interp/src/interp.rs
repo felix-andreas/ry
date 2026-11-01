@@ -31,13 +31,13 @@ pub mod coerce;
 pub mod conditions;
 pub mod connections;
 pub mod deparse;
-pub mod dispatch;
 pub mod distributions;
+pub mod dispatch;
 pub mod envir;
 pub mod eval;
 pub mod format;
-pub mod graphics;
 pub mod linalg;
+pub mod graphics;
 pub mod lower;
 pub mod methods;
 pub mod native;
@@ -249,9 +249,7 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
     use std::io::Write;
     // Console output that cannot be written has nowhere else to go, as in GNU R.
     let written = if is_error {
-        std::io::stdout()
-            .flush()
-            .and_then(|()| std::io::stderr().write_all(text))
+        std::io::stdout().flush().and_then(|()| std::io::stderr().write_all(text))
     } else {
         std::io::stdout().write_all(text)
     };
@@ -352,8 +350,7 @@ impl Interp {
     }
 
     pub fn is_internal(&self, index: u32) -> bool {
-        self.builtin(index).is_some_and(|definition| {
-            matches!(definition.kind, Kind::Internal | Kind::InternalSpecial)
-        })
+        self.builtin(index)
+            .is_some_and(|definition| matches!(definition.kind, Kind::Internal | Kind::InternalSpecial))
     }
 }

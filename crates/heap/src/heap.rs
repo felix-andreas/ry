@@ -448,7 +448,7 @@ impl Heap {
         Ok(())
     }
 
-    /// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
+/// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
     /// the length it was allocated with. GNU R before 4.6 let native code shrink any vector this
     /// way (`SETLENGTH`), and binaries built then still do.
     pub unsafe fn mark_resizable(&mut self, vector: Sexp) {

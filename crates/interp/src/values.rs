@@ -469,11 +469,7 @@ pub unsafe fn named_list(items: &[(&str, Sexp)]) -> R<Sexp> {
 pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
     let mut list = nil();
     for (position, &(tag, value)) in items.iter().enumerate().rev() {
-        let cell_kind = if position == 0 {
-            kind
-        } else {
-            SexpType::Pairlist
-        };
+        let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
         list = triple(cell_kind, value, list, tag)?;
     }
     Ok(list)
@@ -636,7 +632,10 @@ pub unsafe fn is_function(object: Sexp) -> bool {
 }
 
 pub unsafe fn is_numeric_type(kind: SexpType) -> bool {
-    matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
+    matches!(
+        kind,
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    )
 }
 
 pub fn is_na_int(value: i32) -> bool {
@@ -831,18 +830,8 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
         return None;
     }
     match dim.kind() {
-        SexpType::Integer => Some(
-            ints(dim)
-                .iter()
-                .map(|&value| value.max(0) as usize)
-                .collect(),
-        ),
-        SexpType::Real => Some(
-            reals(dim)
-                .iter()
-                .map(|&value| value.max(0.0) as usize)
-                .collect(),
-        ),
+        SexpType::Integer => Some(ints(dim).iter().map(|&value| value.max(0) as usize).collect()),
+        SexpType::Real => Some(reals(dim).iter().map(|&value| value.max(0.0) as usize).collect()),
         _ => None,
     }
 }
@@ -882,28 +871,16 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 cell.kind(),
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
-                let value = if deep {
-                    duplicate(cell.car())?
-                } else {
-                    cell.car()
-                };
+                let value = if deep { duplicate(cell.car())? } else { cell.car() };
                 items.push((cell.tag(), value, cell.attrib()));
                 cell = cell.cdr();
             }
             let mut list = nil();
             for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
-                let cell_kind = if position == 0 {
-                    kind
-                } else {
-                    SexpType::Pairlist
-                };
+                let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
                 list = triple(cell_kind, value, list, tag)?;
                 if attributes != nil() {
-                    let attributes = if deep {
-                        duplicate(attributes)?
-                    } else {
-                        attributes
-                    };
+                    let attributes = if deep { duplicate(attributes)? } else { attributes };
                     heap.set_attrib(list, attributes);
                 }
             }

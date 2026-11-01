@@ -120,9 +120,7 @@ impl ProcessEngine {
     pub fn ry_jit() -> Self {
         let mut engine = ProcessEngine::ry();
         engine.name = "ry-jit".to_string();
-        engine
-            .environment
-            .push(("RY_JIT".to_string(), "force".to_string()));
+        engine.environment.push(("RY_JIT".to_string(), "force".to_string()));
         engine
     }
 
@@ -295,11 +293,7 @@ pub fn gnu_r_available() -> bool {
 
 /// The engine named by `ORACLE_ENGINE`, or the stub.
 pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE")
-        .ok()
-        .as_deref()
-        .and_then(ProcessEngine::named)
-    {
+    match std::env::var("ORACLE_ENGINE").ok().as_deref().and_then(ProcessEngine::named) {
         Some(engine) => Box::new(engine),
         None => Box::new(StubEngine),
     }

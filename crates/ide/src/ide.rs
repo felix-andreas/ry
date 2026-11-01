@@ -1113,10 +1113,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
         });
     }
     let root = semantics::parse(db, file).syntax_node();
-    for definition in root
-        .children()
-        .filter(|node| node.kind() == TYPE_DEFINITION)
-    {
+    for definition in root.children().filter(|node| node.kind() == TYPE_DEFINITION) {
         let keyword = type_definition_keyword(&definition);
         let kind = if keyword == "alias" {
             DocumentSymbolKind::AliasDefinition
