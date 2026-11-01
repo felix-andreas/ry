@@ -282,6 +282,7 @@ void SET_PRCODE(SEXP x, SEXP v);
 void SET_PRENV(SEXP x, SEXP v);
 void SET_PRVALUE(SEXP x, SEXP v);
 SEXP R_PromiseExpr(SEXP x);
+SEXP (PREXPR)(SEXP x);
 SEXP (ENCLOS)(SEXP x);
 SEXP R_ParentEnv(SEXP x);
 SEXP R_NewEnv(SEXP enclos, int hash, int size);

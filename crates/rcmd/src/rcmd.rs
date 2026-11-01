@@ -437,7 +437,6 @@ R_INCLUDE_DIR = $(R_HOME)/include
 R_SHARE_DIR = $(R_HOME)/share
 R_ARCH =
 SHELL = /bin/sh
-MAKE = make
 
 CC = {cc}
 CFLAGS = -g -O2
@@ -772,7 +771,9 @@ impl Default for InstallOptions {
 /// is.
 pub fn install(home: &Path, package: &Path, library: &Path, options: &InstallOptions) -> Result<Installed> {
     fs::create_dir_all(library).map_err(io_error(library))?;
-    let staging = tempdir(library)?;
+    // Building happens outside the library, as in GNU R: a build tree inside a Cargo workspace
+    // (such as a library in ry's own checkout) would make Cargo build the package as a member.
+    let staging = tempdir(&std::env::temp_dir())?;
     let result = (|| {
         let directory = if package.is_dir() {
             package.to_path_buf()
@@ -799,7 +800,7 @@ pub fn install(home: &Path, package: &Path, library: &Path, options: &InstallOpt
 
 fn tempdir(near: &Path) -> Result<PathBuf> {
     for attempt in 0..1000u32 {
-        let path = near.join(format!(".ry-install-{}-{attempt}", std::process::id()));
+        let path = near.join(format!("ry-install-{}-{attempt}", std::process::id()));
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -939,6 +940,7 @@ fn install_source(
     }
     let src = build.join("src");
     let mut shared_object = None;
+    let mut install_libs = false;
     if src.is_dir() {
         let include_flags: Vec<String> = description
             .packages("LinkingTo")
@@ -959,13 +961,28 @@ fn install_source(
             shlib(home, &src, &[], Some(&library_name), &include_flags, &[])
                 .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?
         };
-        if built.exists() {
+        // A package's `src/install.libs.R` installs its own libraries, and runs as R code in
+        // the driver; otherwise every shared object `src` holds is installed, as GNU R does.
+        if src.join("install.libs.R").exists() {
+            install_libs = true;
+        } else if built.exists() {
             let libs = target_staging.join("libs");
             fs::create_dir_all(&libs).map_err(io_error(&libs))?;
-            let installed = libs.join(&library_name);
-            fs::copy(&built, &installed).map_err(io_error(&installed))?;
-            shared_object = Some(library_name);
+            for entry in fs::read_dir(&src).map_err(io_error(&src))? {
+                let path = entry.map_err(io_error(&src))?.path();
+                let Some(file) = path.file_name().filter(|_| path.extension().is_some_and(|extension| extension == "so"))
+                else {
+                    continue;
+                };
+                let installed = libs.join(file);
+                fs::copy(&path, &installed).map_err(io_error(&installed))?;
+            }
+            let symbols = src.join("symbols.rds");
+            if symbols.exists() {
+                fs::copy(&symbols, libs.join("symbols.rds")).map_err(io_error(&symbols))?;
+            }
         }
+        shared_object = Some(library_name);
     }
     // `tools:::.install_package_description` copies the build's DESCRIPTION and adds `Built:`,
     // so the field that marks an installation as ry's goes in first.
@@ -982,6 +999,9 @@ fn install_source(
     driver_arguments.extend(options.driver_flags.iter().cloned());
     if options.tests {
         driver_arguments.push("--install-tests".into());
+    }
+    if install_libs {
+        driver_arguments.push("--install-libs".into());
     }
     let r_libs = std::env::join_paths(std::iter::once(staged_library.clone()).chain(paths.iter().cloned()))
         .map(|joined| joined.to_string_lossy().into_owned())
@@ -1011,7 +1031,7 @@ fn install_source(
         .map_err(io_error(&target))?;
     Ok(Installed {
         name: name.to_owned(),
-        library: shared_object.map(|file| target.join("libs").join(file)),
+        library: shared_object.map(|file| target.join("libs").join(file)).filter(|path| path.exists()),
         directory: target,
     })
 }

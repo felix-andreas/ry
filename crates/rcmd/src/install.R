@@ -7,7 +7,8 @@
 #
 # Arguments: the source directory (already configured and compiled), the staging library the
 # package installs into, the final installation directory, and flags (`--install-tests`,
-# `--no-docs`, `--no-data`, `--no-inst`, `--no-demo`, `--no-exec`, `--no-R`).
+# `--no-docs`, `--no-data`, `--no-inst`, `--no-demo`, `--no-exec`, `--no-R`, and
+# `--install-libs`, which runs the package's `src/install.libs.R`).
 
 local({
     arguments <- commandArgs(TRUE)
@@ -53,6 +54,21 @@ local({
     if (!file.exists(file.path(instdir, "NAMESPACE"))) {
         if (dir.exists("R")) fail("a 'NAMESPACE' file is required")
         writeLines("## package without R code", file.path(instdir, "NAMESPACE"))
+    }
+
+    if (has_flag("--install-libs")) {
+        step("libs")
+        message("installing via 'install.libs.R' to ", instdir)
+        scope <- new.env(parent = .GlobalEnv)
+        assign("SHLIB_EXT", ".so", envir = scope)
+        assign("R_PACKAGE_DIR", instdir, envir = scope)
+        assign("R_PACKAGE_NAME", pkg_name, envir = scope)
+        assign("R_PACKAGE_SOURCE", source_dir, envir = scope)
+        assign("R_ARCH", "", envir = scope)
+        assign("WINDOWS", FALSE, envir = scope)
+        setwd("src")
+        attempt(source("install.libs.R", local = scope), "running 'src/install.libs.R' failed")
+        setwd(source_dir)
     }
 
     install_r <- !has_flag("--no-R") && dir.exists("R") && length(dir("R"))

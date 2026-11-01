@@ -77,6 +77,10 @@ enum Command {
         /// The corpus directory (default: `$RY_CORPUS_DIR`, then `.corpus` in the repository).
         #[arg(long)]
         corpus: Option<PathBuf>,
+        /// Run ry's side on the packages `oracle install` built (`.corpus/ry-library`), through
+        /// ry's R home (`.corpus/ry-home`), recording results under `ry-installed`.
+        #[arg(long)]
+        installed: bool,
         /// The packages to run (default: every package in `closure.txt`).
         packages: Vec<String>,
     },
@@ -160,8 +164,9 @@ fn main() -> ExitCode {
             timeout,
             rerun_gnu_r,
             corpus,
+            installed,
             packages,
-        } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, packages),
+        } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, installed, packages),
         Command::Install {
             home,
             library,
@@ -337,12 +342,17 @@ fn run_install(
     };
     let outcomes = install::run(&settings, &packages, &report);
     let path = settings.corpus.join("ry-install").join("summary.tsv");
-    if let Err(error) = std::fs::write(&path, install::summary(&outcomes)) {
+    // A run over some packages replaces their rows and keeps the rest of the summary.
+    let previous = std::fs::read_to_string(&path).unwrap_or_default();
+    let summary = install::merge_summary(&previous, &outcomes);
+    if let Err(error) = std::fs::write(&path, &summary) {
         eprintln!("cannot write {}: {error}", path.display());
         return ExitCode::FAILURE;
     }
     let (installed, loaded) = install::counts(&outcomes);
     println!("{} packages: {installed} installed, {loaded} load; summary in {}", outcomes.len(), path.display());
+    let (total, installed, loaded) = install::summary_counts(&summary);
+    println!("summary: {total} packages, {installed} installed, {loaded} load");
     ExitCode::SUCCESS
 }
 
@@ -352,6 +362,7 @@ fn run_packages(
     timeout: u64,
     rerun_gnu_r: bool,
     corpus: Option<PathBuf>,
+    installed: bool,
     packages: Vec<String>,
 ) -> ExitCode {
     let runtimes = match runtime.as_str() {
@@ -385,6 +396,10 @@ fn run_packages(
         jobs,
         timeout: Duration::from_secs(timeout),
         reuse_gnu_r: !rerun_gnu_r,
+        installed: installed.then(|| packages::Installed {
+            home: std::path::absolute(corpus.join("ry-home")).unwrap_or_else(|_| corpus.join("ry-home")),
+            library: std::path::absolute(corpus.join("ry-library")).unwrap_or_else(|_| corpus.join("ry-library")),
+        }),
     };
     let report = |package: &str, outcome: &PackageOutcome| {
         let line = match outcome {
@@ -405,7 +420,7 @@ fn run_packages(
     // The summary always covers the whole closure, reading recorded results for the rest.
     let all = packages::run_all(&settings, &everything, &[], &|_, _| {});
     let summary = packages::summary(&all);
-    let path = corpus.join("tests").join("summary.md");
+    let path = corpus.join("tests").join(if installed { "summary-installed.md" } else { "summary.md" });
     if let Err(error) = std::fs::write(&path, &summary) {
         eprintln!("cannot write {}: {error}", path.display());
         return ExitCode::FAILURE;

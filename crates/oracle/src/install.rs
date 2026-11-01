@@ -1,7 +1,7 @@
 //! Installs corpus packages from their source tarballs through ry's `R CMD INSTALL`, on ry's
 //! runtime, and then loads each installed package in a fresh ry session. A package installs once
-//! every package it depends on (`Depends`, `Imports`, `LinkingTo`) has installed, and is skipped
-//! when one of them failed.
+//! every package it depends on (`Depends`, `Imports`, `LinkingTo`) has installed, or is already in
+//! the library when it is not part of the run, and is skipped when one of them failed.
 //!
 //! Layout under the corpus directory: `sources/<pkg>_<version>.tar.gz` and `closure.txt` (from
 //! `tools/corpus/sources.R`) as input; `ry-install/logs/<pkg>.{install,load}.log` and
@@ -54,9 +54,14 @@ pub fn run(
             outcomes.insert(package.clone(), Outcome::NoSources);
             continue;
         };
+        // A dependency outside this run that the library already holds is satisfied, so a
+        // rerun can name only the packages that failed.
         let needs = description_dependencies(&tarball, package)
             .into_iter()
             .filter(|dependency| !base.contains(dependency))
+            .filter(|dependency| {
+                wanted.contains(dependency.as_str()) || !settings.library.join(dependency).join("DESCRIPTION").exists()
+            })
             .collect();
         dependencies.insert(package.clone(), needs);
         tarballs.insert(package.clone(), tarball);
@@ -174,6 +179,33 @@ pub fn summary(outcomes: &[(String, Outcome)]) -> String {
         text.push_str(&format!("{package}\t{row}\n"));
     }
     text
+}
+
+/// `previous` (an earlier `summary.tsv`) with the rows of `outcomes` replacing those of the same
+/// packages, sorted by package.
+pub fn merge_summary(previous: &str, outcomes: &[(String, Outcome)]) -> String {
+    let fresh = summary(outcomes);
+    let mut rows: BTreeMap<String, String> = BTreeMap::new();
+    for line in previous.lines().skip(1).chain(fresh.lines().skip(1)) {
+        if let Some((package, _)) = line.split_once('\t') {
+            rows.insert(package.to_owned(), line.to_owned());
+        }
+    }
+    let mut text = fresh.lines().next().unwrap_or_default().to_owned();
+    text.push('\n');
+    for row in rows.values() {
+        text.push_str(row);
+        text.push('\n');
+    }
+    text
+}
+
+/// `(packages, installed, loaded)` counts of a `summary.tsv`.
+pub fn summary_counts(summary: &str) -> (usize, usize, usize) {
+    let rows: Vec<Vec<&str>> = summary.lines().skip(1).map(|line| line.split('\t').collect()).collect();
+    let installed = rows.iter().filter(|row| row.get(1) == Some(&"installed")).count();
+    let loaded = rows.iter().filter(|row| row.get(2) == Some(&"loaded")).count();
+    (rows.len(), installed, loaded)
 }
 
 /// `(installed, loaded)` counts.
