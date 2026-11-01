@@ -55,6 +55,15 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         crate::heap().known().namespace_registry,
     )?;
     let home = crate::system::r_home();
+    let version = crate::system::r_version();
+    let (major, minor) = crate::system::OLDEST_SUPPORTED_R;
+    if (version.major, version.minor) < (major, minor) {
+        return Err(crate::unwind::error(format!(
+            "ry's runtime needs base R {major}.{minor} or later, but {home} holds R {}; \
+             install a newer GNU R, or set R_HOME to one",
+            version.number()
+        )));
+    }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
@@ -337,7 +346,7 @@ pub unsafe fn run_console(
 /// Ends a session as GNU R does before it exits: closes every graphics device, which writes
 /// the files they were drawing.
 pub unsafe fn finish() {
-    if let Err(unwind) = crate::graphics::close_all_devices() {
+    if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_profiler() {

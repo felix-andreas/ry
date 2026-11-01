@@ -1,0 +1,34 @@
+[stdout]
+| [1] 7inches
+| [1] 12.7cm
+| [1] 14.454points
+| [1] 0.797333333333333inches
+| [1] 8.64831points
+| [1] 16.5777333333333mm
+| [1] 198native
+| [1] 0.5npc
+| [1] -0.428571428571429native
+| left 
+|      [,1] [,2] [,3]
+| [1,]    1    0    0
+| [2,]    0    1    0
+| [3,]    0    0    1
+| [1] 30
+| viewport[ROOT]->(viewport[left]->(viewport[turned])) 
+| left::turned 
+| box
+| lab
+| [1] 3.5inches
+| [1] 1.224inches
+| [1] 1.0005inches
+| lab
+| lab
+| tree
+|   r
+|   c
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c("null device" = 1L)

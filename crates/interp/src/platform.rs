@@ -261,6 +261,65 @@ mod imp {
         }
     }
 
+    /// The process umask. The C library can only read it by setting it, so this sets it back at
+    /// once.
+    pub fn umask() -> u32 {
+        // SAFETY: umask only swaps the process's file creation mask and cannot fail.
+        unsafe {
+            let mask = libc::umask(0);
+            libc::umask(mask);
+            mask as u32
+        }
+    }
+
+    /// Sets the umask and returns the previous one.
+    pub fn set_umask(mask: u32) -> u32 {
+        // SAFETY: as above.
+        unsafe { libc::umask(mask as libc::mode_t) as u32 }
+    }
+
+    /// Sets a file's access and modification times. `utimensat`, as in GNU R, needs only
+    /// ownership, so a read-only file the user owns still takes the new time, and nothing is
+    /// opened, which would block on a FIFO.
+    pub fn set_file_times(path: &Path, time: std::time::SystemTime) -> io::Result<()> {
+        let (whole, nanoseconds) = match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => (after.as_secs() as i64, after.subsec_nanos() as i64),
+            Err(before) => {
+                let before = before.duration();
+                let nanoseconds = before.subsec_nanos() as i64;
+                if nanoseconds == 0 {
+                    (-(before.as_secs() as i64), 0)
+                } else {
+                    (-(before.as_secs() as i64) - 1, 1_000_000_000 - nanoseconds)
+                }
+            }
+        };
+        let stamp = libc::timespec {
+            tv_sec: whole as libc::time_t,
+            tv_nsec: nanoseconds as _,
+        };
+        let path = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path holds a NUL"))?;
+        // SAFETY: both pointers point at live values for the duration of the call.
+        match unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), [stamp, stamp].as_ptr(), 0) }
+        {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// The codeset of the current LC_CTYPE, as `l10n_info()` reports it.
+    pub fn native_codeset() -> String {
+        // SAFETY: `nl_langinfo` returns a pointer to a static string or null.
+        unsafe {
+            let codeset = libc::nl_langinfo(libc::CODESET);
+            if codeset.is_null() {
+                return "UTF-8".to_owned();
+            }
+            CStr::from_ptr(codeset).to_string_lossy().into_owned()
+        }
+    }
+
     pub fn set_errno(code: i32) {
         // SAFETY: errno belongs to this thread.
         unsafe { *errno_location() = code }
@@ -440,11 +499,15 @@ mod imp {
             ffi::{CStr, c_void},
             fs::Metadata,
             io,
-            os::windows::ffi::{OsStrExt, OsStringExt},
+            os::windows::{
+                ffi::{OsStrExt, OsStringExt},
+                fs::OpenOptionsExt,
+            },
             path::Path,
         },
         windows_sys::Win32::{
             Foundation::{CloseHandle, FILETIME, GetLastError, HMODULE},
+            Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES},
             System::{
                 Diagnostics::Debug::{
                     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
@@ -608,6 +671,34 @@ mod imp {
     /// Windows has priority classes rather than niceness, so there is nothing to report.
     pub fn priority(_pid: i32, _value: Option<i32>) -> Option<i32> {
         None
+    }
+
+    /// Windows has no umask; GNU R reports 0 there and ignores a new one.
+    pub fn umask() -> u32 {
+        0
+    }
+
+    pub fn set_umask(_mask: u32) -> u32 {
+        0
+    }
+
+    /// Sets a file's access and modification times, opening it only for attribute writes, as GNU
+    /// R does, so a read-only file still takes them; the backup-semantics flag admits directories.
+    pub fn set_file_times(path: &Path, time: std::time::SystemTime) -> io::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(time)
+                .set_modified(time),
+        )
+    }
+
+    /// GNU R 4.2 and later run Windows in UTF-8, which `ry.exe`'s manifest also asks for.
+    pub fn native_codeset() -> String {
+        "UTF-8".to_owned()
     }
 
     pub fn set_errno(code: i32) {

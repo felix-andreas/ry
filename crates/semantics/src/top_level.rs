@@ -399,7 +399,7 @@ impl Classifier<'_> {
                 let Some(names) = locals.as_mut() else {
                     return found(Effect::Loop);
                 };
-                names.extend(*variable);
+                names.extend(variable.map(|variable| self.module.name(variable)));
                 self.children_effect(id, locals)
             }
             ExpressionKind::While { .. } | ExpressionKind::Repeat { .. } => {

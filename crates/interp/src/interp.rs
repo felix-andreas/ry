@@ -42,6 +42,7 @@ pub mod format;
 pub mod frame;
 pub mod gnu_r_home;
 pub mod graphics;
+pub mod graphics_engine;
 pub mod graphics_render;
 pub mod linalg;
 pub mod lower;
@@ -82,7 +83,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
-        unwind::R,
+        unwind::{R, Unwind},
     },
     heap::{Heap, Marker, RootSource, object::Sexp},
     rustc_hash::FxHashMap,
@@ -117,6 +118,8 @@ pub struct Hooks {
     pub write_console: unsafe fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    /// An ALTREP vector's length, from its class's `Length` method.
+    pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
@@ -132,6 +135,10 @@ pub struct Hooks {
     /// Runs `body` as an entry from native code: the host's boundary turns an unwind into a
     /// `longjmp` into whatever native frame called the connection.
     pub enter_from_native: unsafe fn(&mut dyn FnMut() -> R<()>),
+    /// Calls a graphics device or system callback, which may be C code, under the host's
+    /// native-code boundary: a `longjmp` out of it becomes an `Err`, and the protection stack
+    /// and handles it left behind are released.
+    pub guard_native: unsafe fn(&mut dyn FnMut()) -> R<()>,
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
@@ -203,6 +210,9 @@ pub struct Interp {
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
+    /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
+    pub parked_unwind: Option<Unwind>,
 }
 
 struct InterpState {
@@ -302,6 +312,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         object_systems: true,
+        parked_unwind: None,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -321,6 +332,7 @@ pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
@@ -332,6 +344,10 @@ pub fn default_hooks() -> Hooks {
             if body().is_err() {
                 panic!("an R error escaped into native code without the libR host");
             }
+        },
+        guard_native: |body| {
+            body();
+            Ok(())
         },
         connection_vfprintf: None,
     }
@@ -413,6 +429,10 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            graphics_engine::trace(marker);
+            if let Some(unwind) = &interp.parked_unwind {
+                crate::unwind::trace_unwind(unwind, marker);
+            }
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);

@@ -41,9 +41,18 @@
 | [2,]    3    4
 | [1] 2 4 6
 | [1] "a" "c"
+| [1] "a"   "a.b"
+| [1] "a1"  "a2"  "a.b"
+| [1] "a1"  "a.b" "a3" 
+| [1] "a.b" "a"  
+| [1] "a1" "a2" "a3"
+| [1] "a1"  "a2"  "a.b"
+| [1] "a"   "a.b"
+| [1] "a1"  "a.b" "a3" 
+| [1] "a"   "a.b"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| c("a", "c")
+| c("a", "a.b")

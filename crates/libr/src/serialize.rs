@@ -258,13 +258,7 @@ const NATIVE_ENCODING: &str = "UTF-8";
 
 /// The writer's R version, which is the version ry presents (`interp::system::r_version`).
 fn writer_version() -> c_int {
-    let version = interp::system::r_version();
-    let mut minor = version
-        .minor
-        .split('.')
-        .map(|part| part.parse().unwrap_or(0));
-    let major = version.major.parse().unwrap_or(0);
-    r_version(major, minor.next().unwrap_or(0), minor.next().unwrap_or(0))
+    interp::system::r_version().code()
 }
 
 const fn r_version(major: c_int, minor: c_int, patch: c_int) -> c_int {

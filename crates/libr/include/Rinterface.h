@@ -6,6 +6,8 @@
 #ifndef R_INTERFACE_H_
 #define R_INTERFACE_H_
 
+#include <Rversion.h>
+
 #ifdef __cplusplus
 #include <cstdio>
 #include <cstdint>
@@ -34,14 +36,18 @@ void R_SaveGlobalEnvToFile(const char *name);
 void R_FlushConsole(void);
 void R_ClearerrConsole(void);
 R_INTERFACE_NORETURN void R_Suicide(const char *message);
+#if R_VERSION >= R_Version(4, 6, 0)
 R_INTERFACE_NORETURN void R_CleanUp(SA_TYPE saveact, int status, int run_last);
+#endif
 char *R_HomeDir(void);
+#if R_VERSION >= R_Version(4, 6, 0)
 void R_Busy(int which);
 int R_ReadConsole(const char *prompt, unsigned char *buf, int len, int addtohistory);
 void R_WriteConsole(const char *buf, int len);
 void R_WriteConsoleEx(const char *buf, int len, int otype);
 void R_ResetConsole(void);
 int R_EditFiles(int nfile, const char **file, const char **title, const char *editor);
+#endif
 void R_setupHistory(void);
 void R_ProcessEvents(void);
 
@@ -64,7 +70,9 @@ extern int R_CStackDir;
 #define jump_to_toplevel() Rf_error("")
 #define mainloop run_Rmainloop
 #define onintr Rf_onintr
+#if R_VERSION >= R_Version(4, 6, 0)
 void run_Rmainloop(void);
+#endif
 void Rf_onintr(void);
 void Rf_jump_to_toplevel(void);
 void process_site_Renviron(void);

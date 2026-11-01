@@ -10,7 +10,7 @@
 
 use {
     crate::{
-        builtins::Arg,
+        builtins::{Arg, Call},
         interp,
         unwind::{R, error_in},
         values::{self, length, nil, symbols},
@@ -24,10 +24,14 @@ use {
 pub type NativeFn = unsafe fn(&NativeCall<'_>) -> R<Sexp>;
 
 pub struct NativeCall<'a> {
-    /// The `.Call` (or `.External`, ...) call, for error messages.
+    /// The `.Call` (or `.External`, ...) call, for error messages. It is `NULL` while a
+    /// graphics device replays its display list.
     pub call: Sexp,
     pub args: &'a [Arg],
     pub env: Sexp,
+    /// The foreign call itself, whose primitive and arguments a graphics routine records on
+    /// the display list.
+    pub foreign: &'a Call<'a>,
 }
 
 impl NativeCall<'_> {
@@ -154,7 +158,8 @@ pub unsafe fn symbol_info(name: &str, package: Option<&str>) -> R<Option<Sexp>> 
 
 /// Runs a foreign call whose `.NAME` is a routine of a builtin library. `None` means `.NAME`
 /// is something else, which the caller resolves as native code.
-pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
+    let (call, args, env) = (foreign.call, foreign.args, foreign.env);
     let Some((first, rest)) = args.split_first() else {
         return Ok(None);
     };
@@ -207,6 +212,7 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
         call,
         args: &routine_args,
         env,
+        foreign,
     };
     if routine.3 >= 0
         && matches!(routine.1, RoutineKind::Call)
@@ -363,7 +369,6 @@ unsafe fn native_symbol(
     Ok(entry)
 }
 
-/// GNU R 4.3's registered routines of these packages: package, interface, name and arity.
 type Routine = (&'static str, RoutineKind, &'static str, i32);
 
 /// The routines the default packages register on this platform.
@@ -407,6 +412,10 @@ const WINDOWS_ROUTINES: &[Routine] = &[
     ("grDevices", RoutineKind::External, "devga", 21),
 ];
 
+/// The registered routines of these packages: package, interface, name and arity. It is the
+/// union over every supported GNU R (4.3 on), because each release's namespace refers only to
+/// the routines it knows; an arity of -1 marks a routine whose argument list changed between
+/// releases, whose implementation accepts each.
 const ROUTINES: &[Routine] = &[
     ("parallel", RoutineKind::Call, "nextStream", 1),
     ("parallel", RoutineKind::Call, "nextSubStream", 1),
@@ -478,7 +487,7 @@ const ROUTINES: &[Routine] = &[
     ("utils", RoutineKind::Call, "sockwrite", 2),
     ("utils", RoutineKind::External, "download", 6),
     ("utils", RoutineKind::External, "unzip", 7),
-    ("utils", RoutineKind::External, "Rprof", 9),
+    ("utils", RoutineKind::External, "Rprof", -1),
     ("utils", RoutineKind::External, "Rprofmem", 3),
     ("utils", RoutineKind::External, "countfields", 6),
     ("utils", RoutineKind::External, "readtablehead", 7),
@@ -569,6 +578,10 @@ const ROUTINES: &[Routine] = &[
     ("stats", RoutineKind::Call, "influence", 3),
     ("stats", RoutineKind::Call, "pKolmogorov2x", 2),
     ("stats", RoutineKind::Call, "pKS2", 2),
+    ("stats", RoutineKind::Call, "pkolmogorov_two_exact", 2),
+    ("stats", RoutineKind::Call, "pkolmogorov_two_limit", 3),
+    ("stats", RoutineKind::Call, "dpermdist1", 1),
+    ("stats", RoutineKind::Call, "dpermdist2", 2),
     ("stats", RoutineKind::Call, "psmirnov_exact", 6),
     ("stats", RoutineKind::Call, "ksmooth", 5),
     ("stats", RoutineKind::Call, "SplineCoef", 3),
@@ -707,7 +720,7 @@ const ROUTINES: &[Routine] = &[
     ("stats", RoutineKind::Fortran, "hcass2", 6),
     ("stats", RoutineKind::Fortran, "kmns", 17),
     ("stats", RoutineKind::Fortran, "eureka", 6),
-    ("stats", RoutineKind::Fortran, "stl", 18),
+    ("stats", RoutineKind::Fortran, "stl", -1),
     ("stats", RoutineKind::External, "compcases", -1),
     ("stats", RoutineKind::External, "doD", 2),
     ("stats", RoutineKind::External, "deriv", 5),
@@ -746,7 +759,7 @@ const ROUTINES: &[Routine] = &[
     ("grDevices", RoutineKind::External, "PicTeX", 6),
     ("grDevices", RoutineKind::External, "PostScript", 19),
     ("grDevices", RoutineKind::External, "XFig", 14),
-    ("grDevices", RoutineKind::External, "PDF", 20),
+    ("grDevices", RoutineKind::External, "PDF", -1),
     ("grDevices", RoutineKind::External, "devCairo", 12),
     ("grDevices", RoutineKind::External, "devcap", 1),
     ("grDevices", RoutineKind::External, "devcapture", 1),
@@ -818,6 +831,8 @@ const ROUTINES: &[Routine] = &[
     ("tools", RoutineKind::Call, "dirchmod", 2),
     ("tools", RoutineKind::Call, "getfmts", 1),
     ("tools", RoutineKind::Call, "Rmd5", 1),
+    ("tools", RoutineKind::Call, "Rsha256", 1),
+    ("tools", RoutineKind::Call, "remove_dot_segments_wrapper", 1),
     ("tools", RoutineKind::Call, "check_nonASCII", 2),
     ("tools", RoutineKind::Call, "check_nonASCII2", 1),
     ("tools", RoutineKind::Call, "doTabExpand", 2),
@@ -830,6 +845,6 @@ const ROUTINES: &[Routine] = &[
     ("tools", RoutineKind::Call, "splitString", 2),
     ("tools", RoutineKind::Call, "package_dependencies_scan", 1),
     ("tools", RoutineKind::Call, "nonASCII", 1),
-    ("tools", RoutineKind::External, "parseLatex", 4),
+    ("tools", RoutineKind::External, "parseLatex", -1),
     ("tools", RoutineKind::External, "parseRd", 9),
 ];
