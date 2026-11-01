@@ -932,9 +932,10 @@ struct Checker<'db, 'a> {
     string_values: FxHashMap<BindingId, Option<StringWrite>>,
     /// Slots read somewhere other than as a call head, built on first need.
     value_read_slots: Option<FxHashSet<BindingId>>,
-    /// Slots whose `NULL` the code inferred rather than a declaration stated: those an
-    /// unannotated assignment in the body has written so far, and undeclared formals with a
-    /// default, whose `NULL` default is a placeholder (NlcOptim's `solqp(H = NULL, ...)`).
+    /// Slots whose type the code inferred rather than a declaration stated: those an
+    /// unannotated assignment in the body has written so far, and undeclared formals, whose
+    /// `NULL` is a placeholder default (NlcOptim's `solqp(H = NULL, ...)`) or the shape an
+    /// `is.null()` test gave them (Rsolnp's `if (is.null(eqfun)) ...`).
     computed_slots: FxHashSet<BindingId>,
 }
 
@@ -1931,11 +1932,11 @@ impl<'db> Checker<'db, '_> {
                         .map(|(id, _)| *id)
                     {
                         self.environment.set(slot, EnvEntry::Mono(parameter_ty));
+                        self.computed_slots.insert(slot);
                         if no_default {
                             self.no_default_formals.insert(slot);
                         } else {
                             self.defaulted_formals.insert(slot);
-                            self.computed_slots.insert(slot);
                         }
                     }
                     // Inferred only now: a default may read its own and earlier parameters' slots.
@@ -5906,13 +5907,13 @@ impl<'db> Checker<'db, '_> {
                 .map(|(id, _)| *id)
             {
                 self.environment.set(slot, EnvEntry::Mono(parameter_ty));
+                if !declared {
+                    self.computed_slots.insert(slot);
+                }
                 if parameter.default.is_none() {
                     self.no_default_formals.insert(slot);
                 } else {
                     self.defaulted_formals.insert(slot);
-                    if !declared {
-                        self.computed_slots.insert(slot);
-                    }
                 }
             }
             if let Some(default) = parameter.default {
@@ -8936,7 +8937,8 @@ impl<'db> Checker<'db, '_> {
         let ty = argument.ty?;
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
-                Some(self.without_inferred_null(expected, ty))
+                let ty = self.without_inferred_null(expected, ty);
+                Some(self.without_inferred_length(expected, ty))
             }
             _ => Some(ty),
         }
@@ -8957,9 +8959,9 @@ impl<'db> Checker<'db, '_> {
     /// or a helper that returns `NULL` on some path, is `NULL` only where the code presumably
     /// does not pass it on: rlang's `type <- switch(type, ...)` feeds `sprintf(type, kind)`
     /// after every type has an arm. So an argument naming such a variable drops its `NULL`
-    /// when the parameter's type is settled, or bounded, and admits no `NULL`. A `NULL` default of an
-    /// undeclared formal is the same kind of placeholder. The `NULL` of a declared parameter
-    /// the body never reassigns, or of an annotated assignment, is declared and stays.
+    /// when the parameter's type is settled, or bounded, and admits no `NULL`. The `NULL` of an
+    /// undeclared formal, from a `NULL` default or an `is.null()` test, is the same kind of
+    /// placeholder. The `NULL` of a declared parameter, or of an annotated assignment, stays.
     fn without_inferred_null(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
         let expected = self.table.resolve(self.db, expected);
         let admits_null = |ty: Ty<'db>| match ty.kind(self.db) {
@@ -8969,9 +8971,15 @@ impl<'db> Checker<'db, '_> {
                 .any(|member| matches!(member.kind(self.db), TyKind::Null)),
             _ => false,
         };
-        // No bound admits `NULL`, so a numeric-bounded parameter settles the question too.
-        let bounded = self.table.variable_constraint(self.db, expected).is_some();
-        if admits_null(expected) || (!bounded && contains_inference_var(self.db, expected)) {
+        // A type still open to inference could take the `NULL`, and stripping it there would
+        // pick a different overload (`lapply` takes `list[T] | T[] | NULL`). No bound admits
+        // `NULL`, though, and neither does a callback such as Rsolnp's `fn(Unknown, ...) -> T`.
+        let open = match expected.kind(self.db) {
+            TyKind::Function(_) => false,
+            TyKind::Var(_) => self.table.variable_constraint(self.db, expected).is_none(),
+            _ => contains_inference_var(self.db, expected),
+        };
+        if admits_null(expected) || open {
             return ty;
         }
         let resolved = self.table.resolve(self.db, ty);
@@ -8990,6 +8998,34 @@ impl<'db> Checker<'db, '_> {
             .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
             .collect();
         union_of(self.db, kept)
+    }
+
+    /// A variable the body computes as `character | character[]`, through a helper that returns
+    /// a vector on some path, is presumably one string where a parameter takes one: renv's
+    /// `pattern <- sprintf("^%s=", name)` feeds `sub(pattern, "", spec)`. So such an argument
+    /// passes to a scalar parameter of its atomic type as that scalar.
+    fn without_inferred_length(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
+        let expected = self.table.resolve(self.db, expected);
+        let TyKind::Scalar(atomic) = expected.kind(self.db) else {
+            return ty;
+        };
+        let resolved = self.table.resolve(self.db, ty);
+        let same_atomic = |member: Ty<'db>| match member.kind(self.db) {
+            TyKind::Scalar(other) => other == atomic,
+            TyKind::Vector(element) => {
+                matches!(element.kind(self.db), TyKind::Scalar(other) if other == atomic)
+            }
+            _ => false,
+        };
+        let fits = match resolved.kind(self.db) {
+            TyKind::Vector(_) => same_atomic(resolved),
+            TyKind::Union(members) => members.iter().all(|&member| same_atomic(member)),
+            _ => false,
+        };
+        match fits {
+            true => expected,
+            false => ty,
+        }
     }
 
     /// R matches exact names before placing positionals, so `vapply(xs, character(1),
