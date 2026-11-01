@@ -64,6 +64,17 @@ tokio-util = { version = "0.7.15", features = ["compat"] }
 similar.opt-level = 3
 tree-sitter.opt-level = 3
 tree-sitter-r.opt-level = 3
+# The JIT compiles while the program runs, so an unoptimized code generator makes debug runs of
+# hot R code slower than interpreting it.
+cranelift-codegen.opt-level = 3
+cranelift-frontend.opt-level = 3
+cranelift-entity.opt-level = 3
+cranelift-bforest.opt-level = 3
+cranelift-bitset.opt-level = 3
+cranelift-control.opt-level = 3
+cranelift-jit.opt-level = 3
+cranelift-module.opt-level = 3
+regalloc2.opt-level = 3
 
 [profile.release]
 strip = true
