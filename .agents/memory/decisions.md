@@ -3268,6 +3268,31 @@ first lines R had already read, leaving R mid-command.
   nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
   pin the behavior.
 
+## Per-group top rows and as-of joins reuse the engine's kernels
+
+- **Previous shape.** The Polars-style API had no way to keep each group's best rows or to join on
+  the nearest key, so the table bench answered db-benchmark's top-two question and the keyed
+  rolling join with data.table syntax (`x[order(-v3), head(v3, 2L), by = id6]`,
+  `prices[trades, roll = TRUE]`).
+- **`Expr.head(n)` inside `agg` keeps up to `n` values per group, as rows.** Polars gives a list
+  per group there, but ry has no list columns, so the values are exploded into rows, which is also
+  data.table's layout. The checker tracks an expression's shape (`Shape` in
+  `crates/semantics/src/check.rs`: per row, per group, or up to `n` per group) and accepts `Head`
+  only as a whole `agg` item, because `head(v, 2) + 1` would mix shapes. After a sort, the planner
+  fuses sort and aggregation into one query, which hits the engine's top-k kernel
+  (`group.rs::top_k_shape`) instead of sorting the whole table.
+- **`join_asof` is `How::Asof(Strategy)` in `table::lazy`, lowered to the rolling join.** The left
+  frame is data.table's `i`, so `"backward"` is `roll = TRUE`, `"forward"` is `roll = -Inf` and
+  `"nearest"` is `roll = "nearest"`. The `by` columns become the leading equality keys and `on` the
+  rolled key. One kernel (`join.rs::rolling`, with Polars' asof as the fallback) serves both APIs.
+- **A grouped median holds `(row, slot)` pairs, one list per run of rows.** It used to hold
+  `(slot, value)` pairs and concatenate the threads' lists, 240 MB of fresh memory per 1e7-row
+  query; page-faulting that in made groupby q6 from R two to ten times slower than the same kernel
+  measured from Rust. Reading the value from the input column during the counting sort halves the
+  lists and drops the concatenation.
+- **Impact.** No new kernel or stored state; both verbs are thin plan steps. The typing fixtures in
+  `frames.R.test` and `crates/table/tests/test_lazy.rs` pin the semantics.
+
 ## data.table's helpers run data.table's own C, and the C API is what makes them fast
 
 - **Previous shape.** The plan was to route R calls to `fread`, `fwrite`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`, `fifelse`, `tstrsplit` and friends to the engine's kernels in `table::ops` and `table::io`, which beat data.table when measured from Rust. Under ry's runtime those calls ran data.table's own C through libr, at up to 2.5 times GNU R's time, because every C API call (`TRUELENGTH`, `STRING_ELT`, `LENGTH`, `INTEGER`, the type predicates, `PROTECT`) entered the full error boundary.
@@ -3321,6 +3346,30 @@ first lines R had already read, leaving R mid-command.
 - **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
   right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
   finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
+
+# Decision record: a parallel startup warm-up in the server
+
+- **Previous shape.** The server primed the workspace one file at a time in idle units, and each
+  unit also scanned the file's `library()` calls and applied the grown attach union at once. The
+  first file's check derived every item's naming for the project-wide maps on one thread, about
+  1.3 s on a 300,000-line project, and the first wave's lints read those maps, so a file opened at
+  startup waited that long for any diagnostics. Each union change re-ran the open files'
+  diagnostics, so an open file was republished about six times, with counts that flickered.
+- **Target shape.** `Worker::warm_up` in `crates/ry/src/server.rs` runs before any other idle
+  work: it scans every file's attach facts across all cores and applies the union once, then
+  derives every item's naming and the per-file folds (`file_interface_reads`,
+  `file_conditional_writers`) across all cores, as `ry check` does. Until it ends, the first wave
+  holds only parse-stage diagnostics (the lints need the maps), pull diagnostics answer the same,
+  and settled publishes wait; its end refreshes every open file. The rest of the cold check runs
+  in parallel batches of 64 files. `Worker::in_parallel` is the one helper for both.
+- **Stopping parallel work.** The threads run on cloned handles whose tokens `CancelHandle`
+  cancels too, and they also poll a queued-job counter between files, because salsa resets a
+  handle's cancellation flag when a top-level query returns (`attach.rs`, `DbGuard::drop`), which
+  drops a flip that lands at a query's end. Without the counter an open sometimes waited for the
+  whole warm-up.
+- **Impact.** On dsbench a file opened at startup gets its first wave in under 15 ms (from about
+  1.3 s) and its settled diagnostics about 0.55 s after startup (from 1.3 to 1.9 s), published
+  once instead of six times. Analysis is unchanged; only the order and parallelism of work moved.
 
 ## ry run and ry R: the command chooses the runtime
 

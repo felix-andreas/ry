@@ -7,7 +7,7 @@
 
 use {
     heap::{Heap, object::Sexp},
-    interp::{eval, frame, lower, print, standard_library, unwind::Unwind, values},
+    interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
     std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
     syntax::testing::{SplitMix64, fuzz_iterations},
 };
@@ -869,7 +869,17 @@ fn declarations_and_runtime_bind_the_same_names() {
         })
         .map(str::to_owned)
         .collect();
-    let declared: BTreeSet<String> = declarations().into_iter().map(|(name, _)| name).collect();
+    // An S3 method such as `Ops.Expr` is declared for the checker but registered, not exported.
+    let registered: BTreeSet<&str> = dataframe::METHODS
+        .lines()
+        .filter_map(|line| line.trim().split_once(" = function"))
+        .map(|(name, _)| name)
+        .collect();
+    let declared: BTreeSet<String> = declarations()
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| !registered.contains(name.as_str()))
+        .collect();
     let mut bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
     bound.extend(frame::package_functions().map(str::to_owned));
     let unexported: Vec<_> = declared.difference(&exported).collect();

@@ -2007,12 +2007,15 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Slower than data.table on two bench questions** (`tools/bench/table`, 1e6 rows): groupby q6
-  (median and sd per group, 0.13 s against 0.08 s) and the keyed rolling join (0.03 s against
-  0.02 s). The Rust engine alone runs q6 in 0.06 s, so most of the gap is the R-side call path.
+- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
+  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
+  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
+  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
+  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
-  `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
-  expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
+  `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
+  `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
+  chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
 - **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
@@ -2065,12 +2068,13 @@ The end-to-end guard rests on the corpus suites.
   0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
   bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
   `setkey` is at parity (0.026 s on both).
-- **data.table's helpers that allocate many large vectors trail GNU R at 1e7 rows.** In
-  `tools/bench/table/ops.R`, `rbindlist` takes 1.26 s against 0.85 s, `fwrite` 1.21 s against
-  0.76 s and `melt` 1.38 s against 1.21 s; `setkey`, `dcast`, `unique` and the single-loop helpers
-  are at parity or faster. In `rbindlist` about 0.3 s is collection (minor collections tracing the
-  fresh 2e7-element character columns, and one major collection), and `SET_STRING_ELT`'s barrier
-  and reference counts touch each CHARSXP header. `fwrite` has not been profiled.
+- **A few data.table helpers still trail GNU R at 1e7 rows.** In `tools/bench/table/ops.R`
+  (best of runs, 4 threads) `fwrite` takes 0.89 s against 0.76 s, `rbindlist` 0.97 s against
+  0.85 s, `unique` 0.105 s against 0.073 s and `uniqueN` 0.148 s against 0.113 s; `dcast`,
+  `between` and `chin` are within 15%, and `fread`, `setkey`, `setorder`, `melt` and the
+  single-loop helpers are at parity or faster. In `rbindlist` part of the gap is collection
+  (minor collections tracing the fresh 2e7-element character columns) and `SET_STRING_ELT`'s
+  barrier touching each CHARSXP header. `unique` and `uniqueN` have not been profiled.
 - **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
   `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
   against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
@@ -2892,11 +2896,7 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-
-- **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
-  lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
-  lints when the project is still cold, but that changes the two-wave contract on the architecture
-  page, so weigh it against making the cold naming pass faster.
+- Goto-definition, references and rename have a p99 of 15 to 25 ms (p50 about 1 ms) on all three benches, on main as before. The slow positions are calls to stub globals (`seq_len`, `factor`, `vapply`). `stub_declaration` is a map lookup, so the cost sits elsewhere on that path (the item check, `position_in_item`, or the server's `stub_location`); profile it before guessing.
 
 ## Open: false errors on real CRAN code
 
