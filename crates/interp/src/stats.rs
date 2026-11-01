@@ -1041,7 +1041,6 @@ fn unit_root(angle: f64, multiple: usize, period: usize) -> (f64, f64) {
 /// `nextn(n, factors)`: for each `n`, the smallest integer at least `n` that factors entirely
 /// into `factors`.
 unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
-    let n = integer_values(call.arg(0))?;
     let factors = integer_values(call.arg(1))?;
     if factors.is_empty() {
         return Err(call.error("no factors"));
@@ -1052,30 +1051,63 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
     {
         return Err(call.error("invalid factors"));
     }
-    let mut result = Vec::with_capacity(n.len());
-    for &value in &n {
-        if value == NA_INTEGER {
-            result.push(NA_INTEGER);
-            continue;
-        }
-        let mut candidate = value.max(1) as i64;
+    let next = |value: u64| {
+        let mut candidate = value.max(1);
         loop {
             let mut rest = candidate;
             for &factor in &factors {
-                while rest % factor as i64 == 0 {
-                    rest /= factor as i64;
+                while rest % factor as u64 == 0 {
+                    rest /= factor as u64;
                 }
             }
             if rest == 1 {
-                break;
+                return candidate;
             }
             candidate += 1;
         }
-        result.push(if candidate > i32::MAX as i64 {
-            NA_INTEGER
-        } else {
-            candidate as i32
-        });
+    };
+    // A double `n` gives an integer result unless some answer exceeds the integer range, so
+    // `nextn(2.14e9)` is `2^31` as a double.
+    if call.arg(0).kind() == SexpType::Real {
+        let result: Vec<Option<u64>> = real_values(call.arg(0))?
+            .iter()
+            .map(|&value| (!value.is_nan()).then(|| next(value.trunc().max(1.0) as u64)))
+            .collect();
+        if result
+            .iter()
+            .flatten()
+            .all(|&value| value <= i32::MAX as u64)
+        {
+            let result: Vec<i32> = result
+                .iter()
+                .map(|value| value.map_or(NA_INTEGER, |value| value as i32))
+                .collect();
+            return values::integer_vector(&result);
+        }
+        let result: Vec<f64> = result
+            .iter()
+            .map(|value| value.map_or(NA_REAL, |value| value as f64))
+            .collect();
+        return values::real_vector(&result);
+    }
+    let mut overflow = false;
+    let result: Vec<i32> = integer_values(call.arg(0))?
+        .iter()
+        .map(|&value| {
+            if value == NA_INTEGER {
+                return NA_INTEGER;
+            }
+            i32::try_from(next(value.max(1) as u64)).unwrap_or_else(|_| {
+                overflow = true;
+                NA_INTEGER
+            })
+        })
+        .collect();
+    if overflow {
+        call.warning(&format!(
+            "nextn() found no solution < {} = INT_MAX (the maximal integer); pass '0+ n' instead of 'n'",
+            i32::MAX
+        ))?;
     }
     values::integer_vector(&result)
 }

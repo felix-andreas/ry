@@ -1002,6 +1002,9 @@ fn head_line(input: &[u8], position: &mut usize, syntax: &Syntax) -> (Vec<u8>, b
                     }
                 } else if byte == open {
                     quote = None;
+                    // Whitespace-separated input lets a quote open right after another closes,
+                    // as in `"A"" B "`, which is two fields.
+                    field_start = syntax.separator.is_none();
                 }
             }
             None => {

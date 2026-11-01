@@ -43,6 +43,7 @@ use heap::{
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::ops::Range;
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
 /// `mkCode` turns it into byte code; ry keeps only the buffer's first constant, the source
@@ -1345,7 +1346,14 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     let constants = code.cdr();
     let symbol = constants.element(words[pc + 2] as usize);
     let local = crate::heap().frame_cell(env, symbol).is_some();
-    let value = lookup_variable(symbol, env, constants, code.tag(), words[pc + 3] as usize)?;
+    let value = lookup_variable(
+        symbol,
+        env,
+        constants,
+        code.tag(),
+        words[pc + 3] as usize,
+        0..0,
+    )?;
     record_feedback(constants, pc, value);
     Ok((value, local))
 }
@@ -1380,7 +1388,8 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             // value invisible, as `withCallingHandlers(expr)` relies on.
             interp().visible = true;
             let symbol = constants.element(operand(1));
-            let value = lookup_variable(symbol, env, constants, caches, operand(2))?;
+            let held = base..base + operand(0);
+            let value = lookup_variable(symbol, env, constants, caches, operand(2), held)?;
             record_feedback(constants, at, value);
             set(operand(0), value);
         }
@@ -1722,6 +1731,7 @@ unsafe fn lookup_variable(
     constants: Sexp,
     caches: Sexp,
     slot: usize,
+    held: Range<usize>,
 ) -> R<Sexp> {
     let heap = crate::heap();
     if let Some(cell) = heap.frame_cell(env, symbol) {
@@ -1733,7 +1743,7 @@ unsafe fn lookup_variable(
         return if plain {
             Ok(value)
         } else {
-            eval::eval_symbol(symbol, env)
+            eval_symbol_holding(symbol, env, held)
         };
     }
     let enclosure = env.enclosure();
@@ -1742,7 +1752,7 @@ unsafe fn lookup_variable(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            return eval::eval_symbol(symbol, env);
+            return eval_symbol_holding(symbol, env, held);
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);
@@ -1751,7 +1761,28 @@ unsafe fn lookup_variable(
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(enclosure, cell, constants, caches, slot);
     }
-    eval::eval_symbol(symbol, env)
+    eval_symbol_holding(symbol, env, held)
+}
+
+/// Looks `symbol` up through a promise or an active binding, which runs code. The registers
+/// below the destination hold values of the expression being evaluated without counting as
+/// references, so they count as referenced while that code runs: in `x + y` where forcing `y`
+/// runs `x[] <- 1`, the assignment must copy `x` rather than change the left operand.
+unsafe fn eval_symbol_holding(symbol: Sexp, env: Sexp, held: Range<usize>) -> R<Sexp> {
+    let values: Vec<Sexp> = interp()
+        .bytecode
+        .registers
+        .get(held)
+        .map(<[Sexp]>::to_vec)
+        .unwrap_or_default();
+    for value in &values {
+        value.increment_refcount();
+    }
+    let result = eval::eval_symbol(symbol, env);
+    for value in &values {
+        value.decrement_refcount();
+    }
+    result
 }
 
 /// A function's value, with GNU R's rule that bindings to non-functions are skipped.

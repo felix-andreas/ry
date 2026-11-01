@@ -2262,8 +2262,23 @@ pub unsafe fn complex_assign(
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
-    let local_binding = crate::heap().frame_cell(env, inner).is_some();
-    if values::maybe_shared(base) || (!superassign && !local_binding) {
+    let local_cell = crate::heap().frame_cell(env, inner);
+    // A locked binding rejects the final assignment, so the replacement must not have modified
+    // its value in place by then.
+    let locked = local_cell.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
+    // An index that assigns, as in `x[{x[2] <- 3; 1}] <- 2`, rebinds the variable while the
+    // replacement still holds the old value, which therefore must be a copy. The `*tmp*`
+    // promise deliberately counts no reference, so the inner assignment cannot see the share.
+    let index_assigns = getters.iter().any(|getter| {
+        values::pairlist_items(getter.cdr().cdr())
+            .into_iter()
+            .any(|(_, argument)| contains_assignment(argument, symbols))
+    });
+    if values::maybe_shared(base)
+        || locked
+        || index_assigns
+        || (!superassign && local_cell.is_none())
+    {
         base = values::shallow_duplicate(base)?;
     }
     // Values of each level, innermost first: the variable, then each getter applied to it.
@@ -2314,6 +2329,19 @@ pub unsafe fn complex_assign(
         replacement = result?;
     }
     assign_symbol(inner, replacement, env, superassign)
+}
+
+unsafe fn contains_assignment(expression: Sexp, symbols: &values::Symbols) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    head == symbols.assign
+        || head == symbols.assign2
+        || head == symbols.assign_eq
+        || values::pairlist_items(expression)
+            .into_iter()
+            .any(|(_, part)| contains_assignment(part, symbols))
 }
 
 /// Evaluates one replacement call of a complex assignment. A builtin replacement function
