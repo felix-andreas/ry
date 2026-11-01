@@ -149,8 +149,22 @@ unsafe fn clamp_infinite(call: &NativeCall<'_>, value: f64) -> R<f64> {
 /// Brent's minimizer: golden section search accelerated by successive parabolic
 /// interpolation, never evaluating closer than the tolerance to a previous point.
 fn brent_fmin(lower: f64, upper: f64, tolerance: f64, f: &mut dyn FnMut(f64) -> R<f64>) -> R<f64> {
+    let (minimum, _) = brent_minimize(lower, upper, tolerance, f64::EPSILON.sqrt(), None, f)?;
+    Ok(minimum)
+}
+
+/// [`brent_fmin`] with a relative tolerance `epsilon` and an optional limit on the number of
+/// evaluations after the first. Returns the minimum and the number of those evaluations.
+pub fn brent_minimize(
+    lower: f64,
+    upper: f64,
+    tolerance: f64,
+    epsilon: f64,
+    max_iterations: Option<i32>,
+    f: &mut dyn FnMut(f64) -> R<f64>,
+) -> R<(f64, i32)> {
     let golden = (3.0 - 5f64.sqrt()) * 0.5;
-    let epsilon = f64::EPSILON.sqrt();
+    let mut iterations = 0;
     let (mut a, mut b) = (lower, upper);
     let mut x = a + golden * (b - a);
     let (mut w, mut v) = (x, x);
@@ -162,9 +176,12 @@ fn brent_fmin(lower: f64, upper: f64, tolerance: f64, f: &mut dyn FnMut(f64) -> 
         let middle = (a + b) * 0.5;
         let tol1 = epsilon * x.abs() + third;
         let tol2 = tol1 * 2.0;
-        if (x - middle).abs() <= tol2 - (b - a) * 0.5 {
-            return Ok(x);
+        if (x - middle).abs() <= tol2 - (b - a) * 0.5
+            || max_iterations.is_some_and(|limit| iterations >= limit)
+        {
+            return Ok((x, iterations));
         }
+        iterations += 1;
         let (mut p, mut q, mut r) = (0.0, 0.0, 0.0);
         if previous_step.abs() > tol1 {
             r = (x - w) * (fx - fv);

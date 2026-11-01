@@ -14,7 +14,7 @@ use crate::{
     linalg,
     long_double::LongDouble,
     stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize, stats_port,
-    stats_tests,
+    stats_spline, stats_tests,
     unwind::{R, error},
     values::{self, length, scalar_bool, scalar_integer, symbols},
 };
@@ -116,6 +116,8 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanSmooth", stats_arima::kalman_smooth),
     ("LogLin", loglin),
     ("stl", stl),
+    ("rbart", stats_spline::rbart),
+    ("bvalus", stats_spline::bvalus),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
