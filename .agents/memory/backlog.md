@@ -142,7 +142,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 331 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 313 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
