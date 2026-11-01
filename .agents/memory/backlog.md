@@ -2670,8 +2670,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
   function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
   Position[]`; the second member is the vector view of the same element type and adds noise.
-- **A piped `ry repl` prints nothing.** With stdin not a terminal the console reads no commands and
-  exits silently; it should either evaluate stdin or say it needs a terminal.
 
 ## Open: false errors on real CRAN code
 

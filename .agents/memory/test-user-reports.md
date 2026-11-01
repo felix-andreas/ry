@@ -528,5 +528,5 @@ Driven on a three-file package with a record type, a tag alias, `match`, stdlib 
   library names and record fields, and inlay hints.
 - The loading guide did not say that a package using ry syntax (tags, `match`, records) cannot load
   on GNU R. It does now.
-- The console needs a terminal that answers the cursor-position query (`ESC [6n`); piped stdin
-  prints nothing, so scripted driving needs a pty.
+- The console's editor needs a terminal that answers the cursor-position query (`ESC [6n`), so
+  scripted driving of the editor needs a pty; piped stdin is read directly and evaluates.

@@ -53,7 +53,7 @@ are in [Formatting rules](/reference/formatting-rules).
 `--experimental-features range_formatting` lets the server format a selection instead of the whole
 file.
 
-`ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
+With standard input piped (`echo '1 + 1' | ry repl`), the console skips the editor, the prompt and the startup banner, evaluates each line, prints the result, and exits at the end of input, as `R --no-echo` does, except that it keeps going after an error. `ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
 before the first prompt. [The console guide](/guides/console) describes what its completion knows.
 Started inside an R package, `ry repl` [loads it](/guides/loading-packages) and reloads what changed
 before each command; `--no-load` turns that off. `ry repl --runtime ry` (or `RY_RUNTIME=ry`) runs
