@@ -129,15 +129,9 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             if is_na_real(value) {
                 Ok(na_string())
             } else {
-                let text = crate::format::format_real_alone_scipen(value, 15);
-                // GNU R writes the decimal mark that `options(OutDec)` names.
-                if text.contains('.') {
-                    let mark = crate::envir::get_option("OutDec");
-                    if let Some(mark) = values::first_string(mark).filter(|mark| &**mark != ".") {
-                        return values::mkchar(&text.replacen('.', &mark, 1));
-                    }
-                }
-                values::mkchar(&text)
+                values::mkchar(&crate::format::localize_decimal(
+                    crate::format::format_real_alone_scipen(value, 15),
+                ))
             }
         }
         SexpType::Complex => {
@@ -145,7 +139,9 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             if is_na_real(value.r) || is_na_real(value.i) {
                 Ok(na_string())
             } else {
-                values::mkchar(&crate::format::format_complex_alone(value, 15))
+                values::mkchar(&crate::format::localize_decimal(
+                    crate::format::format_complex_alone(value, 15),
+                ))
             }
         }
         SexpType::Raw => values::mkchar(&format!("{:02x}", values::raws(vector)[index])),

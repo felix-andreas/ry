@@ -1223,6 +1223,16 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             scalar_integer(number as i32)
         }
+        "OutDec" => {
+            let Some(mark) = values::first_string(value) else {
+                return Err(error("invalid value for 'OutDec'"));
+            };
+            if mark.chars().count() != 1 {
+                crate::conditions::warning("'OutDec' must be a string of one character")?;
+            }
+            crate::format::set_output_decimal(&mark);
+            Ok(value)
+        }
         "scipen" | "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))

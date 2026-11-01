@@ -1670,15 +1670,18 @@ unsafe fn cat_element(vector: Sexp, index: usize) -> String {
                 "NA".into()
             } else {
                 let digits = crate::format::Settings::current().digits;
-                crate::format::format_real_alone_scipen(value, digits)
+                crate::format::localize_decimal(crate::format::format_real_alone_scipen(
+                    value, digits,
+                ))
             }
         }
         SexpType::String => {
             values::string_at(vector, index).map_or_else(|| "NA".into(), |text| text.into_owned())
         }
-        SexpType::Complex => {
-            crate::format::format_complex_alone(values::complexes(vector)[index], 7)
-        }
+        SexpType::Complex => crate::format::localize_decimal(crate::format::format_complex_alone(
+            values::complexes(vector)[index],
+            7,
+        )),
         _ => crate::coerce::element_as_charsxp(vector, index)
             .map(|charsxp| {
                 if charsxp == values::na_string() {

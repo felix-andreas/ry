@@ -1669,6 +1669,7 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
     let mut hits = Vec::with_capacity(count);
     for index in 0..count {
         let found = match subject_at(text, index, use_bytes) {
+            Some(_) if !valid_subject(text, index, use_bytes, options, false)? => false,
             Some(element) => matcher.find_at(&element, 0)?.is_some(),
             None => false,
         };
@@ -1734,6 +1735,7 @@ unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
             set_elt(result, index, na_string());
             continue;
         }
+        valid_subject(text, index, use_bytes, options, true)?;
         let element = if use_bytes {
             values::escape_high_bytes(charsxp.bytes())
         } else {
@@ -1910,6 +1912,9 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         for index in 0..count {
             match subject_at(text, index, use_bytes) {
                 None => table.push_na(),
+                Some(_) if !valid_subject(text, index, use_bytes, options, false)? => {
+                    table.push_none()
+                }
                 Some(element) => match matcher.captures_at(&element, 0)? {
                     Some(found) => table.push(&element, &found),
                     None => table.push_none(),
@@ -1925,6 +1930,11 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
             set_elt(result, index, na_match()?);
             continue;
         };
+        if !valid_subject(text, index, use_bytes, options, false)? {
+            table.push_none();
+            set_elt(result, index, table.finish(&report, &names)?);
+            continue;
+        }
         let mut position = 0;
         while position < element.len() {
             let Some(found) = matcher.captures_at(&element, position)? else {
@@ -2300,6 +2310,43 @@ pub(crate) unsafe fn subject_at<'a>(
     }
     let charsxp = object.element(index);
     (charsxp != na_string()).then(|| values::escape_high_bytes(charsxp.bytes()))
+}
+
+/// Whether element `index` of `text` can be matched. GNU R refuses a string marked as UTF-8
+/// whose bytes are not UTF-8: the regex functions warn and treat it as unmatched, and `sub`
+/// and `gsub` (`fatal`) fail. TRE first fails to convert it to wide characters.
+unsafe fn valid_subject(
+    text: Sexp,
+    index: usize,
+    use_bytes: bool,
+    options: PatternOptions,
+    fatal: bool,
+) -> R<bool> {
+    let charsxp = text.element(index);
+    if use_bytes
+        || Encoding::of(charsxp) != Encoding::Utf8
+        || std::str::from_utf8(charsxp.bytes()).is_ok()
+    {
+        return Ok(true);
+    }
+    let message = if options.fixed || options.perl {
+        format!("input string {} is invalid UTF-8", index + 1)
+    } else {
+        let mut shown = String::new();
+        for chunk in charsxp.bytes().utf8_chunks() {
+            shown.push_str(chunk.valid());
+            for byte in chunk.invalid() {
+                shown.push_str(&format!("<{byte:02x}>"));
+            }
+        }
+        warning(format!("unable to translate '{shown}' to a wide string"))?;
+        format!("input string {} is invalid", index + 1)
+    };
+    if fatal {
+        return Err(error(message));
+    }
+    warning(message)?;
+    Ok(false)
 }
 
 /// The byte ranges of a match (group 0) and of its capture groups, `None` for a group that took

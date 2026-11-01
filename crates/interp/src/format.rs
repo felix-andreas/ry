@@ -9,6 +9,7 @@ use crate::{
     values::{self, alloc, length, nil, symbols},
 };
 use heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, gp, is_na_real};
+use std::cell::RefCell;
 use unicode_width::UnicodeWidthChar;
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -261,6 +262,29 @@ pub fn format_integer(value: i32) -> String {
     } else {
         value.to_string()
     }
+}
+
+thread_local! {
+    /// The decimal mark `options(OutDec)` names. Printing, `format`, `cat` and `as.character`
+    /// write it, while deparsing and `sprintf` keep `.`, so it applies where those callers
+    /// finish a number rather than inside the shared formatter.
+    static OUTPUT_DECIMAL: RefCell<String> = RefCell::new(".".to_owned());
+}
+
+pub fn set_output_decimal(mark: &str) {
+    OUTPUT_DECIMAL.with(|decimal| *decimal.borrow_mut() = mark.to_owned());
+}
+
+/// `text`, a formatted number, with `options(OutDec)` as its decimal mark.
+pub fn localize_decimal(text: String) -> String {
+    OUTPUT_DECIMAL.with(|decimal| {
+        let decimal = decimal.borrow();
+        if decimal.as_str() == "." || !text.contains('.') {
+            text
+        } else {
+            text.replace('.', &decimal)
+        }
+    })
 }
 
 pub fn format_logical(value: i32) -> &'static str {
@@ -518,7 +542,7 @@ pub unsafe fn format_vector(
             let format = format_real_common(data, settings);
             let items: Vec<String> = data
                 .iter()
-                .map(|&value| format_real_with(value, format, na_string))
+                .map(|&value| localize_decimal(format_real_with(value, format, na_string)))
                 .collect();
             justify(items, true)
         }
@@ -531,7 +555,12 @@ pub unsafe fn format_vector(
                     if is_na_real(value.r) || is_na_real(value.i) {
                         na_string.to_owned()
                     } else {
-                        format_complex_with(value, real, imaginary, settings.digits)
+                        localize_decimal(format_complex_with(
+                            value,
+                            real,
+                            imaginary,
+                            settings.digits,
+                        ))
                     }
                 })
                 .collect();
@@ -649,7 +678,14 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
                 .collect()
         }
         SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
-            let mut items = format_vector(vector, settings, false, "NA")?;
+            let mark = values::first_string(call.arg(8));
+            let saved = OUTPUT_DECIMAL.with(|decimal| decimal.borrow().clone());
+            if let Some(mark) = &mark {
+                set_output_decimal(mark);
+            }
+            let formatted = format_vector(vector, settings, false, "NA");
+            set_output_decimal(&saved);
+            let mut items = formatted?;
             if trim {
                 items = items
                     .into_iter()
