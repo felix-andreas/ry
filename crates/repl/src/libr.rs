@@ -322,6 +322,7 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        interactive: bool,
         arguments: &[String],
     ) -> Result<(), ReplError> {
         let trailing = trailing_arguments(arguments)?;
@@ -329,22 +330,18 @@ impl RApi {
         unsafe { env::set_var("R_HOME", &self.r_home) };
         export_wrapper_path_vars(&self.r_home);
 
-        let mut argv: Vec<*mut c_char> = [
-            c"repl",
-            c"--interactive",
-            c"--no-save",
-            c"--no-restore-data",
-        ]
-        .iter()
-        // `--no-echo` also keeps R from ending the session with a newline of its own.
-        .chain(quiet.then_some(&c"--no-echo"))
-        .map(|argument| argument.as_ptr() as *mut c_char)
-        .chain(
-            trailing
-                .iter()
-                .map(|argument| argument.as_ptr() as *mut c_char),
-        )
-        .collect();
+        let mut argv: Vec<*mut c_char> = [c"repl", c"--no-save", c"--no-restore-data"]
+            .iter()
+            .chain(interactive.then_some(&c"--interactive"))
+            // `--no-echo` also keeps R from ending the session with a newline of its own.
+            .chain(quiet.then_some(&c"--no-echo"))
+            .map(|argument| argument.as_ptr() as *mut c_char)
+            .chain(
+                trailing
+                    .iter()
+                    .map(|argument| argument.as_ptr() as *mut c_char),
+            )
+            .collect();
 
         unsafe {
             *self.running_as_main_program = 1;
@@ -352,7 +349,8 @@ impl RApi {
             // terminal state and our SIGINT-to-flag translation.
             *self.signal_handlers = 0;
             (self.initialize)(argv.len() as c_int, argv.as_mut_ptr());
-            *self.interactive = 1;
+            // A script reports `interactive()` as FALSE, as under Rscript; a console, TRUE.
+            *self.interactive = c_int::from(interactive);
             // NULL console files route all output through the hooks below.
             *self.consolefile = ptr::null_mut();
             *self.outputfile = ptr::null_mut();
@@ -375,6 +373,7 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        interactive: bool,
         arguments: &[String],
     ) -> Result<(), ReplError> {
         unsafe { env::set_var("R_HOME", &self.r_home) };
@@ -413,7 +412,7 @@ impl RApi {
                         .to_owned(),
                 ));
             }
-            start.r_interactive = 1;
+            start.r_interactive = c_int::from(interactive);
             start.r_quiet = c_int::from(quiet);
             start.r_no_echo = c_int::from(quiet);
             start.restore_action = SA_NORESTORE;

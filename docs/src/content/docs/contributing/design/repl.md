@@ -224,8 +224,8 @@ script.R` feeds the same script and then hands over to the interactive prompt.
 The ReadConsole front end feeds the script's bytes exactly as it feeds accepted console input, and in
 batch mode it answers "end of input" once they are used up. There is no second driver, so parsing,
 evaluation, and autoprinting behave exactly as in the console. Propagating the exit code needs no new
-C surface: batch mode prepends `options(error = function() q(status = 1, save = "no"))`, so a
-top-level error halts the script and the process exits with status 1.
+C surface: batch mode starts R non-interactive, as `Rscript` does, so a top-level error prints
+"Execution halted" and R exits with status 1. A script therefore sees `interactive()` as `FALSE`.
 
 One thing is still ahead for the runner: running typed `.ry` sources directly, which means
 type-checking them, compiling them in memory, and executing the result (see

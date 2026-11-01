@@ -36,7 +36,7 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     install_sigint_handler();
     // A batch run prints only what its code prints, and so does a console reading a pipe.
     let quiet = batch || !stdin().is_terminal();
-    api.initialize(read_console, write_console_ex, quiet, &arguments)?;
+    api.initialize(read_console, write_console_ex, quiet, !batch, &arguments)?;
     api.register_call_routines(&routines);
     for statement in &startup {
         api.eval(statement);
@@ -136,10 +136,6 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
         ),
         None => None,
     };
-    if options.batch && (script.is_some() || !options.input.is_empty()) {
-        // A top-level error quits with a failing status, which becomes the exit code.
-        pending.extend(b"options(error = function() q(status = 1, save = \"no\"))\n");
-    }
     if !options.input.is_empty() {
         pending.extend(normalize_line_endings(&options.input).into_bytes());
         pending.push_back(b'\n');

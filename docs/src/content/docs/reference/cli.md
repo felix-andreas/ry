@@ -75,8 +75,8 @@ script with them erased. ry's runtime is under construction: a script that calls
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which are written
 when the device closes or the script ends; `jpeg` and `postscript` devices open but write no image
-yet. A script sees `interactive()` as `FALSE` on ry's runtime, as under `Rscript`, but as `TRUE` on
-GNU R.
+yet. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
 guide](/guides/console) describes what its completion knows. Started inside an R package, `ry R`

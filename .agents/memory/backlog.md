@@ -1970,9 +1970,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **ry's console (`ry run` with no script) starts bare**: no `tools:ry` environment, no `.Call`
   routines, no `load_all()` and no package autoload, because `repl::ry_repl` does not attach the
   loader the way `ry run script.R` does. `--no-load` is therefore hidden on `ry run`.
-- **`interactive()` differs between runtimes for a script**: FALSE under `ry run script.R`, TRUE
-  under `ry R script.R`, because the embedded GNU R session is started interactive. GNU R's
-  `Rscript` gives FALSE, so `ry R` is the one to fix.
 - **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.

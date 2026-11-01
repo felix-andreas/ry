@@ -898,6 +898,50 @@ fn script_arguments_reach_command_args_verbatim_on_both_runtimes() {
 }
 
 #[test]
+fn a_script_is_not_interactive_and_a_console_is_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("probe.R"), "print(interactive())\n").expect("write script");
+    for runtime in runtimes() {
+        let command = runtime_command(runtime);
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[command, "probe.R"], &[], "");
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert_eq!(stdout, "[1] FALSE\n", "{runtime} script: {stderr}");
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[command], &[], "print(interactive())\n");
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(
+            stdout.contains("[1] TRUE"),
+            "{runtime} console: {stdout}{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_top_level_error_halts_the_script_with_status_one_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("failing.R"),
+        "stop(\"boom\")\ncat(\"not reached\\n\")\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "failing.R"],
+            &[],
+            "",
+        );
+        assert_eq!(status, Some(1), "{runtime}: {stdout}{stderr}");
+        assert!(!stdout.contains("not reached"), "{runtime}: {stdout}");
+        assert!(
+            stderr.contains("boom") && stderr.contains("Execution halted"),
+            "{runtime}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn run_defaults_to_ry_s_runtime_and_r_runs_gnu_r() {
     if !r_available() || !ry_runtime_available() {
         return;
