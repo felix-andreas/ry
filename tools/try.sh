@@ -7,6 +7,9 @@
 set -euo pipefail
 
 repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+target_dir=${CARGO_TARGET_DIR:-$repository/target}
+# The demo changes directory, so a relative target directory would stop resolving.
+[[ "$target_dir" = /* ]] || target_dir=$PWD/$target_dir
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 	bold=$'\e[1m' dim=$'\e[2m' cyan=$'\e[36m' red=$'\e[31m' reset=$'\e[0m'
@@ -22,7 +25,7 @@ note() { printf '%s%s%s\n' "$dim" "$1" "$reset"; }
 show() {
 	local display="" word
 	for word in "$@"; do
-		if [[ "$word" =~ ^[A-Za-z0-9_./:=+-]+$ ]]; then display+=" $word"; else display+=" '$word'"; fi
+		if [[ "$word" =~ ^[A-Za-z0-9_./:=+-]+$ ]]; then display+=" $word"; else display+=" $(printf '%q' "$word")"; fi
 	done
 	printf '\n%s$%s%s\n' "$cyan" "$display" "$reset"
 	local status=0
@@ -53,16 +56,16 @@ check_prerequisites() {
 	if [ -z "$r_home" ]; then
 		problems+=("GNU R is not installed (ry's runtime reads base R from it): install it from https://cloud.r-project.org, or with \`apt install r-base-core\`, \`dnf install R-core\`, or \`brew install --cask r\`.")
 	elif [ ! -e "$r_home/lib/libR.so" ] && [ ! -e "$r_home/lib/libR.dylib" ]; then
-		problems+=("$r_home has no lib/libR.so: it is not an R installation, or that R was built without --enable-R-shlib. Install a CRAN or distribution build of R (both are shared), or fix R_HOME.")
+		problems+=("$r_home has no lib/libR.so or lib/libR.dylib: it is not an R installation, or that R was built without --enable-R-shlib. Install a CRAN or distribution build of R (both are shared), or fix R_HOME.")
 	fi
 
 	# A cold release build of ry and its runtime writes about 6 GB into target/.
-	if [ ! -x "$repository/target/release/ry" ] || [ ! -e "$repository/target/release/libR.so" ]; then
-		mkdir -p "$repository/target"
+	if [ ! -x "$target_dir/release/ry" ]; then
+		mkdir -p "$target_dir"
 		local free_kb
-		free_kb=$(df -Pk "$repository/target" | awk 'NR == 2 { print $4 }')
+		free_kb=$(df -Pk "$target_dir" | awk 'NR == 2 { print $4 }')
 		if [ -n "$free_kb" ] && [ "$free_kb" -lt $((8 * 1024 * 1024)) ]; then
-			problems+=("Only $((free_kb / 1024 / 1024)) GB free under $repository/target, and the first build needs about 8 GB: free some disk space, or point CARGO_TARGET_DIR at a larger disk.")
+			problems+=("Only $((free_kb / 1024 / 1024)) GB free under $target_dir, and the first build needs about 8 GB: free some disk space, or point CARGO_TARGET_DIR at a larger disk.")
 		fi
 	fi
 
@@ -78,7 +81,6 @@ check_prerequisites() {
 check_prerequisites
 
 heading "Building ry and its runtime (fast after the first time)"
-target_dir=${CARGO_TARGET_DIR:-$repository/target}
 note "\$ cargo build --release -p ry-lang -p libr   (the first build takes 10 to 30 minutes)"
 # Warnings from a successful build would bury the demo, so they are shown only on failure.
 if ! build_log=$(cargo build --color always --release --manifest-path "$repository/Cargo.toml" -p ry-lang -p libr 2>&1); then
@@ -90,8 +92,16 @@ export PATH="$bin_dir:$PATH"
 ry --version
 
 demo=${RY_TRY_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/ry-try.XXXXXX")}
+# The demo is rebuilt from scratch on every run, so it deletes $RY_TRY_DIR first, but only a
+# directory that is empty or that an earlier run created.
+if [ -n "$(ls -A "$demo" 2>/dev/null)" ] && [ ! -e "$demo/.ry-try" ]; then
+	printf '%serror:%s %s is not empty and was not made by just try; pick another RY_TRY_DIR.\n' \
+		"$red$bold" "$reset" "$demo" >&2
+	exit 1
+fi
 rm -rf "$demo"
 mkdir -p "$demo/analysis" "$demo/typed" "$demo/tally/R"
+touch "$demo/.ry-try"
 cd "$demo"
 note "The demo project is in $demo"
 

@@ -37,8 +37,22 @@ else
 fi
 
 printf 'x<-c(1,2)\n' >messy.R
-"$ry" fmt messy.R 2>/dev/null
-if [ "$(cat messy.R)" = "x <- c(1, 2)" ]; then pass "ry fmt"; else fail "ry fmt wrote: $(cat messy.R)"; fi
+if "$ry" fmt messy.R 2>/dev/null && [ "$(cat messy.R)" = "x <- c(1, 2)" ]; then
+	pass "ry fmt"
+else
+	fail "ry fmt wrote: $(cat messy.R)"
+fi
+
+# macOS ships no `timeout`; Homebrew's coreutils names it `gtimeout`, and perl is everywhere.
+with_timeout() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$@"
+	elif command -v gtimeout >/dev/null 2>&1; then
+		gtimeout "$@"
+	else
+		perl -e 'alarm shift; exec @ARGV' "$@"
+	fi
+}
 
 # A minimal LSP session: initialize, shutdown, exit. The reply must announce capabilities.
 lsp_message() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
@@ -47,18 +61,18 @@ reply=$({
 	lsp_message '{"jsonrpc":"2.0","method":"initialized","params":{}}'
 	lsp_message '{"jsonrpc":"2.0","id":2,"method":"shutdown"}'
 	lsp_message '{"jsonrpc":"2.0","method":"exit"}'
-} | timeout 30 "$ry" server 2>/dev/null) || true
+} | with_timeout 30 "$ry" server 2>/dev/null) || true
 if grep -q '"capabilities"' <<<"$reply"; then pass "ry server answers initialize"; else fail "ry server: $reply"; fi
 
 if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 	printf 'cat(sum(1:10), "\\n")\n' >sum.R
 	if [ -e "$scratch/install/libR.so" ] || [ -e "$scratch/install/libR.dylib" ]; then
-		output=$("$ry" run sum.R 2>&1) || true
+		output=$("$ry" run sum.R 2>&1 | tr -d '\r') || true
 		if [ "$output" = "55 " ]; then pass "ry run on ry's runtime"; else fail "ry run: $output"; fi
 	else
 		echo "skip  ry run (this archive carries no runtime)"
 	fi
-	output=$("$ry" R sum.R 2>&1) || true
+	output=$("$ry" R sum.R 2>&1 | tr -d '\r') || true
 	if [ "$output" = "55 " ]; then pass "ry R on GNU R"; else fail "ry R: $output"; fi
 else
 	echo "skip  ry run and ry R (GNU R is not installed)"

@@ -22,7 +22,8 @@ that runtime runs.
 
 Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
 aarch64) and macOS (Apple silicon and Intel). The Windows archive holds the checker, formatter and
-language server, without the runtime.
+language server, without the runtime. The macOS runtime has not been run on a Mac yet, and it
+does not set up the symbol exports that compiled packages need, so treat it as experimental.
 
 ## ry 0.3.0, a complete rewrite
 

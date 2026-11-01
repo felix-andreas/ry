@@ -122,7 +122,7 @@
               # name must stay libR.so, the soname compiled packages record.
               postInstall = ''
                 mkdir -p "$out/lib/ry"
-                mv "$out/lib/libR.so" "$out/lib/ry/libR.so"
+                mv "$out"/lib/libR${pkgs.stdenv.hostPlatform.extensions.sharedLibrary} "$out/lib/ry/"
                 rm -f "$out"/lib/libR.a "$out"/lib/*.rlib
               '';
               meta.mainProgram = "ry";

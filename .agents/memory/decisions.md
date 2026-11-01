@@ -1682,8 +1682,7 @@ edit. `backlog.md` tracks it.
 
 # Decision record: the Linux release binary links glibc 2.17 through zig
 
-**Status:** decided and implemented. The user directed one release build per platform, plus a
-native package for Nix users.
+**Status:** superseded by "Releases are built natively per platform, with the runtime beside the binary", which builds each archive on its own CI runner (glibc 2.35 floor). Kept for the reasoning about loaders and musl.
 
 **Problem.** The Linux release package was crane's native build against nixpkgs' glibc, so the
 shipped binary's ELF interpreter and RUNPATH were `/nix/store/...` paths. It started only on a

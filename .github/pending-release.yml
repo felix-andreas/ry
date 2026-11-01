@@ -44,6 +44,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
       - name: version matches the workspace
         run: |
           workspace=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -51,16 +52,16 @@ jobs:
             echo "::error::releasing $VERSION, but Cargo.toml is at $workspace; run \`just bump-version $VERSION\` first"
             exit 1
           fi
+          just release-kind "$VERSION" >/dev/null
       # Reads rust-toolchain.toml, so releases build with the pinned compiler.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      - uses: extractions/setup-just@v2
       - uses: r-lib/actions/setup-r@v2
       # libR links zlib, bzip2 and xz on Linux (crates/libr/build.rs).
       - name: link libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
       - name: package
         run: just package "$VERSION"
       - name: smoke test
@@ -114,6 +115,12 @@ jobs:
         run: |
           prerelease=""
           [ "$(just release-kind "$VERSION")" = pre-release ] && prerelease="--prerelease"
+          # A rerun after a later step failed finds the release already there and refreshes its assets.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" --clobber \
+              release/$VERSION/ry-*.tar.gz release/$VERSION/ry-*.zip release/$VERSION/*.vsix
+            exit 0
+          fi
           gh release create "$VERSION" $prerelease --target "$GITHUB_SHA" --title "ry $VERSION" \
             --notes "See the [news page](https://ry-lang.org/news/) for what changed." \
             release/$VERSION/ry-*.tar.gz release/$VERSION/ry-*.zip release/$VERSION/*.vsix
@@ -128,6 +135,8 @@ jobs:
       - name: Open VSX
         if: env.OVSX_PAT != ''
         run: |
+          flag=""
+          [ "$(just release-kind "$VERSION")" = pre-release ] && flag="--pre-release"
           for vsix in release/$VERSION/ry-*.vsix release/$VERSION/ry.vsix; do
-            bunx ovsx publish "$vsix" --pat "$OVSX_PAT"
+            bunx ovsx publish "$vsix" $flag --pat "$OVSX_PAT"
           done

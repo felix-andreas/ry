@@ -170,12 +170,27 @@ pub fn run_console_on_ry_runtime(
     Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
 }
 
-fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
+// Loading with RTLD_GLOBAL is what lets compiled packages resolve R's API from ry's runtime, and
+// Windows has no equivalent, so the runtime is not shipped there yet.
+#[cfg(unix)]
+type RuntimeLibrary = libloading::os::unix::Library;
+#[cfg(not(unix))]
+type RuntimeLibrary = libloading::Library;
+
+#[cfg(not(unix))]
+fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
+    Err(ReplError(
+        "ry's runtime is not available on Windows yet; use `ry R` to run code on GNU R".into(),
+    ))
+}
+
+#[cfg(unix)]
+fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
     let library_path = ry_runtime_library()?;
     // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
     // dynamic linker satisfy them from it.
     let library = unsafe {
-        libloading::os::unix::Library::open(
+        RuntimeLibrary::open(
             Some(&library_path),
             libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
         )
@@ -189,16 +204,14 @@ fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
     Ok(Box::leak(Box::new(library)))
 }
 
-fn runtime_entry<T: Copy>(
-    library: &'static libloading::os::unix::Library,
-    name: &str,
-) -> Result<T, ReplError> {
+fn runtime_entry<T: Copy>(library: &'static RuntimeLibrary, name: &str) -> Result<T, ReplError> {
     let symbol = format!("{name}\0");
     unsafe { library.get::<T>(symbol.as_bytes()) }
         .map(|symbol| *symbol)
         .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
+#[cfg(unix)]
 fn ry_runtime_library() -> Result<PathBuf, ReplError> {
     if let Some(path) = std::env::var_os("RY_LIBR") {
         return Ok(PathBuf::from(path));
