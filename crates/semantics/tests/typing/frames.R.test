@@ -387,6 +387,21 @@ sales: frame{team: character[], units: integer[], price: double[]}
 ranged: Unknown
 128..133 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
 
+#---- a_range_to_a_position_is_reported_once
+sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ranged <- sales[, .SD, .SDcols = zz:3]
+#++++
+sales: frame{team: character[], units: integer[], price: double[]}
+ranged: frame
+108..110 warning[unresolved] the frame `sales` has no column `zz`, and nothing else defines that name.
+
+#---- lapply_with_a_named_subset_argument
+sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+totals <- sales[, lapply(X = .SD, sum), by = team]
+#++++
+sales: frame{team: character[], units: integer[], price: double[]}
+totals: frame{team: character[], units: integer[], price: double[]}
+
 #---- sdcols_of_another_shape_leaves_the_columns_unknown
 sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 matched <- sales[, .SD, .SDcols = patterns("^u")]
@@ -595,6 +610,16 @@ prices[price > 1, `:=`(id = -2.5, price = 0)]
 prices: frame{id: integer[], price: double[]}
 frame{id: integer[], price: double[]}
 74..78 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
+
+#---- a_one_item_list_writes_its_item
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+labelled <- prices[, c("label") := list("x")]
+truncated <- prices[id > 1L, (c("id")) := list(-(1.5))]
+#++++
+prices: frame{id: integer[], price: double[]}
+labelled: frame{id: integer[], price: double[], label: character[]}
+truncated: Unknown
+139..145 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
 
 #---- a_whole_number_double_written_into_an_integer_column_is_accepted
 prices <- frame(id = 1:3, price = c(1, 2, 3))
@@ -882,6 +907,26 @@ picked <- events[windows, on = .(t >= lo), .(first = x.t, label = i.t), by = .EA
 events: frame{t: double[], v: integer[]}
 windows: frame{lo: double[], t: character[]}
 picked: frame{t: double[], first: double[], label: character[]}
+
+#---- each_i_reads_a_prefixed_column_of_i_as_one_value
+events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- frame(lo = c(0, 1), hi = c(2, 5))
+flagged <- events[windows, on = .(t >= lo), .(wide = if (i.hi > 2) 1 else 2), by = .EACHI]
+#++++
+events: frame{t: double[], v: integer[]}
+windows: frame{lo: double[], hi: double[]}
+flagged: frame{t: double[], wide: double[]}
+
+#---- a_zero_or_false_roll_is_not_a_rolling_join
+events <- frame(id = 1:3, t = c(1, 2, 3))
+windows <- frame(id = 1:2, lo = c(0, 1))
+zero <- events[windows, on = .(id, t >= lo), roll = 0]
+false <- events[windows, on = .(id, t >= lo), roll = F]
+#++++
+events: frame{id: integer[], t: double[]}
+windows: frame{id: integer[], lo: double[]}
+zero: frame{id: integer[], t: double[]}
+false: frame{id: integer[], t: double[]}
 
 #---- each_i_reports_a_missing_column
 events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))

@@ -5894,9 +5894,22 @@ impl<'db> Checker<'db, '_> {
             });
             source_columns = match joined.map(|joined| joined.kind(db)) {
                 Some(TyKind::Frame(joined_columns)) => {
+                    // Under `.EACHI`, `i.col` reads one row of `i`, like a bare column of `i`.
                     join = Some(JoinSides {
                         x: subject_columns.clone(),
-                        i: joined_columns.clone(),
+                        i: joined_columns.as_ref().map(|columns| {
+                            columns
+                                .iter()
+                                .map(|column| RecordField {
+                                    ty: if each_i {
+                                        column_element(db, column.ty)
+                                    } else {
+                                        column.ty
+                                    },
+                                    ..column.clone()
+                                })
+                                .collect()
+                        }),
                     });
                     let joined_name = i_value.and_then(|value| variable_name(module, value));
                     match join_keys(module, on_value) {
@@ -5904,10 +5917,18 @@ impl<'db> Checker<'db, '_> {
                             if let Some(roll) = named("roll")
                                 && let Some(roll_value) = roll.value
                                 && keys.iter().any(|key| key.operator != JoinOperator::Equal)
+                                // data.table rolls unless `roll` equals `FALSE`, which `0` does.
                                 && !matches!(
                                     &module.expression(roll_value).kind,
                                     ExpressionKind::Literal(LiteralKind::Logical(false))
-                                )
+                                ) && !matches!(
+                                    &module.expression(roll_value).kind,
+                                    ExpressionKind::Literal(LiteralKind::Integer(text) | LiteralKind::Double(text))
+                                        if text.trim_end_matches('L').parse::<f64>() == Ok(0.0)
+                                ) && !(matches!(
+                                    &module.expression(roll_value).kind,
+                                    ExpressionKind::NameRef(name) if name == "F"
+                                ) && !self.naming.resolutions.contains_key(&roll_value))
                             {
                                 self.errors.push(TypeError {
                                     range: roll.name_range.map_or_else(
@@ -6403,8 +6424,18 @@ impl<'db> Checker<'db, '_> {
                 rhs,
                 ..
             } => {
-                let (Ok(from), Ok(to)) = (position(self, *lhs), position(self, *rhs)) else {
+                let named = |item: ExprId| {
+                    matches!(
+                        &module.expression(item).kind,
+                        ExpressionKind::Literal(LiteralKind::String(_))
+                            | ExpressionKind::NameRef(_)
+                    )
+                };
+                if !named(*lhs) || !named(*rhs) {
                     self.infer(value);
+                    return None;
+                }
+                let (Ok(from), Ok(to)) = (position(self, *lhs), position(self, *rhs)) else {
                     return None;
                 };
                 let (from, to) = (from?, to?);
@@ -6483,8 +6514,7 @@ impl<'db> Checker<'db, '_> {
         // `lapply` cannot pick its result per element; calling it on each column directly can.
         let function = arguments
             .iter()
-            .filter(|argument| argument.name.is_none())
-            .nth(1)
+            .find(|argument| argument.name.is_none() && argument.value != Some(subset))
             .or_else(|| {
                 arguments
                     .iter()
@@ -6499,6 +6529,7 @@ impl<'db> Checker<'db, '_> {
             }
             _ => None,
         });
+        let overloads_used = overloads.is_some();
         if let Some((function, name, schemes)) = overloads {
             let range = module.expression(value).range;
             let rest: Vec<Argument> = arguments
@@ -6562,9 +6593,14 @@ impl<'db> Checker<'db, '_> {
             }
         }
         self.record(subset, subset_data);
-        if let Some(applied) = &applied {
-            self.record(value, Ty::new(db, TyKind::Record(applied.clone())));
+        if overloads_used {
+            self.infer(*callee);
         }
+        let applied_ty = match &applied {
+            Some(applied) => Ty::new(db, TyKind::Record(applied.clone())),
+            None => unknown(db),
+        };
+        self.record(value, applied_ty);
         // A finding every column causes is about `f` itself and is reported once; one that
         // only some columns cause names each of them.
         let shared: Vec<TypeError<'db>> = findings
@@ -6781,6 +6817,14 @@ impl<'db> Checker<'db, '_> {
                             .collect(),
                     ),
                     (_, _, Some(_)) => None,
+                    // data.table reads a `list()` right side as one value per name, even for one name.
+                    (Some(names), Some(items), None) if names.len() == items.len() => {
+                        let mut paired = Vec::with_capacity(names.len());
+                        for (name, item) in names.into_iter().zip(items) {
+                            paired.push((name, self.infer(item), Some(item)));
+                        }
+                        Some(paired)
+                    }
                     (Some(names), _, None) if names.len() == 1 => {
                         let ty = match right.value {
                             Some(value) => self.infer(value),
@@ -6792,13 +6836,6 @@ impl<'db> Checker<'db, '_> {
                                 .map(|name| (name, ty, right.value))
                                 .collect(),
                         )
-                    }
-                    (Some(names), Some(items), None) if names.len() == items.len() => {
-                        let mut paired = Vec::with_capacity(names.len());
-                        for (name, item) in names.into_iter().zip(items) {
-                            paired.push((name, self.infer(item), Some(item)));
-                        }
-                        Some(paired)
                     }
                     _ => {
                         if let Some(value) = right.value {
@@ -7566,12 +7603,15 @@ fn lossy_write<'db>(
         (Some(Atomic::Logical | Atomic::Integer | Atomic::Double), Some(Atomic::Character)) => true,
         (Some(Atomic::Integer), Some(Atomic::Double)) => {
             let mut literal = value;
-            while let ExpressionKind::Unary {
-                operator: UnaryOperator::Minus,
-                operand,
-            } = &module.expression(literal).kind
-            {
-                literal = *operand;
+            loop {
+                match &module.expression(literal).kind {
+                    ExpressionKind::Unary {
+                        operator: UnaryOperator::Minus,
+                        operand,
+                    } => literal = *operand,
+                    ExpressionKind::Paren(inner) => literal = *inner,
+                    _ => break,
+                }
             }
             matches!(
                 &module.expression(literal).kind,
@@ -7747,9 +7787,9 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
     }
 }
 
-/// The conditions of one `on` string. When the literal's source is its text between two quotes
-/// (no escapes), each column gets its own range inside the literal; otherwise both take the
-/// literal's range.
+/// The conditions of one `on` string. When the literal's source is its text between two quotes,
+/// each column gets its own range inside the literal; a raw string, whose source is longer, gives
+/// every column the literal's range.
 fn split_join_keys(text: &str, range: TextRange) -> Option<Vec<JoinKey>> {
     let verbatim = usize::from(range.len()) == text.len() + 2;
     let range_of = |start: usize, part: &str| {
