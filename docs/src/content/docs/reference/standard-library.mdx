@@ -76,6 +76,8 @@ These rules hold in every module:
   too.
 - **A string is a length-one `character`, and a number a length-one `integer` or `double`.** `NA`
   and `NaN` are refused with an error, because no function has an `NA` case to fall into.
+- **Misuse is an error, not a tag.** An argument of the wrong type, an `NA`, or an `integer`
+  `List.sum` or `List.product` that overflows stops with an R error that names the problem.
 - **Failure is a tag.** A function that can fail returns `:Ok(value)` or `:Err(tag)`, typed
   `Result<T, E>`, and the tag names the reason: `:OutOfBounds`, `:NotFound`, `:ListWasEmpty`,
   `:KeyNotFound`, `:InvalidNumStr`, `:BadUtf8`, `:Overflow`, `:DivByZero`, `:SqrtOfNegative` or
@@ -110,8 +112,10 @@ identical(d, Dict.from_list(list(("a", 1), ("b", 2))))
 ```
 
 A key or element is a `logical`, `integer`, `double` or `character` scalar that is not `NA` or
-`NaN`. Every key of one collection has the same type, except that integers and doubles mix: `1L`
-and `1` are the same key, and the keys become doubles. `-0` and `0` are the same key too.
+`NaN`. Every key of one collection has the same type, which the checker enforces. At run time
+integers and doubles mix, as in R's own `==`: `1L` and `1` are the same key, and the keys become
+doubles. `-0` and `0` are the same key too. `identical()` still tells an integer-keyed collection
+from a double-keyed one, as it tells `1L` from `1`.
 
 `length()`, `identical()`, `all.equal()`, `format()`, `deparse()` and `as.list()` understand them.
 Any other R function refuses one, before it runs and in the checker, so convert with `as.list()`,
@@ -855,7 +859,8 @@ List.sort_with(list(3L, 1L, 2L), Num.compare)
 <T: scalar numeric> fn(list: list[T]) -> T
 ```
 
-The sum of the elements; `0L` for an empty list.
+The sum of the elements; `0L` for an empty list. An `integer` sum that overflows is an error, so
+sum doubles, or fold with `Num.add_checked` to get `:Err(:Overflow)` instead.
 
 ```r
 List.sum(list(1L, 2L, 3L))
@@ -868,7 +873,8 @@ List.sum(list(1L, 2L, 3L))
 <T: scalar numeric> fn(list: list[T]) -> T
 ```
 
-The product of the elements; `1L` for an empty list.
+The product of the elements; `1L` for an empty list. An `integer` product that overflows is an
+error, as for `List.sum`.
 
 ```r
 List.product(list(2, 2.5))
@@ -1501,7 +1507,7 @@ A dictionary maps keys to values, typed `Dict<K, V>`. See [Dictionaries and sets
 #### `Dict.empty`
 
 ```
-<K: atomic, V> fn() -> Dict<K, V>
+<K: key, V> fn() -> Dict<K, V>
 ```
 
 A dictionary with no entries.
@@ -1514,7 +1520,7 @@ Dict.empty()
 #### `Dict.single`
 
 ```
-<K: atomic, V> fn(key: K, value: V) -> Dict<K, V>
+<K: key, V> fn(key: K, value: V) -> Dict<K, V>
 ```
 
 A dictionary with one entry.
@@ -1527,7 +1533,7 @@ Dict.single("a", 1)
 #### `Dict.from_list`
 
 ```
-<K: atomic, V> fn(pairs: list[tuple{K, V}]) -> Dict<K, V>
+<K: key, V> fn(pairs: list[tuple{K, V}]) -> Dict<K, V>
 ```
 
 A dictionary from `(key, value)` tuples; a later tuple replaces an earlier one with the same key.
@@ -1540,7 +1546,7 @@ Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
 #### `Dict.to_list`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>) -> list[tuple{K, V}]
+<K: key, V> fn(dict: Dict<K, V>) -> list[tuple{K, V}]
 ```
 
 The entries as `(key, value)` tuples, in insertion order.
@@ -1553,7 +1559,7 @@ Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
 #### `Dict.len`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>) -> integer
+<K: key, V> fn(dict: Dict<K, V>) -> integer
 ```
 
 The number of entries.
@@ -1566,7 +1572,7 @@ Dict.len(Dict.single("a", 1))
 #### `Dict.is_empty`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>) -> logical
+<K: key, V> fn(dict: Dict<K, V>) -> logical
 ```
 
 Whether the dictionary has no entries.
@@ -1579,7 +1585,7 @@ Dict.is_empty(Dict.empty())
 #### `Dict.get`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
+<K: key, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
 ```
 
 The value for `key`, or `:Err(:KeyNotFound)`.
@@ -1592,7 +1598,7 @@ Dict.get(Dict.single("a", 1), "a")
 #### `Dict.contains`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, key: K) -> logical
+<K: key, V> fn(dict: Dict<K, V>, key: K) -> logical
 ```
 
 Whether the dictionary has an entry for `key`.
@@ -1605,7 +1611,7 @@ Dict.contains(Dict.single("a", 1), "b")
 #### `Dict.insert`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, key: K, value: V) -> Dict<K, V>
+<K: key, V> fn(dict: Dict<K, V>, key: K, value: V) -> Dict<K, V>
 ```
 
 Adds an entry, or replaces the value of an existing key in place.
@@ -1618,7 +1624,7 @@ Dict.insert(Dict.single("a", 1), "b", 2)
 #### `Dict.remove`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, key: K) -> Dict<K, V>
+<K: key, V> fn(dict: Dict<K, V>, key: K) -> Dict<K, V>
 ```
 
 Removes the entry for `key`, if there is one.
@@ -1631,7 +1637,7 @@ Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
 #### `Dict.update`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, key: K, f: fn(Result<V, :Missing>) -> Result<V, :Missing>) -> Dict<K, V>
+<K: key, V> fn(dict: Dict<K, V>, key: K, f: fn(Result<V, :Missing>) -> Result<V, :Missing>) -> Dict<K, V>
 ```
 
 Sets the entry for `key` from `f`, which gets `:Ok(value)` or `:Err(:Missing)` and returns either; `:Err` removes the entry.
@@ -1644,7 +1650,7 @@ Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default
 #### `Dict.keys`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>) -> list[K]
+<K: key, V> fn(dict: Dict<K, V>) -> list[K]
 ```
 
 The keys, in insertion order.
@@ -1657,7 +1663,7 @@ Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
 #### `Dict.values`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>) -> list[V]
+<K: key, V> fn(dict: Dict<K, V>) -> list[V]
 ```
 
 The values, in insertion order.
@@ -1670,7 +1676,7 @@ Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
 #### `Dict.walk`
 
 ```
-<K: atomic, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> S) -> S
+<K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> S) -> S
 ```
 
 Folds over the entries: `f` gets the state, a key and its value.
@@ -1683,7 +1689,7 @@ Dict.walk(Dict.from_list(list(("a", 1), ("b", 2))), 0, function(total, k, v) tot
 #### `Dict.map`
 
 ```
-<K: atomic, A, B> fn(dict: Dict<K, A>, f: fn(K, A) -> B) -> Dict<K, B>
+<K: key, A, B> fn(dict: Dict<K, A>, f: fn(K, A) -> B) -> Dict<K, B>
 ```
 
 Replaces every value with `f` of its key and value.
@@ -1696,7 +1702,7 @@ Dict.map(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v * 10)
 #### `Dict.keep_if`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+<K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
 ```
 
 The entries for which `predicate` of the key and value is `TRUE`.
@@ -1709,7 +1715,7 @@ Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 #### `Dict.drop_if`
 
 ```
-<K: atomic, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+<K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
 ```
 
 The entries for which `predicate` is `FALSE`.
@@ -1722,7 +1728,7 @@ Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 #### `Dict.insert_all`
 
 ```
-<K: atomic, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+<K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 ```
 
 The entries of both; where a key is in both, `second`'s value wins.
@@ -1735,7 +1741,7 @@ Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
 #### `Dict.keep_shared`
 
 ```
-<K: atomic, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+<K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 ```
 
 The entries of `first` whose key and value are both in `second`.
@@ -1748,7 +1754,7 @@ Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list((
 #### `Dict.remove_all`
 
 ```
-<K: atomic, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+<K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 ```
 
 The entries of `first` whose key is not in `second`.
@@ -1765,7 +1771,7 @@ A set of distinct keys, typed `Set<T>`.
 #### `Set.empty`
 
 ```
-<T: atomic> fn() -> Set<T>
+<T: key> fn() -> Set<T>
 ```
 
 A set with no elements.
@@ -1778,7 +1784,7 @@ Set.empty()
 #### `Set.single`
 
 ```
-<T: atomic> fn(element: T) -> Set<T>
+<T: key> fn(element: T) -> Set<T>
 ```
 
 A set with one element.
@@ -1791,7 +1797,7 @@ Set.single("a")
 #### `Set.from_list`
 
 ```
-<T: atomic> fn(list: list[T]) -> Set<T>
+<T: key> fn(list: list[T]) -> Set<T>
 ```
 
 A set of the list's elements, without duplicates, in first-seen order.
@@ -1804,7 +1810,7 @@ Set.from_list(list(2L, 1L, 2L))
 #### `Set.to_list`
 
 ```
-<T: atomic> fn(set: Set<T>) -> list[T]
+<T: key> fn(set: Set<T>) -> list[T]
 ```
 
 The elements, in insertion order.
@@ -1817,7 +1823,7 @@ Set.to_list(Set.from_list(list("b", "a")))
 #### `Set.len`
 
 ```
-<T: atomic> fn(set: Set<T>) -> integer
+<T: key> fn(set: Set<T>) -> integer
 ```
 
 The number of elements.
@@ -1830,7 +1836,7 @@ Set.len(Set.from_list(list(1L, 1L, 2L)))
 #### `Set.is_empty`
 
 ```
-<T: atomic> fn(set: Set<T>) -> logical
+<T: key> fn(set: Set<T>) -> logical
 ```
 
 Whether the set has no elements.
@@ -1843,7 +1849,7 @@ Set.is_empty(Set.empty())
 #### `Set.contains`
 
 ```
-<T: atomic> fn(set: Set<T>, element: T) -> logical
+<T: key> fn(set: Set<T>, element: T) -> logical
 ```
 
 Whether `element` is in the set.
@@ -1856,7 +1862,7 @@ Set.contains(Set.from_list(list(1L, 2L)), 2L)
 #### `Set.insert`
 
 ```
-<T: atomic> fn(set: Set<T>, element: T) -> Set<T>
+<T: key> fn(set: Set<T>, element: T) -> Set<T>
 ```
 
 Adds an element.
@@ -1869,7 +1875,7 @@ Set.insert(Set.single(1L), 2L)
 #### `Set.remove`
 
 ```
-<T: atomic> fn(set: Set<T>, element: T) -> Set<T>
+<T: key> fn(set: Set<T>, element: T) -> Set<T>
 ```
 
 Removes an element, if it is there.
@@ -1882,7 +1888,7 @@ Set.remove(Set.from_list(list(1L, 2L)), 1L)
 #### `Set.union`
 
 ```
-<T: atomic> fn(first: Set<T>, second: Set<T>) -> Set<T>
+<T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 ```
 
 The elements of either set.
@@ -1895,7 +1901,7 @@ Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #### `Set.intersection`
 
 ```
-<T: atomic> fn(first: Set<T>, second: Set<T>) -> Set<T>
+<T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 ```
 
 The elements of both sets.
@@ -1908,7 +1914,7 @@ Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #### `Set.difference`
 
 ```
-<T: atomic> fn(first: Set<T>, second: Set<T>) -> Set<T>
+<T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 ```
 
 The elements of `first` that are not in `second`.
@@ -1921,7 +1927,7 @@ Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #### `Set.walk`
 
 ```
-<T: atomic, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
+<T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
 ```
 
 Folds over the elements.
@@ -1934,7 +1940,7 @@ Set.walk(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) total + x)
 #### `Set.map`
 
 ```
-<A: atomic, B: atomic> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
+<A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
 ```
 
 The set of `f` of every element.
@@ -1947,7 +1953,7 @@ Set.map(Set.from_list(list(1L, 2L, 3L)), function(x) x %% 2L)
 #### `Set.keep_if`
 
 ```
-<T: atomic> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+<T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 ```
 
 The elements for which `predicate` is `TRUE`.
@@ -1960,7 +1966,7 @@ Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 #### `Set.drop_if`
 
 ```
-<T: atomic> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+<T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 ```
 
 The elements for which `predicate` is `FALSE`.

@@ -207,7 +207,10 @@ unsafe fn tag_id(name: Sexp) -> Result<u32, String> {
 
 /// Builds a record (named items), tuple (unnamed items) or tag (with `tag`). Field names are
 /// sorted by their bytes, so field order is part of neither the value nor its layout.
-pub(crate) unsafe fn make(tag: Option<u32>, items: &[(Option<Sexp>, Sexp)]) -> Result<Sexp, String> {
+pub(crate) unsafe fn make(
+    tag: Option<u32>,
+    items: &[(Option<Sexp>, Sexp)],
+) -> Result<Sexp, String> {
     let named = items.iter().filter(|(name, _)| name.is_some()).count();
     if named != 0 && named != items.len() {
         return Err("a record cannot mix named fields and unnamed items".to_owned());
@@ -698,7 +701,9 @@ unsafe fn scalar(value: Sexp) -> Option<Scalar> {
 unsafe fn do_as_list(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     if object.kind() != SexpType::Record {
-        return Err(call.error("`as.list()` for a ry value needs a record, tuple, tag, dict or set"));
+        return Err(
+            call.error("`as.list()` for a ry value needs a record, tuple, tag, dict or set")
+        );
     }
     if matches!(native_kind(object), NativeKind::Dict | NativeKind::Set) {
         return standard_library::as_list(object);
@@ -867,8 +872,14 @@ unsafe fn compare(
         return Ok(());
     }
     if matches!(left.kind(), NativeKind::Dict | NativeKind::Set) {
-        if !standard_library::collections_identical(target, current, &IdenticalFlags::default()) {
-            messages.push(format!("{prefix}target and current hold different entries"));
+        match standard_library::paired_entries(target, current)? {
+            Some(pairs) => {
+                for (key, left_value, right_value) in pairs {
+                    let label = format!("{prefix}Key {key}: ");
+                    compare(left_value, right_value, extra, env, &label, messages)?;
+                }
+            }
+            None => messages.push(format!("{prefix}target and current hold different keys")),
         }
         return Ok(());
     }
@@ -922,7 +933,7 @@ unsafe fn compare_r(
     prefix: &str,
     messages: &mut Vec<String>,
 ) -> R<()> {
-    let flags = crate::sort::IdenticalFlags::default();
+    let flags = IdenticalFlags::default();
     if crate::sort::identical(target, current, &flags) {
         return Ok(());
     }

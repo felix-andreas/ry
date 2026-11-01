@@ -163,8 +163,8 @@ list of `(key, value)` tuples or of elements, and `saveRDS()` and C code refuse 
 other ry value.
 
 Keys and elements are `logical`, `integer`, `double` or `character` scalars, never `NA` or `NaN`.
-The checker's `atomic` constraint also admits `complex` and `raw`, so those two are refused at run
-time. Keys compare exactly, `-0` equals `0`, and the integer `1L` and the double `1` are the same
+The checker's `key` constraint admits exactly those four, and the runtime refuses any other type
+that reaches it through `Unknown` code. Keys compare exactly, `-0` equals `0`, and the integer `1L` and the double `1` are the same
 key, because R's own `==` treats them as equal. A dictionary keeps insertion order, as Roc's does,
 so `Dict.to_list` and `Dict.walk` are deterministic.
 
@@ -183,7 +183,7 @@ Result.map : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> B) -> Result<B, E>
 List.walk : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
 List.first : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
 List.sum : <T: scalar numeric> fn(list: list[T]) -> T
-Dict.get : <K: atomic, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
+Dict.get : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
 ```
 
 Three additions to the checker make this possible:

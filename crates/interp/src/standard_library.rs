@@ -206,10 +206,9 @@ unsafe fn arguments<const N: usize>(call: &Call<'_>, formals: [&str; N]) -> R<[S
         match matched.get(index).copied().flatten() {
             Some(value) if value != missing_arg() => values[index] = value,
             _ => {
-                return Err(call.error(format!(
-                    "`{}()` needs the argument `{formal}`",
-                    call.name()
-                )));
+                return Err(
+                    call.error(format!("`{}()` needs the argument `{formal}`", call.name()))
+                );
             }
         }
     }
@@ -247,7 +246,11 @@ unsafe fn describe(value: Sexp) -> String {
 }
 
 unsafe fn vector_phrase(value: Sexp, kind: &str) -> String {
-    let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+    let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
     match length(value) {
         1 => match missing_scalar(value) {
             Some(missing) => missing.to_owned(),
@@ -276,7 +279,9 @@ unsafe fn list_elements(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Vec<
     if value.kind() != SexpType::List {
         return Err(wrong(call, parameter, "a list", value));
     }
-    Ok((0..length(value)).map(|index| value.element(index)).collect())
+    Ok((0..length(value))
+        .map(|index| value.element(index))
+        .collect())
 }
 
 unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Sexp> {
@@ -303,7 +308,12 @@ unsafe fn verdict(call: &Call<'_>, parameter: &str, value: Sexp) -> R<bool> {
             flag => return Ok(flag != 0),
         }
     }
-    Err(wrong(call, &format!("{parameter}()"), "`TRUE` or `FALSE`", value))
+    Err(wrong(
+        call,
+        &format!("{parameter}()"),
+        "`TRUE` or `FALSE`",
+        value,
+    ))
 }
 
 /// A whole number that fits an R integer, given as an integer or a whole double.
@@ -396,7 +406,12 @@ unsafe fn result_parts(call: &Call<'_>, parameter: &str, value: Sexp) -> R<(bool
     match tag_parts(value)? {
         Some((name, Some(payload))) if name == "Ok" => Ok((true, payload)),
         Some((name, Some(payload))) if name == "Err" => Ok((false, payload)),
-        _ => Err(wrong(call, parameter, "a result, `:Ok(value)` or `:Err(error)`", value)),
+        _ => Err(wrong(
+            call,
+            parameter,
+            "a result, `:Ok(value)` or `:Err(error)`",
+            value,
+        )),
     }
 }
 
@@ -536,9 +551,8 @@ unsafe fn list_to_vector(call: &Call<'_>) -> R<Sexp> {
         kind = Some(match (kind, item.kind()) {
             (None, found) => found,
             (Some(current), found) if current == found => current,
-            (Some(SexpType::Integer), SexpType::Real) | (Some(SexpType::Real), SexpType::Integer) => {
-                SexpType::Real
-            }
+            (Some(SexpType::Integer), SexpType::Real)
+            | (Some(SexpType::Real), SexpType::Integer) => SexpType::Real,
             (Some(current), found) => {
                 return Err(call.error(format!(
                     "`list` must hold elements of one atomic type, and it mixes {} and {}",
@@ -970,7 +984,12 @@ unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
     let items = list_elements(call, "list", list)?;
     let start = whole(call, "start", start)?;
     if start < 1 {
-        return Err(wrong(call, "start", "a position of 1 or more", values::scalar_integer(start as i32)?));
+        return Err(wrong(
+            call,
+            "start",
+            "a position of 1 or more",
+            values::scalar_integer(start as i32)?,
+        ));
     }
     let taken = count(call, "count", taken)?;
     let from = (start as usize - 1).min(items.len());
@@ -1133,7 +1152,10 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     for item in items {
         numbers.push(number(call, "list", item)?);
     }
-    if numbers.iter().any(|number| matches!(number, Number::Double(_))) {
+    if numbers
+        .iter()
+        .any(|number| matches!(number, Number::Double(_)))
+    {
         for number in &mut numbers {
             *number = Number::Double(number.as_double());
         }
@@ -1210,7 +1232,12 @@ unsafe fn affix(call: &Call<'_>, parameter: &str, at_start: bool) -> R<Sexp> {
         &items[items.len() - part.len()..]
     };
     let flags = IdenticalFlags::default();
-    scalar_bool(window.iter().zip(&part).all(|(&left, &right)| identical(left, right, &flags)))
+    scalar_bool(
+        window
+            .iter()
+            .zip(&part)
+            .all(|(&left, &right)| identical(left, right, &flags)),
+    )
 }
 
 unsafe fn list_starts_with(call: &Call<'_>) -> R<Sexp> {
@@ -1408,7 +1435,14 @@ unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
         let byte = whole(call, "bytes", item)?;
         match u8::try_from(byte) {
             Ok(byte) => decoded.push(byte),
-            Err(_) => return Err(wrong(call, "bytes", "a list of numbers from 0 to 255", item)),
+            Err(_) => {
+                return Err(wrong(
+                    call,
+                    "bytes",
+                    "a list of numbers from 0 to 255",
+                    item,
+                ));
+            }
         }
     }
     // R strings cannot hold a NUL byte, so one is reported as bad UTF-8 like any other byte a
@@ -1480,12 +1514,20 @@ unsafe fn num_compare(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn num_min(call: &Call<'_>) -> R<Sexp> {
     let (first, second) = two_numbers(call)?;
-    number_value(if second.as_double() < first.as_double() { second } else { first })
+    number_value(if second.as_double() < first.as_double() {
+        second
+    } else {
+        first
+    })
 }
 
 unsafe fn num_max(call: &Call<'_>) -> R<Sexp> {
     let (first, second) = two_numbers(call)?;
-    number_value(if second.as_double() > first.as_double() { second } else { first })
+    number_value(if second.as_double() > first.as_double() {
+        second
+    } else {
+        first
+    })
 }
 
 unsafe fn num_is_zero(call: &Call<'_>) -> R<Sexp> {
@@ -1614,8 +1656,8 @@ enum Key {
     Text(Sexp),
 }
 
-/// The atomic type of a collection's keys. Integer keys become double keys once a non-integer
-/// double joins them, as `c(1L, 1.5)` does.
+/// The atomic type of a collection's keys. Integer keys become double keys once a double joins
+/// them, as `c(1L, 1)` does.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum KeyKind {
     Logical,
@@ -1759,8 +1801,7 @@ impl Collection {
     }
 
     unsafe fn find(&self, key: Key) -> Option<usize> {
-        probe(&self.index, key, |position| self.keys[position])
-            .ok()
+        probe(&self.index, key, |position| self.keys[position]).ok()
     }
 
     /// Adds `key` (with `value` for a dictionary), replacing the value of an existing key.
@@ -1768,11 +1809,17 @@ impl Collection {
         self.key_kind = Some(match self.key_kind {
             None => kind,
             Some(current) if current == kind => current,
-            Some(KeyKind::Integer | KeyKind::Double) if matches!(kind, KeyKind::Integer | KeyKind::Double) => {
+            Some(KeyKind::Integer | KeyKind::Double)
+                if matches!(kind, KeyKind::Integer | KeyKind::Double) =>
+            {
                 KeyKind::Double
             }
             Some(current) => {
-                let what = if self.kind == NativeKind::Dict { "dict's keys" } else { "set's elements" };
+                let what = if self.kind == NativeKind::Dict {
+                    "dict's keys"
+                } else {
+                    "set's elements"
+                };
                 return Err(call.error(format!(
                     "the {what} are {}, and this one is {}; a collection holds one type",
                     current.name(),
@@ -1811,6 +1858,11 @@ impl Collection {
                     values.push(self.values[position]);
                 }
             }
+        }
+        // An emptied collection forgets its key type, so it is the same value as `Dict.empty()`
+        // and accepts keys of any type again.
+        if keys.is_empty() {
+            self.key_kind = None;
         }
         self.keys = keys;
         self.values = values;
@@ -1873,17 +1925,25 @@ impl Collection {
         } else {
             (Fields::Set, vec![keys, index])
         };
-        records::alloc(Layout { tag: None, fields }, &slots).map_err(|failure| error(failure.to_string()))
+        records::alloc(Layout { tag: None, fields }, &slots)
+            .map_err(|failure| error(failure.to_string()))
     }
 
     unsafe fn key_value(&self, position: usize) -> R<Sexp> {
-        key_value(self.keys[position], self.key_kind.unwrap_or(KeyKind::Logical))
+        key_value(
+            self.keys[position],
+            self.key_kind.unwrap_or(KeyKind::Logical),
+        )
     }
 }
 
 /// Probes `index` for `key`: `Ok(position)` when a stored key equals it, or `Err(slot)` with the
 /// empty slot where it belongs. The index is never full, because it is rebuilt at half load.
-unsafe fn probe(index: &[i32], key: Key, key_at_position: impl Fn(usize) -> Key) -> Result<usize, usize> {
+unsafe fn probe(
+    index: &[i32],
+    key: Key,
+    key_at_position: impl Fn(usize) -> Key,
+) -> Result<usize, usize> {
     let mask = index.len() - 1;
     let mut slot = key_hash(key) as usize & mask;
     loop {
@@ -1915,7 +1975,11 @@ unsafe fn collection(call: &Call<'_>, parameter: &str, value: Sexp, kind: Native
     if value.kind() == SexpType::Record && records::native_kind(value) == kind {
         return Ok(value);
     }
-    let needed = if kind == NativeKind::Dict { "a dict" } else { "a set" };
+    let needed = if kind == NativeKind::Dict {
+        "a dict"
+    } else {
+        "a set"
+    };
     Err(wrong(call, parameter, needed, value))
 }
 
@@ -1941,19 +2005,68 @@ pub(crate) unsafe fn entries(object: Sexp) -> R<Vec<(Sexp, Option<Sexp>)>> {
 
 /// Whether two dictionaries (or two sets) hold the same entries, in whatever order: the
 /// collections are value types, and insertion order is not part of their value.
-pub(crate) unsafe fn collections_identical(left: Sexp, right: Sexp, flags: &IdenticalFlags) -> bool {
+pub(crate) unsafe fn collections_identical(
+    left: Sexp,
+    right: Sexp,
+    flags: &IdenticalFlags,
+) -> bool {
     let (Ok(left), Ok(right)) = (Collection::read(left), Collection::read(right)) else {
         return false;
     };
     left.kind == right.kind
+        && left.key_kind == right.key_kind
         && left.keys.len() == right.keys.len()
-        && left.keys.iter().enumerate().all(|(position, &key)| match right.find(key) {
-            Some(other) => {
-                left.kind == NativeKind::Set
-                    || identical(left.values[position], right.values[other], flags)
-            }
-            None => false,
-        })
+        && left
+            .keys
+            .iter()
+            .enumerate()
+            .all(|(position, &key)| match right.find(key) {
+                Some(other) => {
+                    left.kind == NativeKind::Set
+                        || identical(left.values[position], right.values[other], flags)
+                }
+                None => false,
+            })
+}
+
+/// For `all.equal()`: when two dictionaries (or two sets) hold the same keys, each key's label
+/// with the two values stored under it (none for a set), so the caller can compare the values
+/// with tolerance; `None` when the keys differ.
+pub(crate) unsafe fn paired_entries(
+    left: Sexp,
+    right: Sexp,
+) -> R<Option<Vec<(String, Sexp, Sexp)>>> {
+    let (left, right) = (Collection::read(left)?, Collection::read(right)?);
+    if left.kind != right.kind
+        || left.key_kind != right.key_kind
+        || left.keys.len() != right.keys.len()
+    {
+        return Ok(None);
+    }
+    let mut pairs = Vec::new();
+    for (position, &key) in left.keys.iter().enumerate() {
+        let Some(other) = right.find(key) else {
+            return Ok(None);
+        };
+        if left.kind == NativeKind::Dict {
+            let label = match key {
+                Key::Logical(flag) => {
+                    if flag {
+                        "TRUE".to_owned()
+                    } else {
+                        "FALSE".to_owned()
+                    }
+                }
+                Key::Number(number) if left.key_kind == Some(KeyKind::Integer) => {
+                    format!("{}L", number as i32)
+                }
+                Key::Number(number) => number.to_string(),
+                Key::Text(text) => format!("{:?}", char_str(text)),
+            };
+            pairs.push((label, left.values[position], right.values[other]));
+        }
+    }
+    Ok(Some(pairs))
 }
 
 /// `as.list()`: a dictionary becomes a list of `(key, value)` tuples, and a set a list of its
@@ -1996,7 +2109,12 @@ unsafe fn pair(call: &Call<'_>, item: Sexp) -> R<(Sexp, Sexp)> {
             return Ok((records::slot_value(item, 0)?, records::slot_value(item, 1)?));
         }
     }
-    Err(wrong(call, "pairs", "a list of `(key, value)` tuples", item))
+    Err(wrong(
+        call,
+        "pairs",
+        "a list of `(key, value)` tuples",
+        item,
+    ))
 }
 
 unsafe fn dict_from_list(call: &Call<'_>) -> R<Sexp> {
@@ -2086,7 +2204,10 @@ unsafe fn dict_update(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn dict_keys(call: &Call<'_>) -> R<Sexp> {
     let [object] = arguments(call, ["dict"])?;
-    let keys: Vec<Sexp> = entries(dict(call, object)?)?.into_iter().map(|(key, _)| key).collect();
+    let keys: Vec<Sexp> = entries(dict(call, object)?)?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
     list_vector(&keys)
 }
 
@@ -2179,7 +2300,9 @@ unsafe fn intersect(call: &Call<'_>, kind: NativeKind, shared: bool) -> R<Sexp> 
     let stored = first.values.clone();
     first.retain(|position| {
         let found = second.find(keys[position]).filter(|&other| {
-            !shared || kind == NativeKind::Set || identical(stored[position], second.values[other], &flags)
+            !shared
+                || kind == NativeKind::Set
+                || identical(stored[position], second.values[other], &flags)
         });
         Ok(found.is_some() == shared)
     })?;

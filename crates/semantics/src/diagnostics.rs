@@ -2347,6 +2347,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }
+        Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
     }
 }

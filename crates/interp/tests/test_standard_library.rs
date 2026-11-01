@@ -304,6 +304,18 @@ const PRINTS: &[(&str, &str)] = &[
     ("typeof(s)", "[1] \"set\"\n"),
     // A program's own definition comes before the library's.
     ("(function() { List.len <- function(list) -1L; List.len(xs) })()", "[1] -1\n"),
+    // An emptied collection is `Dict.empty()` again, key type included.
+    (
+        "Dict.insert(Dict.remove(Dict.single(1L, \"a\"), 1L), \"x\", 2)",
+        "Dict.from_list(list((\"x\", 2)))\n",
+    ),
+    ("Set.insert(Set.remove(Set.single(1L), 1L), \"x\")", "Set.from_list(list(\"x\"))\n"),
+    ("identical(Set.from_list(list(1L)), Set.from_list(list(1)))", "[1] FALSE\n"),
+    (
+        "all.equal.ry_dict(Dict.single(\"a\", 1), Dict.single(\"a\", 2))",
+        "[1] \"Key \\\"a\\\": target and current differ\"\n",
+    ),
+    ("all.equal.ry_set(Set.single(1L), Set.single(2L))", "[1] \"target and current hold different keys\"\n"),
 ];
 
 /// Each case's code and the error message it raises.
@@ -345,6 +357,10 @@ const ERRORS: &[(&str, &str)] = &[
     ("s[[1]]", "a set cannot be indexed; test an element with `Set.contains(set, element)`"),
     ("sum(d)", "`d` is a ry dict, not an R object; convert it with `as.list()`"),
     ("c(s, 1)", "`s` is a ry set, not an R object; convert it with `as.list()`"),
+    (
+        "List.sum(list(2147483647L, 1L))",
+        "the integer result overflows; convert the elements to doubles first",
+    ),
 ];
 
 thread_local! {

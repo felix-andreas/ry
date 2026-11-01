@@ -447,16 +447,18 @@ and the block carries no typing payload.
 #### Constraints
 
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
-`<T: numeric> fn(values: T) -> T`. There are three constraints:
+`<T: numeric> fn(values: T) -> T`. These are the constraints:
 
 - `numeric` admits `integer` and `double`, scalar or vector, and any class that declares an
   arithmetic [operator method](#operator-methods-on-a-class).
 - `atomic` admits one of the six atomic scalar types: `logical`, `integer`, `double`, `complex`,
   `character`, and `raw`.
+- `key` admits a scalar `logical`, `integer`, `double` or `character`, the types a dictionary key
+  or set element may have. `complex` and `raw` are left out.
 - `scalar numeric` admits a scalar `integer` or `double`, which is both bounds at once. It is what an
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 
-Any other constraint name is an annotation error, and the error lists the three that exist. An
+Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call.
 
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.

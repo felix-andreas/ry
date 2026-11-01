@@ -606,7 +606,7 @@ fn erase_residual_vars_at<'db>(
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
             Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
-            Constraint::AtomicElement | Constraint::Unconstrained => unknown(db),
+            Constraint::AtomicElement | Constraint::Key | Constraint::Unconstrained => unknown(db),
         };
     }
     if let Some(&rigid) = closer.generalized.get(&var) {
@@ -1473,7 +1473,9 @@ impl<'db> Checker<'db, '_> {
     /// error here too. A value only some of whose types are native may be R data at run time,
     /// so it is not reported.
     fn check_native_arguments(&mut self, callee: ExprId, arguments: &[Argument]) {
-        let function = match &self.module.expression(callee).kind {
+        // A library function accepts ry values, but only a bare name or `ry::` reaches it:
+        // `pkg::List.len` is the package's own function, whatever its name.
+        let (function, may_be_library) = match &self.module.expression(callee).kind {
             ExpressionKind::NameRef(name) => {
                 let deferred = self.naming.deferred_non_locals.contains(&callee);
                 if self.naming.resolutions.contains_key(&callee)
@@ -1483,14 +1485,21 @@ impl<'db> Checker<'db, '_> {
                 {
                     return;
                 }
-                name.as_str()
+                (name.as_str(), true)
             }
             ExpressionKind::Namespace {
-                name: Some(name), ..
-            } => name.as_str(),
+                package,
+                name: Some(name),
+                ..
+            } => (
+                name.as_str(),
+                package.is_some_and(|package| package.as_str() == STANDARD_LIBRARY),
+            ),
             _ => return,
         };
-        if accepts_native(function) || namespace_exports(self.db, STANDARD_LIBRARY, function) {
+        if accepts_native(function)
+            || (may_be_library && namespace_exports(self.db, STANDARD_LIBRARY, function))
+        {
             return;
         }
         for argument in arguments {

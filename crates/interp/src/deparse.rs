@@ -640,16 +640,15 @@ impl Deparser {
         self.print(")");
     }
 
-    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1),))` or
+    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
     /// `Set.empty()`.
     unsafe fn collection(&mut self, object: Sexp, dict: bool) {
         let module = if dict { "Dict" } else { "Set" };
+        // The deparser cannot fail, and reading entries fails only on a malformed collection or
+        // an exhausted heap, so printing a placeholder would hide a corrupted value.
         let entries = match standard_library::entries(object) {
             Ok(entries) => entries,
-            Err(_) => {
-                self.print("<unavailable>");
-                return;
-            }
+            Err(failure) => panic!("a {module} value could not be read for deparsing: {failure:?}"),
         };
         if entries.is_empty() {
             self.print(module);
