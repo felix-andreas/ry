@@ -45,7 +45,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special(".frame_new", -1, do_frame_new).keep_visibility(),
     builtin(".frame_from_list", 1, do_from_list),
     builtin(".frame_to_list", 1, do_to_list),
-    builtin(".frame_read_csv", 1, do_read_csv),
+    builtin(".frame_read_csv", 2, do_read_csv),
     builtin(".frame_read_parquet", 1, do_read_parquet),
     builtin(".frame_write_csv", 2, do_write_csv).invisible(),
     builtin(".frame_write_parquet", 2, do_write_parquet).invisible(),
@@ -113,7 +113,7 @@ DataFrame <- .frame_new
 as.DataFrame <- function(x) .frame_from_list(x)
 is.DataFrame <- function(x) inherits(x, "DataFrame")
 DataFrame.schema <- function(df) .frame_schema(df)
-DataFrame.read_csv <- function(path) .frame_read_csv(path)
+DataFrame.read_csv <- function(path, strings_as_factors = FALSE) .frame_read_csv(path, strings_as_factors)
 DataFrame.read_parquet <- function(path) .frame_read_parquet(path)
 DataFrame.write_csv <- function(df, path) .frame_write_csv(df, path)
 DataFrame.write_parquet <- function(df, path) .frame_write_parquet(df, path)
@@ -472,9 +472,25 @@ unsafe fn do_to_list(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
-    let table = table::io::read_csv(std::path::Path::new(&path))
-        .map_err(|failure| error_in(call.call, format!("cannot read `{path}`: {failure}")))?;
-    wrap(table)
+    let factors = values::require_flag(call.arg(1), "strings_as_factors")?;
+    let fail = |failure: &dyn std::fmt::Display| error_in(call.call, format!("cannot read `{path}`: {failure}"));
+    let table = table::io::read_csv(std::path::Path::new(&path)).map_err(|failure| fail(&failure))?;
+    if !factors {
+        return wrap(table);
+    }
+    let mut frame = table.into_frame();
+    let text: Vec<_> = frame
+        .columns()
+        .iter()
+        .filter(|column| column.dtype().is_string())
+        .map(|column| column.name().clone())
+        .collect();
+    for name in text {
+        let column = frame.column(&name).map_err(|failure| fail(&failure))?;
+        let factor = convert::string_to_factor(column.as_materialized_series()).map_err(|failure| fail(&failure))?;
+        frame.with_column(factor.into_column()).map_err(|failure| fail(&failure))?;
+    }
+    wrap(Table::new(frame).map_err(|failure| fail(&failure))?)
 }
 
 unsafe fn do_read_parquet(call: &Call<'_>) -> R<Sexp> {

@@ -2471,6 +2471,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *first_ty),
             renderer.render(db, *second_ty)
         ),
+        TypeErrorKind::NotAnAggregation { column } => format!(
+            "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
+        ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",
             if *columns == 1 { "column" } else { "columns" },

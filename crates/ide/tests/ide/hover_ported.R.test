@@ -203,7 +203,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: NULL\n"
-completion (107): F, FALSE, for, function, factanal, factor, factor.scope, factorial
+completion (102): F, FALSE, for, function, factanal, factor, factor.scope, factorial
 hint @5: integer
 hint @18: NULL
 
@@ -239,7 +239,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: NULL\n"
-completion (105): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (108): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 
@@ -255,7 +255,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
-completion (52): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
+completion (55): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
 hint @5: <T> fn(parameter: T) -> T
 
 #==== hover_literals
@@ -334,7 +334,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (60): La.svd, La_library, La_version, LakeHuron, LETTERS, LifeCycleSavings, List.all, List.any
+completion (73): La.svd, La_library, La_version, LakeHuron, LazyFrame.collect, LazyFrame.explain, LazyFrame.filter, LazyFrame.group_by
 hint @5: integer
 
 #==== hover_annotated
@@ -348,7 +348,7 @@ definition 11..18
 references: 11..18*
 rename: 1 edit(s)
 signature: none
-completion (96): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
+completion (97): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
 
 #---- if_unknown_annotation
 frame <- data.frame(a = 1)
@@ -362,7 +362,7 @@ definition 51..56
 references: 51..56*
 rename: 1 edit(s)
 signature: none
-completion (47): maybe, makePrototypeFromClassDef, mapply, mauchly.test, .mapply, simplify2array, Summary, summary
+completion (48): maybe, makePrototypeFromClassDef, mapply, mauchly.test, .mapply, simplify2array, Summary, summary
 
 #---- trust_annotation
 #: @trust integer
@@ -374,7 +374,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (77): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (81): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -388,7 +388,7 @@ definition 56..62
 references: 56..62*
 rename: 1 edit(s)
 signature: none
-completion (125): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (126): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 
 #---- new_annotation_unknown_value_use
 #: @type Person {list{name: character}}
@@ -408,7 +408,7 @@ action: Add inferred type annotation for `touch`
   edit 80..80 -> "#: fn() -> Person\n"
 action: Add inferred type annotations for the whole file
   edit 80..80 -> "#: fn() -> Person\n"
-completion (125): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (126): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 hint @85: fn() -> Person
 
 #---- alias_declaration_tag
@@ -596,7 +596,7 @@ rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-completion (61): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
+completion (63): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
 hint @6: <T> fn(x: T) -> T
 
 #---- two_type_variables
@@ -698,8 +698,8 @@ signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
 parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
-signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
-parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
 signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `total`

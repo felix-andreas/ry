@@ -139,7 +139,7 @@ y: Unknown
 64..72 error[type-mismatch] expected `list{x: double}`, found `record{x: double}`
 
 #---- list_is_not_a_record
-#: fn(r: record{x: double}) -> double
+#: fn(r: Record{x: double}) -> double
 f <- function(r) r$x
 y <- f(list(x = 1))
 #++++
@@ -148,7 +148,7 @@ y: Unknown
 66..77 error[type-mismatch] expected `record{x: double}`, found `list{x: double}`
 
 #---- record_field_order_does_not_matter
-#: fn(r: record{x: double, y: double}) -> double
+#: fn(r: Record{x: double, y: double}) -> double
 f <- function(r) r$x
 z <- f((y = 2, x = 1))
 #++++
@@ -156,7 +156,7 @@ f: fn(r: record{x: double, y: double}) -> double
 z: double
 
 #---- record_needs_every_field
-#: fn(r: record{x: double, y: double}) -> double
+#: fn(r: Record{x: double, y: double}) -> double
 f <- function(r) r$x
 z <- f((x = 1,))
 #++++
@@ -165,7 +165,7 @@ z: Unknown
 77..85 error[type-mismatch] expected `record{x: double, y: double}`, found `record{x: double}`
 
 #---- integer_widens_into_a_double_field
-#: fn(r: record{x: double}) -> double
+#: fn(r: Record{x: double}) -> double
 f <- function(r) r$x
 z <- f((x = 1L,))
 #++++
@@ -323,7 +323,7 @@ f <- function(o) {
 f: fn(o: :Some(integer) | :None) -> integer
 
 #---- tuple_pattern_binds_each_item
-#: fn(t: tuple{integer, character}) -> character
+#: fn(t: Tuple{integer, character}) -> character
 f <- function(t) {
   match (t) {
     (n, s) => s
@@ -333,7 +333,7 @@ f <- function(t) {
 f: fn(t: tuple{integer, character}) -> character
 
 #---- record_pattern_binds_fields
-#: fn(r: record{x: double, y: integer}) -> integer
+#: fn(r: Record{x: double, y: integer}) -> integer
 f <- function(r) {
   match (r) {
     (y = b, ..) => b
@@ -406,7 +406,7 @@ f <- function(o) {
 f: fn(o: :Some(integer) | :None) -> integer
 
 #---- or_pattern_binds_the_union
-#: fn(t: tuple{integer, character}) -> integer | character
+#: fn(t: Tuple{integer, character}) -> integer | character
 f <- function(t) {
   match (t) {
     (a, _) | (_, a) => a
@@ -481,7 +481,7 @@ f: fn(o: :Some(integer) | :None) -> integer
 81..92 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`
 
 #---- field_the_record_lacks
-#: fn(r: record{x: double}) -> double
+#: fn(r: Record{x: double}) -> double
 f <- function(r) {
   match (r) {
     (z = v, ..) => v
@@ -493,7 +493,7 @@ f: fn(r: record{x: double}) -> double
 75..86 error[type-mismatch] this pattern can never match: the value is `record{x: double}`
 
 #---- tuple_pattern_on_a_record
-#: fn(r: record{x: double}) -> double
+#: fn(r: Record{x: double}) -> double
 f <- function(r) {
   match (r) {
     (a, b) => a
@@ -668,28 +668,28 @@ f: fn(o: :Some(integer) | :None) -> integer
 
 #==== mismatch_blame
 #---- record_field_mismatch_blames_the_field_value
-#: record{x: double, y: double}
+#: Record{x: double, y: double}
 p <- (x = 1, y = "a")
 #++++
 p: record{x: double, y: double}
 49..52 error[type-mismatch] expected `double`, found `character`
 
 #---- tuple_item_mismatch_blames_the_item
-#: tuple{integer, integer}
+#: Tuple{integer, integer}
 t <- (1L, "x")
 #++++
 t: tuple{integer, integer}
 37..40 error[type-mismatch] expected `integer`, found `character`
 
 #---- nested_record_mismatch_blames_the_innermost_value
-#: record{inner: record{x: double}}
+#: Record{inner: Record{x: double}}
 p <- (inner = (x = "a",),)
 #++++
 p: record{inner: record{x: double}}
 55..58 error[type-mismatch] expected `double`, found `character`
 
 #---- argument_record_mismatch_blames_the_field_value
-#: fn(p: record{x: double, y: double}) -> double
+#: fn(p: Record{x: double, y: double}) -> double
 f <- function(p) p$x
 v <- f((x = 1, y = "b"))
 #++++
@@ -698,20 +698,20 @@ v: Unknown
 89..92 error[type-mismatch] expected `double`, found `character`
 
 #---- inline_ascription_blames_the_field_value
-w: record{x: double} <- (x = "s",)
+w: Record{x: double} <- (x = "s",)
 #++++
 w: record{x: double}
 29..32 error[type-mismatch] expected `double`, found `character`
 
 #---- nominal_constructor_blames_the_field_value
-type Money = record{amount: double}
+type Money = Record{amount: double}
 m <- @Money((amount = "x",))
 #++++
 m: Unknown
 58..61 error[type-mismatch] expected `double`, found `character`
 
 #---- two_mismatched_fields_blame_the_whole_record
-#: record{x: double, y: double}
+#: Record{x: double, y: double}
 p <- (x = "a", y = "b")
 #++++
 p: record{x: double, y: double}

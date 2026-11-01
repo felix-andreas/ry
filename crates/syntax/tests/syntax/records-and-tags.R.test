@@ -433,7 +433,7 @@ SOURCE_FILE@0..39
         IDENT@35..39 "None"
 
 #---- record_and_tuple_types
-f <- function(p: record{x: double}, t: tuple{integer, character}) -> :Ok(value: double) p
+f <- function(p: Record{x: double}, t: Tuple{integer, character}) -> :Ok(value: double) p
 #++++
 SOURCE_FILE@0..89
   BINARY_EXPR@0..89

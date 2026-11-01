@@ -197,7 +197,7 @@ DataFrame.schema : fn(df: DataFrame) -> character
 DataFrame.height : fn(df: DataFrame) -> integer
 DataFrame.width : fn(df: DataFrame) -> integer
 DataFrame.columns : fn(df: DataFrame) -> character
-DataFrame.read_csv : fn(path: character) -> DataFrame
+DataFrame.read_csv : fn(path: character, [strings_as_factors]: logical) -> DataFrame
 DataFrame.read_parquet : fn(path: character) -> DataFrame
 DataFrame.write_csv : fn(df: DataFrame, path: character) -> DataFrame
 DataFrame.write_parquet : fn(df: DataFrame, path: character) -> DataFrame
@@ -224,6 +224,11 @@ LazyFrame.join : fn(lf: LazyFrame, other: LazyFrame | DataFrame, [on]: character
 LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
 LazyFrame.explain : fn(lf: LazyFrame) -> character
 LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
+
+# Arithmetic, comparison and logic on an expression build a bigger expression, and a plain value
+# on the other side is a literal.
+Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical) -> Expr
+Ops.Expr : fn(e1: double | integer | character | logical, e2: Expr) -> Expr
 
 col : fn(x: character, [as.factor]: logical) -> Expr
 col : fn(x: Any, [as.factor]: logical) -> Any

@@ -154,7 +154,7 @@ b <- @Box<integer>(list(value = 1L))
 b: Box<integer>
 
 #---- constructor_wraps_a_record
-type Point = record{x: double, y: double}
+type Point = Record{x: double, y: double}
 p <- @Point((x = 1, y = 2))
 #++++
 p: Point
@@ -215,8 +215,8 @@ type Celsius = double
 #++++
 
 #---- pair_with_renamed_binders_agrees
-#: @alias Pair<T> {tuple{T, T}}
-alias Pair<U> = tuple{U, U}
+#: @alias Pair<T> {Tuple{T, T}}
+alias Pair<U> = Tuple{U, U}
 #++++
 
 

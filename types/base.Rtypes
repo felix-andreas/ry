@@ -312,7 +312,7 @@ xor : fn(x: Any, y: Any) -> logical
 sum : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 sum : fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
 sum : fn(...: difftime, [na.rm]: logical) -> difftime
-sum : fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+sum : fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
 sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 min : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 min : fn(...: double[], [na.rm]: logical) -> double

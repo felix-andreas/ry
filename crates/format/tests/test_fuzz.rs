@@ -48,10 +48,10 @@ const SEEDS: &[&str] = &[
     "s <- :Rect(width = 2, height = 3); n <- :None\n",
     "match (s) { # c\n  :Circle(radius = r) => r, :Rect(width = w, ..) if (w > 0) => w\n\n  (a, 'x') | (_, a) => a; -1L => 0\n  _ => NULL\n}\n",
     "x: :Some(integer) | :None | .. <- :None\n",
-    "#: fn(p: record{x: double}) -> :Ok(value: double)\nf <- function(p) p\n",
+    "#: fn(p: Record{x: double}) -> :Ok(value: double)\nf <- function(p) p\n",
     "type UserId = integer\nalias Box<T: numeric> = list{value: T}\nid <- @UserId(5L)\n",
     "alias Shape =\n  | :Circle(radius: double)\n  | :Empty\nx: @trust Shape <- y\n",
-    "#: @alias Pair<T> {tuple{T, T}}\nalias Pair<U> = tuple{U, U}\np <- @Pair<integer>((1L, 2L))\n",
+    "#: @alias Pair<T> {Tuple{T, T}}\nalias Pair<U> = Tuple{U, U}\np <- @Pair<integer>((1L, 2L))\n",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -123,12 +123,12 @@ const ALPHABET: &[&str] = &[
     "..",
     ":None",
     ":Some(",
-    "record{",
+    "Record{",
     "type ",
     "alias ",
     "|",
     "@trust ",
-    "tuple{",
+    "Tuple{",
 ];
 
 /// Coverage-guided fuzzer finds. Unlike `SEEDS` these may refuse; only the

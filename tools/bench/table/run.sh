@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the table benchmark: generates the data if needed, then runs the same questions under
-# data.table, as R code on ry's frames, and on the ry engine directly from Rust, one after the
+# data.table, as R code on ry's DataFrame, and on the ry engine directly from Rust, one after the
 # other so they never share the CPU.
 #
 # Usage: tools/bench/table/run.sh <data-dir> [rows]
@@ -19,7 +19,7 @@ binary="$(ls -t "$root"/target/release/deps/db_benchmark-* | grep -v '\.d$' | gr
 
 echo "== data.table"
 Rscript "$here/datatable.R" "$dir"
-echo "== ry frames, from R code under ry's runtime"
+echo "== ry DataFrame, from R code under ry's runtime"
 "$root/target/release/ry" run --runtime ry "$here/ry.R" "$dir"
 echo "== ry engine, from Rust"
 "$binary" "$dir"

@@ -171,7 +171,7 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
         }
         PatternKind::Record { fields, rest } => {
             output.push_str(&format!(
-                "{indent}pattern record{}\n",
+                "{indent}pattern Record{}\n",
                 if *rest { " .." } else { "" }
             ));
             for field in fields {

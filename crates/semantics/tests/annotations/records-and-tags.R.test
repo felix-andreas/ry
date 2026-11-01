@@ -1,36 +1,36 @@
 #==== native_types
 #---- record_type
-record{y: double, x: integer}
+Record{y: double, x: integer}
 #++++
 record{x: integer, y: double}
 
 #---- empty_record_type
-record{}
+Record{}
 #++++
 record{}
 
 #---- tuple_type
-tuple{integer, character}
+Tuple{integer, character}
 #++++
 tuple{integer, character}
 
 #---- empty_tuple_type
-tuple{}
+Tuple{}
 #++++
 tuple{}
 
 #---- record_type_needs_names
-record{integer, character}
+Record{integer, character}
 #++++
 error: a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items
 
 #---- tuple_type_takes_no_names
-tuple{x: integer}
+Tuple{x: integer}
 #++++
 error: a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields
 
 #---- duplicate_record_field
-record{x: integer, x: double}
+Record{x: integer, x: double}
 #++++
 error: the field `x` appears twice in this `record{...}` type
 

@@ -205,19 +205,19 @@ list{na.rm: logical, length.out: integer}
 
 #==== frames
 #---- frame_with_columns
-frame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
 #++++
-frame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
 
 #---- frame_column_broadens_a_scalar
-frame{id: integer, label: character}
+DataFrame{id: integer, label: character}
 #++++
-frame{id: integer[], label: character[]}
+DataFrame{id: integer[], label: character[]}
 
 #---- empty_frame
-frame{}
+DataFrame{}
 #++++
-frame{}
+DataFrame{}
 
 #---- frame_with_unknown_columns
 frame
@@ -225,11 +225,11 @@ frame
 frame
 
 #---- frame_with_a_non_syntactic_column
-frame{`unit price`: double[]}
+DataFrame{`unit price`: double[]}
 #++++
-frame{`unit price`: double[]}
+DataFrame{`unit price`: double[]}
 
 #---- frame_in_a_union
-frame{id: integer[]} | NULL
+DataFrame{id: integer[]} | NULL
 #++++
-frame{id: integer[]} | NULL
+DataFrame{id: integer[]} | NULL

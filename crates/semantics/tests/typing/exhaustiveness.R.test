@@ -58,7 +58,7 @@ f: fn(c: :Red | :Green | :Blue) -> integer
 64..73 error[non-exhaustive-match] this `match` does not handle `:Green` and `:Blue`: add arms for them, or a catch-all `_ => ...` arm
 
 #---- more_than_three_missing_cases
-#: fn(pair: tuple{logical, logical}) -> integer
+#: fn(pair: Tuple{logical, logical}) -> integer
 f <- function(pair) {
   match (pair) {
     (TRUE, TRUE) => 1L
@@ -140,7 +140,7 @@ f: fn(x: :Some(integer) | NULL) -> integer
 64..73 error[non-exhaustive-match] this `match` does not handle `NULL`: add an arm for it, or a catch-all `_ => ...` arm
 
 #---- record_with_a_rest_covers_the_record
-#: fn(r: record{x: logical, y: double}) -> integer
+#: fn(r: Record{x: logical, y: double}) -> integer
 f <- function(r) {
   match (r) {
     (x = TRUE, ..) => 1L
