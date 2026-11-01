@@ -1770,6 +1770,7 @@ unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
+    crate::session::finish();
     use std::io::Write;
     drop(std::io::stdout().flush());
     std::process::exit(if status == NA_INTEGER { 0 } else { status });

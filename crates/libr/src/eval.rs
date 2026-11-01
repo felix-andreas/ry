@@ -1144,6 +1144,7 @@ pub unsafe extern "C" fn ry_run(
             }
         };
     }
+    interp::session::finish();
     crate::boundary::run_pending_finalizers();
     use std::io::Write;
     drop(std::io::stdout().flush());
@@ -1218,6 +1219,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
             prompt = std::ffi::CString::default();
         }
     });
+    interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
 }

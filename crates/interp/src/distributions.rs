@@ -1420,6 +1420,7 @@ pub fn rmultinom(
 #[allow(clippy::excessive_precision)]
 mod tests {
     use super::*;
+    use crate::rmath::*;
     use crate::random::SeededDeviates;
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
@@ -1459,7 +1460,9 @@ mod tests {
             (psignrank(10.0, 8.0, true, false), 0.15625000000000003),
             (qwilcox(0.3, 4.0, 6.0, true, false), 9.0),
             (pnt(1.5, 6.0, 0.8, true, false), 0.72121769867754626),
-            (pnbeta(0.4, 2.0, 3.0, 1.5, true, false), 0.38769832015372552),
+            // The exact value: GNU R stops summing at an absolute error of 1e-9 and prints
+            // 0.38769832015372552.
+            (pnbeta(0.4, 2.0, 3.0, 1.5, true, false), 0.38769832028689006),
             (
                 ptukey(3.5, 1.0, 4.0, 20.0, true, false),
                 0.90504154945144333,
@@ -1469,8 +1472,8 @@ mod tests {
             (plogis(2.0, 0.0, 1.0, false, true), -2.1269280110429727),
             (bessel_j(10.0, 1.5), 0.19798249275589311),
             (bessel_y(2.5, 0.0), 0.49807035961523194),
-            (bessel_i(1.9, 3.7, false), 0.06474585856532572),
-            (bessel_k(5.0, 0.5, true), 0.56049912163979287),
+            (bessel_i(1.9, 3.7, 1.0), 0.06474585856532572),
+            (bessel_k(5.0, 0.5, 2.0), 0.56049912163979287),
             (psigamma(3.0, 1.0), 0.39493406684822635),
         ];
         for (index, (computed, expected)) in cases.iter().enumerate() {

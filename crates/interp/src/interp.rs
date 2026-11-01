@@ -38,6 +38,7 @@ pub mod eval;
 pub mod format;
 pub mod linalg;
 pub mod graphics;
+pub mod graphics_render;
 pub mod lower;
 pub mod methods;
 pub mod native;
