@@ -5,13 +5,14 @@
 
 use {
     ide::{
-        DefinitionTarget, DocumentSymbol, HoverDefinition, code_actions, completion, definition,
-        diagnostic_fixes, document_symbols, folding_ranges, hover, inlay_hints, references, rename,
-        selection_ranges, semantic_tokens, signature_help, type_definition, workspace_symbols,
+        CodeActionKind, DefinitionTarget, DocumentSymbol, HoverDefinition, call_hierarchy_item,
+        code_actions, completion, definition, diagnostic_fixes, document_symbols, folding_ranges,
+        hover, incoming_calls, inlay_hints, outgoing_calls, references, rename, selection_ranges,
+        semantic_tokens, signature_help, type_definition, workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::file_diagnostics,
+        diagnostics::{Applicability, file_diagnostics},
         lints::{LintConfig, lint_file},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
@@ -193,6 +194,36 @@ fn render_at(
     match rename(db, files, file, offset) {
         Some(edits) => output.push_str(&format!("rename: {} edit(s)\n", edits.len())),
         None => output.push_str("rename: none\n"),
+    }
+    // Rendered only where the cursor names a project function, so other cases stay unchanged.
+    if let Some(item) = call_hierarchy_item(db, files, file, offset) {
+        let render_calls = |calls: Vec<ide::CallHierarchyCall>, caller_side: bool| {
+            calls
+                .iter()
+                .map(|call| {
+                    let ranges: Vec<String> = call
+                        .ranges
+                        .iter()
+                        .map(|range| {
+                            let in_file = if caller_side {
+                                call.item.file
+                            } else {
+                                item.file
+                            };
+                            place(in_file, *range)
+                        })
+                        .collect();
+                    format!("{} [{}]", call.item.name, ranges.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        output.push_str(&format!(
+            "calls {}: in {} | out {}\n",
+            item.name,
+            render_calls(incoming_calls(db, files, &item), true),
+            render_calls(outgoing_calls(db, files, &item), false),
+        ));
     }
     if let Some(type_target) = type_definition(db, files, file, offset) {
         output.push_str(&render_target("type-definition", Some(type_target)));
@@ -503,9 +534,13 @@ fn render_structure(source: &str) -> String {
             diagnostics.extend(lint_file(db, file, &LintConfig::default()));
             let whole = TextRange::up_to(TextSize::of(text.as_str()));
             for fix in diagnostic_fixes(&diagnostics, whole) {
+                let unsafe_marker = match fix.kind {
+                    CodeActionKind::DiagnosticFix(Applicability::Unsafe) => " (unsafe)",
+                    _ => "",
+                };
                 for edit in &fix.edits {
                     output.push_str(&format!(
-                        "fix {}: {} -> {:?}\n",
+                        "fix {}{unsafe_marker}: {} -> {:?}\n",
                         fix.title,
                         covered(edit.range),
                         edit.replacement
