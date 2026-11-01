@@ -10,15 +10,17 @@
 //! "QUADPACK" (1983). Every objective is an R function called back from here, each call in its
 //! own handle scope so that long runs do not accumulate handles.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    coerce::coerce_vector,
-    eval,
-    stats::{real_matrix, real_values},
-    unwind::R,
-    values::{self, length, nil, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        coerce::coerce_vector,
+        eval,
+        stats::{real_matrix, real_values},
+        unwind::R,
+        values::{self, length, nil, symbols},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType};
 
 /// `do_fmin(f, lower, upper, tol)`: the minimum of `f` on `[lower, upper]` by Brent's method.
 pub unsafe fn do_fmin(call: &NativeCall<'_>) -> R<Sexp> {
@@ -99,7 +101,15 @@ pub unsafe fn zeroin2(call: &NativeCall<'_>) -> R<Sexp> {
             Ok(f64::MAX)
         }
     };
-    let (root, iterations, precision) = brent_zeroin(lower, upper, f_lower, f_upper, tolerance, max_iterations, &mut objective)?;
+    let (root, iterations, precision) = brent_zeroin(
+        lower,
+        upper,
+        f_lower,
+        f_upper,
+        tolerance,
+        max_iterations,
+        &mut objective,
+    )?;
     values::real_vector(&[root, iterations as f64, precision])
 }
 
@@ -112,7 +122,11 @@ unsafe fn scalar_objective(call: &NativeCall<'_>, function: Sexp, x: f64, what: 
         match value.kind() {
             SexpType::Integer | SexpType::Logical if length(value) == 1 => {
                 let entry = values::ints(value)[0];
-                Ok(if entry == NA_INTEGER { f64::NAN } else { entry as f64 })
+                Ok(if entry == NA_INTEGER {
+                    f64::NAN
+                } else {
+                    entry as f64
+                })
             }
             SexpType::Real if length(value) == 1 => Ok(values::reals(value)[0]),
             _ => Err(call.error(format!("invalid function value in '{what}'"))),
@@ -273,12 +287,18 @@ fn brent_zeroin(
             } else {
                 p = -p;
             }
-            if p < 0.75 * to_c * q - (tolerance_now * q).abs() / 2.0 && p < (previous_step * q / 2.0).abs() {
+            if p < 0.75 * to_c * q - (tolerance_now * q).abs() / 2.0
+                && p < (previous_step * q / 2.0).abs()
+            {
                 step = p / q;
             }
         }
         if step.abs() < tolerance_now {
-            step = if step > 0.0 { tolerance_now } else { -tolerance_now };
+            step = if step > 0.0 {
+                tolerance_now
+            } else {
+                -tolerance_now
+            };
         }
         a = b;
         fa = fb;
@@ -314,7 +334,11 @@ impl Problem<'_> {
     /// The scaled objective at the scaled parameters `p`.
     unsafe fn value(&mut self, p: &[f64]) -> R<f64> {
         self.function_count += 1;
-        let parameters: Vec<f64> = p.iter().zip(&self.par_scale).map(|(value, scale)| value * scale).collect();
+        let parameters: Vec<f64> = p
+            .iter()
+            .zip(&self.par_scale)
+            .map(|(value, scale)| value * scale)
+            .collect();
         let raw = self.evaluate_function(&parameters)?;
         Ok(raw / self.fn_scale)
     }
@@ -330,7 +354,10 @@ impl Problem<'_> {
             let expression = values::call(function, &[argument])?;
             let value = eval::eval(expression, call.env)?;
             if length(value) != 1 {
-                return Err(call.error(format!("objective function in optim evaluates to length {} not 1", length(value))));
+                return Err(call.error(format!(
+                    "objective function in optim evaluates to length {} not 1",
+                    length(value)
+                )));
             }
             let value = coerce_vector(value, SexpType::Real)?;
             Ok(values::reals(value)[0])
@@ -343,7 +370,11 @@ impl Problem<'_> {
         let n = p.len();
         if self.gradient != nil() {
             self.gradient_count += 1;
-            let parameters: Vec<f64> = p.iter().zip(&self.par_scale).map(|(value, scale)| value * scale).collect();
+            let parameters: Vec<f64> = p
+                .iter()
+                .zip(&self.par_scale)
+                .map(|(value, scale)| value * scale)
+                .collect();
             let call = self.call;
             let (gradient, names) = (self.gradient, self.names);
             let raw = crate::scope(|| {
@@ -354,15 +385,26 @@ impl Problem<'_> {
                 let expression = values::call(gradient, &[argument])?;
                 let value = eval::eval(expression, call.env)?;
                 if length(value) != n {
-                    return Err(call.error(format!("gradient in optim evaluated to length {} not {n}", length(value))));
+                    return Err(call.error(format!(
+                        "gradient in optim evaluated to length {} not {n}",
+                        length(value)
+                    )));
                 }
                 let value = coerce_vector(value, SexpType::Real)?;
                 Ok(ValueList(values::reals(value).to_vec()))
             })?
             .0;
-            return Ok(raw.iter().zip(&self.par_scale).map(|(value, scale)| value * scale / self.fn_scale).collect());
+            return Ok(raw
+                .iter()
+                .zip(&self.par_scale)
+                .map(|(value, scale)| value * scale / self.fn_scale)
+                .collect());
         }
-        let mut parameters: Vec<f64> = p.iter().zip(&self.par_scale).map(|(value, scale)| value * scale).collect();
+        let mut parameters: Vec<f64> = p
+            .iter()
+            .zip(&self.par_scale)
+            .map(|(value, scale)| value * scale)
+            .collect();
         let mut result = vec![0.0; n];
         for i in 0..n {
             let step = self.steps[i];
@@ -381,16 +423,26 @@ impl Problem<'_> {
             parameters[i] = forward * self.par_scale[i];
             let high = self.evaluate_function(&parameters)? / self.fn_scale;
             if !high.is_finite() {
-                return Err(self.call.error(format!("non-finite finite-difference value [{}]", i + 1)));
+                return Err(self
+                    .call
+                    .error(format!("non-finite finite-difference value [{}]", i + 1)));
             }
             parameters[i] = backward * self.par_scale[i];
             let low = self.evaluate_function(&parameters)? / self.fn_scale;
             if !low.is_finite() {
-                return Err(self.call.error(format!("non-finite finite-difference value [{}]", i + 1)));
+                return Err(self
+                    .call
+                    .error(format!("non-finite finite-difference value [{}]", i + 1)));
             }
-            result[i] = if self.bounds.is_some() { (high - low) / (forward_step + backward_step) } else { (high - low) / (2.0 * step) };
+            result[i] = if self.bounds.is_some() {
+                (high - low) / (forward_step + backward_step)
+            } else {
+                (high - low) / (2.0 * step)
+            };
             if !result[i].is_finite() {
-                return Err(self.call.error(format!("non-finite finite-difference value [{}]", i + 1)));
+                return Err(self
+                    .call
+                    .error(format!("non-finite finite-difference value [{}]", i + 1)));
             }
             parameters[i] = p[i] * self.par_scale[i];
         }
@@ -420,7 +472,13 @@ unsafe fn control_integer(control: Sexp, name: &str) -> i32 {
     values::as_integer_scalar(values::list_get(control, name))
 }
 
-unsafe fn problem<'a>(call: &'a NativeCall<'a>, par: Sexp, function: Sexp, gradient: Sexp, control: Sexp) -> R<Problem<'a>> {
+unsafe fn problem<'a>(
+    call: &'a NativeCall<'a>,
+    par: Sexp,
+    function: Sexp,
+    gradient: Sexp,
+    control: Sexp,
+) -> R<Problem<'a>> {
     if !values::is_function(function) {
         return Err(call.error("'fn' is not a function"));
     }
@@ -453,7 +511,9 @@ unsafe fn problem<'a>(call: &'a NativeCall<'a>, par: Sexp, function: Sexp, gradi
 /// `optim(par, fn, gr, method, control, lower, upper)`.
 pub unsafe fn optim(call: &NativeCall<'_>) -> R<Sexp> {
     let par = coerce_vector(call.arg(0), SexpType::Real)?;
-    let method = values::first_string(call.arg(3)).map(|name| name.into_owned()).unwrap_or_default();
+    let method = values::first_string(call.arg(3))
+        .map(|name| name.into_owned())
+        .unwrap_or_default();
     let control_list = call.arg(4);
     let lower_argument = call.arg(5);
     let upper_argument = call.arg(6);
@@ -465,27 +525,55 @@ pub unsafe fn optim(call: &NativeCall<'_>) -> R<Sexp> {
         rel_tol: control_real(control_list, "reltol"),
         report: control_integer(control_list, "REPORT"),
     };
-    let start: Vec<f64> = values::reals(par).iter().zip(&problem.par_scale).map(|(value, scale)| value / scale).collect();
+    let start: Vec<f64> = values::reals(par)
+        .iter()
+        .zip(&problem.par_scale)
+        .map(|(value, scale)| value / scale)
+        .collect();
     let (solution, value, function_count, gradient_count, fail, message) = match method.as_str() {
         "Nelder-Mead" => {
             let alpha = control_real(control_list, "alpha");
             let beta = control_real(control_list, "beta");
             let gamma = control_real(control_list, "gamma");
-            let (solution, value, count, fail) = nelder_mead(&mut problem, &start, &control, alpha, beta, gamma)?;
+            let (solution, value, count, fail) =
+                nelder_mead(&mut problem, &start, &control, alpha, beta, gamma)?;
             (solution, value, count as i32, NA_INTEGER, fail, nil())
         }
         "BFGS" => {
             let (solution, value, counts, fail) = variable_metric(&mut problem, &start, &control)?;
-            (solution, value, counts.0 as i32, counts.1 as i32, fail, nil())
+            (
+                solution,
+                value,
+                counts.0 as i32,
+                counts.1 as i32,
+                fail,
+                nil(),
+            )
         }
         "CG" => {
             let kind = control_integer(control_list, "type");
-            let (solution, value, counts, fail) = conjugate_gradients(&mut problem, &start, &control, kind)?;
-            (solution, value, counts.0 as i32, counts.1 as i32, fail, nil())
+            let (solution, value, counts, fail) =
+                conjugate_gradients(&mut problem, &start, &control, kind)?;
+            (
+                solution,
+                value,
+                counts.0 as i32,
+                counts.1 as i32,
+                fail,
+                nil(),
+            )
         }
         "L-BFGS-B" => {
-            let lower: Vec<f64> = real_values(lower_argument)?.iter().zip(&problem.par_scale).map(|(bound, scale)| bound / scale).collect();
-            let upper: Vec<f64> = real_values(upper_argument)?.iter().zip(&problem.par_scale).map(|(bound, scale)| bound / scale).collect();
+            let lower: Vec<f64> = real_values(lower_argument)?
+                .iter()
+                .zip(&problem.par_scale)
+                .map(|(bound, scale)| bound / scale)
+                .collect();
+            let upper: Vec<f64> = real_values(upper_argument)?
+                .iter()
+                .zip(&problem.par_scale)
+                .map(|(bound, scale)| bound / scale)
+                .collect();
             let memory = control_integer(control_list, "lmm");
             let factor = control_real(control_list, "factr");
             let projected_tolerance = control_real(control_list, "pgtol");
@@ -498,9 +586,22 @@ pub unsafe fn optim(call: &NativeCall<'_>) -> R<Sexp> {
                 trace: control.trace,
                 report: control.report.max(1),
             };
-            let outcome = crate::stats_lbfgsb::minimize(&mut problem_adapter(&mut problem), &start, &lower, &upper, &settings)?;
+            let outcome = crate::stats_lbfgsb::minimize(
+                &mut problem_adapter(&mut problem),
+                &start,
+                &lower,
+                &upper,
+                &settings,
+            )?;
             let message = values::scalar_string(&outcome.message)?;
-            (outcome.solution, outcome.value, outcome.function_count as i32, outcome.gradient_count as i32, outcome.fail, message)
+            (
+                outcome.solution,
+                outcome.value,
+                outcome.function_count as i32,
+                outcome.gradient_count as i32,
+                outcome.fail,
+                message,
+            )
         }
         "SANN" => {
             let max_temperature_steps = control_integer(control_list, "tmax");
@@ -508,19 +609,37 @@ pub unsafe fn optim(call: &NativeCall<'_>) -> R<Sexp> {
             if max_temperature_steps < 1 {
                 return Err(call.error("'tmax' is not a positive integer"));
             }
-            let (solution, value) = simulated_annealing(&mut problem, &start, &control, max_temperature_steps, temperature)?;
-            let count = if start.is_empty() { 1 } else { control.max_iterations };
+            let (solution, value) = simulated_annealing(
+                &mut problem,
+                &start,
+                &control,
+                max_temperature_steps,
+                temperature,
+            )?;
+            let count = if start.is_empty() {
+                1
+            } else {
+                control.max_iterations
+            };
             (solution, value, count, NA_INTEGER, 0, nil())
         }
         _ => return Err(call.error("unknown 'method'")),
     };
-    let parameters: Vec<f64> = solution.iter().zip(&problem.par_scale).map(|(value, scale)| value * scale).collect();
+    let parameters: Vec<f64> = solution
+        .iter()
+        .zip(&problem.par_scale)
+        .map(|(value, scale)| value * scale)
+        .collect();
     let parameters = values::real_vector(&parameters)?;
     if problem.names != nil() {
         values::set_attr(parameters, symbols().names, problem.names)?;
     }
     let counts = values::integer_vector(&[function_count, gradient_count])?;
-    values::set_attr(counts, symbols().names, values::string_vector(&["function", "gradient"])?)?;
+    values::set_attr(
+        counts,
+        symbols().names,
+        values::string_vector(&["function", "gradient"])?,
+    )?;
     values::named_list(&[
         ("par", parameters),
         ("value", values::scalar_real(value * problem.fn_scale)?),
@@ -561,7 +680,11 @@ pub unsafe fn optimhess(call: &NativeCall<'_>) -> R<Sexp> {
     let control = call.arg(3);
     let mut problem = problem(call, par, call.arg(1), call.arg(2), control)?;
     let n = length(par);
-    let mut point: Vec<f64> = values::reals(par).iter().zip(&problem.par_scale).map(|(value, scale)| value / scale).collect();
+    let mut point: Vec<f64> = values::reals(par)
+        .iter()
+        .zip(&problem.par_scale)
+        .map(|(value, scale)| value / scale)
+        .collect();
     let mut hessian = vec![0.0; n * n];
     for i in 0..n {
         let step = problem.steps[i] / problem.par_scale[i];
@@ -570,7 +693,8 @@ pub unsafe fn optimhess(call: &NativeCall<'_>) -> R<Sexp> {
         point[i] -= 2.0 * step;
         let backward = problem.gradient(&point)?;
         for j in 0..n {
-            hessian[i * n + j] = problem.fn_scale * (forward[j] - backward[j]) / (2.0 * step * problem.par_scale[i] * problem.par_scale[j]);
+            hessian[i * n + j] = problem.fn_scale * (forward[j] - backward[j])
+                / (2.0 * step * problem.par_scale[i] * problem.par_scale[j]);
         }
         point[i] += step;
     }
@@ -599,7 +723,14 @@ const BIG: f64 = 1.0e35;
 /// Nelder and Mead's simplex search as Nash gives it: reflection, extension, contraction
 /// towards the centroid, and shrinking towards the best vertex, until the spread of the
 /// function values over the simplex falls below the tolerance.
-unsafe fn nelder_mead(problem: &mut Problem<'_>, start: &[f64], control: &Control, alpha: f64, beta: f64, gamma: f64) -> R<(Vec<f64>, f64, usize, i32)> {
+unsafe fn nelder_mead(
+    problem: &mut Problem<'_>,
+    start: &[f64],
+    control: &Control,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+) -> R<(Vec<f64>, f64, usize, i32)> {
     let n = start.len();
     let trace = control.trace > 0;
     if control.max_iterations <= 0 {
@@ -611,15 +742,22 @@ unsafe fn nelder_mead(problem: &mut Problem<'_>, start: &[f64], control: &Contro
     }
     let value = problem.value(start)?;
     if !value.is_finite() {
-        return Err(problem.call.error("function cannot be evaluated at initial parameters"));
+        return Err(problem
+            .call
+            .error("function cannot be evaluated at initial parameters"));
     }
     if trace {
-        print(&format!("function value for initial parameters = {value:.6}\n"));
+        print(&format!(
+            "function value for initial parameters = {value:.6}\n"
+        ));
     }
     let mut count = 1usize;
     let tolerance = control.rel_tol * (value.abs() + control.rel_tol);
     if trace {
-        print(&format!("  Scaled convergence tolerance is {}\n", crate::format::c_general(tolerance, 6, false)));
+        print(&format!(
+            "  Scaled convergence tolerance is {}\n",
+            crate::format::c_general(tolerance, 6, false)
+        ));
     }
     let vertices = n + 1;
     // Column `j` is vertex `j` (its coordinates, then its function value); the extra column is
@@ -628,7 +766,9 @@ unsafe fn nelder_mead(problem: &mut Problem<'_>, start: &[f64], control: &Contro
     simplex[0][..n].copy_from_slice(start);
     simplex[0][n] = value;
     let mut best = 0usize;
-    let mut step = start.iter().fold(0.0_f64, |largest, value| largest.max(0.1 * value.abs()));
+    let mut step = start
+        .iter()
+        .fold(0.0_f64, |largest, value| largest.max(0.1 * value.abs()));
     if step == 0.0 {
         step = 0.1;
     }
@@ -751,7 +891,8 @@ unsafe fn nelder_mead(problem: &mut Problem<'_>, start: &[f64], control: &Contro
                 for j in 0..vertices {
                     if j != best {
                         for i in 0..n {
-                            simplex[j][i] = beta * (simplex[j][i] - simplex[best][i]) + simplex[best][i];
+                            simplex[j][i] =
+                                beta * (simplex[j][i] - simplex[best][i]) + simplex[best][i];
                             size += (simplex[j][i] - simplex[best][i]).abs();
                         }
                     }
@@ -772,7 +913,9 @@ unsafe fn nelder_mead(problem: &mut Problem<'_>, start: &[f64], control: &Contro
         }
     }
     if trace {
-        print(&format!("Exiting from Nelder Mead minimizer\n    {count} function evaluations used\n"));
+        print(&format!(
+            "Exiting from Nelder Mead minimizer\n    {count} function evaluations used\n"
+        ));
     }
     if count > control.max_iterations as usize {
         fail = 1;
@@ -787,7 +930,11 @@ const RELATIVE_TEST: f64 = 10.0;
 /// Nash's variable metric method: BFGS updates of an inverse Hessian approximation, with a
 /// backtracking line search on an Armijo condition and a reset to steepest descent whenever
 /// the update fails.
-unsafe fn variable_metric(problem: &mut Problem<'_>, start: &[f64], control: &Control) -> R<(Vec<f64>, f64, (usize, usize), i32)> {
+unsafe fn variable_metric(
+    problem: &mut Problem<'_>,
+    start: &[f64],
+    control: &Control,
+) -> R<(Vec<f64>, f64, (usize, usize), i32)> {
     let n = start.len();
     let trace = control.trace > 0;
     let report = control.report.max(1) as usize;
@@ -861,7 +1008,8 @@ unsafe fn variable_metric(problem: &mut Problem<'_>, start: &[f64], control: &Co
                     break;
                 }
             }
-            let enough = f > control.abs_tol && (f - minimum).abs() > control.rel_tol * (minimum.abs() + control.rel_tol);
+            let enough = f > control.abs_tol
+                && (f - minimum).abs() > control.rel_tol * (minimum.abs() + control.rel_tol);
             if !enough {
                 count = n;
                 minimum = f;
@@ -894,7 +1042,10 @@ unsafe fn variable_metric(problem: &mut Problem<'_>, start: &[f64], control: &Co
                     d2 = 1.0 + d2 / d1;
                     for i in 0..n {
                         for j in 0..=i {
-                            inverse[i][j] += (d2 * direction[i] * direction[j] - product[i] * direction[j] - direction[i] * product[j]) / d1;
+                            inverse[i][j] += (d2 * direction[i] * direction[j]
+                                - product[i] * direction[j]
+                                - direction[i] * product[j])
+                                / d1;
                         }
                     }
                 } else {
@@ -934,13 +1085,23 @@ unsafe fn variable_metric(problem: &mut Problem<'_>, start: &[f64], control: &Co
             print(&format!("stopped after {iteration} iterations\n"));
         }
     }
-    Ok((b, minimum, (function_count, gradient_count), if converged { 0 } else { 1 }))
+    Ok((
+        b,
+        minimum,
+        (function_count, gradient_count),
+        if converged { 0 } else { 1 },
+    ))
 }
 
 /// Nash's conjugate gradients method, with Fletcher-Reeves (1), Polak-Ribiere (2) or
 /// Beale-Sorenson (3) updates, a backtracking line search refined by one quadratic
 /// interpolation step, and a restart every `n` cycles.
-unsafe fn conjugate_gradients(problem: &mut Problem<'_>, start: &[f64], control: &Control, kind: i32) -> R<(Vec<f64>, f64, (usize, usize), i32)> {
+unsafe fn conjugate_gradients(
+    problem: &mut Problem<'_>,
+    start: &[f64],
+    control: &Control,
+    kind: i32,
+) -> R<(Vec<f64>, f64, (usize, usize), i32)> {
     let n = start.len();
     let trace = control.trace > 0;
     let mut b = start.to_vec();
@@ -949,19 +1110,29 @@ unsafe fn conjugate_gradients(problem: &mut Problem<'_>, start: &[f64], control:
         return Ok((b, value, (0, 0), 0));
     }
     if !(1..=3).contains(&kind) {
-        return Err(problem.call.error("unknown 'type' in \"CG\" method of 'optim'"));
+        return Err(problem
+            .call
+            .error("unknown 'type' in \"CG\" method of 'optim'"));
     }
     if trace {
-        print(&format!("  Conjugate gradients function minimizer\nMethod: {}\n", ["Fletcher Reeves", "Polak Ribiere", "Beale Sorenson"][kind as usize - 1]));
+        print(&format!(
+            "  Conjugate gradients function minimizer\nMethod: {}\n",
+            ["Fletcher Reeves", "Polak Ribiere", "Beale Sorenson"][kind as usize - 1]
+        ));
     }
     let intolerance = control.rel_tol;
     let tolerance = intolerance * n as f64 * intolerance.sqrt();
     let mut f = problem.value(&b)?;
     if !f.is_finite() {
-        return Err(problem.call.error("Function cannot be evaluated at initial parameters"));
+        return Err(problem
+            .call
+            .error("Function cannot be evaluated at initial parameters"));
     }
     if trace {
-        print(&format!("tolerance used in gradient test={}\n", crate::format::c_general(tolerance, 6, false)));
+        print(&format!(
+            "tolerance used in gradient test={}\n",
+            crate::format::c_general(tolerance, 6, false)
+        ));
     }
     let mut minimum = f;
     let mut function_count = 1usize;
@@ -1090,7 +1261,9 @@ unsafe fn conjugate_gradients(problem: &mut Problem<'_>, start: &[f64], control:
         }
     }
     if trace {
-        print(&format!("Exiting from conjugate gradients minimizer\n    {function_count} function evaluations used\n    {gradient_count} gradient evaluations used\n"));
+        print(&format!(
+            "Exiting from conjugate gradients minimizer\n    {function_count} function evaluations used\n    {gradient_count} gradient evaluations used\n"
+        ));
     }
     Ok((b, minimum, (function_count, gradient_count), 0))
 }
@@ -1098,7 +1271,13 @@ unsafe fn conjugate_gradients(problem: &mut Problem<'_>, start: &[f64], control:
 /// Simulated annealing as `optim`'s "SANN": Gaussian candidate moves scaled by the
 /// temperature, which falls logarithmically and stays at each level for `tmax` steps,
 /// accepting uphill moves by the Metropolis criterion. Returns the best point found.
-unsafe fn simulated_annealing(problem: &mut Problem<'_>, start: &[f64], control: &Control, steps_per_temperature: i32, start_temperature: f64) -> R<(Vec<f64>, f64)> {
+unsafe fn simulated_annealing(
+    problem: &mut Problem<'_>,
+    start: &[f64],
+    control: &Control,
+    steps_per_temperature: i32,
+    start_temperature: f64,
+) -> R<(Vec<f64>, f64)> {
     let n = start.len();
     let trace = control.trace > 0;
     // e - 1, so that the first temperature is the starting one.
@@ -1117,7 +1296,9 @@ unsafe fn simulated_annealing(problem: &mut Problem<'_>, start: &[f64], control:
     let mut best_value = value;
     let report = control.report.max(1);
     if trace {
-        print(&format!("sann objective function values\ninitial       value {value:.6}\n"));
+        print(&format!(
+            "sann objective function values\ninitial       value {value:.6}\n"
+        ));
     }
     let scale = 1.0 / start_temperature;
     let mut iteration = 1;
@@ -1159,14 +1340,21 @@ unsafe fn simulated_annealing(problem: &mut Problem<'_>, start: &[f64], control:
     }
     crate::random::put_rng_state()?;
     if trace {
-        print(&format!("final         value {best_value:.6}\nsann stopped after {} iterations\n", iteration - 1));
+        print(&format!(
+            "final         value {best_value:.6}\nsann stopped after {} iterations\n",
+            iteration - 1
+        ));
     }
     Ok((best, best_value))
 }
 
 /// A SANN candidate from the user's `gr`, which for this method generates the next point.
 unsafe fn candidate_from_r(problem: &Problem<'_>, point: &[f64]) -> R<Vec<f64>> {
-    let parameters: Vec<f64> = point.iter().zip(&problem.par_scale).map(|(value, scale)| value * scale).collect();
+    let parameters: Vec<f64> = point
+        .iter()
+        .zip(&problem.par_scale)
+        .map(|(value, scale)| value * scale)
+        .collect();
     let call = problem.call;
     let (gradient, names, n) = (problem.gradient, problem.names, point.len());
     let raw = crate::scope(|| {
@@ -1177,12 +1365,20 @@ unsafe fn candidate_from_r(problem: &Problem<'_>, point: &[f64]) -> R<Vec<f64>> 
         let expression = values::call(gradient, &[argument])?;
         let value = eval::eval(expression, call.env)?;
         if length(value) != n {
-            return Err(call.error(format!("candidate point in 'optim' evaluated to length {} not {n}", length(value))));
+            return Err(call.error(format!(
+                "candidate point in 'optim' evaluated to length {} not {n}",
+                length(value)
+            )));
         }
         let value = coerce_vector(value, SexpType::Real)?;
         Ok(ValueList(values::reals(value).to_vec()))
     })?;
-    Ok(raw.0.iter().zip(&problem.par_scale).map(|(value, scale)| value / scale).collect())
+    Ok(raw
+        .0
+        .iter()
+        .zip(&problem.par_scale)
+        .map(|(value, scale)| value / scale)
+        .collect())
 }
 
 // integrate.
@@ -1197,8 +1393,19 @@ pub unsafe fn call_dqags(call: &NativeCall<'_>) -> R<Sexp> {
     let abs_tol = values::as_real_scalar(call.arg(4));
     let rel_tol = values::as_real_scalar(call.arg(5));
     let limit = values::as_integer_scalar(call.arg(6));
-    let mut integrand = Integrand { call, function, env };
-    let outcome = qags(&mut integrand, lower, upper, abs_tol, rel_tol, limit.max(1) as usize)?;
+    let mut integrand = Integrand {
+        call,
+        function,
+        env,
+    };
+    let outcome = qags(
+        &mut integrand,
+        lower,
+        upper,
+        abs_tol,
+        rel_tol,
+        limit.max(1) as usize,
+    )?;
     integration_result(outcome)
 }
 
@@ -1212,8 +1419,19 @@ pub unsafe fn call_dqagi(call: &NativeCall<'_>) -> R<Sexp> {
     let abs_tol = values::as_real_scalar(call.arg(4));
     let rel_tol = values::as_real_scalar(call.arg(5));
     let limit = values::as_integer_scalar(call.arg(6));
-    let mut integrand = Integrand { call, function, env };
-    let outcome = qagi(&mut integrand, bound, infinite, abs_tol, rel_tol, limit.max(1) as usize)?;
+    let mut integrand = Integrand {
+        call,
+        function,
+        env,
+    };
+    let outcome = qagi(
+        &mut integrand,
+        bound,
+        infinite,
+        abs_tol,
+        rel_tol,
+        limit.max(1) as usize,
+    )?;
     integration_result(outcome)
 }
 
@@ -1406,12 +1624,23 @@ unsafe fn kronrod21(f: &mut Integrand<'_>, a: f64, b: f64) -> R<Rule> {
     }
     let scale = half.abs();
     let (absolute, deviation) = (absolute * scale, deviation * scale);
-    Ok(Rule { result: kronrod * half, error: rule_error((kronrod - gauss) * half, absolute, deviation), absolute, deviation })
+    Ok(Rule {
+        result: kronrod * half,
+        error: rule_error((kronrod - gauss) * half, absolute, deviation),
+        absolute,
+        deviation,
+    })
 }
 
 /// The 15-point Gauss-Kronrod rule on `[a, b]` within (0, 1], for the integral over the
 /// infinite range mapped there by `x = bound + sign (1 - t) / t`.
-unsafe fn kronrod15_infinite(f: &mut Integrand<'_>, bound: f64, infinite: i32, a: f64, b: f64) -> R<Rule> {
+unsafe fn kronrod15_infinite(
+    f: &mut Integrand<'_>,
+    bound: f64,
+    infinite: i32,
+    a: f64,
+    b: f64,
+) -> R<Rule> {
     let sign = infinite.min(1) as f64;
     let center = (a + b) * 0.5;
     let half = (b - a) * 0.5;
@@ -1452,16 +1681,51 @@ unsafe fn kronrod15_infinite(f: &mut Integrand<'_>, bound: f64, infinite: i32, a
         deviation += KRONROD15_WEIGHTS[j] * ((left[j] - mean).abs() + (right[j] - mean).abs());
     }
     let (absolute, deviation) = (absolute * half, deviation * half);
-    Ok(Rule { result: kronrod * half, error: rule_error((kronrod - gauss) * half, absolute, deviation), absolute, deviation })
+    Ok(Rule {
+        result: kronrod * half,
+        error: rule_error((kronrod - gauss) * half, absolute, deviation),
+        absolute,
+        deviation,
+    })
 }
 
-unsafe fn qags(f: &mut Integrand<'_>, a: f64, b: f64, abs_tol: f64, rel_tol: f64, limit: usize) -> R<Quadrature> {
-    adaptive(limit, abs_tol, rel_tol, a, b, (b - a).abs() * 0.375, &mut |lower, upper| kronrod21(f, lower, upper))
+unsafe fn qags(
+    f: &mut Integrand<'_>,
+    a: f64,
+    b: f64,
+    abs_tol: f64,
+    rel_tol: f64,
+    limit: usize,
+) -> R<Quadrature> {
+    adaptive(
+        limit,
+        abs_tol,
+        rel_tol,
+        a,
+        b,
+        (b - a).abs() * 0.375,
+        &mut |lower, upper| kronrod21(f, lower, upper),
+    )
 }
 
-unsafe fn qagi(f: &mut Integrand<'_>, bound: f64, infinite: i32, abs_tol: f64, rel_tol: f64, limit: usize) -> R<Quadrature> {
+unsafe fn qagi(
+    f: &mut Integrand<'_>,
+    bound: f64,
+    infinite: i32,
+    abs_tol: f64,
+    rel_tol: f64,
+    limit: usize,
+) -> R<Quadrature> {
     let bound = if infinite == 2 { 0.0 } else { bound };
-    adaptive(limit, abs_tol, rel_tol, 0.0, 1.0, 0.375, &mut |lower, upper| kronrod15_infinite(f, bound, infinite, lower, upper))
+    adaptive(
+        limit,
+        abs_tol,
+        rel_tol,
+        0.0,
+        1.0,
+        0.375,
+        &mut |lower, upper| kronrod15_infinite(f, bound, infinite, lower, upper),
+    )
 }
 
 /// QUADPACK's QAGSE/QAGIE driver: bisects the interval with the largest error estimate,
@@ -1480,7 +1744,12 @@ unsafe fn adaptive(
     let underflow = f64::MIN_POSITIVE;
     let overflow = f64::MAX;
     if abs_tol <= 0.0 && rel_tol < (50.0 * epsilon).max(0.5e-28) {
-        return Ok(Quadrature { result: 0.0, error: 0.0, last: 0, status: 6 });
+        return Ok(Quadrature {
+            result: 0.0,
+            error: 0.0,
+            last: 0,
+            status: 6,
+        });
     }
     // Interval lists, 1-based as QUADPACK keeps them so that `order` can hold indices.
     let mut lower = vec![0.0; limit + 1];
@@ -1508,7 +1777,12 @@ unsafe fn adaptive(
         status = 1;
     }
     if status != 0 || (abserr <= bound && abserr != first.deviation) || abserr == 0.0 {
-        return Ok(Quadrature { result, error: abserr, last, status });
+        return Ok(Quadrature {
+            result,
+            error: abserr,
+            last,
+            status,
+        });
     }
     let mut table = [0.0; 55];
     table[1] = result;
@@ -1526,7 +1800,11 @@ unsafe fn adaptive(
     let mut no_extrapolation = false;
     let (mut roundoff1, mut roundoff2, mut roundoff3) = (0, 0, 0);
     let mut roundoff_status = 0;
-    let sign = if magnitude >= (1.0 - 50.0 * epsilon) * defabs { 1 } else { -1 };
+    let sign = if magnitude >= (1.0 - 50.0 * epsilon) * defabs {
+        1
+    } else {
+        -1
+    };
     let mut small = 0.0;
     let mut error_large = 0.0;
     let mut error_test = 0.0;
@@ -1546,7 +1824,9 @@ unsafe fn adaptive(
         error_sum = error_sum + error12 - error_max;
         area = area + area12 - results[max_error];
         if left.deviation != left.error && right.deviation != right.error {
-            if (results[max_error] - area12).abs() <= 1e-5 * area12.abs() && error12 >= 0.99 * error_max {
+            if (results[max_error] - area12).abs() <= 1e-5 * area12.abs()
+                && error12 >= 0.99 * error_max
+            {
                 if extrapolating {
                     roundoff2 += 1;
                 } else {
@@ -1587,7 +1867,15 @@ unsafe fn adaptive(
             errors[max_error] = left.error;
             errors[last] = right.error;
         }
-        sort_errors(limit, last, &mut max_error, &mut error_max, &errors, &mut order, &mut nr_max);
+        sort_errors(
+            limit,
+            last,
+            &mut max_error,
+            &mut error_max,
+            &errors,
+            &mut order,
+            &mut nr_max,
+        );
         if error_sum <= bound {
             summed = true;
             break;
@@ -1621,7 +1909,11 @@ unsafe fn adaptive(
         }
         let mut bisect_large = false;
         if roundoff_status != 3 && error_large > error_test {
-            let upper_bound = if last > 2 + limit / 2 { limit + 3 - last } else { last };
+            let upper_bound = if last > 2 + limit / 2 {
+                limit + 3 - last
+            } else {
+                last
+            };
             for _ in nr_max..=upper_bound {
                 max_error = order[nr_max];
                 error_max = errors[max_error];
@@ -1638,7 +1930,12 @@ unsafe fn adaptive(
         }
         table_size += 1;
         table[table_size] = area;
-        let (extrapolated, extrapolated_error) = epsilon_algorithm(&mut table_size, &mut table, &mut previous_results, &mut results_count);
+        let (extrapolated, extrapolated_error) = epsilon_algorithm(
+            &mut table_size,
+            &mut table,
+            &mut previous_results,
+            &mut results_count,
+        );
         k_min += 1;
         if k_min > 5 && abserr < 1e-3 * error_sum {
             status = 5;
@@ -1695,7 +1992,8 @@ unsafe fn adaptive(
         if use_sum {
             result = sum_results(last);
             abserr = error_sum;
-        } else if divergence_test && !(sign == -1 && result.abs().max(area.abs()) <= defabs * 0.01) {
+        } else if divergence_test && !(sign == -1 && result.abs().max(area.abs()) <= defabs * 0.01)
+        {
             if 0.01 > result / area || result / area > 100.0 || error_sum > area.abs() {
                 status = 6;
             }
@@ -1707,13 +2005,26 @@ unsafe fn adaptive(
     if status > 2 {
         status -= 1;
     }
-    Ok(Quadrature { result, error: abserr, last, status })
+    Ok(Quadrature {
+        result,
+        error: abserr,
+        last,
+        status,
+    })
 }
 
 /// QUADPACK's QPSRT: keeps `order[1..]` listing the intervals by decreasing error estimate
 /// (only as deep as the remaining subdivisions can use), after interval `max_error` was
 /// split into itself and `last`; then selects the `nr_max`-th largest for bisection.
-fn sort_errors(limit: usize, last: usize, max_error: &mut usize, error_max: &mut f64, errors: &[f64], order: &mut [usize], nr_max: &mut usize) {
+fn sort_errors(
+    limit: usize,
+    last: usize,
+    max_error: &mut usize,
+    error_max: &mut f64,
+    errors: &[f64],
+    order: &mut [usize],
+    nr_max: &mut usize,
+) {
     if last <= 2 {
         order[1] = 1;
         order[2] = 2;
@@ -1729,7 +2040,11 @@ fn sort_errors(limit: usize, last: usize, max_error: &mut usize, error_max: &mut
                 *nr_max -= 1;
             }
         }
-        let depth = if last > limit / 2 + 2 { limit + 3 - last } else { last };
+        let depth = if last > limit / 2 + 2 {
+            limit + 3 - last
+        } else {
+            last
+        };
         let smallest = errors[last];
         let bottom = depth - 1;
         let begin = *nr_max + 1;
@@ -1774,7 +2089,12 @@ fn sort_errors(limit: usize, last: usize, max_error: &mut usize, error_max: &mut
 /// QUADPACK's QELG: Wynn's epsilon algorithm on `table[1..=size]`, which it extends and then
 /// shortens. Returns the extrapolated limit and an error estimate from the last three
 /// results.
-fn epsilon_algorithm(size: &mut usize, table: &mut [f64; 55], previous: &mut [f64; 4], count: &mut usize) -> (f64, f64) {
+fn epsilon_algorithm(
+    size: &mut usize,
+    table: &mut [f64; 55],
+    previous: &mut [f64; 4],
+    count: &mut usize,
+) -> (f64, f64) {
     let epsilon = f64::EPSILON;
     let overflow = f64::MAX;
     let limit_size = 50;
@@ -1854,7 +2174,9 @@ fn epsilon_algorithm(size: &mut usize, table: &mut [f64; 55], previous: &mut [f6
         previous[*count] = result;
         error = overflow;
     } else {
-        error = (result - previous[3]).abs() + (result - previous[2]).abs() + (result - previous[1]).abs();
+        error = (result - previous[3]).abs()
+            + (result - previous[2]).abs()
+            + (result - previous[1]).abs();
         previous[1] = previous[2];
         previous[2] = previous[3];
         previous[3] = result;

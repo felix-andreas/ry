@@ -4,14 +4,16 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::{CStr, c_int},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::{CStr, c_int},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 const CPLXSXP: c_int = 15;
 const NA_INTEGER: c_int = i32::MIN;

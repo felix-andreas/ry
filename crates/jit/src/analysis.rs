@@ -22,20 +22,39 @@
 //! to date before anything that can observe it runs, and slots are forgotten after anything that
 //! can change it, so code outside the compiled body never sees the difference.
 
-use bumpalo::Bump;
-use heap::object::{Sexp, SexpType, gp};
-use interp::{
-    bytecode::{
-        self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count,
+use {
+    bumpalo::Bump,
+    heap::object::{Sexp, SexpType, gp},
+    interp::{
+        bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
+        values,
     },
-    values,
+    rustc_hash::{FxBuildHasher, FxHashSet},
+    smallvec::SmallVec,
+    std::{
+        alloc::{AllocError, Allocator, Layout},
+        ptr::NonNull,
+    },
 };
-use rustc_hash::{FxBuildHasher, FxHashSet};
-use smallvec::SmallVec;
 
 /// A growable array in the compilation's arena.
-pub type List<'a, T> = allocator_api2::vec::Vec<T, &'a Bump>;
-type Map<'a, K, V> = hashbrown::HashMap<K, V, FxBuildHasher, &'a Bump>;
+pub type List<'a, T> = Vec<T, Arena<'a>>;
+type Map<'a, K, V> = hashbrown::HashMap<K, V, FxBuildHasher, Arena<'a>>;
+
+/// A compilation's bump arena as a std allocator. Freeing is a no-op, because the whole arena
+/// is reset once the compilation is done. (bumpalo's own `allocator_api` feature would replace
+/// the `allocator-api2` implementation Cranelift's register allocator relies on.)
+#[derive(Clone, Copy)]
+pub struct Arena<'a>(pub &'a Bump);
+
+unsafe impl Allocator for Arena<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let pointer = self.0.try_alloc_layout(layout).map_err(|_| AllocError)?;
+        Ok(NonNull::slice_from_raw_parts(pointer, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, _pointer: NonNull<u8>, _layout: Layout) {}
+}
 
 /// What compiled code knows about a value, which decides its machine representation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -150,7 +169,10 @@ pub struct Slot {
 }
 
 impl Slot {
-    const UNLOADED: Slot = Slot { status: status::NOT_LOADED, ty: Ty::Bottom };
+    const UNLOADED: Slot = Slot {
+        status: status::NOT_LOADED,
+        ty: Ty::Bottom,
+    };
 
     fn join(self, other: Slot) -> Slot {
         let ty = if self.status & status::LOADED == 0 {
@@ -163,7 +185,12 @@ impl Slot {
         // An unboxed local boxed on the way into a join is a fresh object the frame does not
         // hold, so from there on it is a value to write back, not the frame's own (see
         // `box_slot` in codegen).
-        let boxed = |side: Slot| side.ty.is_unboxed() && side.may_be(status::LOCAL) && ty != Ty::Bottom && !ty.is_unboxed();
+        let boxed = |side: Slot| {
+            side.ty.is_unboxed()
+                && side.may_be(status::LOCAL)
+                && ty != Ty::Bottom
+                && !ty.is_unboxed()
+        };
         let mut status = self.status | other.status;
         if boxed(self) || boxed(other) {
             status |= status::DIRTY;
@@ -187,8 +214,12 @@ pub struct State<'a> {
 }
 
 impl<'a> State<'a> {
-    fn bottom(arena: &'a Bump, registers: usize, slots: usize) -> State<'a> {
-        let mut state = State { registers: List::with_capacity_in(registers, arena), slots: List::with_capacity_in(slots, arena), visible: None };
+    fn bottom(arena: Arena<'a>, registers: usize, slots: usize) -> State<'a> {
+        let mut state = State {
+            registers: List::with_capacity_in(registers, arena),
+            slots: List::with_capacity_in(slots, arena),
+            visible: None,
+        };
         state.registers.resize(registers, Ty::Bottom);
         state.slots.resize(slots, Slot::UNLOADED);
         state
@@ -246,8 +277,14 @@ pub struct StateRef<'p> {
 }
 
 impl<'a> States<'a> {
-    fn new_in(arena: &'a Bump, registers: usize, slots: usize) -> States<'a> {
-        States { registers, slots, types: List::new_in(arena), slot_rows: List::new_in(arena), visible: List::new_in(arena) }
+    fn new_in(arena: Arena<'a>, registers: usize, slots: usize) -> States<'a> {
+        States {
+            registers,
+            slots,
+            types: List::new_in(arena),
+            slot_rows: List::new_in(arena),
+            visible: List::new_in(arena),
+        }
     }
 
     fn rows(&self) -> usize {
@@ -287,7 +324,8 @@ impl<'a> States<'a> {
 
     fn store(&mut self, id: StateId, state: &State) {
         let row = id as usize;
-        self.types[row * self.registers..(row + 1) * self.registers].copy_from_slice(&state.registers);
+        self.types[row * self.registers..(row + 1) * self.registers]
+            .copy_from_slice(&state.registers);
         self.slot_rows[row * self.slots..(row + 1) * self.slots].copy_from_slice(&state.slots);
         self.visible[row] = state.visible;
     }
@@ -297,7 +335,10 @@ impl<'a> States<'a> {
         let (into, from) = (into as usize, from as usize);
         let mut changed = false;
         for register in 0..self.registers {
-            let (target, source) = (into * self.registers + register, from * self.registers + register);
+            let (target, source) = (
+                into * self.registers + register,
+                from * self.registers + register,
+            );
             let joined = self.types[target].join(self.types[source]);
             changed |= joined != self.types[target];
             self.types[target] = joined;
@@ -341,7 +382,9 @@ pub struct Live<'a> {
 
 impl Live<'_> {
     fn row(&self, position: usize) -> &[u64] {
-        self.bits.get(position * self.words..(position + 1) * self.words).unwrap_or(&[])
+        self.bits
+            .get(position * self.words..(position + 1) * self.words)
+            .unwrap_or(&[])
     }
 
     /// Whether `register` is live before the instruction at `position`; nothing is live past the
@@ -352,7 +395,9 @@ impl Live<'_> {
 }
 
 fn bit(words: &[u64], index: usize) -> bool {
-    words.get(index / 64).is_some_and(|word| word & (1 << (index % 64)) != 0)
+    words
+        .get(index / 64)
+        .is_some_and(|word| word & (1 << (index % 64)) != 0)
 }
 
 fn set_bit(words: &mut [u64], index: usize, value: bool) {
@@ -423,7 +468,10 @@ pub enum Intrinsic {
 /// Where a directly called closure's argument comes from.
 #[derive(Clone, Copy, Debug)]
 pub enum Argument {
-    Unboxed { register: usize, ty: Ty },
+    Unboxed {
+        register: usize,
+        ty: Ty,
+    },
     /// A loaded variable whose boxed value is in its slot cell.
     Slot(usize),
 }
@@ -433,51 +481,141 @@ pub enum Argument {
 pub enum Action<'a> {
     /// Nothing: the instruction is unreachable or folds away.
     Skip,
-    Constant { dst: usize, value: Sexp, ty: Ty },
+    Constant {
+        dst: usize,
+        value: Sexp,
+        ty: Ty,
+    },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
     /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
-    GetVar { dst: usize, slot: usize, load: Option<Ty>, forcing: bool },
-    SetVar { slot: usize, src: usize },
+    GetVar {
+        dst: usize,
+        slot: usize,
+        load: Option<Ty>,
+        forcing: bool,
+    },
+    SetVar {
+        slot: usize,
+        src: usize,
+    },
     /// A function lookup resolved at compile time; the speculations check it still holds.
-    GetFun { dst: usize, function: Sexp },
+    GetFun {
+        dst: usize,
+        function: Sexp,
+    },
     /// A function lookup that finds a closure in a slot, loading the slot first when `load`.
-    GetFunSlot { dst: usize, slot: usize, load: Option<Ty> },
+    GetFunSlot {
+        dst: usize,
+        slot: usize,
+        load: Option<Ty>,
+    },
     /// A call of a closure whose body was inlined: each step with the state before it, on
     /// registers past tier 0's own. The steps have no effect but loading slots, so every check
     /// that fails in them hands the call itself back to tier 0.
-    Inline { steps: &'a [(Action<'a>, StateId)] },
+    Inline {
+        steps: &'a [(Action<'a>, StateId)],
+    },
     /// Loads a slot without forcing a promise, handing the instruction to tier 0 when the
     /// variable is not a plain value. Only inlined calls use it.
-    Peek { slot: usize, ty: Ty },
+    Peek {
+        slot: usize,
+        ty: Ty,
+    },
     /// Copies an unboxed scalar between registers.
-    Move { dst: usize, src: usize, ty: Ty },
+    Move {
+        dst: usize,
+        src: usize,
+        ty: Ty,
+    },
     /// Calls a closure known at compile time with arguments evaluated by `steps`, binding each
     /// to a promise that already holds its value, then refines the result to `dst`'s type.
-    Call { steps: &'a [(Action<'a>, StateId)], function: Sexp, call: Sexp, args: &'a [Argument], dst: (usize, Ty) },
+    Call {
+        steps: &'a [(Action<'a>, StateId)],
+        function: Sexp,
+        call: Sexp,
+        args: &'a [Argument],
+        dst: (usize, Ty),
+    },
     /// Runs the instruction in tier 0, then refines its destination register.
-    Step { effect: Effect, objects: &'a [usize], dst: Option<(usize, Ty)> },
+    Step {
+        effect: Effect,
+        objects: &'a [usize],
+        dst: Option<(usize, Ty)>,
+    },
     /// The instruction's check always passes, so control falls through.
     FallThrough,
     /// Control always goes to the jump target.
     Branch,
-    BranchUnlessBuiltin { function: usize },
-    BranchUnlessPrimitive { function: usize, expected: Sexp },
-    BranchIfObject { src: usize },
+    BranchUnlessBuiltin {
+        function: usize,
+    },
+    BranchUnlessPrimitive {
+        function: usize,
+        expected: Sexp,
+    },
+    BranchIfObject {
+        src: usize,
+    },
     Jump,
-    JumpUnless { src: usize },
-    Arithmetic { arith: Arith, numeric: Numeric, dst: usize, left: usize, right: usize },
-    Comparison { arith: Arith, numeric: Numeric, dst: usize, left: usize, right: usize },
-    Intrinsic { intrinsic: Intrinsic, dst: usize, args: &'a [usize], result: Ty },
-    Return { src: usize },
-    ForInit { index: usize, src: usize, refine: Option<Ty> },
-    ForStep { index: usize, src: usize, slot: usize },
+    JumpUnless {
+        src: usize,
+    },
+    Arithmetic {
+        arith: Arith,
+        numeric: Numeric,
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    Comparison {
+        arith: Arith,
+        numeric: Numeric,
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    Intrinsic {
+        intrinsic: Intrinsic,
+        dst: usize,
+        args: &'a [usize],
+        result: Ty,
+    },
+    Return {
+        src: usize,
+    },
+    ForInit {
+        index: usize,
+        src: usize,
+        refine: Option<Ty>,
+    },
+    ForStep {
+        index: usize,
+        src: usize,
+        slot: usize,
+    },
     /// Releases the reference `ForInit` took on the sequence.
-    ForEnd { src: usize },
+    ForEnd {
+        src: usize,
+    },
     Visible(bool),
-    LogicLeft { dst: usize, src: usize, is_and: bool },
-    LogicRight { dst: usize, left: usize, right: usize, is_and: bool },
+    LogicLeft {
+        dst: usize,
+        src: usize,
+        is_and: bool,
+    },
+    LogicRight {
+        dst: usize,
+        left: usize,
+        right: usize,
+        is_and: bool,
+    },
     /// `x[i] <- value` in place on a plain vector, with a generic path that copies or grows.
-    SubAssign { dst: usize, slot: usize, index: usize, value: usize },
+    SubAssign {
+        dst: usize,
+        slot: usize,
+        index: usize,
+        value: usize,
+    },
 }
 
 /// A function lookup compiled code assumes still resolves as it did at compile time.
@@ -530,7 +668,11 @@ pub struct Plan<'a> {
 
 impl Plan<'_> {
     pub fn block_at(&self, pc: usize) -> Option<usize> {
-        self.block_at.get(pc).copied().filter(|&block| block != NO_BLOCK).map(|block| block as usize)
+        self.block_at
+            .get(pc)
+            .copied()
+            .filter(|&block| block != NO_BLOCK)
+            .map(|block| block as usize)
     }
 
     pub fn before(&self, position: usize) -> Option<StateRef<'_>> {
@@ -538,7 +680,10 @@ impl Plan<'_> {
     }
 
     pub fn edges(&self, position: usize) -> &[(usize, StateId)] {
-        let (start, end) = (self.edge_ranges[position] as usize, self.edge_ranges[position + 1] as usize);
+        let (start, end) = (
+            self.edge_ranges[position] as usize,
+            self.edge_ranges[position + 1] as usize,
+        );
         &self.edges[start..end]
     }
 
@@ -548,12 +693,16 @@ impl Plan<'_> {
 }
 
 /// The formals whose default is an expression rather than a constant or nothing.
-unsafe fn defaulted_formals(formals: Sexp, arena: &Bump) -> Map<'_, Sexp, ()> {
+unsafe fn defaulted_formals(formals: Sexp, arena: Arena<'_>) -> Map<'_, Sexp, ()> {
     let mut defaulted = Map::with_hasher_in(FxBuildHasher, arena);
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
         let default = formal.car();
-        if matches!(default.kind(), SexpType::Language | SexpType::Symbol | SexpType::Promise) && default != values::missing_arg() {
+        if matches!(
+            default.kind(),
+            SexpType::Language | SexpType::Symbol | SexpType::Promise
+        ) && default != values::missing_arg()
+        {
             defaulted.insert(formal.tag(), ());
         }
         formal = formal.cdr();
@@ -602,7 +751,13 @@ pub const COLD: &str = "the body has no type feedback yet";
 /// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
 /// has never run, because code compiled without that type runs the instruction in tier 0 for
 /// as long as it lives.
-pub unsafe fn plan<'a>(arena: &'a Bump, code: Sexp, formals: Sexp, enclosure: Sexp, patient: bool) -> Result<Plan<'a>, Refusal> {
+pub unsafe fn plan<'a>(
+    arena: Arena<'a>,
+    code: Sexp,
+    formals: Sexp,
+    enclosure: Sexp,
+    patient: bool,
+) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
     // A body that reflects on its frame can bind any symbol, which slots cannot model.
@@ -681,14 +836,18 @@ pub unsafe fn plan<'a>(arena: &'a Bump, code: Sexp, formals: Sexp, enclosure: Se
 }
 
 /// Decodes the instruction words.
-pub unsafe fn decode(arena: &Bump, code: Sexp) -> Result<List<'_, Inst<'_>>, Refusal> {
+pub unsafe fn decode(arena: Arena<'_>, code: Sexp) -> Result<List<'_, Inst<'_>>, Refusal> {
     let words = values::ints(code.car());
     let mut insts = List::new_in(arena);
     let mut pc = 0;
     while pc < words.len() {
-        let op = *OPS.get(words[pc] as usize).ok_or(Refusal("an unknown opcode"))?;
+        let op = *OPS
+            .get(words[pc] as usize)
+            .ok_or(Refusal("an unknown opcode"))?;
         let count = operand_count(op);
-        let operands = words.get(pc + 1..pc + 1 + count).ok_or(Refusal("a truncated instruction"))?;
+        let operands = words
+            .get(pc + 1..pc + 1 + count)
+            .ok_or(Refusal("a truncated instruction"))?;
         insts.push(Inst { pc, op, operands });
         pc += 1 + count;
     }
@@ -699,18 +858,104 @@ pub unsafe fn decode(arena: &Bump, code: Sexp) -> Result<List<'_, Inst<'_>>, Ref
 /// frame's variables alone. Internal generics among them dispatch on objects, which is why calls
 /// check their boxed arguments first.
 const PURE_BUILTINS: &[&str] = &[
-    "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "!", "&", "|", "sqrt", "exp", "log",
-    "abs", "floor", "ceiling", "trunc", "round", "signif", "sin", "cos", "tan", "asin", "acos", "atan", "log2",
-    "log10", "log1p", "expm1", "length", "[", "[[", "c", "is.na", "is.null", "sum", "prod", "max", "min",
-    "cumsum", "cumprod", "seq_len", "seq_along", ":", "rnorm", "runif", "rexp", "rbinom", "rpois", "vector",
-    "numeric", "integer", "double", "logical", "character", "rep", "rep.int", "rep_len", "nchar", "paste",
-    "paste0", "unlist", "names", "any", "all", "which", "rev", "as.integer", "as.numeric", "as.double",
-    "as.character", "as.logical", "is.numeric", "is.character", "is.logical", "is.function", "identical",
-    "range", "dim", "list", "abs", "mean", "var", "order", "sort", "max", "pmin", "pmax",
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "%%",
+    "%/%",
+    "==",
+    "!=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "!",
+    "&",
+    "|",
+    "sqrt",
+    "exp",
+    "log",
+    "abs",
+    "floor",
+    "ceiling",
+    "trunc",
+    "round",
+    "signif",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "log2",
+    "log10",
+    "log1p",
+    "expm1",
+    "length",
+    "[",
+    "[[",
+    "c",
+    "is.na",
+    "is.null",
+    "sum",
+    "prod",
+    "max",
+    "min",
+    "cumsum",
+    "cumprod",
+    "seq_len",
+    "seq_along",
+    ":",
+    "rnorm",
+    "runif",
+    "rexp",
+    "rbinom",
+    "rpois",
+    "vector",
+    "numeric",
+    "integer",
+    "double",
+    "logical",
+    "character",
+    "rep",
+    "rep.int",
+    "rep_len",
+    "nchar",
+    "paste",
+    "paste0",
+    "unlist",
+    "names",
+    "any",
+    "all",
+    "which",
+    "rev",
+    "as.integer",
+    "as.numeric",
+    "as.double",
+    "as.character",
+    "as.logical",
+    "is.numeric",
+    "is.character",
+    "is.logical",
+    "is.function",
+    "identical",
+    "range",
+    "dim",
+    "list",
+    "abs",
+    "mean",
+    "var",
+    "order",
+    "sort",
+    "max",
+    "pmin",
+    "pmax",
 ];
 
 struct Builder<'a> {
-    arena: &'a Bump,
+    arena: Arena<'a>,
     code: Sexp,
     enclosure: Sexp,
     feedback: &'a [u8],
@@ -800,8 +1045,18 @@ impl<'a> Builder<'a> {
     /// Splits the instructions into blocks and finds each block's successors and the loop
     /// headers (the blocks a backward jump targets).
     #[allow(clippy::type_complexity)]
-    fn blocks(&self) -> (List<'a, Block>, List<'a, u32>, List<'a, [Option<usize>; 2]>, List<'a, usize>) {
-        let words = self.insts.last().map_or(0, |last| last.pc + 1 + last.operands.len());
+    fn blocks(
+        &self,
+    ) -> (
+        List<'a, Block>,
+        List<'a, u32>,
+        List<'a, [Option<usize>; 2]>,
+        List<'a, usize>,
+    ) {
+        let words = self
+            .insts
+            .last()
+            .map_or(0, |last| last.pc + 1 + last.operands.len());
         let mut leaders = List::new_in(self.arena);
         leaders.resize(words.div_ceil(64).max(1), 0u64);
         set_bit(&mut leaders, 0, true);
@@ -824,21 +1079,39 @@ impl<'a> Builder<'a> {
                     last.end = position;
                 }
                 block_at[inst.pc] = blocks.len() as u32;
-                blocks.push(Block { start: position, end: position + 1, entry: None });
+                blocks.push(Block {
+                    start: position,
+                    end: position + 1,
+                    entry: None,
+                });
             }
         }
         if let Some(last) = blocks.last_mut() {
             last.end = self.insts.len();
         }
-        let lookup = |pc: usize| block_at.get(pc).copied().filter(|&block| block != NO_BLOCK).map(|block| block as usize);
+        let lookup = |pc: usize| {
+            block_at
+                .get(pc)
+                .copied()
+                .filter(|&block| block != NO_BLOCK)
+                .map(|block| block as usize)
+        };
         let mut successors = List::with_capacity_in(blocks.len(), self.arena);
         for block in &blocks {
             let last = &self.insts[block.end - 1];
-            let fallthrough = if falls_through(last.op) && block.end < self.insts.len() { lookup(self.insts[block.end].pc) } else { None };
+            let fallthrough = if falls_through(last.op) && block.end < self.insts.len() {
+                lookup(self.insts[block.end].pc)
+            } else {
+                None
+            };
             successors.push([fallthrough, jump_target(last).and_then(lookup)]);
         }
         let mut loop_headers = List::new_in(self.arena);
-        for inst in self.insts.iter().filter(|inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc) {
+        for inst in self
+            .insts
+            .iter()
+            .filter(|inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc)
+        {
             if let Some(header) = lookup(inst.operand(0)) {
                 loop_headers.push(header);
             }
@@ -859,7 +1132,10 @@ impl<'a> Builder<'a> {
         let live_out = |live: &mut [u64], live_in: &[u64], index: usize| {
             live.fill(0);
             for &successor in successors[index].iter().flatten() {
-                for (word, incoming) in live.iter_mut().zip(&live_in[successor * words..(successor + 1) * words]) {
+                for (word, incoming) in live
+                    .iter_mut()
+                    .zip(&live_in[successor * words..(successor + 1) * words])
+                {
                     *word |= incoming;
                 }
             }
@@ -897,7 +1173,13 @@ impl<'a> Builder<'a> {
     ///
     /// Each block's entry is a row reserved up front; the rows a block's transfer adds (its
     /// edges and inlined steps) are dropped once they are joined into the targets' entries.
-    unsafe fn fixpoint(&mut self, blocks: &mut [Block], block_at: &[u32], live: &Live, loop_headers: &[usize]) -> Result<(), Refusal> {
+    unsafe fn fixpoint(
+        &mut self,
+        blocks: &mut [Block],
+        block_at: &[u32],
+        live: &Live,
+        loop_headers: &[usize],
+    ) -> Result<(), Refusal> {
         let mut state = State::bottom(self.arena, self.registers + TEMPORARIES, self.slots.len());
         for _ in 0..blocks.len() {
             self.states.push(&state);
@@ -913,7 +1195,9 @@ impl<'a> Builder<'a> {
             if rounds > 100_000 {
                 return Err(Refusal("the type analysis did not converge"));
             }
-            let Some(entry) = blocks[index].entry else { continue };
+            let Some(entry) = blocks[index].entry else {
+                continue;
+            };
             self.states.load(entry, &mut state);
             for position in blocks[index].start..blocks[index].end {
                 self.edges.clear();
@@ -921,9 +1205,19 @@ impl<'a> Builder<'a> {
             }
             for edge in 0..self.edges.len() {
                 let (target_pc, out) = self.edges[edge];
-                let Some(target) = block_at.get(target_pc).copied().filter(|&block| block != NO_BLOCK) else { continue };
+                let Some(target) = block_at
+                    .get(target_pc)
+                    .copied()
+                    .filter(|&block| block != NO_BLOCK)
+                else {
+                    continue;
+                };
                 let target = target as usize;
-                self.states.adapt_edge(out, live.row(blocks[target].start), loop_headers.contains(&target));
+                self.states.adapt_edge(
+                    out,
+                    live.row(blocks[target].start),
+                    loop_headers.contains(&target),
+                );
                 let changed = match blocks[target].entry {
                     Some(existing) => self.states.join_into(existing, out),
                     None => {
@@ -944,7 +1238,11 @@ impl<'a> Builder<'a> {
 
     /// The action for the instruction at `position` and its effect on `state`. It also adds
     /// the state along each outgoing edge to [`Builder::edges`].
-    unsafe fn transfer(&mut self, position: usize, state: &mut State<'a>) -> Result<Action<'a>, Refusal> {
+    unsafe fn transfer(
+        &mut self,
+        position: usize,
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
         let inst = self.insts[position];
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
@@ -954,13 +1252,21 @@ impl<'a> Builder<'a> {
                 let ty = constant_type(value);
                 state.registers[operand(0)] = ty;
                 state.visible = Some(true);
-                Action::Constant { dst: operand(0), value, ty }
+                Action::Constant {
+                    dst: operand(0),
+                    value,
+                    ty,
+                }
             }
             Op::GetVar => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
                 let load = if current.may_be(status::NOT_LOADED) {
-                    let ty = if current.may_be(status::LOADED) { current.ty } else { self.feedback_at(inst.pc) };
+                    let ty = if current.may_be(status::LOADED) {
+                        current.ty
+                    } else {
+                        self.feedback_at(inst.pc)
+                    };
                     Some(if ty == Ty::Bottom { Ty::Boxed } else { ty })
                 } else {
                     None
@@ -969,7 +1275,10 @@ impl<'a> Builder<'a> {
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
-                    let loaded = Slot { status: status_bits, ty };
+                    let loaded = Slot {
+                        status: status_bits,
+                        ty,
+                    };
                     // Code generation writes the variables back before the load and forgets them
                     // after it, but only when the load really happens.
                     let mut forced = state.clone();
@@ -989,7 +1298,12 @@ impl<'a> Builder<'a> {
                 // A load can force a promise to `invisible()`, which leaves the value invisible,
                 // as `withCallingHandlers(expr)` relies on.
                 state.visible = if load.is_some() { None } else { Some(true) };
-                Action::GetVar { dst: operand(0), slot, load, forcing }
+                Action::GetVar {
+                    dst: operand(0),
+                    slot,
+                    load,
+                    forcing,
+                }
             }
             Op::SetVar => {
                 let slot = self.slot(self.constant(operand(0)));
@@ -997,9 +1311,15 @@ impl<'a> Builder<'a> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
-                state.slots[slot] = Slot { status: status::DIRTY, ty };
+                state.slots[slot] = Slot {
+                    status: status::DIRTY,
+                    ty,
+                };
                 state.visible = Some(false);
-                Action::SetVar { slot, src: operand(1) }
+                Action::SetVar {
+                    slot,
+                    src: operand(1),
+                }
             }
             Op::GetFun => {
                 let symbol = self.constant(operand(1));
@@ -1010,17 +1330,36 @@ impl<'a> Builder<'a> {
                     let current = state.slots[slot];
                     let load = current.may_be(status::NOT_LOADED).then_some(current.ty);
                     if load.is_some() {
-                        state.slots[slot] = Slot { status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING, ty: current.ty };
+                        state.slots[slot] = Slot {
+                            status: (current.status & status::LOADED)
+                                | status::LOCAL
+                                | status::ENCLOSING,
+                            ty: current.ty,
+                        };
                     }
                     state.registers[operand(0)] = current.ty;
-                    return Ok(self.finish(Action::GetFunSlot { dst: operand(0), slot, load }, inst.op, next_pc, state));
+                    return Ok(self.finish(
+                        Action::GetFunSlot {
+                            dst: operand(0),
+                            slot,
+                            load,
+                        },
+                        inst.op,
+                        next_pc,
+                        state,
+                    ));
                 }
                 match self.speculate(symbol) {
                     Some(function) if !self.bound_locally(symbol) => {
                         state.registers[operand(0)] = Ty::Fun(function);
-                        Action::GetFun { dst: operand(0), function }
+                        Action::GetFun {
+                            dst: operand(0),
+                            function,
+                        }
                     }
-                    _ => self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque),
+                    _ => {
+                        self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
+                    }
                 }
             }
             Op::BranchUnlessBuiltin => match state.registers[operand(0)] {
@@ -1031,7 +1370,9 @@ impl<'a> Builder<'a> {
                 }
                 _ => {
                     self.push_edge(operand(1), state);
-                    Action::BranchUnlessBuiltin { function: operand(0) }
+                    Action::BranchUnlessBuiltin {
+                        function: operand(0),
+                    }
                 }
             },
             Op::BranchUnlessPrimitive => {
@@ -1044,7 +1385,10 @@ impl<'a> Builder<'a> {
                     }
                     _ => {
                         self.push_edge(operand(2), state);
-                        Action::BranchUnlessPrimitive { function: operand(0), expected }
+                        Action::BranchUnlessPrimitive {
+                            function: operand(0),
+                            expected,
+                        }
                     }
                 }
             }
@@ -1056,23 +1400,54 @@ impl<'a> Builder<'a> {
                     Action::BranchIfObject { src: operand(0) }
                 }
             }
-            Op::DispatchSubject => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), &[], Effect::Opaque),
+            Op::DispatchSubject => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
             Op::CallGeneric => {
                 let call = self.constant(operand(2));
                 let inlined = match state.registers[operand(1)] {
-                    Ty::Closure(formals, body) => self.inline(state, call, formals, body, None, operand(0)),
+                    Ty::Closure(formals, body) => {
+                        self.inline(state, call, formals, body, None, operand(0))
+                    }
                     Ty::Fun(function) if function.kind() == SexpType::Closure => self
-                        .inline(state, call, function.car(), bytecode::closure_body(function), Some(function.tag()), operand(0))
-                        .or_else(|| self.direct_call(state, call, function, (operand(0), self.call_result_at(inst.pc, function)))),
+                        .inline(
+                            state,
+                            call,
+                            function.car(),
+                            bytecode::closure_body(function),
+                            Some(function.tag()),
+                            operand(0),
+                        )
+                        .or_else(|| {
+                            self.direct_call(
+                                state,
+                                call,
+                                function,
+                                (operand(0), self.call_result_at(inst.pc, function)),
+                            )
+                        }),
                     _ => None,
                 };
                 match inlined {
                     Some(action) => action,
-                    None => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), &[], Effect::Opaque),
+                    None => self.opaque_step(
+                        state,
+                        Some((operand(0), self.feedback_at(inst.pc))),
+                        &[],
+                        Effect::Opaque,
+                    ),
                 }
             }
-            Op::Ast => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), &[], Effect::Opaque),
+            Op::Ast => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
             Op::Guard => {
                 let symbol = self.constant(operand(0));
                 let expected = self.constant(operand(1));
@@ -1099,27 +1474,59 @@ impl<'a> Builder<'a> {
                 let ty = state.registers[src];
                 let refine = match ty {
                     // Code generation boxes an unboxed scalar sequence before the loop.
-                    Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::List | Ty::Int | Ty::Dbl | Ty::Lgl => None,
+                    Ty::IntVec
+                    | Ty::DblVec
+                    | Ty::LglVec
+                    | Ty::List
+                    | Ty::Int
+                    | Ty::Dbl
+                    | Ty::Lgl => None,
                     _ => {
                         if self.never_ran(inst.pc) {
-                            return Err(Refusal(if self.patient { COLD } else { "a for loop that has never run" }));
+                            return Err(Refusal(if self.patient {
+                                COLD
+                            } else {
+                                "a for loop that has never run"
+                            }));
                         }
                         let speculated = self.feedback_at(inst.pc);
-                        if !matches!(speculated, Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::List | Ty::Int | Ty::Dbl | Ty::Lgl) {
-                            return Err(Refusal("a for loop over something other than a plain vector"));
+                        if !matches!(
+                            speculated,
+                            Ty::IntVec
+                                | Ty::DblVec
+                                | Ty::LglVec
+                                | Ty::List
+                                | Ty::Int
+                                | Ty::Dbl
+                                | Ty::Lgl
+                        ) {
+                            return Err(Refusal(
+                                "a for loop over something other than a plain vector",
+                            ));
                         }
                         Some(speculated.vector())
                     }
                 };
                 state.registers[src] = refine.unwrap_or(ty.vector());
-                Action::ForInit { index: operand(0), src, refine }
+                Action::ForInit {
+                    index: operand(0),
+                    src,
+                    refine,
+                }
             }
             Op::ForStep => {
                 let slot = self.slot(self.constant(operand(2)));
                 self.push_edge(operand(3), state);
                 let element = state.registers[operand(1)].element();
-                state.slots[slot] = Slot { status: status::DIRTY, ty: element };
-                Action::ForStep { index: operand(0), src: operand(1), slot }
+                state.slots[slot] = Slot {
+                    status: status::DIRTY,
+                    ty: element,
+                };
+                Action::ForStep {
+                    index: operand(0),
+                    src: operand(1),
+                    slot,
+                }
             }
             Op::ForEnd => Action::ForEnd { src: operand(0) },
             Op::Invisible => {
@@ -1136,20 +1543,37 @@ impl<'a> Builder<'a> {
                 decided.visible = Some(true);
                 self.push_edge(operand(4), &decided);
                 state.registers[operand(1)] = Ty::Lgl;
-                Action::LogicLeft { dst: operand(0), src: operand(1), is_and: operand(3) == 1 }
+                Action::LogicLeft {
+                    dst: operand(0),
+                    src: operand(1),
+                    is_and: operand(3) == 1,
+                }
             }
             Op::LogicRight => {
                 state.registers[operand(0)] = Ty::Lgl;
                 state.visible = Some(true);
-                Action::LogicRight { dst: operand(0), left: operand(1), right: operand(2), is_and: operand(4) == 1 }
+                Action::LogicRight {
+                    dst: operand(0),
+                    left: operand(1),
+                    right: operand(2),
+                    is_and: operand(4) == 1,
+                }
             }
             // The interpreter's own step sets the current srcref; it touches no register.
-            Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: &[], dst: None },
+            Op::SetSrcref => Action::Step {
+                effect: Effect::Pure,
+                objects: &[],
+                dst: None,
+            },
             Op::Closure => {
                 state.visible = Some(true);
                 let ty = Ty::Closure(self.constant(operand(1)), self.constant(operand(2)));
                 state.registers[operand(0)] = ty;
-                Action::Step { effect: Effect::Pure, objects: &[], dst: Some((operand(0), ty)) }
+                Action::Step {
+                    effect: Effect::Pure,
+                    objects: &[],
+                    dst: Some((operand(0), ty)),
+                }
             }
             Op::SubAssign => {
                 let slot = self.slot(self.constant(operand(1)));
@@ -1161,8 +1585,11 @@ impl<'a> Builder<'a> {
                     Ty::LglVec => value == Ty::Lgl,
                     _ => false,
                 };
-                if fits && matches!(index, Ty::Int | Ty::Dbl) && state.slots[slot].may_be(status::LOADED)
-                    && !(self.defaulted.contains_key(&self.slots[slot]) && state.slots[slot].may_be(status::NOT_LOADED))
+                if fits
+                    && matches!(index, Ty::Int | Ty::Dbl)
+                    && state.slots[slot].may_be(status::LOADED)
+                    && !(self.defaulted.contains_key(&self.slots[slot])
+                        && state.slots[slot].may_be(status::NOT_LOADED))
                 {
                     // The generic path writes the variable back, runs the assignment in tier 0
                     // and forgets the variable; the fast path may make it dirty by copying it.
@@ -1174,13 +1601,19 @@ impl<'a> Builder<'a> {
                     state.slots[slot] = fast.join(forgotten);
                     state.registers[operand(0)] = value;
                     state.visible = Some(false);
-                    Action::SubAssign { dst: operand(0), slot, index: operand(2), value: operand(3) }
+                    Action::SubAssign {
+                        dst: operand(0),
+                        slot,
+                        index: operand(2),
+                        value: operand(3),
+                    }
                 } else {
                     let refine = match value {
                         Ty::Bottom => Ty::Boxed,
                         ty => ty,
                     };
-                    let action = self.opaque_step(state, Some((operand(0), refine)), &[], Effect::Opaque);
+                    let action =
+                        self.opaque_step(state, Some((operand(0), refine)), &[], Effect::Opaque);
                     state.visible = Some(false);
                     action
                 }
@@ -1196,7 +1629,13 @@ impl<'a> Builder<'a> {
 
     /// Adds the fallthrough edge. Every instruction reports it: the fixpoint reads the edges of a
     /// block's last instruction, and code generation reads the state after any instruction.
-    fn finish(&mut self, action: Action<'a>, op: Op, next_pc: Option<usize>, state: &State) -> Action<'a> {
+    fn finish(
+        &mut self,
+        action: Action<'a>,
+        op: Op,
+        next_pc: Option<usize>,
+        state: &State,
+    ) -> Action<'a> {
         if falls_through(op)
             && let Some(next) = next_pc
             && !matches!(action, Action::Branch)
@@ -1225,11 +1664,32 @@ impl<'a> Builder<'a> {
     /// the body, which R's lazy evaluation cannot observe because nothing in between has an
     /// effect, and an argument that would fail or is not a plain scalar hands the whole call
     /// back to tier 0, which then evaluates it lazily.
-    unsafe fn inline(&mut self, state: &mut State<'a>, call: Sexp, formals: Sexp, body: Sexp, closed: Option<Sexp>, dst: usize) -> Option<Action<'a>> {
-        let mut lowering = Lowering { state: state.clone(), steps: List::new_in(self.arena), next: self.registers, scope: SmallVec::new(), closed: None };
+    unsafe fn inline(
+        &mut self,
+        state: &mut State<'a>,
+        call: Sexp,
+        formals: Sexp,
+        body: Sexp,
+        closed: Option<Sexp>,
+        dst: usize,
+    ) -> Option<Action<'a>> {
+        let mut lowering = Lowering {
+            state: state.clone(),
+            steps: List::new_in(self.arena),
+            next: self.registers,
+            scope: SmallVec::new(),
+            closed: None,
+        };
         let result = self.lower_call(&mut lowering, call, formals, body, closed, 0)?;
         let ty = lowering.state.registers[result];
-        self.push_step(&mut lowering, Action::Move { dst, src: result, ty });
+        self.push_step(
+            &mut lowering,
+            Action::Move {
+                dst,
+                src: result,
+                ty,
+            },
+        );
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
@@ -1237,7 +1697,9 @@ impl<'a> Builder<'a> {
         after.registers[dst] = ty;
         after.visible = Some(true);
         *state = after;
-        Some(Action::Inline { steps: lowering.steps.leak() })
+        Some(Action::Inline {
+            steps: lowering.steps.leak(),
+        })
     }
 
     /// Calls `function` directly when every argument is a scalar computed without effects or a
@@ -1246,14 +1708,29 @@ impl<'a> Builder<'a> {
     ///
     /// Evaluating an argument before the call is only invisible when nothing can change what it
     /// reads before the callee forces it, so the callee must be frame-safe.
-    unsafe fn direct_call(&mut self, state: &mut State<'a>, call: Sexp, function: Sexp, dst: (usize, Ty)) -> Option<Action<'a>> {
+    unsafe fn direct_call(
+        &mut self,
+        state: &mut State<'a>,
+        call: Sexp,
+        function: Sexp,
+        dst: (usize, Ty),
+    ) -> Option<Action<'a>> {
         if !self.frame_safe(function) {
             return None;
         }
-        let mut lowering = Lowering { state: state.clone(), steps: List::new_in(self.arena), next: self.registers, scope: SmallVec::new(), closed: None };
+        let mut lowering = Lowering {
+            state: state.clone(),
+            steps: List::new_in(self.arena),
+            next: self.registers,
+            scope: SmallVec::new(),
+            closed: None,
+        };
         let mut args = List::new_in(self.arena);
         for (tag, expression) in values::pairlist_items(call.cdr()) {
-            if tag != values::nil() || expression == values::missing_arg() || expression == values::symbols().dots {
+            if tag != values::nil()
+                || expression == values::missing_arg()
+                || expression == values::symbols().dots
+            {
                 return None;
             }
             if expression.kind() == SexpType::Symbol
@@ -1264,7 +1741,10 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let register = self.lower_expression(&mut lowering, expression, 0)?;
-            args.push(Argument::Unboxed { register, ty: lowering.state.registers[register] });
+            args.push(Argument::Unboxed {
+                register,
+                ty: lowering.state.registers[register],
+            });
         }
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
@@ -1277,20 +1757,43 @@ impl<'a> Builder<'a> {
         after.visible = None;
         after.registers[dst.0] = dst.1;
         *state = after;
-        Some(Action::Call { steps: lowering.steps.leak(), function, call, args: args.leak(), dst })
+        Some(Action::Call {
+            steps: lowering.steps.leak(),
+            function,
+            call,
+            args: args.leak(),
+            dst,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
-    unsafe fn lower_call(&mut self, lowering: &mut Lowering<'a>, call: Sexp, formals: Sexp, body: Sexp, closed: Option<Sexp>, depth: usize) -> Option<usize> {
+    unsafe fn lower_call(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        call: Sexp,
+        formals: Sexp,
+        body: Sexp,
+        closed: Option<Sexp>,
+        depth: usize,
+    ) -> Option<usize> {
         if depth > MAX_INLINE_DEPTH {
             return None;
         }
         let args = values::pairlist_items(call.cdr());
         let formals = values::pairlist_items(formals);
-        let positional = args.iter().all(|(tag, value)| *tag == values::nil() && *value != values::missing_arg() && *value != values::symbols().dots);
+        let positional = args.iter().all(|(tag, value)| {
+            *tag == values::nil()
+                && *value != values::missing_arg()
+                && *value != values::symbols().dots
+        });
         // Every formal needs its argument: a default is evaluated in the callee's frame, which
         // the inlined body does not have.
-        if !positional || args.len() != formals.len() || formals.iter().any(|(symbol, _)| *symbol == values::symbols().dots) {
+        if !positional
+            || args.len() != formals.len()
+            || formals
+                .iter()
+                .any(|(symbol, _)| *symbol == values::symbols().dots)
+        {
             return None;
         }
         let outer = std::mem::take(&mut lowering.scope);
@@ -1305,7 +1808,11 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        lowering.scope = formals.iter().map(|(symbol, _)| *symbol).zip(scope).collect();
+        lowering.scope = formals
+            .iter()
+            .map(|(symbol, _)| *symbol)
+            .zip(scope)
+            .collect();
         let outer_closed = std::mem::replace(&mut lowering.closed, closed);
         let result = self.lower_expression(lowering, body, depth);
         lowering.scope = outer;
@@ -1317,7 +1824,12 @@ impl<'a> Builder<'a> {
     /// its unboxed value. Symbols resolve in `lowering.scope` (the formals of the closure being
     /// inlined) and then in this activation's slots, which is where both the call's arguments
     /// and the free variables of a closure made in this activation are found.
-    unsafe fn lower_expression(&mut self, lowering: &mut Lowering<'a>, expression: Sexp, depth: usize) -> Option<usize> {
+    unsafe fn lower_expression(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        expression: Sexp,
+        depth: usize,
+    ) -> Option<usize> {
         match expression.kind() {
             SexpType::Integer | SexpType::Real | SexpType::Logical => {
                 let ty = constant_type(expression);
@@ -1325,12 +1837,23 @@ impl<'a> Builder<'a> {
                     return None;
                 }
                 let dst = lowering.temporary()?;
-                self.push_step(lowering, Action::Constant { dst, value: expression, ty });
+                self.push_step(
+                    lowering,
+                    Action::Constant {
+                        dst,
+                        value: expression,
+                        ty,
+                    },
+                );
                 lowering.state.registers[dst] = ty;
                 Some(dst)
             }
             SexpType::Symbol => {
-                if let Some(&(_, register)) = lowering.scope.iter().find(|(symbol, _)| *symbol == expression) {
+                if let Some(&(_, register)) = lowering
+                    .scope
+                    .iter()
+                    .find(|(symbol, _)| *symbol == expression)
+                {
                     return Some(register);
                 }
                 if lowering.closed.is_some() {
@@ -1342,7 +1865,15 @@ impl<'a> Builder<'a> {
                     return None;
                 }
                 let dst = lowering.temporary()?;
-                self.push_step(lowering, Action::GetVar { dst, slot, load: None, forcing: false });
+                self.push_step(
+                    lowering,
+                    Action::GetVar {
+                        dst,
+                        slot,
+                        load: None,
+                        forcing: false,
+                    },
+                );
                 lowering.state.registers[dst] = ty;
                 Some(dst)
             }
@@ -1351,9 +1882,16 @@ impl<'a> Builder<'a> {
                 if head.kind() != SexpType::Symbol {
                     return None;
                 }
-                let args: SmallVec<[Sexp; 4]> = values::pairlist_items(expression.cdr()).iter().map(|(tag, value)| {
-                    if *tag == values::nil() { *value } else { values::missing_arg() }
-                }).collect();
+                let args: SmallVec<[Sexp; 4]> = values::pairlist_items(expression.cdr())
+                    .iter()
+                    .map(|(tag, value)| {
+                        if *tag == values::nil() {
+                            *value
+                        } else {
+                            values::missing_arg()
+                        }
+                    })
+                    .collect();
                 if args.contains(&values::missing_arg()) {
                     return None;
                 }
@@ -1365,34 +1903,84 @@ impl<'a> Builder<'a> {
                 {
                     // A closure this activation made, called from inlined code: inline it too.
                     self.peek_slot(lowering, head, false)?;
-                    let Ty::Closure(formals, body) = lowering.state.slots[slot].ty else { return None };
+                    let Ty::Closure(formals, body) = lowering.state.slots[slot].ty else {
+                        return None;
+                    };
                     return self.lower_call(lowering, expression, formals, body, None, depth + 1);
                 }
                 let function = self.resolve_head(lowering, head)?;
                 if function.kind() == SexpType::Closure {
                     let body = bytecode::closure_body(function);
-                    return self.lower_call(lowering, expression, function.car(), body, Some(function.tag()), depth + 1);
+                    return self.lower_call(
+                        lowering,
+                        expression,
+                        function.car(),
+                        body,
+                        Some(function.tag()),
+                        depth + 1,
+                    );
                 }
                 let name = base_builtin(function, head)?;
-                let registers = args.iter().map(|&arg| self.lower_expression(lowering, arg, depth)).collect::<Option<SmallVec<[usize; 4]>>>()?;
-                let types: SmallVec<[Ty; 4]> = registers.iter().map(|&register| lowering.state.registers[register]).collect();
+                let registers = args
+                    .iter()
+                    .map(|&arg| self.lower_expression(lowering, arg, depth))
+                    .collect::<Option<SmallVec<[usize; 4]>>>()?;
+                let types: SmallVec<[Ty; 4]> = registers
+                    .iter()
+                    .map(|&register| lowering.state.registers[register])
+                    .collect();
                 match (name.as_str(), registers.as_slice()) {
                     ("(" | "{", [inner]) => Some(*inner),
-                    (operator, [left, right]) if let Some(&(arith, _)) = ARITHS.iter().find(|(_, symbol)| *symbol == operator) => {
+                    (operator, [left, right])
+                        if let Some(&(arith, _)) =
+                            ARITHS.iter().find(|(_, symbol)| *symbol == operator) =>
+                    {
                         let (a, b) = (types[0], types[1]);
                         let dst = lowering.temporary()?;
                         let integers = a != Ty::Dbl && b != Ty::Dbl;
-                        let comparison = matches!(arith, Arith::Equal | Arith::NotEqual | Arith::Less | Arith::Greater | Arith::LessEqual | Arith::GreaterEqual);
+                        let comparison = matches!(
+                            arith,
+                            Arith::Equal
+                                | Arith::NotEqual
+                                | Arith::Less
+                                | Arith::Greater
+                                | Arith::LessEqual
+                                | Arith::GreaterEqual
+                        );
                         let (action, ty) = if comparison {
                             let numeric = if integers { Numeric::Int } else { Numeric::Dbl };
-                            (Action::Comparison { arith, numeric, dst, left: *left, right: *right }, Ty::Lgl)
+                            (
+                                Action::Comparison {
+                                    arith,
+                                    numeric,
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                },
+                                Ty::Lgl,
+                            )
                         } else {
                             let numeric = match arith {
-                                Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
+                                Arith::Add | Arith::Subtract | Arith::Multiply if integers => {
+                                    Numeric::Int
+                                }
                                 _ => Numeric::Dbl,
                             };
-                            let ty = if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl };
-                            (Action::Arithmetic { arith, numeric, dst, left: *left, right: *right }, ty)
+                            let ty = if numeric == Numeric::Int {
+                                Ty::Int
+                            } else {
+                                Ty::Dbl
+                            };
+                            (
+                                Action::Arithmetic {
+                                    arith,
+                                    numeric,
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                },
+                                ty,
+                            )
                         };
                         self.push_step(lowering, action);
                         lowering.state.registers[dst] = ty;
@@ -1405,7 +1993,15 @@ impl<'a> Builder<'a> {
                         }
                         let dst = lowering.temporary()?;
                         let args = self.slice(registers);
-                        self.push_step(lowering, Action::Intrinsic { intrinsic, dst, args, result });
+                        self.push_step(
+                            lowering,
+                            Action::Intrinsic {
+                                intrinsic,
+                                dst,
+                                args,
+                                result,
+                            },
+                        );
                         lowering.state.registers[dst] = result;
                         Some(dst)
                     }
@@ -1419,19 +2015,31 @@ impl<'a> Builder<'a> {
     /// and returns the slot.
     /// A variable compiled code has not loaded is assumed to have the type tier 0 saw at its
     /// loads, which the peek checks. Only a `boxed` peek may find a boxed value.
-    unsafe fn peek_slot(&mut self, lowering: &mut Lowering<'a>, symbol: Sexp, boxed: bool) -> Option<usize> {
+    unsafe fn peek_slot(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        symbol: Sexp,
+        boxed: bool,
+    ) -> Option<usize> {
         let slot = *self.slot_of.get(&symbol)?;
         if self.defaulted.contains_key(&symbol) {
             return None;
         }
         let current = lowering.state.slots[slot];
         if current.may_be(status::NOT_LOADED) {
-            let ty = if current.may_be(status::LOADED) { current.ty } else { self.hints[slot] };
+            let ty = if current.may_be(status::LOADED) {
+                current.ty
+            } else {
+                self.hints[slot]
+            };
             if ty == Ty::Bottom || (ty == Ty::Boxed && !boxed) {
                 return None;
             }
             self.push_step(lowering, Action::Peek { slot, ty });
-            lowering.state.slots[slot] = Slot { status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING, ty };
+            lowering.state.slots[slot] = Slot {
+                status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING,
+                ty,
+            };
         }
         Some(slot)
     }
@@ -1453,7 +2061,13 @@ impl<'a> Builder<'a> {
     }
 
     /// A tier-0 step whose destination is refined to `dst`'s type afterwards.
-    fn opaque_step(&mut self, state: &mut State<'a>, dst: Option<(usize, Ty)>, objects: &'a [usize], effect: Effect) -> Action<'a> {
+    fn opaque_step(
+        &mut self,
+        state: &mut State<'a>,
+        dst: Option<(usize, Ty)>,
+        objects: &'a [usize],
+        effect: Effect,
+    ) -> Action<'a> {
         match effect {
             Effect::Pure => {}
             // Only a call that dispatches or warns into a handler writes the variables back and
@@ -1472,10 +2086,18 @@ impl<'a> Builder<'a> {
         if let Some((register, ty)) = dst {
             state.registers[register] = ty;
         }
-        Action::Step { effect, objects, dst }
+        Action::Step {
+            effect,
+            objects,
+            dst,
+        }
     }
 
-    unsafe fn arithmetic(&mut self, inst: &Inst<'a>, state: &mut State<'a>) -> Result<Action<'a>, Refusal> {
+    unsafe fn arithmetic(
+        &mut self,
+        inst: &Inst<'a>,
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
         let operand = |index: usize| inst.operand(index);
         let arith = ARITHS[operand(0)].0;
         let (dst, left, right) = (operand(1), operand(2), operand(3));
@@ -1485,33 +2107,62 @@ impl<'a> Builder<'a> {
             let integers = !matches!(a, Ty::Dbl) && !matches!(b, Ty::Dbl);
             let comparison = matches!(
                 arith,
-                Arith::Equal | Arith::NotEqual | Arith::Less | Arith::Greater | Arith::LessEqual | Arith::GreaterEqual
+                Arith::Equal
+                    | Arith::NotEqual
+                    | Arith::Less
+                    | Arith::Greater
+                    | Arith::LessEqual
+                    | Arith::GreaterEqual
             );
             if comparison {
                 state.registers[dst] = Ty::Lgl;
                 let numeric = if integers { Numeric::Int } else { Numeric::Dbl };
-                return Ok(Action::Comparison { arith, numeric, dst, left, right });
+                return Ok(Action::Comparison {
+                    arith,
+                    numeric,
+                    dst,
+                    left,
+                    right,
+                });
             }
             let numeric = match arith {
                 Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
                 _ => Numeric::Dbl,
             };
-            state.registers[dst] = if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl };
-            return Ok(Action::Arithmetic { arith, numeric, dst, left, right });
+            state.registers[dst] = if numeric == Numeric::Int {
+                Ty::Int
+            } else {
+                Ty::Dbl
+            };
+            return Ok(Action::Arithmetic {
+                arith,
+                numeric,
+                dst,
+                left,
+                right,
+            });
         }
         // An operand of unknown type is typically the result of a call that has not returned
         // yet, as in a recursive function compiled on its way down.
         if self.patient && (a == Ty::Boxed || b == Ty::Boxed) && self.never_ran(inst.pc) {
             return Err(Refusal(COLD));
         }
-        let effect = if a.is_plain() && b.is_plain() { Effect::PureUnlessObserved } else { Effect::Opaque };
+        let effect = if a.is_plain() && b.is_plain() {
+            Effect::PureUnlessObserved
+        } else {
+            Effect::Opaque
+        };
         let ty = self.feedback_at(inst.pc);
         let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
         state.visible = Some(true);
         Ok(action)
     }
 
-    unsafe fn call_builtin(&mut self, inst: &Inst<'a>, state: &mut State<'a>) -> Result<Action<'a>, Refusal> {
+    unsafe fn call_builtin(
+        &mut self,
+        inst: &Inst<'a>,
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
         let operand = |index: usize| inst.operand(index);
         let dst = operand(0);
         let call = self.constant(operand(2));
@@ -1521,18 +2172,38 @@ impl<'a> Builder<'a> {
         let Ty::Fun(function) = state.registers[operand(1)] else {
             return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
         };
-        let definition = interp::eval::builtin_def(function).map_err(|_| Refusal("a builtin without a definition"))?;
+        let definition = interp::eval::builtin_def(function)
+            .map_err(|_| Refusal("a builtin without a definition"))?;
         let name = definition.name;
-        let untagged = values::pairlist_items(call.cdr()).iter().all(|(tag, _)| *tag == values::nil());
-        let types: SmallVec<[Ty; 4]> = args.iter().map(|&register| state.registers[register]).collect();
+        let untagged = values::pairlist_items(call.cdr())
+            .iter()
+            .all(|(tag, _)| *tag == values::nil());
+        let types: SmallVec<[Ty; 4]> = args
+            .iter()
+            .map(|&register| state.registers[register])
+            .collect();
         if untagged && let Some((intrinsic, result)) = intrinsic_for(name, &types) {
             state.registers[dst] = result;
             state.visible = Some(true);
-            return Ok(Action::Intrinsic { intrinsic, dst, args, result });
+            return Ok(Action::Intrinsic {
+                intrinsic,
+                dst,
+                args,
+                result,
+            });
         }
         if PURE_BUILTINS.contains(&name) {
-            let objects = self.slice(args.iter().copied().filter(|&register| !state.registers[register].is_plain()));
-            return Ok(self.opaque_step(state, Some((dst, feedback)), objects, Effect::PureUnlessObserved));
+            let objects = self.slice(
+                args.iter()
+                    .copied()
+                    .filter(|&register| !state.registers[register].is_plain()),
+            );
+            return Ok(self.opaque_step(
+                state,
+                Some((dst, feedback)),
+                objects,
+                Effect::PureUnlessObserved,
+            ));
         }
         Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque))
     }
@@ -1552,7 +2223,9 @@ impl<'a> Builder<'a> {
         self.frame_safe.insert(function, true);
         let mut found = List::new_in(self.arena);
         let defaults = values::pairlist_items(function.car());
-        let safe = defaults.iter().all(|&(_, default)| safe_expression(default, function, &mut found))
+        let safe = defaults
+            .iter()
+            .all(|&(_, default)| safe_expression(default, function, &mut found))
             && safe_expression(bytecode::closure_body(function), function, &mut found);
         if safe {
             self.speculations.extend(found);
@@ -1585,13 +2258,90 @@ impl<'a> Builder<'a> {
 /// Base builtins that never run R code of the caller's choosing nor touch any environment but
 /// their own arguments, apart from S3 dispatch on a classed argument.
 const FRAME_SAFE_BUILTINS: &[&str] = &[
-    "{", "(", "if", "for", "while", "repeat", "break", "next", "return", "invisible", "+", "-", "*", "/",
-    "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "!", "&", "|", "&&", "||", "sqrt", "exp", "log",
-    "abs", "floor", "ceiling", "trunc", "round", "signif", "sin", "cos", "tan", "log2", "log10", "log1p",
-    "expm1", "length", "[", "[[", "c", "is.na", "is.null", "sum", "prod", "max", "min", "cumsum", "cumprod",
-    "seq_len", "seq_along", ":", "vector", "numeric", "integer", "double", "logical", "character", "rep",
-    "rep.int", "rep_len", "nchar", "any", "all", "which", "rev", "as.integer", "as.numeric", "as.double",
-    "as.logical", "is.numeric", "is.character", "is.logical", "identical", "range", "pmin", "pmax",
+    "{",
+    "(",
+    "if",
+    "for",
+    "while",
+    "repeat",
+    "break",
+    "next",
+    "return",
+    "invisible",
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "%%",
+    "%/%",
+    "==",
+    "!=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "!",
+    "&",
+    "|",
+    "&&",
+    "||",
+    "sqrt",
+    "exp",
+    "log",
+    "abs",
+    "floor",
+    "ceiling",
+    "trunc",
+    "round",
+    "signif",
+    "sin",
+    "cos",
+    "tan",
+    "log2",
+    "log10",
+    "log1p",
+    "expm1",
+    "length",
+    "[",
+    "[[",
+    "c",
+    "is.na",
+    "is.null",
+    "sum",
+    "prod",
+    "max",
+    "min",
+    "cumsum",
+    "cumprod",
+    "seq_len",
+    "seq_along",
+    ":",
+    "vector",
+    "numeric",
+    "integer",
+    "double",
+    "logical",
+    "character",
+    "rep",
+    "rep.int",
+    "rep_len",
+    "nchar",
+    "any",
+    "all",
+    "which",
+    "rev",
+    "as.integer",
+    "as.numeric",
+    "as.double",
+    "as.logical",
+    "is.numeric",
+    "is.character",
+    "is.logical",
+    "identical",
+    "range",
+    "pmin",
+    "pmax",
 ];
 
 /// Whether `expression`, in the body of `function`, keeps `function` frame-safe (see
@@ -1617,10 +2367,15 @@ unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Spe
             // also calls the replacement builtin, and any other target could call a closure.
             Some("<-" | "=") => match arguments.first() {
                 Some(&(_, target)) if target.kind() == SexpType::Symbol => true,
-                Some(&(_, target)) if target.kind() == SexpType::Language && target.car().kind() == SexpType::Symbol => {
+                Some(&(_, target))
+                    if target.kind() == SexpType::Language
+                        && target.car().kind() == SexpType::Symbol =>
+                {
                     let index = values::symbol_name(target.car());
                     matches!(index.as_ref(), "[" | "[[")
-                        && values::pairlist_items(target.cdr()).first().is_some_and(|&(_, value)| value.kind() == SexpType::Symbol)
+                        && values::pairlist_items(target.cdr())
+                            .first()
+                            .is_some_and(|&(_, value)| value.kind() == SexpType::Symbol)
                 }
                 _ => false,
             },
@@ -1632,7 +2387,9 @@ unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Spe
         return false;
     }
     found.push(speculation);
-    arguments.iter().all(|&(_, argument)| safe_expression(argument, function, found))
+    arguments
+        .iter()
+        .all(|&(_, argument)| safe_expression(argument, function, found))
 }
 
 /// The name of the base builtin `function`, when `symbol` names it.
@@ -1663,7 +2420,12 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
                 value = value.car();
             }
             if values::is_function(value) {
-                return Some(Speculation { symbol, env: start, cell, function: value });
+                return Some(Speculation {
+                    symbol,
+                    env: start,
+                    cell,
+                    function: value,
+                });
             }
         }
         env = env.enclosure();
@@ -1687,29 +2449,69 @@ unsafe fn constant_type(value: Sexp) -> Ty {
 
 /// The intrinsic for a call of builtin `name` with arguments of these types, and its result.
 fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
-    let numeric = |ty: Ty| if ty == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
+    let numeric = |ty: Ty| {
+        if ty == Ty::Dbl {
+            Numeric::Dbl
+        } else {
+            Numeric::Int
+        }
+    };
     Some(match (name, types) {
-        ("[" | "[[", [vector, index]) if vector.is_vector() && matches!(index, Ty::Int | Ty::Dbl) => {
+        ("[" | "[[", [vector, index])
+            if vector.is_vector() && matches!(index, Ty::Int | Ty::Dbl) =>
+        {
             (Intrinsic::Element, vector.element())
         }
-        ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => (Intrinsic::Element, Ty::Boxed),
-        ("length", [ty]) if ty.is_vector() || ty.is_numeric_scalar() || *ty == Ty::List => (Intrinsic::Length, Ty::Int),
-        ("-", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Negate(numeric(*ty)), if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int }),
+        ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => {
+            (Intrinsic::Element, Ty::Boxed)
+        }
+        ("length", [ty]) if ty.is_vector() || ty.is_numeric_scalar() || *ty == Ty::List => {
+            (Intrinsic::Length, Ty::Int)
+        }
+        ("-", [ty]) if ty.is_numeric_scalar() => (
+            Intrinsic::Negate(numeric(*ty)),
+            if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },
+        ),
         ("!", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Not, Ty::Lgl),
         ("is.na", [ty]) if ty.is_numeric_scalar() => (Intrinsic::IsNa, Ty::Lgl),
         ("sqrt", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Sqrt, Ty::Dbl),
         ("exp", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Exp, Ty::Dbl),
         ("log", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Log, Ty::Dbl),
-        ("abs", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Abs(numeric(*ty)), if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int }),
+        ("abs", [ty]) if ty.is_numeric_scalar() => (
+            Intrinsic::Abs(numeric(*ty)),
+            if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },
+        ),
         ("floor", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Floor, Ty::Dbl),
         ("ceiling", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Ceiling, Ty::Dbl),
         ("%%", [a, b]) if a.is_numeric_scalar() && b.is_numeric_scalar() => {
-            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
-            (Intrinsic::Modulo(numeric), if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl })
+            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl {
+                Numeric::Dbl
+            } else {
+                Numeric::Int
+            };
+            (
+                Intrinsic::Modulo(numeric),
+                if numeric == Numeric::Int {
+                    Ty::Int
+                } else {
+                    Ty::Dbl
+                },
+            )
         }
         ("%/%", [a, b]) if a.is_numeric_scalar() && b.is_numeric_scalar() => {
-            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
-            (Intrinsic::IntegerDivide(numeric), if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl })
+            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl {
+                Numeric::Dbl
+            } else {
+                Numeric::Int
+            };
+            (
+                Intrinsic::IntegerDivide(numeric),
+                if numeric == Numeric::Int {
+                    Ty::Int
+                } else {
+                    Ty::Dbl
+                },
+            )
         }
         _ => return None,
     })
@@ -1755,7 +2557,9 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     match inst.op {
         Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
         Op::SetVar => gen_(operand(1), live),
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => gen_(operand(0), live),
+        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+            gen_(operand(0), live)
+        }
         Op::DispatchSubject => {
             kill(operand(0), live);
             gen_(operand(1), live);

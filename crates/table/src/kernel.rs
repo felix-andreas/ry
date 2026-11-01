@@ -10,23 +10,27 @@
 //! An expression these kernels cannot evaluate makes them return `None`, and the caller falls
 //! back to the Polars plan, so both paths must agree on every result.
 
-use std::mem::MaybeUninit;
-
-use polars::prelude::{
-    BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
-    Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr, StringChunked,
-    UInt8Chunked, UInt16Chunked, UInt32Chunked,
+use {
+    crate::{
+        ColumnType, Error, Result, Schema,
+        convert::factor_levels,
+        query::{BinaryOp, Expr, Typer, UnaryOp, comparison},
+    },
+    polars::prelude::{
+        BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
+        Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr,
+        StringChunked, UInt8Chunked, UInt16Chunked, UInt32Chunked,
+    },
+    polars_arrow::{
+        array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+        bitmap::{Bitmap, MutableBitmap},
+        datatypes::ArrowDataType,
+    },
+    polars_buffer::Buffer,
+    polars_core::runtime::THREAD_POOL,
+    rayon::prelude::*,
+    std::mem::MaybeUninit,
 };
-use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
-use polars_arrow::bitmap::{Bitmap, MutableBitmap};
-use polars_arrow::datatypes::ArrowDataType;
-use polars_buffer::Buffer;
-use polars_core::runtime::THREAD_POOL;
-use rayon::prelude::*;
-
-use crate::convert::factor_levels;
-use crate::query::{BinaryOp, Expr, Typer, UnaryOp, comparison};
-use crate::{ColumnType, Error, Result, Schema};
 
 /// Below this many rows a kernel runs on the calling thread, because handing work to the pool
 /// costs more than it saves.
@@ -1267,18 +1271,15 @@ fn pack(len: usize, write: impl Fn(usize, &mut [MaybeUninit<u8>]) + Sync) -> Bit
 /// eight-value arrays, which LLVM unrolls into branch-free compares; a loop over a slice of
 /// unknown length compiles to one branch per bit and runs several times slower.
 fn pack_into<T: Copy>(out: &mut [MaybeUninit<u8>], values: &[T], test: impl Fn(T) -> bool) {
-    let mut chunks = values.chunks_exact(8);
-    for (slot, chunk) in out.iter_mut().zip(&mut chunks) {
+    let (chunks, rest) = values.as_chunks::<8>();
+    for (slot, chunk) in out.iter_mut().zip(chunks) {
         let mut byte = 0u8;
-        if let Ok(chunk) = <&[T; 8]>::try_from(chunk) {
-            for (bit, value) in chunk.iter().enumerate() {
-                byte |= u8::from(test(*value)) << bit;
-            }
+        for (bit, value) in chunk.iter().enumerate() {
+            byte |= u8::from(test(*value)) << bit;
         }
         slot.write(byte);
     }
-    let rest = chunks.remainder();
-    if let Some(slot) = out.get_mut(values.len() / 8)
+    if let Some(slot) = out.get_mut(chunks.len())
         && !rest.is_empty()
     {
         let mut byte = 0u8;
@@ -1290,25 +1291,26 @@ fn pack_into<T: Copy>(out: &mut [MaybeUninit<u8>], values: &[T], test: impl Fn(T
 }
 
 /// [`pack_into`] for a test of two equally long slices, value by value.
-fn pack_pairs<T: Copy>(out: &mut [MaybeUninit<u8>], lhs: &[T], rhs: &[T], test: impl Fn(T, T) -> bool) {
-    let full = lhs.len() / 8;
-    let mut left = lhs.chunks_exact(8);
-    let mut right = rhs.chunks_exact(8);
-    for ((slot, lhs), rhs) in out.iter_mut().zip(&mut left).zip(&mut right) {
+fn pack_pairs<T: Copy>(
+    out: &mut [MaybeUninit<u8>],
+    lhs: &[T],
+    rhs: &[T],
+    test: impl Fn(T, T) -> bool,
+) {
+    let (left, left_rest) = lhs.as_chunks::<8>();
+    let (right, right_rest) = rhs.as_chunks::<8>();
+    for ((slot, lhs), rhs) in out.iter_mut().zip(left).zip(right) {
         let mut byte = 0u8;
-        if let (Ok(lhs), Ok(rhs)) = (<&[T; 8]>::try_from(lhs), <&[T; 8]>::try_from(rhs)) {
-            for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
-                byte |= u8::from(test(*lhs, *rhs)) << bit;
-            }
+        for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
+            byte |= u8::from(test(*lhs, *rhs)) << bit;
         }
         slot.write(byte);
     }
-    let (lhs, rhs) = (left.remainder(), right.remainder());
-    if let Some(slot) = out.get_mut(full)
-        && !lhs.is_empty()
+    if let Some(slot) = out.get_mut(left.len())
+        && !left_rest.is_empty()
     {
         let mut byte = 0u8;
-        for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
+        for (bit, (lhs, rhs)) in left_rest.iter().zip(right_rest).enumerate() {
             byte |= u8::from(test(*lhs, *rhs)) << bit;
         }
         slot.write(byte);

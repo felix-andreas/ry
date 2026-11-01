@@ -296,12 +296,12 @@ language server once per load, for as long as the setting stays off. A `#:` bloc
 statement then applies alone, and so does a paired `#:` definition. An inline type definition with
 no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
 `type` stays nominal, so a plain value is still not accepted where it is expected, but its
-representation is `Unknown`. The setting also governs running code: `ry run` and `ry repl` still
-erase the annotations, but ry's runtime registers no checks for them.
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry R` still
+run annotated code, but ry's runtime registers no checks for the annotations.
 
 ### Inline annotations at run time
 
-`ry run` and `ry repl` run annotated code on both runtimes. GNU R reads the erasure. ry's runtime
+`ry run` runs annotated code on ry's runtime and `ry R` on GNU R, which reads the erasure. ry's runtime
 reads the annotations themselves and checks a function's parameter and return types at its
 boundary, so a function called with the wrong kind of value fails where it was called instead of
 somewhere inside it. The checks come from the inline spelling, so this example has a single block:
@@ -351,10 +351,10 @@ The checks belong to the function definition that carried the annotations. A clo
 another function's `formals()` with a body of its own, as `rlang::new_function()` builds one, is a
 new definition and is not checked.
 
-Before running anything, `ry run` checks the script and `ry repl` checks each command, with the
+Before running anything, `ry run` and `ry R` check the script and their console checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
 [strict mode](/type-checking/strict-mode) they also print every error and refuse to run code that
-has one: `ry run` exits with status 1, and the console drops the command. Other findings are left
+has one: a script exits with status 1, and the console drops the command. Other findings are left
 to `ry check`, so they never change whether R code runs.
 
 ## Types
@@ -747,6 +747,25 @@ way. Every union, written or inferred, is normalized:
 - A union whose members collapse to one type is that type, so `integer | integer` is `integer`.
 - A union with an `Any` member is `Any`, because every value already satisfies `Any`.
 - Otherwise, a union with an `Unknown` member is `Unknown`.
+
+A call's result drops a union member that is a type parameter of the called function when the
+callee's parameters mention it only as what a callback returns and the call left it unconstrained,
+because the callback then never produces such a value. `Result.and_then` returns
+`Result<B, E | F>`, where `F` is the error type of the step, so a step that never fails leaves `F`
+unconstrained and the result keeps the error `E` alone:
+
+```r
+a <- Result.and_then(Str.to_integer("1"), function(n) :Ok(n))
+# :Ok(integer) | :Err(:InvalidNumStr)
+b <- Result.and_then(Str.to_integer("1"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+# :Ok(integer) | :Err(:InvalidNumStr | :NotPositive)
+```
+
+A union made only of such parameters stays as it is. A type parameter that an argument fills
+directly, or that appears only in the result (`<T> fn(name: character) -> T | NULL`), is kept,
+because there an open `T` means any value. So is one that code outside the call still reaches,
+such as an unannotated parameter passed as the callback:
+`function(r, step) Result.and_then(r, step)` returns `:Ok(V) | :Err(U | W)`.
 
 ### Union compatibility
 

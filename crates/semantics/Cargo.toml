@@ -9,6 +9,7 @@ path = "src/semantics.rs"
 
 [dependencies]
 boxcar.workspace = true
+hashbrown.workspace = true
 rowan.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true

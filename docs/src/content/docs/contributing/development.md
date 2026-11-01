@@ -3,16 +3,25 @@ title: Development
 description: How to build, test, and debug ry
 ---
 
-ry is a Rust workspace of six crates under `crates/`. [Structure](/contributing/structure) maps
+ry is a Rust workspace whose crates live under `crates/`. [Structure](/contributing/structure) maps
 every source file, and [Architecture](/contributing/architecture) explains how the analysis fits
 together. The editor extensions live in `editors/code` (VS Code) and `editors/zed` (Zed).
 
 ## Build and test
 
+The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
+API and other unstable features are worth having before they stabilize (the policy is in
+`.agents/memory/decisions.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
+downloads that toolchain, with clippy, rustfmt and the `wasm32-wasip2` target, on the first build.
+The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
+`rustfmt.toml`, so `cargo fmt` keeps a single `use { ... }` tree per file.
+
 The `justfile` at the repository root names every day-to-day action, and `just` with no arguments
 lists them all. The common ones:
 
 ```sh
+just ry check                       # build ry and its runtime if needed, then run `ry check`
+just build                          # every binary and ry's runtime (`just build --release`)
 just gate                           # tests, clippy -D warnings, and fmt --check
 just battery                        # all workspace tests, excluding zed_ry
 just fixture <group__case>          # one fixture case
@@ -20,7 +29,7 @@ just bless -p semantics --test ...  # rewrite fixture expectations from current 
 just fuzz-deep                      # the long seeded fuzz run
 just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
-just repl-e2e                       # drive `ry repl` through a pty against the system R
+just repl-e2e                       # drive `ry R` and `ry run` through a pty
 ```
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a
@@ -44,7 +53,7 @@ environment variables come up every day:
 - `FIXTURE_FILTER=group__case` runs a single case.
 
 Some suites and every performance instrument read a corpus of real-world R code. Fetch it with
-`cargo +nightly -Zscript scripts/fetch-corpus.rs`, which writes into the gitignored `corpus/`
+`cargo -Zscript scripts/fetch-corpus.rs`, which writes into the gitignored `corpus/`
 directory. The resolved inventory is committed as `scripts/corpus-manifest.txt`.
 
 ### The R console needs no R to build

@@ -6,22 +6,24 @@
 //! An R error, `break` or `next` is parked the same way, as the activation's pending unwind,
 //! and compiled code reacts by deoptimizing, which hands the unwind to the interpreter.
 
-use crate::analysis::{Speculation, resolve_function};
-use heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real};
-use interp::{
-    arith,
-    bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
-    builtins::Arg,
-    eval, heap,
-    unwind::{R, Unwind, error},
-    values,
-};
-use smallvec::SmallVec;
-use std::{
-    any::Any,
-    cell::Cell,
-    ffi::c_void,
-    panic::{AssertUnwindSafe, catch_unwind},
+use {
+    crate::analysis::{Speculation, resolve_function},
+    heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+    interp::{
+        arith,
+        builtins::Arg,
+        bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
+        eval, heap,
+        unwind::{R, Unwind, error},
+        values,
+    },
+    smallvec::SmallVec,
+    std::{
+        any::Any,
+        cell::Cell,
+        ffi::c_void,
+        panic::{AssertUnwindSafe, catch_unwind},
+    },
 };
 
 /// What compiled code receives. The first fields are read by machine code at fixed offsets
@@ -107,7 +109,8 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
     }
     for speculation in &compiled.speculations {
         match resolve_function(speculation.symbol, speculation.env) {
-            Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
+            Some(found)
+                if found.cell == speculation.cell && found.function == speculation.function => {}
             _ => return false,
         }
     }
@@ -162,7 +165,11 @@ unsafe fn compiled<'a>(activation: &Activation) -> &'a Compiled {
 }
 
 /// Runs `body`, parking a panic in the activation and returning `fallback` instead.
-unsafe fn guarded<T>(activation: *mut Activation, fallback: T, body: impl FnOnce(&mut Activation) -> T) -> T {
+unsafe fn guarded<T>(
+    activation: *mut Activation,
+    fallback: T,
+    body: impl FnOnce(&mut Activation) -> T,
+) -> T {
     let activation = unsafe { &mut *activation };
     if activation.panic.is_some() {
         return fallback;
@@ -198,7 +205,11 @@ fn park(activation: &mut Activation, unwind: Unwind) {
 /// next helper that would run interpreter code with that value fails instead and the error
 /// reaches tier 0. Write-back and deoptimization helpers use [`guarded`], because they must
 /// still run after an error to leave the frame as tier 0 expects it.
-unsafe fn checked<T>(activation: *mut Activation, fallback: T, body: impl FnOnce(&mut Activation) -> T) -> T {
+unsafe fn checked<T>(
+    activation: *mut Activation,
+    fallback: T,
+    body: impl FnOnce(&mut Activation) -> T,
+) -> T {
     unsafe {
         if (*activation).pending.is_some() {
             return fallback;
@@ -208,7 +219,11 @@ unsafe fn checked<T>(activation: *mut Activation, fallback: T, body: impl FnOnce
 }
 
 unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
-    unsafe { activation.registers.add(compiled(activation).registers + slot as usize) }
+    unsafe {
+        activation
+            .registers
+            .add(compiled(activation).registers + slot as usize)
+    }
 }
 
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
@@ -313,10 +328,19 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
 
 /// Whether `value` is a closure made from `formals` and `body` in the activation's
 /// environment, which is what an inlined call of it assumes.
-pub unsafe extern "C" fn jit_closure_matches(activation: *mut Activation, value: *mut Header, formals: *mut Header, body: *mut Header) -> i32 {
+pub unsafe extern "C" fn jit_closure_matches(
+    activation: *mut Activation,
+    value: *mut Header,
+    formals: *mut Header,
+    body: *mut Header,
+) -> i32 {
     unsafe {
         guarded(activation, 0, |activation| {
-            let (Some(value), Some(formals), Some(body)) = (Sexp::from_raw(value), Sexp::from_raw(formals), Sexp::from_raw(body)) else {
+            let (Some(value), Some(formals), Some(body)) = (
+                Sexp::from_raw(value),
+                Sexp::from_raw(formals),
+                Sexp::from_raw(body),
+            ) else {
                 return 0;
             };
             let matches = value.kind() == SexpType::Closure
@@ -343,7 +367,8 @@ pub unsafe extern "C" fn jit_call(
 ) -> i32 {
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
-            let (Some(function), Some(call)) = (Sexp::from_raw(function), Sexp::from_raw(call)) else {
+            let (Some(function), Some(call)) = (Sexp::from_raw(function), Sexp::from_raw(call))
+            else {
                 park(activation, error("compiled code passed a null call"));
                 return outcome::FAILED;
             };
@@ -358,10 +383,14 @@ pub unsafe extern "C" fn jit_call(
                         representation::INTEGER => values::scalar_integer(bits as i32)?,
                         representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
                         representation::LOGICAL => values::scalar_logical(bits as i32)?,
-                        _ => Sexp::from_raw(bits as *mut Header).ok_or_else(|| error("compiled code passed a null argument"))?,
+                        _ => Sexp::from_raw(bits as *mut Header)
+                            .ok_or_else(|| error("compiled code passed a null argument"))?,
                     };
                     heap.root(value);
-                    args.push(Arg { tag: values::nil(), value });
+                    args.push(Arg {
+                        tag: values::nil(),
+                        value,
+                    });
                 }
                 // The frame records no argument list: only `nargs`, method dispatch and
                 // `standardGeneric` read it, and a frame-safe callee calls none of them.
@@ -375,7 +404,11 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !valid(compiled(activation)) { outcome::INVALIDATED } else { outcome::OK }
+                    if !valid(compiled(activation)) {
+                        outcome::INVALIDATED
+                    } else {
+                        outcome::OK
+                    }
                 }
             }
         })
@@ -392,7 +425,12 @@ pub mod representation {
 
 /// Writes a dirty slot back to the environment. A boxed value hands the reference compiled
 /// code held over to the binding. Returns 1 on success.
-pub unsafe extern "C" fn jit_flush(activation: *mut Activation, slot: i64, kind: i32, bits: i64) -> i32 {
+pub unsafe extern "C" fn jit_flush(
+    activation: *mut Activation,
+    slot: i64,
+    kind: i32,
+    bits: i64,
+) -> i32 {
     unsafe {
         guarded(activation, 0, |activation| {
             let machine = machine(activation);
@@ -448,7 +486,11 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
 }
 
 /// `if (value)`: 1 or 0, or 2 after parking the error.
-pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut Header, call: *mut Header) -> i32 {
+pub unsafe extern "C" fn jit_condition(
+    activation: *mut Activation,
+    value: *mut Header,
+    call: *mut Header,
+) -> i32 {
     unsafe {
         checked(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
@@ -467,7 +509,13 @@ pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut 
 }
 
 /// An operand of `&&` or `||` as a logical scalar, or 2 after parking the error.
-pub unsafe extern "C" fn jit_logic(activation: *mut Activation, value: *mut Header, call: *mut Header, is_and: i32, right: i32) -> i32 {
+pub unsafe extern "C" fn jit_logic(
+    activation: *mut Activation,
+    value: *mut Header,
+    call: *mut Header,
+    is_and: i32,
+    right: i32,
+) -> i32 {
     unsafe {
         checked(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
@@ -489,7 +537,11 @@ pub unsafe extern "C" fn jit_logic(activation: *mut Activation, value: *mut Head
 
 /// Replaces a slot's vector with a private copy compiled code may modify in place, owning one
 /// reference to it. `dirty` says whether the slot owned a reference to the old vector.
-pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, dirty: i32) -> *mut Header {
+pub unsafe extern "C" fn jit_duplicate(
+    activation: *mut Activation,
+    slot: i64,
+    dirty: i32,
+) -> *mut Header {
     unsafe {
         guarded(activation, std::ptr::null_mut(), |activation| {
             let cell = slot_cell(activation, slot);
@@ -514,14 +566,18 @@ pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, d
 
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {
-        guarded(activation, values::nil().as_ptr(), |activation| match scoped(make) {
-            Ok(value) => value.as_ptr(),
-            // Only an exhausted heap gets here. The next helper sees the parked error.
-            Err(unwind) => {
-                park(activation, unwind);
-                values::nil().as_ptr()
-            }
-        })
+        guarded(
+            activation,
+            values::nil().as_ptr(),
+            |activation| match scoped(make) {
+                Ok(value) => value.as_ptr(),
+                // Only an exhausted heap gets here. The next helper sees the parked error.
+                Err(unwind) => {
+                    park(activation, unwind);
+                    values::nil().as_ptr()
+                }
+            },
+        )
     }
 }
 
@@ -544,7 +600,11 @@ pub extern "C" fn jit_handlers_present() -> i32 {
 
 /// `^` on doubles, as tier 0 computes it.
 pub extern "C" fn jit_power(base: f64, exponent: f64) -> f64 {
-    if exponent == 2.0 && !is_na_real(base) { base * base } else { arith::power(base, exponent) }
+    if exponent == 2.0 && !is_na_real(base) {
+        base * base
+    } else {
+        arith::power(base, exponent)
+    }
 }
 
 pub extern "C" fn jit_exp(value: f64) -> f64 {
@@ -575,4 +635,3 @@ pub extern "C" fn jit_integer_divide(a: i32, b: i32) -> i32 {
     }
     (a as f64 / b as f64).floor() as i32
 }
-

@@ -1,6 +1,4 @@
-use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::{fs, path::Path, process::Command};
 
 /// One finished `ry` invocation, its streams decoded.
 struct Run {
@@ -819,7 +817,10 @@ fn check_reads_the_package_namespace_past_a_test_file_s_bindings() {
 fn check_accepts_exports_made_at_run_time_or_found_on_the_search_path() {
     let directory = project(&[
         ("DESCRIPTION", "Package: expkg\n"),
-        ("NAMESPACE", "export(bgRed)\nexport(diff)\nS3method(diff,thing)\n"),
+        (
+            "NAMESPACE",
+            "export(bgRed)\nexport(diff)\nS3method(diff,thing)\n",
+        ),
         (
             "R/a.R",
             "styles <- list(bgRed = 41L)\nfor (style in names(styles)) assign(style, styles[[style]])\ndiff.thing <- function(x, ...) x\n",
@@ -1450,4 +1451,120 @@ fn check_turns_object_system_definitions_into_errors_when_disabled() {
         "expected the object-system error, got: {}",
         output.stderr
     );
+}
+
+#[test]
+fn root_help_lists_run_and_r_but_not_the_console_s_earlier_name() {
+    let directory = project(&[]);
+    let output = ry(directory.path(), &["--help"]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    let commands: Vec<&str> = output
+        .stdout
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "check", "fmt", "run", "R", "load", "server", "debug", "help"
+        ],
+        "{}",
+        output.stdout
+    );
+}
+
+#[test]
+fn run_and_r_help_hide_the_runtime_flag() {
+    let directory = project(&[]);
+    for command in ["run", "R", "load"] {
+        let output = ry(directory.path(), &[command, "--help"]);
+        assert_eq!(output.code, 0, "{command}: {}", output.stderr);
+        assert!(
+            !output.stdout.contains("--runtime"),
+            "{command}: {}",
+            output.stdout
+        );
+    }
+    let run = ry(directory.path(), &["run", "--help"]);
+    assert!(
+        run.stdout
+            .contains("Usage: ry run [OPTIONS] [FILE] [ARGS]..."),
+        "{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("--interactive"), "{}", run.stdout);
+    assert!(!run.stdout.contains("--no-load"), "{}", run.stdout);
+    let r = ry(directory.path(), &["R", "--help"]);
+    assert!(
+        r.stdout.contains("Usage: ry R [OPTIONS] [FILE] [ARGS]..."),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("--no-load"), "{}", r.stdout);
+}
+
+#[test]
+fn a_missing_script_exits_two_before_any_r_starts() {
+    let directory = project(&[]);
+    for arguments in [
+        &["run", "missing.R"][..],
+        &["R", "missing.R"],
+        &["run", "-i", "missing.R"],
+        &["R", "--interactive", "missing.R"],
+        &["repl", "-f", "missing.R"],
+    ] {
+        let output = ry(directory.path(), arguments);
+        assert_eq!(output.code, 2, "{arguments:?}: {}", output.stderr);
+        assert!(
+            output.stderr.contains("cannot read missing.R"),
+            "{arguments:?}: {}",
+            output.stderr
+        );
+        assert_eq!(output.stdout, "", "{arguments:?}");
+    }
+}
+
+#[test]
+fn session_usage_errors_exit_two() {
+    let directory = project(&[("script.R", "1\n")]);
+    for arguments in [
+        &["run", "--interactive"][..],
+        &["run", "-i", "script.R", "extra"],
+        &["R", "--runtime", "ry", "script.R"],
+        &["run", "--keybindings", "nano"],
+        &["run", "--runtime", "jvm", "script.R"],
+        &["R", "--bogus"],
+    ] {
+        let output = ry(directory.path(), arguments);
+        assert_eq!(output.code, 2, "{arguments:?}: {}", output.stderr);
+        assert!(
+            output.stderr.starts_with("error:"),
+            "{arguments:?}: {}",
+            output.stderr
+        );
+    }
+}
+
+#[test]
+fn a_strict_mode_refusal_exits_one_before_any_r_starts() {
+    let directory = project(&[
+        ("ry.toml", "[check]\ntyping = true\nstrict = true\n"),
+        (
+            "script.R",
+            "describe <- function(x) cat(\"a value\\n\")\ndescribe(1)\n",
+        ),
+    ]);
+    for command in ["run", "R"] {
+        let output = ry(directory.path(), &[command, "script.R"]);
+        assert_eq!(output.code, 1, "{command}: {}", output.stderr);
+        assert!(
+            output.stderr.contains("strict mode found 1 error"),
+            "{}",
+            output.stderr
+        );
+        assert_eq!(output.stdout, "", "{command}: nothing ran");
+    }
 }
