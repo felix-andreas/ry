@@ -319,3 +319,8 @@ run <- function() with_progress(copy)
 with_progress: <T> fn(callback: fn(...: Any) -> T) -> fn(...: Any) -> T
 copy: <T, U, V> fn([source]: T, [target]: U, [overwrite]: V) -> logical
 run: fn() -> fn(...: Any) -> logical
+
+#---- vapply_types_its_result_by_the_template
+ascii <- function(fields) !vapply(fields, is.character, TRUE)
+#++++
+ascii: <T> fn(fields: list[T] | T[]) -> logical[]
