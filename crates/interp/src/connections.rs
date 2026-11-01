@@ -817,7 +817,10 @@ unsafe fn do_socket_accept(call: &Call<'_>) -> R<Sexp> {
         .as_ref()
         .ok_or_else(|| error("connection is not open"))?;
     let port = listener.local_addr().map_err(io_error)?.port();
-    let stream = accept_within(listener, timeout)?;
+    let Some(stream) = accept_within(listener, timeout)? else {
+        crate::conditions::warning("problem in accepting connections on this socket")?;
+        return Err(error("cannot open the connection"));
+    };
     let device = Device::Socket(SocketDevice {
         peer: SocketPeer::Accepted,
         timeout,
@@ -881,7 +884,7 @@ unsafe fn do_sock_select(call: &Call<'_>) -> R<Sexp> {
     } else {
         (timeout * 1000.0).min(f64::from(i32::MAX)) as i32
     };
-    let polled = platform::poll_sockets(&handles, timeout_milliseconds).map_err(io_error)?;
+    let polled = wait_sockets(&handles, timeout_milliseconds)?;
     let ready: Vec<i32> = polled
         .iter()
         .zip(&buffered)
@@ -934,19 +937,39 @@ unsafe fn socket_no_delay(options: Sexp) -> bool {
         .any(|option| option.as_deref() == Some("no-delay"))
 }
 
-/// Accepts the next client of `listener`, failing as GNU R does when none comes within
-/// `timeout` seconds.
-fn accept_within(listener: &TcpListener, timeout: f64) -> R<TcpStream> {
+/// Accepts the next client of `listener`, or `None` when none comes within `timeout` seconds.
+fn accept_within(listener: &TcpListener, timeout: f64) -> R<Option<TcpStream>> {
     let handle = platform::listener_handle(listener);
-    let ready = platform::poll_sockets(&[(handle, false)], timeout_milliseconds(timeout))
-        .map_err(io_error)?;
-    if !ready.first().copied().unwrap_or(false) {
-        return Err(error("problem in listening on this socket"));
+    let ready = wait_sockets(&[(handle, false)], timeout_milliseconds(timeout))?;
+    if !ready.contains(&true) {
+        return Ok(None);
     }
-    let (stream, _) = listener
-        .accept()
-        .map_err(|_| error("problem in listening on this socket"))?;
-    Ok(stream)
+    Ok(listener.accept().ok().map(|(stream, _)| stream))
+}
+
+/// Polls `sockets` for up to `timeout_milliseconds` (-1 waits forever). The wait goes in short
+/// slices, between which a user interrupt stops it.
+fn wait_sockets(
+    sockets: &[(platform::SocketHandle, bool)],
+    timeout_milliseconds: i32,
+) -> R<Vec<bool>> {
+    const SLICE_MILLISECONDS: i32 = 100;
+    let mut remaining = timeout_milliseconds;
+    loop {
+        let slice = if remaining < 0 {
+            SLICE_MILLISECONDS
+        } else {
+            remaining.min(SLICE_MILLISECONDS)
+        };
+        let ready = platform::poll_sockets(sockets, slice).map_err(io_error)?;
+        if ready.contains(&true) || remaining == 0 {
+            return Ok(ready);
+        }
+        if remaining > 0 {
+            remaining -= slice;
+        }
+        crate::unwind::poll_interrupt()?;
+    }
 }
 
 fn timeout_milliseconds(timeout: f64) -> i32 {
@@ -977,7 +1000,11 @@ unsafe fn socket_open(socket: &mut SocketDevice) -> R<bool> {
                 crate::conditions::warning(format!("port {port} cannot be opened"))?;
                 return Ok(false);
             };
-            accept_within(&listener, socket.timeout)?
+            let Some(stream) = accept_within(&listener, socket.timeout)? else {
+                crate::conditions::warning("problem in listening on this socket")?;
+                return Ok(false);
+            };
+            stream
         }
     };
     socket.stream = Some(stream);
@@ -997,24 +1024,24 @@ fn connect_within(host: &str, port: u16, timeout: f64) -> Option<TcpStream> {
 
 /// Reads buffered socket input, receiving more when the buffer is empty. A non-blocking
 /// connection with nothing to read marks itself incomplete and reads nothing; a blocking one
-/// waits up to its timeout first.
+/// waits up to its timeout first, and reads nothing if the timeout passes.
 unsafe fn socket_read(con: Rconnection, socket: &mut SocketDevice, buffer: &mut [u8]) -> R<usize> {
     if socket.input_position == socket.input.len() {
         let stream = socket
             .stream
             .as_mut()
             .ok_or_else(|| error("connection is not open"))?;
-        if (*con).blocking == 0 {
-            let handle = platform::stream_handle(stream);
-            let ready = platform::poll_sockets(&[(handle, false)], 0).map_err(io_error)?;
-            if !ready.first().copied().unwrap_or(false) {
-                (*con).incomplete = 1;
-                return Ok(0);
-            }
+        let wait = if (*con).blocking == 0 {
+            0
         } else {
-            stream
-                .set_read_timeout(socket_duration(socket.timeout))
-                .map_err(io_error)?;
+            timeout_milliseconds(socket.timeout)
+        };
+        let handle = platform::stream_handle(stream);
+        if !wait_sockets(&[(handle, false)], wait)?.contains(&true) {
+            if (*con).blocking == 0 {
+                (*con).incomplete = 1;
+            }
+            return Ok(0);
         }
         socket.input.resize(SOCKET_READ_SIZE, 0);
         socket.input_position = 0;
@@ -1157,8 +1184,14 @@ unsafe fn url_connection(url: &str, open: &str, headers: Vec<String>) -> R<Sexp>
 }
 
 /// Request header lines from `url()`'s or `download.file()`'s `headers`: NULL, or strings that
-/// each hold one or more CRLF-terminated `Name: value` lines.
+/// each hold one or more CRLF-terminated `Name: value` lines. `url()` passes a list whose first
+/// element holds the lines one per string and whose second joins them, so only the first counts.
 pub(crate) unsafe fn header_lines(headers: Sexp) -> Vec<String> {
+    let headers = if headers.kind() == SexpType::List && values::length(headers) > 0 {
+        values::list_elt(headers, 0)
+    } else {
+        headers
+    };
     let mut lines = Vec::new();
     for index in 0..values::length(headers) {
         if let Some(text) = values::string_at(headers, index) {
@@ -2713,7 +2746,6 @@ fn utf8_continuation_bytes(lead: u8) -> usize {
     }
 }
 
-/// Reads until `buffer` is full or a read returns nothing.
 /// Fills `buffer`, short only at the end of the input.
 pub(crate) unsafe fn read_all(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
     let mut filled = 0;

@@ -92,10 +92,19 @@ impl Reader<'_> {
                 Ok(slice)
             }
             Input::Connection { con, buffer } => {
-                buffer.resize(count, 0);
-                // SAFETY: the connection stays open while the reader runs.
-                if unsafe { crate::connections::read_all(*con, buffer)? } != count {
-                    return Err(error("error reading from connection"));
+                // The buffer grows a block at a time, so a corrupt length runs into the end of
+                // the input instead of allocating it all at once.
+                const BLOCK: usize = 1 << 20;
+                buffer.clear();
+                while buffer.len() < count {
+                    let start = buffer.len();
+                    let step = (count - start).min(BLOCK);
+                    buffer.resize(start + step, 0);
+                    // SAFETY: the connection stays open while the reader runs.
+                    if unsafe { crate::connections::read_all(*con, &mut buffer[start..])? } != step
+                    {
+                        return Err(error("error reading from connection"));
+                    }
                 }
                 Ok(buffer)
             }
@@ -198,7 +207,7 @@ impl Reader<'_> {
     /// leaves that newline before whatever follows it on a connection.
     fn ascii_string(&mut self, length: usize) -> R<Vec<u8>> {
         let truncated = || error("ReadItem: unexpected end of serialized data");
-        let mut bytes = Vec::with_capacity(length);
+        let mut bytes = Vec::with_capacity(length.min(4096));
         let mut next = loop {
             match self.next_byte()? {
                 Some(byte) if byte.is_ascii_whitespace() => {}
@@ -243,6 +252,12 @@ impl Reader<'_> {
             });
         }
         Ok(bytes)
+    }
+
+    /// A byte count, which a corrupt stream may give as negative.
+    fn count(&mut self) -> R<usize> {
+        usize::try_from(self.integer()?)
+            .map_err(|_| error("negative length vectors are not allowed"))
     }
 
     fn length(&mut self) -> R<usize> {
@@ -432,7 +447,7 @@ impl Reader<'_> {
                 return Ok(weak);
             }
             7 | 8 => {
-                let count = self.integer()? as usize;
+                let count = self.count()?;
                 let name = self.string(count)?;
                 let name = String::from_utf8_lossy(&name).into_owned();
                 let primitive = crate::builtins::primitive(&name)
@@ -450,7 +465,9 @@ impl Reader<'_> {
                 if count == -1 {
                     return Ok(known.na_string);
                 }
-                let bytes = self.string(count as usize)?;
+                let count = usize::try_from(count)
+                    .map_err(|_| error("negative length vectors are not allowed"))?;
+                let bytes = self.string(count)?;
                 let encoding = if levels & gp::UTF8 != 0 {
                     Encoding::Utf8
                 } else if levels & gp::LATIN1 != 0 {
@@ -836,7 +853,7 @@ unsafe fn read_object(mut reader: Reader<'_>) -> R<Sexp> {
     match version {
         2 => {}
         3 => {
-            let encoding_length = reader.integer()? as usize;
+            let encoding_length = reader.count()?;
             if reader.format == Format::Ascii {
                 reader.ascii_word()?;
             } else {
