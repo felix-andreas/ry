@@ -63,6 +63,11 @@ and `ry load` need a GNU R installation built as a shared library (see the
 R's R sources and the default packages from your GNU R installation instead of shipping them, so
 ry stays independent of R's license.
 
+ry finds that installation through `R_HOME` when it is set, and otherwise looks in `/usr/lib/R`,
+`/usr/local/lib/R`, `/opt/R/lib/R` and `/usr/lib64/R`, then asks `R RHOME`. If none holds base R,
+`ry run` and `ry load` stop with exit status 2 and name the places they searched. Install GNU R, or
+set `R_HOME` to the directory `R RHOME` prints.
+
 ## Zed
 
 The Zed extension is not in Zed's registry yet, so install it as a dev extension:
