@@ -260,7 +260,7 @@ fn a_whole_frame_is_a_classed_list_of_columns() {
             get_attrib(list, R_ClassSymbol.get()).unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(
             strings_of(class),
-            [Some("frame".to_string()), Some("data.frame".to_string())]
+            [Some("DataFrame".to_string()), Some("data.frame".to_string())]
         );
     }
 }

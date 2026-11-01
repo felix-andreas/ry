@@ -117,15 +117,19 @@ Compare.difftime : fn(e1: difftime, e2: double) -> logical
 Compare.difftime : fn(e1: double, e2: difftime) -> logical
 
 # A matrix supports the full elementwise arithmetic and comparison R gives it,
-# against another matrix or a scalar. Declaring these is what makes typing `%*%`
-# safe: without them the `matrix` the product returns would reject `+ 1L`, which
-# R accepts.
+# against another matrix, a scalar, or a vector that R recycles down its columns.
+# Declaring these is what makes typing `%*%` safe: without them the `matrix` the
+# product returns would reject `+ 1L`, which R accepts.
 Arith.matrix : fn(e1: matrix, e2: matrix) -> matrix
 Arith.matrix : fn(e1: matrix, e2: double) -> matrix
 Arith.matrix : fn(e1: double, e2: matrix) -> matrix
+Arith.matrix : fn(e1: matrix, e2: double[]) -> matrix
+Arith.matrix : fn(e1: double[], e2: matrix) -> matrix
 Compare.matrix : fn(e1: matrix, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical
+Compare.matrix : fn(e1: matrix, e2: double[]) -> logical
+Compare.matrix : fn(e1: double[], e2: matrix) -> logical
 
 # Reserved value constants and built-in constant vectors.
 T : logical
@@ -313,7 +317,7 @@ xor : fn(x: Any, y: Any) -> logical
 sum : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 sum : fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
 sum : fn(...: difftime, [na.rm]: logical) -> difftime
-sum : fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+sum : fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
 sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 min : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 min : fn(...: double[], [na.rm]: logical) -> double

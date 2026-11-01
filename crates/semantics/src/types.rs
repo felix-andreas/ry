@@ -31,9 +31,9 @@ pub enum TyKind<'db> {
     Tuple(Vec<Ty<'db>>),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(Vec<RecordField<'db>>),
-    /// `tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
+    /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(Vec<Ty<'db>>),
-    /// `record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
+    /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
     /// fields are kept sorted by name and every field is required.
     NativeRecord(Vec<NativeField<'db>>),
     /// `:Name` or `:Name(...)`. The payload is always a `NativeTuple` (positional) or a
@@ -42,10 +42,11 @@ pub enum TyKind<'db> {
     /// `..`, the member that makes a tag union open: it stands for every tag the union does
     /// not list. Only `union_of` places it, always last.
     OtherTags,
-    /// ry's built-in table, `frame{a: A[], b: B[]}`: a record of column vectors.
-    /// `None` is a frame whose columns are not known (`frame`), which every
-    /// column reference treats as silent.
-    Frame(Option<Vec<RecordField<'db>>>),
+    /// A table whose type is a record of column vectors: ry's `DataFrame{a: A[], b: B[]}`,
+    /// a `LazyFrame{...}` plan, a `GroupBy{...}`, or a `data.table{...}` whose columns are known.
+    /// `None` is a table whose columns are not known (`DataFrame`), which every column reference
+    /// treats as silent.
+    Frame(FrameKind, Option<Vec<RecordField<'db>>>),
     Function(FunctionType<'db>),
     /// Normalized; build only through `union_of`, never directly.
     Union(Vec<Ty<'db>>),
@@ -55,6 +56,43 @@ pub enum TyKind<'db> {
     /// A skolem from an explicit `<T>` binder: refuses to bind while its scope is
     /// checked, generalizes back out afterwards.
     Rigid(Name<'db>),
+}
+
+/// What a table type is. The kinds never fit each other: a `data.table` runs data.table's code,
+/// a `LazyFrame` holds a plan rather than rows, and a `GroupBy` only feeds `GroupBy.agg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum FrameKind {
+    DataFrame,
+    LazyFrame,
+    /// `DataFrame.group_by` or `LazyFrame.group_by`. The first `keys` columns are the group keys,
+    /// rendered before a `;`, and the rest are the columns `GroupBy.agg` aggregates.
+    GroupBy { lazy: bool, keys: u32 },
+    /// A data.table whose columns are known, from `fread` and the rest of data.table's readers.
+    DataTable,
+}
+
+impl FrameKind {
+    pub fn head(self) -> &'static str {
+        match self {
+            FrameKind::DataFrame => "DataFrame",
+            FrameKind::LazyFrame => "LazyFrame",
+            FrameKind::GroupBy { lazy: false, .. } => "GroupBy",
+            FrameKind::GroupBy { lazy: true, .. } => "LazyGroupBy",
+            FrameKind::DataTable => "data.table",
+        }
+    }
+
+    /// The kind a type head names, for the heads written with braces.
+    pub fn from_head(head: &str) -> Option<FrameKind> {
+        Some(match head {
+            "DataFrame" => FrameKind::DataFrame,
+            "LazyFrame" => FrameKind::LazyFrame,
+            "GroupBy" => FrameKind::GroupBy { lazy: false, keys: 0 },
+            "LazyGroupBy" => FrameKind::GroupBy { lazy: true, keys: 0 },
+            "data.table" => FrameKind::DataTable,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -446,8 +484,8 @@ fn mapped_kind<'db>(
                 .collect(),
         )),
         TyKind::Tag(name, payload) => Some(TyKind::Tag(*name, payload.map(&mut *map))),
-        TyKind::Frame(None) => None,
-        TyKind::Frame(Some(columns)) => Some(TyKind::Frame(Some(
+        TyKind::Frame(_, None) => None,
+        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(*kind, Some(
             columns
                 .iter()
                 .map(|column| RecordField {
@@ -500,10 +538,10 @@ pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl F
         }
         TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
-        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => {
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
             fields.iter().for_each(|field| visit(field.ty))
         }
-        TyKind::Frame(None) => {}
+        TyKind::Frame(_, None) => {}
         TyKind::Function(function) => {
             function.positional.iter().copied().for_each(&mut *visit);
             function

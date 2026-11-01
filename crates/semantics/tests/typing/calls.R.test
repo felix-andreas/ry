@@ -192,7 +192,7 @@ g <- function(x, n) {
 }
 f <- function() g(n = 2)
 #++++
-g: <T> fn(x: T, n: double) -> Unknown
+g: <T, U: numeric> fn(x: T, n: U) -> Unknown
 f: Unknown
 92..93 error[type-mismatch] this call leaves out `x`, which the function requires
 

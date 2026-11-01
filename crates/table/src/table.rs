@@ -1,5 +1,5 @@
-//! ry's built-in typed table, the value R code writes as `frame(...)` and the checker types as
-//! `frame{id: integer[], price: double[]}`.
+//! ry's built-in typed table, the value R code writes as `DataFrame(...)` and the checker types as
+//! `DataFrame{id: integer[], price: double[]}`.
 //!
 //! A [`Table`] holds a Polars [`DataFrame`]. Its columns are restricted to the dtypes that have an
 //! R vector type (see [`ColumnType`]), so every column can cross into R and back without a lossy
@@ -15,6 +15,7 @@ pub mod ffi;
 mod group;
 pub mod io;
 mod join;
+pub mod lazy;
 mod kernel;
 pub mod ops;
 pub mod query;
@@ -60,7 +61,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The R vector type of a column, which is also its element type in the checker's `frame{...}`
+/// The R vector type of a column, which is also its element type in the checker's `DataFrame{...}`
 /// notation. Each one has exactly one Polars dtype, so a table never holds a column R cannot see.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum ColumnType {
@@ -119,7 +120,7 @@ impl fmt::Display for ColumnType {
 }
 
 /// A frame's columns and their types, in order: the runtime side of the checker's
-/// `frame{id: integer[], price: double[]}`. It is derived from a table's Polars schema, never
+/// `DataFrame{id: integer[], price: double[]}`. It is derived from a table's Polars schema, never
 /// stored beside it, so the two cannot disagree.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Schema {
@@ -147,12 +148,12 @@ impl Schema {
             .map(|(_, kind)| *kind)
     }
 
-    /// Parses the checker's notation, such as `frame{id: integer[], ticker: character[]}`.
+    /// Parses the checker's notation, such as `DataFrame{id: integer[], ticker: character[]}`.
     pub fn parse(text: &str) -> Result<Schema> {
         let syntax = || Error::SchemaSyntax(text.to_string());
         let body = text
             .trim()
-            .strip_prefix("frame{")
+            .strip_prefix("DataFrame{")
             .and_then(|rest| rest.strip_suffix('}'))
             .ok_or_else(syntax)?;
         let mut columns = Vec::new();
@@ -196,7 +197,7 @@ impl Schema {
 
 impl fmt::Display for Schema {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("frame{")?;
+        formatter.write_str("DataFrame{")?;
         for (index, (name, kind)) in self.columns.iter().enumerate() {
             if index > 0 {
                 formatter.write_str(", ")?;
@@ -229,12 +230,14 @@ impl Table {
     /// becomes an `Enum` so its level order is fixed. A valid `i32::MIN` becomes a null, because
     /// R reads that bit pattern as `NA_integer_`.
     pub fn new(frame: DataFrame) -> Result<Table> {
+        // A frame without columns still has rows, which `.N` counts.
+        let height = frame.height();
         let mut columns = Vec::with_capacity(frame.width());
         for column in frame.into_columns() {
             columns.push(normalize(column)?);
         }
         Ok(Table {
-            frame: DataFrame::new_infer_height(columns)?,
+            frame: DataFrame::new(height, columns)?,
             key: Vec::new(),
         })
     }

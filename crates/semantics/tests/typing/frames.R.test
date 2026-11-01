@@ -1,558 +1,558 @@
 #==== frame_constructor
 #---- named_arguments_become_columns
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 
 #---- a_scalar_broadens_to_its_vector_type
-labels <- frame(count = 1L, label = "a")
+labels <- DataFrame(count = 1L, label = "a")
 #++++
-labels: frame{count: integer[], label: character[]}
+labels: DataFrame{count: integer[], label: character[]}
 
 #---- an_unnamed_variable_keeps_its_name
 id <- 1:3
-items <- frame(id, price = c(1, 2, 3))
+items <- DataFrame(id, price = c(1, 2, 3))
 #++++
 id: integer[]
-items: frame{id: integer[], price: double[]}
+items: DataFrame{id: integer[], price: double[]}
 
 #---- an_unnamed_computed_argument_leaves_the_columns_unknown
-items <- frame(1:3, price = c(1, 2, 3))
+items <- DataFrame(1:3, price = c(1, 2, 3))
 #++++
-items: frame
+items: DataFrame
 
 #---- no_arguments_is_the_graphics_page
-page <- frame()
+page <- DataFrame()
 #++++
-page: NULL
+page: DataFrame{}
 
 #---- a_project_definition_shadows_the_builtin
 frame <- function(...) 1L
-made <- frame(id = 1:3)
+made <- DataFrame(id = 1:3)
 #++++
 frame: fn(...: Any) -> integer
-made: integer
+made: DataFrame{id: integer[]}
 
 #==== frame_annotations
 #---- a_frame_type_annotates_a_parameter
-#: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+#: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 price_of <- function(prices) prices$price
 #++++
-price_of: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+price_of: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 
 #---- a_frame_with_unknown_columns_is_silent
-#: fn(data: frame) -> frame
+#: fn(data: DataFrame) -> DataFrame
 anything <- function(data) data[score > 1, .(total = sum(score)), by = team]
 #++++
-anything: fn(data: frame) -> frame
+anything: fn(data: DataFrame) -> DataFrame
 
 #---- a_frame_is_no_data_frame
 #: fn(data: data.frame) -> integer
 count_rows <- function(data) nrow(data)
-rows <- count_rows(frame(id = 1:3))
+rows <- count_rows(DataFrame(id = 1:3))
 #++++
 count_rows: fn(data: data.frame) -> integer
 rows: Unknown
-94..109 error[type-mismatch] expected `data.frame`, found `frame{id: integer[]}`
+94..113 error[type-mismatch] expected `data.frame`, found `DataFrame{id: integer[]}`
 
 #---- as_frame_and_file_reads_build_frames
-from_list <- as.frame(list(id = 1:3))
-read <- frame_read_csv("prices.csv")
-flag <- is.frame(read)
+from_list <- as.DataFrame(list(id = 1:3))
+read <- DataFrame.read_csv("prices.csv")
+flag <- is.DataFrame(read)
 #++++
-from_list: frame
-read: frame
+from_list: DataFrame
+read: DataFrame
 flag: logical
 
 #---- a_frame_argument_checks_its_columns
-#: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+#: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 price_of <- function(prices) prices$price
-cost <- price_of(frame(id = 1:3, price = c("a", "b", "c")))
+cost <- price_of(DataFrame(id = 1:3, price = c("a", "b", "c")))
 #++++
-price_of: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+price_of: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 cost: Unknown
-124..165 error[type-mismatch] expected `frame{id: integer[], price: double[]}`, found `frame{id: integer[], price: character[]}`
+128..173 error[type-mismatch] expected `DataFrame{id: integer[], price: double[]}`, found `DataFrame{id: integer[], price: character[]}`
 
 #==== frame_rows
 #---- a_filter_keeps_the_frame_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 expensive <- prices[price > 1]
 #++++
-prices: frame{id: integer[], price: double[]}
-expensive: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+expensive: DataFrame{id: integer[], price: double[]}
 
 #---- an_ordering_keeps_the_frame_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 sorted <- prices[order(-price)]
 #++++
-prices: frame{id: integer[], price: double[]}
-sorted: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+sorted: DataFrame{id: integer[], price: double[]}
 
 #---- a_lexical_name_that_is_no_column_keeps_its_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 threshold <- 2
 expensive <- prices[price > threshold]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 threshold: double
-expensive: frame{id: integer[], price: double[]}
+expensive: DataFrame{id: integer[], price: double[]}
 
 #---- a_column_shadows_a_lexical_name
 price <- "not a number"
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 doubled <- prices[, price * 2]
 #++++
 price: character
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 doubled: double[]
 
 #---- a_misspelled_column_in_i_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 expensive <- prices[pirce > 1]
 #++++
-prices: frame{id: integer[], price: double[]}
-expensive: frame{id: integer[], price: double[]}
-66..71 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
+prices: DataFrame{id: integer[], price: double[]}
+expensive: DataFrame{id: integer[], price: double[]}
+70..75 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
 
 #---- a_global_that_is_no_column_is_silent
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 scaled <- prices[price > pi]
 #++++
-prices: frame{id: integer[], price: double[]}
-scaled: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+scaled: DataFrame{id: integer[], price: double[]}
 
 #---- a_character_row_index_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 picked <- prices["a"]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 picked: Unknown
-63..66 error[type-mismatch] a frame's row index must be logical (a filter) or numeric (row positions), but this is `character`
+67..70 error[type-mismatch] a frame's row index must be logical (a filter) or numeric (row positions), but this is `character`
 
 #---- a_frame_row_index_suggests_a_join
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(id = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(id = 1:3, label = c("a", "b", "c"))
 joined <- prices[labels]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{id: integer[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{id: integer[], label: character[]}
 joined: Unknown
-115..121 error[type-mismatch] a frame's row index must be logical (a filter) or numeric (row positions), but this is `frame{id: integer[], label: character[]}`. To join two frames, add `on =`.
+123..129 error[type-mismatch] a frame's row index must be logical (a filter) or numeric (row positions), but this is `DataFrame{id: integer[], label: character[]}`. To join two frames, add `on =`.
 
 #==== frame_j
 #---- a_named_list_j_builds_a_frame
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 summary <- prices[, .(total = sum(price), rows = .N)]
 #++++
-prices: frame{id: integer[], price: double[]}
-summary: frame{total: double[], rows: integer[]}
+prices: DataFrame{id: integer[], price: double[]}
+summary: DataFrame{total: double[], rows: integer[]}
 
 #---- list_spells_the_same_j
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 summary <- prices[, list(total = sum(price))]
 #++++
-prices: frame{id: integer[], price: double[]}
-summary: frame{total: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+summary: DataFrame{total: double[]}
 
 #---- an_unnamed_column_keeps_its_name_and_others_are_numbered
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 shaped <- prices[, .(id, price * 2)]
 #++++
-prices: frame{id: integer[], price: double[]}
-shaped: frame{id: integer[], V2: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+shaped: DataFrame{id: integer[], V2: double[]}
 
 #---- a_bare_column_j_is_the_column_vector
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 column <- prices[, price]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 column: double[]
 
 #---- a_computed_j_without_by_is_its_value
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 total <- prices[, sum(price)]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 total: double
 
 #---- a_misspelled_column_in_j_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 total <- prices[, .(total = sum(pirce))]
 #++++
-prices: frame{id: integer[], price: double[]}
-total: frame{total: Unknown}
-78..83 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
+prices: DataFrame{id: integer[], price: double[]}
+total: DataFrame{total: Unknown}
+82..87 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
 
 #---- a_closure_parameter_in_j_stays_lexical
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 scaled <- prices[, .(scaled = vapply(price, function(value) value * 2, numeric(1)))]
 #++++
-prices: frame{id: integer[], price: double[]}
-scaled: frame{scaled: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+scaled: DataFrame{scaled: double[]}
 
 #---- a_dot_dot_name_reads_the_enclosing_variable
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 columns <- "price"
 rate <- 2
 picked <- prices[, ..columns]
 scaled <- prices[, .(scaled = price * ..rate)]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 columns: character
 rate: double
-picked: frame
-scaled: frame{scaled: double[]}
+picked: DataFrame
+scaled: DataFrame{scaled: double[]}
 
 #==== frame_specials
 #---- ngrp_is_an_integer
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 counted <- sales[, .(groups = .NGRP, n = .N, group = .GRP), by = team]
 #++++
-sales: frame{team: character[], amount: double[]}
-counted: frame{team: character[], groups: integer[], n: integer[], group: integer[]}
+sales: DataFrame{team: character[], amount: double[]}
+counted: DataFrame{team: character[], groups: integer[], n: integer[], group: integer[]}
 
 #==== frame_by
 #---- a_bare_name_groups_first
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), by = team]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_team: frame{team: character[], total: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+per_team: DataFrame{team: character[], total: double[]}
 
 #---- a_dot_list_of_groups
-sales <- frame(team = c("a", "b"), year = c(2020L, 2021L), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), year = c(2020L, 2021L), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), by = .(team, year)]
 #++++
-sales: frame{team: character[], year: integer[], amount: double[]}
-per_team: frame{team: character[], year: integer[], total: double[]}
+sales: DataFrame{team: character[], year: integer[], amount: double[]}
+per_team: DataFrame{team: character[], year: integer[], total: double[]}
 
 #---- a_character_vector_of_groups
-sales <- frame(team = c("a", "b"), year = c(2020L, 2021L), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), year = c(2020L, 2021L), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), by = c("team", "year")]
 #++++
-sales: frame{team: character[], year: integer[], amount: double[]}
-per_team: frame{team: character[], year: integer[], total: double[]}
+sales: DataFrame{team: character[], year: integer[], amount: double[]}
+per_team: DataFrame{team: character[], year: integer[], total: double[]}
 
 #---- a_single_string_group
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), by = "team"]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_team: frame{team: character[], total: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+per_team: DataFrame{team: character[], total: double[]}
 
 #---- keyby_groups_like_by
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), keyby = team]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_team: frame{team: character[], total: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+per_team: DataFrame{team: character[], total: double[]}
 
 #---- a_named_computed_group
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_size <- sales[, .(rows = .N), by = .(large = amount > 1)]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_size: frame{large: logical[], rows: integer[]}
+sales: DataFrame{team: character[], amount: double[]}
+per_size: DataFrame{large: logical[], rows: integer[]}
 
 #---- an_unnamed_grouped_value_is_v1
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, sum(amount), by = team]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_team: frame{team: character[], V1: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+per_team: DataFrame{team: character[], V1: double[]}
 
 #---- a_bare_column_under_by_keeps_its_name
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, amount, by = team]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_team: frame{team: character[], amount: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+per_team: DataFrame{team: character[], amount: double[]}
 
 #---- subset_data_is_the_frame_without_its_groups
-sales <- frame(team = c("a", "b"), year = c(2020L, 2021L), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), year = c(2020L, 2021L), amount = c(1, 2))
 firsts <- sales[, .SD[1], by = team]
 #++++
-sales: frame{team: character[], year: integer[], amount: double[]}
-firsts: frame{team: character[], year: integer[], amount: double[]}
+sales: DataFrame{team: character[], year: integer[], amount: double[]}
+firsts: DataFrame{team: character[], year: integer[], amount: double[]}
 
 #---- a_misspelled_bare_group_is_reported
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), by = taem]
 #++++
-sales: frame{team: character[], amount: double[]}
-per_team: frame{taem: Unknown, total: double[]}
-102..106 warning[unresolved] the frame `sales` has no column `taem`, and nothing else defines that name. Did you mean `team`?
+sales: DataFrame{team: character[], amount: double[]}
+per_team: DataFrame{taem: Unknown, total: double[]}
+106..110 warning[unresolved] the frame `sales` has no column `taem`, and nothing else defines that name. Did you mean `team`?
 
 #---- a_misspelled_string_group_is_reported
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 per_team <- sales[, .(total = sum(amount)), by = c("taem")]
 #++++
-sales: frame{team: character[], amount: double[]}
+sales: DataFrame{team: character[], amount: double[]}
 per_team: Unknown
-104..110 error[type-mismatch] the frame `sales` has no column `taem`. Did you mean `team`?
+108..114 error[type-mismatch] the frame `sales` has no column `taem`. Did you mean `team`?
 
 #---- a_bare_count_is_named_n
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 counts <- sales[, .N, by = team]
 listed <- sales[, .(.N, top = max(amount)), by = team]
 #++++
-sales: frame{team: character[], amount: double[]}
-counts: frame{team: character[], N: integer[]}
-listed: frame{team: character[], N: integer[], top: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+counts: DataFrame{team: character[], N: integer[]}
+listed: DataFrame{team: character[], N: integer[], top: double[]}
 
 #==== frame_subset_data
 #---- lapply_over_subset_data_applies_the_function_to_each_column
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 means <- sales[, lapply(.SD, mean), by = team]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-means: frame{team: character[], units: double[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+means: DataFrame{team: character[], units: double[], price: double[]}
 
 #---- an_overloaded_function_keeps_each_column_type
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 totals <- sales[, lapply(.SD, sum), by = team]
 tops <- sales[, lapply(.SD, max, na.rm = TRUE), by = team]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-totals: frame{team: character[], units: integer[], price: double[]}
-tops: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+totals: DataFrame{team: character[], units: integer[], price: double[]}
+tops: DataFrame{team: character[], units: integer[], price: double[]}
 
 #---- extra_arguments_reach_the_function
-sales <- frame(team = c("a", "b"), price = c(1.25, 2.5))
+sales <- DataFrame(team = c("a", "b"), price = c(1.25, 2.5))
 rounded <- sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
 #++++
-sales: frame{team: character[], price: double[]}
-rounded: frame{price: double[]}
+sales: DataFrame{team: character[], price: double[]}
+rounded: DataFrame{price: double[]}
 
 #---- a_function_that_does_not_fit_a_column_is_reported
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 doubled <- sales[, lapply(.SD, function(v) v * 2)]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
 doubled: Unknown
-106..123 error[type-mismatch] this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
+110..127 error[type-mismatch] this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
 
 #---- a_finding_every_column_causes_is_reported_once
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 broken <- sales[, lapply(.SD, function(v) "a" + 1)]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
 broken: Unknown
-117..120 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+121..124 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- sdcols_names_the_columns
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 picked <- sales[, .SD, .SDcols = c("units", "price")]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-picked: frame{units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+picked: DataFrame{units: integer[], price: double[]}
 
 #---- a_result_repeating_a_group_name_has_unknown_columns
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 grouped <- sales[, .SD, .SDcols = c("team", "units"), by = team]
 named <- sales[, .(team = units), by = team]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-grouped: frame
-named: frame
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+grouped: DataFrame
+named: DataFrame
 
 #---- sdcols_takes_a_range_of_columns
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 ranged <- sales[, .SD, .SDcols = units:price]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-ranged: frame{units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+ranged: DataFrame{units: integer[], price: double[]}
 
 #---- sdcols_takes_a_type_predicate
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 numbers <- sales[, lapply(.SD, sum), .SDcols = is.numeric]
 labels <- sales[, lapply(.SD, nchar), .SDcols = is.character]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-numbers: frame{units: integer[], price: double[]}
-labels: frame{team: integer[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+numbers: DataFrame{units: integer[], price: double[]}
+labels: DataFrame{team: integer[]}
 
 #---- sdcols_excludes_with_not_or_minus
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 without_units <- sales[, .SD, .SDcols = !c("units")]
 without_range <- sales[, .SD, .SDcols = -(team:units)]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-without_units: frame{team: character[], price: double[]}
-without_range: frame{price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+without_units: DataFrame{team: character[], price: double[]}
+without_range: DataFrame{price: double[]}
 
 #---- a_misspelled_sdcols_column_is_reported
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 picked <- sales[, .SD, .SDcols = c("units", "prise")]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
 picked: Unknown
-119..126 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
+123..130 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
 
 #---- a_misspelled_sdcols_range_end_is_reported
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 ranged <- sales[, lapply(.SD, mean), .SDcols = units:prise]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
 ranged: Unknown
-128..133 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
+132..137 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
 
 #---- a_range_to_a_position_is_reported_once
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 ranged <- sales[, .SD, .SDcols = zz:3]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-ranged: frame
-108..110 warning[unresolved] the frame `sales` has no column `zz`, and nothing else defines that name.
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+ranged: DataFrame
+112..114 warning[unresolved] the frame `sales` has no column `zz`, and nothing else defines that name.
 
 #---- lapply_with_a_named_subset_argument
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 totals <- sales[, lapply(X = .SD, sum), by = team]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-totals: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+totals: DataFrame{team: character[], units: integer[], price: double[]}
 
 #---- sdcols_of_another_shape_leaves_the_columns_unknown
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 matched <- sales[, .SD, .SDcols = patterns("^u")]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-matched: frame
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+matched: DataFrame
 
 #---- assigning_lapply_over_subset_data_updates_each_column
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 labelled <- sales[, c("units", "price") := lapply(.SD, as.character), .SDcols = c("units", "price")]
-orders <- frame(id = 1:2, units = c(1L, 2L))
+orders <- DataFrame(id = 1:2, units = c(1L, 2L))
 doubled <- orders[, (c("units")) := lapply(.SD, function(v) v * 2), .SDcols = "units"]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
-labelled: frame{team: character[], units: character[], price: character[]}
-orders: frame{id: integer[], units: integer[]}
-doubled: frame{id: integer[], units: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
+labelled: DataFrame{team: character[], units: character[], price: character[]}
+orders: DataFrame{id: integer[], units: integer[]}
+doubled: DataFrame{id: integer[], units: double[]}
 
 #---- a_local_name_vector_selects_and_assigns_columns
 relabel <- function() {
-  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
   cols <- c("units", "price")
   sales[, (cols) := lapply(.SD, as.character), .SDcols = cols]
 }
 pick <- function() {
-  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
   cols <- "units"
   sales[, .SD, .SDcols = cols]
 }
 misspelled <- function() {
-  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
   cols <- c("units", "prise")
   sales[, .SD, .SDcols = cols]
 }
 #++++
-relabel: fn() -> frame{team: character[], units: character[], price: character[]}
-pick: fn() -> frame{units: integer[]}
+relabel: fn() -> DataFrame{team: character[], units: character[], price: character[]}
+pick: fn() -> DataFrame{units: integer[]}
 misspelled: Unknown
-470..477 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
+482..489 error[type-mismatch] the frame `sales` has no column `prise`. Did you mean `price`?
 
 #---- a_name_vector_written_twice_leaves_the_columns_unknown
 relabel <- function(wide) {
-  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
   cols <- "units"
   if (wide) cols <- c("units", "price")
   sales[, .SD, .SDcols = cols]
 }
 shifted <- function() {
-  sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+  sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
   cols <- c("units", "price")
   cols[2] <- "team"
   sales[, .SD, .SDcols = cols]
 }
 #++++
-relabel: fn(wide: logical) -> frame
-shifted: fn() -> frame
+relabel: fn(wide: logical) -> DataFrame
+shifted: fn() -> DataFrame
 
 #---- assigning_through_a_name_vector_leaves_the_columns_unknown
-sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
 cols <- c("units", "price")
 labelled <- sales[, (cols) := lapply(.SD, as.character), .SDcols = cols]
 #++++
-sales: frame{team: character[], units: integer[], price: double[]}
+sales: DataFrame{team: character[], units: integer[], price: double[]}
 cols: character[]
-labelled: frame
+labelled: DataFrame
 
 #==== frame_update
 #---- walrus_adds_a_column_for_later_uses
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, doubled := price * 2]
 column <- prices$doubled
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[], doubled: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[], doubled: double[]}
 column: double[]
 
 #---- walrus_null_removes_a_column
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, price := NULL]
 remaining <- prices
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[]}
-remaining: frame{id: integer[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[]}
+remaining: DataFrame{id: integer[]}
 
 #---- walrus_replaces_a_column_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, id := as.character(id)]
 ids <- prices$id
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: character[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: character[], price: double[]}
 ids: character[]
 
 #---- an_alias_keeps_the_old_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 before <- prices
 prices[, doubled := price * 2]
 missing <- before$doubled
 #++++
-prices: frame{id: integer[], price: double[]}
-before: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[], doubled: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+before: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[], doubled: double[]}
 missing: Unknown
-112..119 error[type-mismatch] the frame `before` has no column `doubled`. Its columns are `id`, `price`
+116..123 error[type-mismatch] the frame `before` has no column `doubled`. Its columns are `id`, `price`
 
 #---- walrus_is_the_value_of_the_bracket
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 extended <- prices[, flag := price > 1]
 #++++
-prices: frame{id: integer[], price: double[]}
-extended: frame{id: integer[], price: double[], flag: logical[]}
+prices: DataFrame{id: integer[], price: double[]}
+extended: DataFrame{id: integer[], price: double[], flag: logical[]}
 
 #---- walrus_with_a_character_vector_of_names
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 extended <- prices[, c("tax", "label") := list(price * 0.2, "x")]
 #++++
-prices: frame{id: integer[], price: double[]}
-extended: frame{id: integer[], price: double[], tax: double[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+extended: DataFrame{id: integer[], price: double[], tax: double[], label: character[]}
 
 #---- walrus_in_functional_form
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 extended <- prices[, `:=`(tax = price * 0.2, price = NULL)]
 #++++
-prices: frame{id: integer[], price: double[]}
-extended: frame{id: integer[], tax: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+extended: DataFrame{id: integer[], tax: double[]}
 
 #---- a_computed_left_side_widens_silently
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 columns <- "tax"
 prices[, (columns) := 1]
 widened <- prices$anything
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 columns: character
-frame
+DataFrame
 widened: Unknown
 
 #---- walrus_updates_a_local_frame
 total_tax <- function() {
-  prices <- frame(id = 1:3, price = c(1, 2, 3))
+  prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
   prices[, tax := price * 0.2]
   prices$tax
 }
@@ -560,487 +560,487 @@ total_tax <- function() {
 total_tax: fn() -> double[]
 
 #---- walrus_updates_a_parameter
-#: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+#: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 total_tax <- function(prices) {
   prices[, tax := price * 0.2]
   prices$tax
 }
 #++++
-total_tax: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+total_tax: fn(prices: DataFrame{id: integer[], price: double[]}) -> double[]
 
 #---- walrus_on_an_enclosing_frame_updates_it_without_a_local_binding
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 with_tax <- function() {
   prices[, tax := price * 0.2]
   prices
 }
 unchanged <- prices
 #++++
-prices: frame{id: integer[], price: double[]}
-with_tax: fn() -> frame{id: integer[], price: double[], tax: double[]}
-unchanged: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+with_tax: fn() -> DataFrame{id: integer[], price: double[], tax: double[]}
+unchanged: DataFrame{id: integer[], price: double[]}
 
 #---- an_assigned_walrus_makes_a_local_copy
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 with_tax <- function() {
   prices <- prices[, tax := price * 0.2]
   prices$tax
 }
 unchanged <- prices
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 with_tax: fn() -> double[]
-unchanged: frame{id: integer[], price: double[]}
+unchanged: DataFrame{id: integer[], price: double[]}
 
 #---- a_subset_walrus_keeps_the_existing_column_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[id > 1L, price := 0L]
 kept <- prices$price
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
 kept: double[]
 
 #---- a_single_value_walrus_keeps_the_existing_column_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, price := 0L]
 kept <- prices$price
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
 kept: double[]
 
 #---- a_grouped_walrus_keeps_the_existing_column_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, id := 2, by = price]
 kept <- prices$id
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
 kept: integer[]
 
 #---- a_subset_walrus_adds_a_new_column_with_the_value_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[id > 1L, flag := TRUE]
 added <- prices$flag
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[], flag: logical[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[], flag: logical[]}
 added: logical[]
 
 #---- walrus_with_a_misspelled_right_side_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, tax := pirce * 0.2]
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[], tax: Unknown}
-62..67 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[], tax: Unknown}
+66..71 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
 
 #---- a_string_written_into_part_of_a_number_column_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[id > 1L, price := "free"]
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-71..77 error[type-mismatch] column `price` holds `double[]`, so this `character` value is parsed as a number, and a string that is not one becomes `NA`
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+75..81 error[type-mismatch] column `price` holds `double[]`, so this `character` value is parsed as a number, and a string that is not one becomes `NA`
 
 #---- a_string_recycled_into_a_logical_column_is_reported
-flags <- frame(id = 1:3, ok = c(TRUE, FALSE, TRUE))
+flags <- DataFrame(id = 1:3, ok = c(TRUE, FALSE, TRUE))
 flags[, ok := "yes"]
 #++++
-flags: frame{id: integer[], ok: logical[]}
-frame{id: integer[], ok: logical[]}
-66..71 error[type-mismatch] column `ok` holds `logical[]`, so this `character` value is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`
+flags: DataFrame{id: integer[], ok: logical[]}
+DataFrame{id: integer[], ok: logical[]}
+70..75 error[type-mismatch] column `ok` holds `logical[]`, so this `character` value is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`
 
 #---- a_fractional_literal_written_into_an_integer_column_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[price > 1, `:=`(id = -2.5, price = 0)]
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-74..78 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+78..82 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
 
 #---- a_one_item_list_writes_its_item
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 labelled <- prices[, c("label") := list("x")]
 truncated <- prices[id > 1L, (c("id")) := list(-(1.5))]
 #++++
-prices: frame{id: integer[], price: double[]}
-labelled: frame{id: integer[], price: double[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labelled: DataFrame{id: integer[], price: double[], label: character[]}
 truncated: Unknown
-139..145 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
+143..149 error[type-mismatch] column `id` holds `integer[]`, so this `double` value is truncated to an integer
 
 #---- a_whole_number_double_written_into_an_integer_column_is_accepted
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[price > 1, id := 2]
 kept <- prices$id
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
 kept: integer[]
 
 #---- a_number_written_into_a_string_column_is_accepted
-labels <- frame(id = 1:3, label = c("a", "b", "c"))
+labels <- DataFrame(id = 1:3, label = c("a", "b", "c"))
 labels[id > 1L, label := 0L]
 kept <- labels$label
 #++++
-labels: frame{id: integer[], label: character[]}
-frame{id: integer[], label: character[]}
+labels: DataFrame{id: integer[], label: character[]}
+DataFrame{id: integer[], label: character[]}
 kept: character[]
 
 #---- a_string_column_replacing_a_number_column_changes_its_type
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, price := as.character(id)]
 replaced <- prices$price
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: character[]}
 replaced: character[]
 
 #---- dollar_assignment_adds_and_removes_columns
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices$label <- "x"
 prices$id <- NULL
 shaped <- prices
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 character
 NULL
-shaped: frame{price: double[], label: character[]}
+shaped: DataFrame{price: double[], label: character[]}
 
 #==== frame_joins
 #---- on_a_string_key
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(id = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(id = 1:3, label = c("a", "b", "c"))
 joined <- prices[labels, on = "id"]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{id: integer[], label: character[]}
-joined: frame{id: integer[], price: double[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{id: integer[], label: character[]}
+joined: DataFrame{id: integer[], price: double[], label: character[]}
 
 #---- on_a_dot_list_key
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(id = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(id = 1:3, label = c("a", "b", "c"))
 joined <- prices[labels, on = .(id)]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{id: integer[], label: character[]}
-joined: frame{id: integer[], price: double[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{id: integer[], label: character[]}
+joined: DataFrame{id: integer[], price: double[], label: character[]}
 
 #---- on_a_character_vector_key_with_roll
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(id = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(id = 1:3, label = c("a", "b", "c"))
 joined <- prices[labels, on = c("id"), roll = TRUE]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{id: integer[], label: character[]}
-joined: frame{id: integer[], price: double[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{id: integer[], label: character[]}
+joined: DataFrame{id: integer[], price: double[], label: character[]}
 
 #---- on_differently_named_keys
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(key = c(1L, 2L), label = c("a", "b"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(key = c(1L, 2L), label = c("a", "b"))
 joined <- prices[labels, on = c(id = "key")]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{key: integer[], label: character[]}
-joined: frame{id: integer[], price: double[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{key: integer[], label: character[]}
+joined: DataFrame{id: integer[], price: double[], label: character[]}
 
 #---- a_shared_non_key_column_is_prefixed
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-quotes <- frame(id = 1:3, price = c(1L, 2L, 3L))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+quotes <- DataFrame(id = 1:3, price = c(1L, 2L, 3L))
 joined <- prices[quotes, on = "id"]
 #++++
-prices: frame{id: integer[], price: double[]}
-quotes: frame{id: integer[], price: integer[]}
-joined: frame{id: integer[], price: double[], i.price: integer[]}
+prices: DataFrame{id: integer[], price: double[]}
+quotes: DataFrame{id: integer[], price: integer[]}
+joined: DataFrame{id: integer[], price: double[], i.price: integer[]}
 
 #---- a_key_missing_from_the_queried_frame
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(key = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(key = 1:3, label = c("a", "b", "c"))
 joined <- prices[labels, on = "key"]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{key: integer[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{key: integer[], label: character[]}
 joined: Unknown
-130..133 error[type-mismatch] the frame `prices` has no column `key`. Its columns are `id`, `price`
+138..141 error[type-mismatch] the frame `prices` has no column `key`. Its columns are `id`, `price`
 
 #---- a_key_missing_from_the_joined_frame
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(key = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(key = 1:3, label = c("a", "b", "c"))
 joined <- prices[labels, on = .(id = idd)]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{key: integer[], label: character[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{key: integer[], label: character[]}
 joined: Unknown
-136..139 error[type-mismatch] the frame `labels` has no column `idd`. Its columns are `key`, `label`
+144..147 error[type-mismatch] the frame `labels` has no column `idd`. Its columns are `key`, `label`
 
 #---- a_non_frame_i_with_on_is_unknown
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 joined <- prices[list(2L), on = "id"]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 joined: Unknown
 
 #---- a_join_feeds_j
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-labels <- frame(id = 1:3, label = c("a", "b", "c"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+labels <- DataFrame(id = 1:3, label = c("a", "b", "c"))
 named <- prices[labels, on = "id", .(label, price)]
 #++++
-prices: frame{id: integer[], price: double[]}
-labels: frame{id: integer[], label: character[]}
-named: frame{label: character[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+labels: DataFrame{id: integer[], label: character[]}
+named: DataFrame{label: character[], price: double[]}
 
 #---- prefixed_columns_read_either_side_of_a_join
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-quotes <- frame(id = 1:3, price = c("a", "b", "c"), venue = c("x", "y", "z"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+quotes <- DataFrame(id = 1:3, price = c("a", "b", "c"), venue = c("x", "y", "z"))
 picked <- prices[quotes, on = "id", .(a = i.price, b = x.price, c = i.venue, d = i.id, e = x.id)]
 #++++
-prices: frame{id: integer[], price: double[]}
-quotes: frame{id: integer[], price: character[], venue: character[]}
-picked: frame{a: character[], b: double[], c: character[], d: integer[], e: integer[]}
+prices: DataFrame{id: integer[], price: double[]}
+quotes: DataFrame{id: integer[], price: character[], venue: character[]}
+picked: DataFrame{a: character[], b: double[], c: character[], d: integer[], e: integer[]}
 
 #---- a_prefixed_column_missing_from_its_side_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
-quotes <- frame(id = 1:3, venue = c("x", "y", "z"))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+quotes <- DataFrame(id = 1:3, venue = c("x", "y", "z"))
 picked <- prices[quotes, on = "id", .(a = i.vneue)]
 #++++
-prices: frame{id: integer[], price: double[]}
-quotes: frame{id: integer[], venue: character[]}
-picked: frame{a: Unknown}
-140..147 warning[unresolved] the frame `prices` has no column `i.vneue`, and nothing else defines that name. Did you mean `i.venue`?
+prices: DataFrame{id: integer[], price: double[]}
+quotes: DataFrame{id: integer[], venue: character[]}
+picked: DataFrame{a: Unknown}
+148..155 warning[unresolved] the frame `prices` has no column `i.vneue`, and nothing else defines that name. Did you mean `i.venue`?
 
 #---- a_prefixed_name_outside_a_join_is_unknown
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 picked <- prices[, .(a = i.price, b = x.price)]
 #++++
-prices: frame{id: integer[], price: double[]}
-picked: frame{a: Unknown, b: Unknown}
+prices: DataFrame{id: integer[], price: double[]}
+picked: DataFrame{a: Unknown, b: Unknown}
 
 #---- a_non_equi_join_takes_the_values_of_i
-events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
-windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- DataFrame(id = 1:2, lo = c(0, 1), hi = c(2, 5))
 joined <- events[windows, on = .(id, t >= lo)]
 #++++
-events: frame{id: integer[], t: double[], v: character[]}
-windows: frame{id: integer[], lo: double[], hi: double[]}
-joined: frame{id: integer[], t: double[], v: character[], hi: double[]}
+events: DataFrame{id: integer[], t: double[], v: character[]}
+windows: DataFrame{id: integer[], lo: double[], hi: double[]}
+joined: DataFrame{id: integer[], t: double[], v: character[], hi: double[]}
 
 #---- a_non_equi_join_in_string_form
-events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
-windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- DataFrame(id = 1:2, lo = c(0, 1), hi = c(2, 5))
 joined <- events[windows, on = c("id", "t>=lo")]
 spaced <- events[windows, on = "id==id, t > lo"]
 #++++
-events: frame{id: integer[], t: double[], v: character[]}
-windows: frame{id: integer[], lo: double[], hi: double[]}
-joined: frame{id: integer[], t: double[], v: character[], hi: double[]}
-spaced: frame{id: integer[], t: double[], v: character[], hi: double[]}
+events: DataFrame{id: integer[], t: double[], v: character[]}
+windows: DataFrame{id: integer[], lo: double[], hi: double[]}
+joined: DataFrame{id: integer[], t: double[], v: character[], hi: double[]}
+spaced: DataFrame{id: integer[], t: double[], v: character[], hi: double[]}
 
 #---- a_second_condition_on_a_column_adds_a_numbered_column
-events <- frame(t = c(1, 2, 3), v = c("a", "b", "c"))
-windows <- frame(lo = c(0, 1), hi = c(2L, 5L))
+events <- DataFrame(t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- DataFrame(lo = c(0, 1), hi = c(2L, 5L))
 joined <- events[windows, on = .(t >= lo, t < hi)]
 #++++
-events: frame{t: double[], v: character[]}
-windows: frame{lo: double[], hi: integer[]}
-joined: frame{t: double[], v: character[], t.1: integer[]}
+events: DataFrame{t: double[], v: character[]}
+windows: DataFrame{lo: double[], hi: integer[]}
+joined: DataFrame{t: double[], v: character[], t.1: integer[]}
 
 #---- a_generated_name_stays_unique
-events <- frame(t = c(1, 2, 3), t.1 = c("a", "b", "c"))
-windows <- frame(lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(t = c(1, 2, 3), t.1 = c("a", "b", "c"))
+windows <- DataFrame(lo = c(0, 1), hi = c(2, 5))
 joined <- events[windows, on = .(t >= lo, t <= hi)]
 #++++
-events: frame{t: double[], t.1: character[]}
-windows: frame{lo: double[], hi: double[]}
-joined: frame{t: double[], t.1: character[], t.1.1: double[]}
+events: DataFrame{t: double[], t.1: character[]}
+windows: DataFrame{lo: double[], hi: double[]}
+joined: DataFrame{t: double[], t.1: character[], t.1.1: double[]}
 
 #---- a_missing_column_in_a_condition_string_is_reported_on_its_name
-events <- frame(id = 1:3, t = c(1, 2, 3))
-windows <- frame(id = 1:2, lo = c(0, 1))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3))
+windows <- DataFrame(id = 1:2, lo = c(0, 1))
 joined <- events[windows, on = "id, t >= low"]
 #++++
-events: frame{id: integer[], t: double[]}
-windows: frame{id: integer[], lo: double[]}
+events: DataFrame{id: integer[], t: double[]}
+windows: DataFrame{id: integer[], lo: double[]}
 joined: Unknown
-124..127 error[type-mismatch] the frame `windows` has no column `low`. Its columns are `id`, `lo`
+132..135 error[type-mismatch] the frame `windows` has no column `low`. Its columns are `id`, `lo`
 
 #---- integer_and_double_columns_join
-events <- frame(id = 1:3, t = c(1, 2, 3))
-windows <- frame(id = c(1, 2), lo = c(0L, 1L))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3))
+windows <- DataFrame(id = c(1, 2), lo = c(0L, 1L))
 joined <- events[windows, on = .(id, t > lo)]
 #++++
-events: frame{id: integer[], t: double[]}
-windows: frame{id: double[], lo: integer[]}
-joined: frame{id: double[], t: integer[]}
+events: DataFrame{id: integer[], t: double[]}
+windows: DataFrame{id: double[], lo: integer[]}
+joined: DataFrame{id: double[], t: integer[]}
 
 #---- a_join_of_numbers_to_strings_is_reported
-events <- frame(id = 1:3, t = c(1, 2, 3))
-labels <- frame(key = c("1", "2"), label = c("a", "b"))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3))
+labels <- DataFrame(key = c("1", "2"), label = c("a", "b"))
 joined <- events[labels, on = .(id = key)]
 compared <- events[labels, on = "id == key"]
 #++++
-events: frame{id: integer[], t: double[]}
-labels: frame{key: character[], label: character[]}
+events: DataFrame{id: integer[], t: double[]}
+labels: DataFrame{key: character[], label: character[]}
 joined: Unknown
 compared: Unknown
-130..138 error[type-mismatch] the join condition `id == key` compares `integer[]` with `character[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
-174..183 error[type-mismatch] the join condition `id == key` compares `integer[]` with `character[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+138..146 error[type-mismatch] the join condition `id == key` compares `integer[]` with `character[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+182..191 error[type-mismatch] the join condition `id == key` compares `integer[]` with `character[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
 
 #---- a_join_of_logicals_to_numbers_is_reported
-events <- frame(id = 1:3, ok = c(TRUE, FALSE, TRUE))
-picks <- frame(ok = c(1L, 0L))
+events <- DataFrame(id = 1:3, ok = c(TRUE, FALSE, TRUE))
+picks <- DataFrame(ok = c(1L, 0L))
 joined <- events[picks, on = "ok"]
 #++++
-events: frame{id: integer[], ok: logical[]}
-picks: frame{ok: integer[]}
+events: DataFrame{id: integer[], ok: logical[]}
+picks: DataFrame{ok: integer[]}
 joined: Unknown
-114..116 error[type-mismatch] the join condition `ok == ok` compares `logical[]` with `integer[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+122..124 error[type-mismatch] the join condition `ok == ok` compares `logical[]` with `integer[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
 
 #---- an_ordering_condition_on_strings_is_reported
-events <- frame(id = 1:3, name = c("a", "b", "c"))
-bounds <- frame(lo = c("a", "b"))
+events <- DataFrame(id = 1:3, name = c("a", "b", "c"))
+bounds <- DataFrame(lo = c("a", "b"))
 joined <- events[bounds, on = .(name > lo)]
 #++++
-events: frame{id: integer[], name: character[]}
-bounds: frame{lo: character[]}
+events: DataFrame{id: integer[], name: character[]}
+bounds: DataFrame{lo: character[]}
 joined: Unknown
-117..121 error[type-mismatch] the join condition `name > lo` compares numbers, but `name` is `character[]`. Only `==` joins strings.
+125..129 error[type-mismatch] the join condition `name > lo` compares numbers, but `name` is `character[]`. Only `==` joins strings.
 
 #---- a_rolling_non_equi_join_is_reported
-events <- frame(id = 1:3, t = c(1, 2, 3))
-windows <- frame(id = 1:2, lo = c(0, 1))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3))
+windows <- DataFrame(id = 1:2, lo = c(0, 1))
 joined <- events[windows, on = .(id, t >= lo), roll = TRUE]
 plain <- events[windows, on = .(id, t >= lo), roll = FALSE]
 #++++
-events: frame{id: integer[], t: double[]}
-windows: frame{id: integer[], lo: double[]}
+events: DataFrame{id: integer[], t: double[]}
+windows: DataFrame{id: integer[], lo: double[]}
 joined: Unknown
-plain: frame{id: integer[], t: double[]}
-130..141 error[type-mismatch] a rolling join needs every join condition to be `==`
+plain: DataFrame{id: integer[], t: double[]}
+138..149 error[type-mismatch] a rolling join needs every join condition to be `==`
 
 #---- each_i_groups_by_the_compared_columns
-events <- frame(id = 1:3, t = c(1, 2, 3), v = c(10L, 20L, 30L))
-windows <- frame(lo = c(0, 1), hi = c(2L, 5L), label = c("p", "q"))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- DataFrame(lo = c(0, 1), hi = c(2L, 5L), label = c("p", "q"))
 totals <- events[windows, on = .(t >= lo, t < hi), .(n = .N, total = sum(v), label), by = .EACHI]
 counted <- events[windows, on = .(t >= lo), .N, by = .EACHI]
 #++++
-events: frame{id: integer[], t: double[], v: integer[]}
-windows: frame{lo: double[], hi: integer[], label: character[]}
-totals: frame{t: double[], t.1: integer[], n: integer[], total: integer[], label: character[]}
-counted: frame{t: double[], N: integer[]}
+events: DataFrame{id: integer[], t: double[], v: integer[]}
+windows: DataFrame{lo: double[], hi: integer[], label: character[]}
+totals: DataFrame{t: double[], t.1: integer[], n: integer[], total: integer[], label: character[]}
+counted: DataFrame{t: double[], N: integer[]}
 
 #---- each_i_reads_a_column_of_i_as_one_value
-events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
-windows <- frame(lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- DataFrame(lo = c(0, 1), hi = c(2, 5))
 sized <- events[windows, on = .(t >= lo), .(size = if (hi > 2) "wide" else "narrow"), by = .EACHI]
 #++++
-events: frame{t: double[], v: integer[]}
-windows: frame{lo: double[], hi: double[]}
-sized: frame{t: double[], size: character[]}
+events: DataFrame{t: double[], v: integer[]}
+windows: DataFrame{lo: double[], hi: double[]}
+sized: DataFrame{t: double[], size: character[]}
 
 #---- each_i_reads_a_column_of_x_as_a_vector
-events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
-windows <- frame(lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- DataFrame(lo = c(0, 1), hi = c(2, 5))
 sized <- events[windows, on = .(t >= lo), .(big = if (v > 2L) "yes" else "no"), by = .EACHI]
 #++++
-events: frame{t: double[], v: integer[]}
-windows: frame{lo: double[], hi: double[]}
-sized: frame{t: double[], big: character[]}
+events: DataFrame{t: double[], v: integer[]}
+windows: DataFrame{lo: double[], hi: double[]}
+sized: DataFrame{t: double[], big: character[]}
 
 #---- each_i_reads_prefixed_columns
-events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
-windows <- frame(lo = c(0, 1), t = c("a", "b"))
+events <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- DataFrame(lo = c(0, 1), t = c("a", "b"))
 picked <- events[windows, on = .(t >= lo), .(first = x.t, label = i.t), by = .EACHI]
 #++++
-events: frame{t: double[], v: integer[]}
-windows: frame{lo: double[], t: character[]}
-picked: frame{t: double[], first: double[], label: character[]}
+events: DataFrame{t: double[], v: integer[]}
+windows: DataFrame{lo: double[], t: character[]}
+picked: DataFrame{t: double[], first: double[], label: character[]}
 
 #---- each_i_reads_a_prefixed_column_of_i_as_one_value
-events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
-windows <- frame(lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- DataFrame(lo = c(0, 1), hi = c(2, 5))
 flagged <- events[windows, on = .(t >= lo), .(wide = if (i.hi > 2) 1 else 2), by = .EACHI]
 #++++
-events: frame{t: double[], v: integer[]}
-windows: frame{lo: double[], hi: double[]}
-flagged: frame{t: double[], wide: double[]}
+events: DataFrame{t: double[], v: integer[]}
+windows: DataFrame{lo: double[], hi: double[]}
+flagged: DataFrame{t: double[], wide: double[]}
 
 #---- a_zero_or_false_roll_is_not_a_rolling_join
-events <- frame(id = 1:3, t = c(1, 2, 3))
-windows <- frame(id = 1:2, lo = c(0, 1))
+events <- DataFrame(id = 1:3, t = c(1, 2, 3))
+windows <- DataFrame(id = 1:2, lo = c(0, 1))
 zero <- events[windows, on = .(id, t >= lo), roll = 0]
 false <- events[windows, on = .(id, t >= lo), roll = F]
 #++++
-events: frame{id: integer[], t: double[]}
-windows: frame{id: integer[], lo: double[]}
-zero: frame{id: integer[], t: double[]}
-false: frame{id: integer[], t: double[]}
+events: DataFrame{id: integer[], t: double[]}
+windows: DataFrame{id: integer[], lo: double[]}
+zero: DataFrame{id: integer[], t: double[]}
+false: DataFrame{id: integer[], t: double[]}
 
 #---- each_i_reports_a_missing_column
-events <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
-windows <- frame(lo = c(0, 1), hi = c(2, 5))
+events <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+windows <- DataFrame(lo = c(0, 1), hi = c(2, 5))
 totals <- events[windows, on = .(t >= lo), .(total = sum(vv)), by = .EACHI]
 #++++
-events: frame{t: double[], v: integer[]}
-windows: frame{lo: double[], hi: double[]}
-totals: frame{t: double[], total: Unknown}
-156..158 warning[unresolved] the frame `events` has no column `vv`, and nothing else defines that name.
+events: DataFrame{t: double[], v: integer[]}
+windows: DataFrame{lo: double[], hi: double[]}
+totals: DataFrame{t: double[], total: Unknown}
+164..166 warning[unresolved] the frame `events` has no column `vv`, and nothing else defines that name.
 
 #==== frame_columns
 #---- dollar_reads_a_column
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 column <- prices$price
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 column: double[]
 
 #---- double_bracket_reads_a_column
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 column <- prices[["price"]]
 first <- prices[[1L]]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 column: double[]
 first: integer[]
 
 #---- a_missing_dollar_column_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 column <- prices$pirce
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 column: Unknown
-63..68 error[type-mismatch] the frame `prices` has no column `pirce`. Did you mean `price`?
+67..72 error[type-mismatch] the frame `prices` has no column `pirce`. Did you mean `price`?
 
 #---- a_missing_double_bracket_column_is_reported
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 column <- prices[["pirce"]]
 #++++
-prices: frame{id: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
 column: Unknown
-64..71 error[type-mismatch] the frame `prices` has no column `pirce`. Did you mean `price`?
+68..75 error[type-mismatch] the frame `prices` has no column `pirce`. Did you mean `price`?
 
 #==== frame_chains
 #---- queries_compose_left_to_right
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 top <- sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 #++++
-sales: frame{team: character[], amount: double[]}
-top: frame{team: character[], total: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+top: DataFrame{team: character[], total: double[]}
 
 #---- a_chain_sees_columns_added_earlier_in_it
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 taxed <- sales[, tax := amount * 0.2][, .(team, tax)]
 #++++
-sales: frame{team: character[], amount: double[]}
-taxed: frame{team: character[], tax: double[]}
+sales: DataFrame{team: character[], amount: double[]}
+taxed: DataFrame{team: character[], tax: double[]}
 
 #---- a_chain_reports_a_column_its_earlier_step_dropped
-sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 totals <- sales[, .(total = sum(amount)), by = team][, amount]
 #++++
-sales: frame{team: character[], amount: double[]}
+sales: DataFrame{team: character[], amount: double[]}
 totals: Unknown
-108..114 warning[unresolved] this frame has no column `amount`, and nothing else defines that name.
+112..118 warning[unresolved] this frame has no column `amount`, and nothing else defines that name.
 
 #==== factor_columns
 
@@ -1078,25 +1078,143 @@ dd: Date
 183..184 error[type-mismatch] expected a numeric value (`integer` or `double`), found `factor`
 
 #---- a_factor_column_joins_on_labels_and_refuses_numbers
-f <- frame(g = factor(c("a", "b")), v = c(1, 2))
+f <- DataFrame(g = factor(c("a", "b")), v = c(1, 2))
 fa <- f[g == "a"]
 fb <- f[g == 1]
-k <- frame(k = c("a", "b"))
+k <- DataFrame(k = c("a", "b"))
 j <- f[k, on = .(g = k)]
-m <- frame(k = c(1, 2))
+m <- DataFrame(k = c(1, 2))
 j2 <- f[m, on = .(g = k)]
 f[, g := "c"]
 f[, g := 3]
 #++++
-f: frame{g: factor, v: double[]}
-fa: frame{g: factor, v: double[]}
+f: DataFrame{g: factor, v: double[]}
+fa: DataFrame{g: factor, v: double[]}
 fb: Unknown
-k: frame{k: character[]}
-j: frame{g: character[], v: double[]}
-m: frame{k: double[]}
+k: DataFrame{k: character[]}
+j: DataFrame{g: character[], v: double[]}
+m: DataFrame{k: double[]}
 j2: Unknown
-frame{g: factor, v: double[]}
-frame{g: factor, v: double[]}
-75..81 error[type-mismatch] `==` is not defined between `factor` and `double`
-178..183 error[type-mismatch] the join condition `g == k` compares `factor` with `double[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
-209..210 error[type-mismatch] column `g` holds `factor`, so this `double` value is read as a level's position rather than a label, and a number that is not one becomes `NA`
+DataFrame{g: factor, v: double[]}
+DataFrame{g: factor, v: double[]}
+79..85 error[type-mismatch] `==` is not defined between `factor` and `double`
+190..195 error[type-mismatch] the join condition `g == k` compares `factor` with `double[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+221..222 error[type-mismatch] column `g` holds `factor`, so this `double` value is read as a level's position rather than a label, and a number that is not one becomes `NA`
+
+#==== dataframe_verbs
+#---- select_computes_the_named_columns
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
+picked <- DataFrame.select(sales, "region", revenue = col("units") * col("price"))
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[]}
+picked: DataFrame{region: character[], revenue: double[]}
+
+#---- unaliased_expressions_take_the_first_column_read
+sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
+picked <- sales |> DataFrame.select(col("price") * 2, col("units") > 1L, Expr.len())
+#++++
+sales: DataFrame{units: integer[], price: double[]}
+picked: DataFrame{price: double[], units: logical[], len: integer[]}
+
+#---- alias_renames_an_expression
+sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
+picked <- sales |> DataFrame.select(col("price") |> Expr.alias("cost"))
+#++++
+sales: DataFrame{units: integer[], price: double[]}
+picked: DataFrame{cost: double[]}
+
+#---- with_columns_replaces_or_appends
+sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
+wider <- sales |> DataFrame.with_columns(units = col("units") * 2.5, total = col("units") * col("price"))
+#++++
+sales: DataFrame{units: integer[], price: double[]}
+wider: DataFrame{units: double[], price: double[], total: double[]}
+
+#---- filter_sort_and_head_keep_the_columns
+sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
+top <- sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.sort("price", descending = TRUE) |>
+  DataFrame.head(1L)
+#++++
+sales: DataFrame{units: integer[], price: double[]}
+top: DataFrame{units: integer[], price: double[]}
+
+#---- group_by_and_agg_give_keys_then_aggregates
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
+grouped <- DataFrame.group_by(sales, "region")
+totals <- grouped |> GroupBy.agg(col("units") |> Expr.sum(), avg = col("price") |> Expr.mean(), n = Expr.len())
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[]}
+grouped: GroupBy{region: character[]; units: integer[], price: double[]}
+totals: DataFrame{region: character[], units: integer[], avg: double[], n: integer[]}
+
+#---- join_appends_the_other_columns_with_a_suffix
+left <- DataFrame(id = 1:3, score = c(1, 2, 3))
+right <- DataFrame(id = 1:2, score = c(10, 20), label = c("a", "b"))
+joined <- DataFrame.join(left, right, on = "id")
+kept <- DataFrame.join(left, right, on = "id", how = "semi")
+#++++
+left: DataFrame{id: integer[], score: double[]}
+right: DataFrame{id: integer[], score: double[], label: character[]}
+joined: DataFrame{id: integer[], score: double[], score_right: double[], label: character[]}
+kept: DataFrame{id: integer[], score: double[]}
+
+#---- lazy_frames_carry_the_schema_to_collect
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+plan <- sales |>
+  DataFrame.lazy() |>
+  LazyFrame.group_by("region") |>
+  LazyGroupBy.agg(col("units") |> Expr.max())
+result <- LazyFrame.collect(plan)
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+plan: LazyFrame{region: character[], units: integer[]}
+result: DataFrame{region: character[], units: integer[]}
+
+#---- an_expression_in_a_variable_leaves_the_columns_unknown
+sales <- DataFrame(units = c(3L, 5L))
+doubled <- col("units") * 2
+picked <- DataFrame.select(sales, doubled)
+#++++
+sales: DataFrame{units: integer[]}
+doubled: Expr
+picked: DataFrame
+
+#==== dataframe_verb_errors
+#---- a_misspelled_column_is_reported_at_its_string
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+picked <- DataFrame.select(sales, "regoin", col("unit") * 2)
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+picked: Unknown
+96..104 error[type-mismatch] the frame `sales` has no column `regoin`. Did you mean `region`?
+110..116 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
+
+#---- agg_needs_an_aggregation
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("units"))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+totals: Unknown
+125..137 error[type-mismatch] `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
+
+#---- a_join_key_must_exist_on_both_sides
+left <- DataFrame(id = 1:3)
+right <- DataFrame(key = 1:3)
+joined <- DataFrame.join(left, right, on = "id")
+#++++
+left: DataFrame{id: integer[]}
+right: DataFrame{key: integer[]}
+joined: Unknown
+101..105 error[type-mismatch] the frame `right` has no column `id`. Its columns are `key`
+
+#---- a_key_missing_from_both_sides_is_reported_once
+left <- DataFrame(id = 1:3)
+right <- DataFrame(id = 1:3)
+joined <- DataFrame.join(left, right, on = "ids")
+#++++
+left: DataFrame{id: integer[]}
+right: DataFrame{id: integer[]}
+joined: Unknown
+100..105 error[type-mismatch] the frame `left` has no column `ids`. Its columns are `id`

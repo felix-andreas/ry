@@ -70,12 +70,12 @@ w <- match ((1L, "a")) {
 
 #---- tag_and_record_types
 x: :Some(integer)|:None|.. <- :None
-f <- function(p: record{ x:double }, t: tuple{integer}) ->:Ok(value: double) p
+f <- function(p: Record{ x:double }, t: Tuple{integer}) ->:Ok(value: double) p
 #: :Some(integer)|:None
 y <- :None
 #++++
 x: :Some(integer) | :None | .. <- :None
-f <- function(p: record{x: double}, t: tuple{integer}) -> :Ok(value: double) p
+f <- function(p: Record{x: double}, t: Tuple{integer}) -> :Ok(value: double) p
 #: :Some(integer) | :None
 y <- :None
 

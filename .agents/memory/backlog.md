@@ -35,10 +35,11 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **Compiled code builds with GNU R's toolchain**: on ry's runtime `R.home()` is GNU R's, so
-  `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links GNU R's `libR.so`. It loads
-  because ry's `libR.so` already holds that soname. Pointing `R.home()` at `crates/rcmd`'s R home
-  would make the build ry's own.
+- **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run --runtime ry`,
+  `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
+  GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
+  loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
+  on ry, would make the build ry's own.
 - **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
@@ -142,7 +143,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 624 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 377 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -152,21 +153,23 @@ classes, largest first:
   `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
   has not been isolated yet. The likely fix is leniency for shape-only mismatches at calls to
   unannotated project functions, which needs the callee's annotation provenance at the argument check.
-- **Inferred unions in conditions.** `T | logical | NULL` and `logical | NULL` reach `if` and `&&`
-  after `if (is.null(x)) x <- ...` rebinds (processx `conn_connect_fifo`, data.table, lattice).
+- **A top-level `x <- NULL` placeholder** that a function fills in with `assign()` or `<<-` and
+  another tests in a condition (brew `.extendedError`, rvest `new_chromote`).
 - **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
   an `if` without `else` assigns the value (httr2 `sprintf(type, kind)`, `gsub` replacement).
 - **Callbacks whose arity the interface fixes.** purrr `.fmap(.x, function(x) ...)` against
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
-- **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics),
-  xtable's string `+` method, `*` between `double[]` and a matrix.
+- **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
+- **`lapply` or `vapply` over a `data.frame`** (9; rprojroot, nlme, rmarkdown). The opaque
+  `data.frame` fits no `list` parameter. A `data.frame` overload of `lapply` fixes the call but makes
+  an untyped argument ambiguous and coarsens the `.SD` column error, so the fix is to give
+  `data.frame` its named-list representation rather than more overloads.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
 - One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
   and no such function exists.
-- Singletons: `lapply` over `as.data.frame(x)`, an infinite-type error
-  in pkgdown `news_search_index`, `Sys.getenv()` value passed to a `logical` helper (renv `not`).
+- Singletons: an infinite-type error in pkgdown `news_search_index`, `Sys.getenv()` value passed to a `logical` helper (renv `not`).
 
 To reproduce, give each package a `ry.toml` with `[check]` `typing = true` (typing is off by
 default) and run `ry check --output json R` inside it.
@@ -1900,7 +1903,24 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
-## Open: the built-in frame
+## Open: DataFrame
+
+- **Slower than data.table on two bench questions** (`tools/bench/table`, 1e6 rows): groupby q6
+  (median and sd per group, 0.13 s against 0.08 s) and the keyed rolling join (0.03 s against
+  0.02 s). The Rust engine alone runs q6 in 0.06 s, so most of the gap is the R-side call path.
+- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
+  `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
+  expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
+  has no parquet predicate statistics use beyond what Polars' reader does.
+- **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
+  column string to the verb or constructor argument that created it are not implemented; hover and
+  completion are.
+- **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
+  unknown, because the refinement reads argument syntax. Typing `Expr` with its column type
+  (`Expr<double>`) would close it. The column-error wording says "the frame `x`" for every table
+  kind.
+- **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
+  recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
 - **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
   needs R code (including under `.EACHI`) stop with an error.
@@ -1927,12 +1947,10 @@ The end-to-end guard rests on the corpus suites.
 - **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
   `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
   under ry's runtime an attached data.table still runs its own versions, which return a
-  `data.table` and reject a frame. The runtime needs these names routed to the engine
-  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
-  installs, before the checker's types are true at run time. The `[` bridge
-  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
-  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
-  and decline to data.table otherwise.
+  `data.table` and reject a frame. Routing them to the engine was measured and rejected
+  (`decisions.md`, "data.table's helpers run data.table's own C"), so the fix is in the checker:
+  type a call that resolves to data.table's export as returning `data.table`, and keep frames for
+  `frame_read_csv` and the other `ry` functions.
 - **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
@@ -1941,6 +1959,22 @@ The end-to-end guard rests on the corpus suites.
   against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
   through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
   `ops::key_digits`, as `unique` does, would skip the general grouping.
+- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `dcast` takes 0.030 to
+  0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
+  bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
+  `setkey` is at parity (0.026 s on both).
+- **data.table's helpers that allocate many large vectors trail GNU R at 1e7 rows.** In
+  `tools/bench/table/ops.R`, `rbindlist` takes 1.26 s against 0.85 s, `fwrite` 1.21 s against
+  0.76 s and `melt` 1.38 s against 1.21 s; `setkey`, `dcast`, `unique` and the single-loop helpers
+  are at parity or faster. In `rbindlist` about 0.3 s is collection (minor collections tracing the
+  fresh 2e7-element character columns, and one major collection), and `SET_STRING_ELT`'s barrier
+  and reference counts touch each CHARSXP header. `fwrite` has not been profiled.
+- **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
+  `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
+  against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
+  digits cover factors, integers and logicals only. A string digit from `ops::string_ranks` was
+  tried and was slower (ranking sorts the distinct strings), so a digit needs first-appearance
+  numbers taken during import, where each distinct CHARSXP is already numbered.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
@@ -2028,10 +2062,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
-- **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
-  compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
-  exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
-  GNU R until then, because configure scripts run R code through them.
+- **`R -f` and `R CMD BATCH` do not echo input.** `ry_run` runs a file like `Rscript`, so
+  `R -f` without `--no-echo` and `BATCH` output omit the `> ` echoed code GNU R prints.
+- **`exists(name, registry)` on the namespace registry segfaults** (its enclosure is NULL, as in
+  GNU R, where the lookup errors "use of NULL environment is defunct" instead).
+- **`lazyLoad()` returns visibly** (prints `NULL` at top level); GNU R's result is invisible.
 - **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
   negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the

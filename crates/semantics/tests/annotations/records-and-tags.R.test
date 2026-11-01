@@ -1,38 +1,38 @@
 #==== native_types
 #---- record_type
-record{y: double, x: integer}
+Record{y: double, x: integer}
 #++++
-record{x: integer, y: double}
+Record{x: integer, y: double}
 
 #---- empty_record_type
-record{}
+Record{}
 #++++
-record{}
+Record{}
 
 #---- tuple_type
-tuple{integer, character}
+Tuple{integer, character}
 #++++
-tuple{integer, character}
+Tuple{integer, character}
 
 #---- empty_tuple_type
-tuple{}
+Tuple{}
 #++++
-tuple{}
+Tuple{}
 
 #---- record_type_needs_names
-record{integer, character}
+Record{integer, character}
 #++++
-error: a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items
+error: a `Record{...}` type names every field: write each one as `name: TYPE`, or use `Tuple{...}` for unnamed items
 
 #---- tuple_type_takes_no_names
-tuple{x: integer}
+Tuple{x: integer}
 #++++
-error: a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields
+error: a `Tuple{...}` type lists its items without names: drop the names, or use `Record{...}` for named fields
 
 #---- duplicate_record_field
-record{x: integer, x: double}
+Record{x: integer, x: double}
 #++++
-error: the field `x` appears twice in this `record{...}` type
+error: the field `x` appears twice in this `Record{...}` type
 
 #==== tag_types
 #---- bare_tag
@@ -74,3 +74,8 @@ error: `:Some(integer)` and `:Some(integer, integer)` give one tag two payload s
 @alias Option<T> {:Some(T) | :None}
 #++++
 alias Option<T> = :Some(T) | :None
+
+#---- lowercase_heads_point_at_the_capitalized_spelling
+record{x: double}
+#++++
+syntax error: ry's own types are capitalized: write `Record{...}`, not `record{...}`

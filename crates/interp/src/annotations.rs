@@ -400,9 +400,12 @@ fn mask_of(node: &SyntaxNode) -> Mask {
             }
             mask
         }
-        // A frame is an external pointer to a table, so its columns are not in its storage.
-        SyntaxKind::TYPE_RECORD
-            if node.first_token().is_some_and(|token| token.text() == "frame") =>
+        // A DataFrame is an external pointer to a table, so its columns are not in its storage,
+        // and a plan or a grouping is no list either.
+        SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE
+            if node.first_token().is_some_and(|token| {
+                matches!(token.text(), "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy")
+            }) =>
         {
             0
         }

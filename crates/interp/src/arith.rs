@@ -1482,6 +1482,8 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
+        // GNU R negates any empty vector, so `!character()` is `logical(0)`.
+        _ if count == 0 => alloc(SexpType::Logical, 0),
         _ => Err(call.error("invalid argument type")),
     }
 }

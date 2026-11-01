@@ -6,6 +6,7 @@ import starlightThemeBlack from 'starlight-theme-black'
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://ry-lang.org',
 	// Every page published before the docs were reorganised keeps working.
 	redirects: {
 		'/formatter': '/guides/formatting',
@@ -97,8 +98,8 @@ export default defineConfig({
 					label: "4. Go fully typed",
 					items: [
 						{ slug: 'type-checking/records-and-tags' },
-						{ slug: 'type-checking/frames' },
-						{ slug: 'guides/frames' },
+						{ slug: 'type-checking/dataframes' },
+						{ slug: 'guides/dataframes' },
 						{ slug: 'reference/standard-library' },
 						{ slug: 'type-checking/strict-mode' },
 					],

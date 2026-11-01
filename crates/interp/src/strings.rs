@@ -390,7 +390,16 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
                 }
             }
         };
-        set_elt(result, index, string_vector(&pieces)?);
+        // Each piece vector is stored in `result` before its strings are made, so neither needs
+        // a handle; rooting them would grow the handle stack with the input, and every
+        // collection scans that stack.
+        let heap = crate::heap();
+        let vector = heap.alloc_vector(SexpType::String, pieces.len() as isize)?;
+        heap.set_element(result, index, vector);
+        for (position, piece) in pieces.iter().enumerate() {
+            let charsxp = heap.mk_char(piece.as_bytes(), Encoding::Utf8)?;
+            heap.set_element(vector, position, charsxp);
+        }
     }
     let names = get_attr(x, symbols().names);
     if names != nil() {

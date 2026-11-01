@@ -274,6 +274,9 @@ pub mod gp {
     pub const UTF8: u16 = 1 << 3;
     pub const S4_OBJECT: u16 = 1 << 4;
     pub const CACHED: u16 = 1 << 5;
+    /// GNU R's `GROWABLE_MASK` on a vector, the same bit as `CACHED` on a string. ry keeps
+    /// growability in the heap's resizable flag, and `LEVELS` reports it through this bit.
+    pub const GROWABLE: u16 = 1 << 5;
     pub const ASCII: u16 = 1 << 6;
     /// The encoding bits that distinguish two interned strings with the same bytes.
     pub const ENCODING: u16 = BYTES | LATIN1 | UTF8;
@@ -642,6 +645,25 @@ impl Sexp {
     /// resizable vector (`R_allocResizableVector`). For a `CHARSXP` the field holds its hash.
     pub unsafe fn capacity(self) -> isize {
         unsafe { self.payload::<VectorObject>().capacity.get() }
+    }
+
+    /// A `CHARSXP`'s intern hash, the high half of its capacity field.
+    pub unsafe fn char_hash(self) -> u32 {
+        unsafe { (self.capacity() as u64 >> 32) as u32 }
+    }
+
+    /// A `CHARSXP`'s `TRUELENGTH`, the low half of its capacity field. data.table's string
+    /// kernels set and read the truelength of every string they meet, so it lives in the string
+    /// itself and costs a load, as in GNU R.
+    pub unsafe fn char_truelength(self) -> i32 {
+        unsafe { self.capacity() as u64 as u32 as i32 }
+    }
+
+    pub unsafe fn set_char_truelength(self, value: i32) {
+        unsafe {
+            let hash = self.capacity() as u64 & !0xFFFF_FFFF;
+            self.set_capacity((hash | u64::from(value as u32)) as isize);
+        }
     }
 
     pub(crate) unsafe fn set_capacity(self, capacity: isize) {

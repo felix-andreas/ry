@@ -71,7 +71,32 @@ pub const BUILTINS: &[BuiltinDef] = &[
     })
     .invisible(),
     internal("saveToConn", 6, |call| unsafe { do_save_to_conn(call) }).invisible(),
+    internal("lazyLoadDBinsertValue", 5, |call| unsafe { do_lazy_load_insert(call) }),
 ];
+
+/// `lazyLoadDBinsertValue(value, file, ascii, compress, hook)`: serializes `value` (version 3,
+/// with `hook` deciding which environments become references), compresses it as `compress`
+/// asks, appends the record to `file`, and returns its `c(offset, length)`, which is the key
+/// `lazyLoadDBfetch` takes back.
+unsafe fn do_lazy_load_insert(call: &Call<'_>) -> ApiResult<Sexp> {
+    use std::io::{Seek, Write};
+    let file = interp::values::require_string(call.arg(1), "file")?;
+    let format = if interp::values::as_logical_scalar(call.arg(2)) == 1 { Format::Ascii } else { Format::Xdr };
+    let kind = interp::values::as_integer_scalar(call.arg(3));
+    let stream = serialize_to_bytes(call.arg(0), format, 3, call.arg(4))?;
+    let record = interp::serialize::compress_record(&stream, if kind == NA_INTEGER { 1 } else { kind })?;
+    let failed = |failure: std::io::Error| error(format!("cannot write to file '{file}': {failure}"));
+    let mut handle = std::fs::OpenOptions::new().create(true).append(true).open(&file).map_err(failed)?;
+    let offset = handle.seek(std::io::SeekFrom::End(0)).map_err(failed)?;
+    handle.write_all(&record).map_err(failed)?;
+    interp::serialize::forget_database(&file);
+    let key = interp::values::alloc(SexpType::Integer, 2)?;
+    let (Ok(offset), Ok(length)) = (i32::try_from(offset), i32::try_from(record.len())) else {
+        return Err(error(format!("lazy-load database '{file}' is larger than 2GB")));
+    };
+    interp::values::ints_mut(key).copy_from_slice(&[offset, length]);
+    Ok(key)
+}
 
 /// `serialize()`'s `type` code: 0 is XDR, 1 ASCII, 2 hexadecimal ASCII and 3 native binary.
 unsafe fn level_format(code: Sexp) -> ApiResult<Format> {
@@ -330,6 +355,7 @@ pub unsafe fn serialize(
         buffer: Vec::new(),
         sink,
         refs: FxHashMap::default(),
+        remembered: 0,
         hook,
         known: *runtime().heap.known(),
     };
@@ -351,6 +377,10 @@ struct Writer<'s, 'h> {
     sink: &'s mut dyn FnMut(&[u8]) -> ApiResult<()>,
     /// The back-reference index of every remembered object.
     refs: FxHashMap<Sexp, usize>,
+    /// How many objects the reader will have remembered, which exceeds `refs.len()` once the
+    /// persistence hook names an object a second time: GNU R remembers it again under a new
+    /// index, and so does every reader.
+    remembered: usize,
     hook: Option<PersistHook<'h>>,
     known: WellKnown,
 }
@@ -468,8 +498,8 @@ impl Writer<'_, '_> {
     }
 
     fn remember(&mut self, object: Sexp) {
-        let index = self.refs.len() + 1;
-        self.refs.insert(object, index);
+        self.remembered += 1;
+        self.refs.insert(object, self.remembered);
     }
 
     unsafe fn write_item(&mut self, object: Sexp) -> ApiResult<()> {
@@ -691,10 +721,10 @@ impl Writer<'_, '_> {
         self.write_integer(SexpType::Environment.code() as i32)?;
         self.write_integer(env.has_gp(gp::FRAME_LOCKED) as i32)?;
         self.write_item(env.enclosure())?;
-        // GNU R conses a new binding onto the front of an unhashed frame, so the newest
-        // binding comes first.
+        // `frame_symbols` already lists in GNU R's order, which puts the newest binding of an
+        // unhashed frame first.
         let symbols = runtime().heap.frame_symbols(env);
-        for &symbol in symbols.iter().rev() {
+        for &symbol in &symbols {
             let Some(cell) = runtime().heap.frame_cell(env, symbol) else {
                 continue;
             };

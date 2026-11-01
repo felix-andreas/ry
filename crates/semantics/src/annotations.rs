@@ -6,7 +6,7 @@
 use crate::Db;
 use crate::diagnostics::TypeRenderer;
 use crate::types::{
-    Atomic, Constraint, FunctionType, Name, NativeField, Parameter, RecordField, RestParameter, Ty,
+    Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField, RestParameter, Ty,
     TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null, scalar,
     substitute_rigid, union_of, unknown,
 };
@@ -913,11 +913,11 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
     )
 }
 
-/// `record{...}` and `tuple{...}` share the brace grammar of `list{...}` too.
+/// `Record{...}` and `Tuple{...}` share the brace grammar of `list{...}` too.
 fn native_head(node: &SyntaxNode) -> Option<NativeHead> {
     match name_text(node).as_deref() {
-        Some("record") => Some(NativeHead::Record),
-        Some("tuple") => Some(NativeHead::Tuple),
+        Some("Record") => Some(NativeHead::Record),
+        Some("Tuple") => Some(NativeHead::Tuple),
         _ => None,
     }
 }
@@ -928,9 +928,10 @@ enum NativeHead {
     Tuple,
 }
 
-/// `frame{...}` shares the brace grammar of `list{...}`; the head word tells them apart.
-fn is_frame_type(node: &SyntaxNode) -> bool {
-    name_text(node).as_deref() == Some("frame")
+/// `DataFrame{...}` and the other table types share the brace grammar of `list{...}`; the head
+/// word tells them apart.
+fn frame_kind(node: &SyntaxNode) -> Option<FrameKind> {
+    FrameKind::from_head(name_text(node).as_deref()?)
 }
 
 /// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
@@ -1266,20 +1267,20 @@ impl<'db> Lowering<'db> {
                 match native_head(node) {
                     Some(NativeHead::Record) if positional => {
                         self.errors.push((
-                            "a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items".to_owned(),
+                            "a `Record{...}` type names every field: write each one as `name: TYPE`, or use `Tuple{...}` for unnamed items".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
                     }
                     Some(NativeHead::Tuple) if named => {
                         self.errors.push((
-                            "a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields".to_owned(),
+                            "a `Tuple{...}` type lists its items without names: drop the names, or use `Record{...}` for named fields".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
                     }
                     Some(NativeHead::Record) => {
-                        self.lower_native_fields(node, "this `record{...}` type")
+                        self.lower_native_fields(node, "this `Record{...}` type")
                     }
                     _ => self.lower_native_items(node),
                 }
@@ -1305,8 +1306,8 @@ impl<'db> Lowering<'db> {
                     && node.children().any(|c| is_type_kind(c.kind())) =>
             {
                 self.errors.push((
-                    if is_frame_type(node) {
-                        "a `frame{...}` type names every column: write each one as `name: TYPE`".to_owned()
+                    if let Some(kind) = frame_kind(node) {
+                        format!("a `{}{{...}}` type names every column: write each one as `name: TYPE`", kind.head())
                     } else {
                         "a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them".to_owned()
                     },
@@ -1314,16 +1315,19 @@ impl<'db> Lowering<'db> {
                 ));
                 unknown(self.db)
             }
-            SyntaxKind::TYPE_TUPLE if is_frame_type(node) => {
+            SyntaxKind::TYPE_TUPLE if frame_kind(node).is_some() => {
+                let kind = frame_kind(node).unwrap_or(FrameKind::DataFrame);
                 if node.children().any(|c| is_type_kind(c.kind())) {
                     self.errors.push((
-                        "a `frame{...}` type names every column: write each one as `name: TYPE`"
-                            .to_owned(),
+                        format!(
+                            "a `{}{{...}}` type names every column: write each one as `name: TYPE`",
+                            kind.head()
+                        ),
                         node.text_range(),
                     ));
                     return unknown(self.db);
                 }
-                Ty::new(self.db, TyKind::Frame(Some(Vec::new())))
+                Ty::new(self.db, TyKind::Frame(kind, Some(Vec::new())))
             }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
@@ -1334,7 +1338,7 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, TyKind::Tuple(items))
             }
             SyntaxKind::TYPE_RECORD => {
-                let frame = is_frame_type(node);
+                let frame = frame_kind(node);
                 let fields: Vec<(String, SyntaxNode)> = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -1344,9 +1348,10 @@ impl<'db> Lowering<'db> {
                 for (name, field) in &fields {
                     if !seen.insert(name.as_str()) {
                         self.errors.push((
-                            if frame {
+                            if let Some(kind) = frame {
                                 format!(
-                                    "the column `{name}` appears twice in this `frame{{...}}` type"
+                                    "the column `{name}` appears twice in this `{}{{...}}` type",
+                                    kind.head()
                                 )
                             } else {
                                 format!(
@@ -1357,6 +1362,22 @@ impl<'db> Lowering<'db> {
                         ));
                     }
                 }
+                // In `GroupBy{g: character[]; x: double[]}` the fields before the `;` are keys.
+                let frame = match frame {
+                    Some(FrameKind::GroupBy { lazy, .. }) => {
+                        let keys = node
+                            .children_with_tokens()
+                            .find(|element| element.kind() == SyntaxKind::SEMICOLON)
+                            .map_or(0, |semicolon| {
+                                fields
+                                    .iter()
+                                    .filter(|(_, field)| field.text_range().end() <= semicolon.text_range().start())
+                                    .count()
+                            });
+                        Some(FrameKind::GroupBy { lazy, keys: keys as u32 })
+                    }
+                    other => other,
+                };
                 let fields = fields
                     .into_iter()
                     .map(|(name, field)| {
@@ -1365,15 +1386,15 @@ impl<'db> Lowering<'db> {
                             .unwrap_or_else(|| unknown(self.db));
                         RecordField {
                             name: Name::new(self.db, name),
-                            ty: if frame { column_type(self.db, ty) } else { ty },
+                            ty: if frame.is_some() { column_type(self.db, ty) } else { ty },
                             optional: false,
                         }
                     })
                     .collect();
                 Ty::new(
                     self.db,
-                    if frame {
-                        TyKind::Frame(Some(fields))
+                    if let Some(kind) = frame {
+                        TyKind::Frame(kind, Some(fields))
                     } else {
                         TyKind::Record(fields)
                     },
@@ -1472,7 +1493,14 @@ impl<'db> Lowering<'db> {
             "complex" => return scalar(self.db, Atomic::Complex),
             "character" => return scalar(self.db, Atomic::Character),
             "raw" => return scalar(self.db, Atomic::Raw),
-            "frame" => return Ty::new(self.db, TyKind::Frame(None)),
+            "DataFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None)),
+            "LazyFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None)),
+            "GroupBy" => {
+                return Ty::new(self.db, TyKind::Frame(FrameKind::GroupBy { lazy: false, keys: 0 }, None));
+            }
+            "LazyGroupBy" => {
+                return Ty::new(self.db, TyKind::Frame(FrameKind::GroupBy { lazy: true, keys: 0 }, None));
+            }
             _ => {}
         }
         let name = Name::new(self.db, text);

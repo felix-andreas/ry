@@ -48,11 +48,11 @@ list{id: integer, id: integer}
 error: the field `id` appears twice in this `list{...}` type
 
 #---- duplicate_frame_column
-frame{id: integer[], id: double[]}
+DataFrame{id: integer[], id: double[]}
 #++++
-error: the column `id` appears twice in this `frame{...}` type
+error: the column `id` appears twice in this `DataFrame{...}` type
 
 #---- frame_column_without_a_name
-frame{integer[]}
+DataFrame{integer[]}
 #++++
-error: a `frame{...}` type names every column: write each one as `name: TYPE`
+error: a `DataFrame{...}` type names every column: write each one as `name: TYPE`

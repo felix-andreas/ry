@@ -54,7 +54,14 @@ const lspFeatures = [
 
 // Every snippet below was run through the real binary (`ry check`, `ry run --runtime ry`), and
 // its output is pasted verbatim; re-run rather than hand-edit.
-type Sample = { key: string; label: string; code: string; command: string; output: string };
+type Sample = {
+    key: string;
+    label: string;
+    code: string;
+    command: string;
+    output: string;
+    note?: string;
+};
 
 const runtimeTabs: Sample[] = [
     {
@@ -76,26 +83,25 @@ area(:Rect(width = 3, height = 4))`,
     {
         key: "nominal",
         label: "Nominal types",
-        code: `type UserId = integer
-type OrderId = integer
+        code: `type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
 
-cancel <- function(order: OrderId) -> character "cancelled"
+boiling <- function() -> Celsius @Celsius(degrees = 100,)
 
-user <- @UserId(7L)
-cancel(user)`,
+wrong: Fahrenheit <- boiling()`,
         command: "ry check",
         output: `type-mismatch
 
-  x expected \`OrderId\`, found \`UserId\`
-   --[orders.R:7:8]
- 6 | user <- @UserId(7L)
- 7 | cancel(user)
-   |        ^^^^`,
+  x expected \`Fahrenheit\`, found \`Celsius\`
+   --[R/temps.R:6:22]
+ 5 |
+ 6 | wrong: Fahrenheit <- boiling()
+   |                      ^^^^^^^^^`,
     },
     {
         key: "records",
         label: "Records",
-        code: `alias Person = record{name: character, age: integer}
+        code: `alias Person = Record{name: character, age: integer}
 
 greet <- function(person: Person) -> character paste("hi", person$name)
 
@@ -106,6 +112,25 @@ ada$email`,
         output: `[1] "hi ada"
 Error in ada$email :
   the record has no field \`email\`; its fields are \`age\`, \`name\``,
+    },
+    {
+        key: "dataframe",
+        label: "DataFrame",
+        code: `sales <- DataFrame(
+  region = c("eu", "us", "eu", "us"),
+  units = c(3L, 5L, 2L, 1L),
+  price = c(1.5, 2, 4, 3)
+)
+sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(revenue = (col("units") * col("price")) |> Expr.sum())`,
+        command: "ry run --runtime ry sales.R",
+        output: `   region revenue
+   <char>   <num>
+1:     eu    12.5
+2:     us    10.0`,
+        note: "About twice as fast as data.table on 1 million rows.",
     },
     {
         key: "stdlib",
@@ -199,8 +224,8 @@ const KEYWORDS = new Set([
     "TRUE", "FALSE", "NULL", "NA",
 ]);
 const TYPE_NAMES = new Set([
-    "double", "integer", "character", "logical", "record", "Result", "Shape", "Person",
-    "Payment", "UserId", "OrderId",
+    "double", "integer", "character", "logical", "Record", "Result", "Shape", "Person",
+    "Payment", "Celsius", "Fahrenheit",
 ]);
 
 // A small R tokenizer that emits the same `t-*` classes as the captured editor mocks.
@@ -653,6 +678,7 @@ const year = new Date().getFullYear();
                                         <div class="term" set:html={terminal(tab.command, tab.output)} />
                                     </div>
                                 </div>
+                                {tab.note && <p class="stage-note">{tab.note}</p>}
                             </div>
                         ))
                     }
@@ -3552,6 +3578,13 @@ ry check .</code></pre>
             }
             .stage.split .pane + .pane {
                 border-left: 1px solid var(--border);
+            }
+            .stage-note {
+                margin: 0;
+                padding: 0.6rem 1rem;
+                border-top: 1px solid var(--border);
+                color: var(--muted);
+                font-size: 0.85rem;
             }
             .stage.split .pane-out {
                 background: color-mix(in oklab, var(--pane-bg) 88%, #000);

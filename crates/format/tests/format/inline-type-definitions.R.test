@@ -30,12 +30,12 @@ alias Shape = :Circle(radius: double) |
   :Rect(width: double, height: double)
 
 #---- multi_line_record
-alias Point = record{
+alias Point = Record{
   x: double,
      y: double
 }
 #++++
-alias Point = record{
+alias Point = Record{
   x: double,
   y: double
 }

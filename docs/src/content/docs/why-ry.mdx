@@ -13,7 +13,7 @@ a time.
 
 With ry you check, format, load and run R from one tool configured by one `ry.toml`. Its type
 system sits on top of R, so plain R stays valid. ry also adds what R lacks: records, tagged unions,
-a typed table called a frame, and a standard library. Everything ry runs, plain R plus these
+a typed table called `DataFrame` with a Polars-style API, and a standard library. Everything ry runs, plain R plus these
 additions, is what we call R++. Strict mode then keeps only code whose types are known, which we
 call R--.
 
@@ -111,8 +111,8 @@ GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to
 
 A field read from an R6 object, or from a list built at run time, has a type the checker cannot
 see. ry's own data types have one. [Records, tuples and tagged unions](/type-checking/records-and-tags)
-come with a `match` that knows every case, [frames](/type-checking/frames) are a table whose
-columns the checker knows, and the [standard library](/reference/standard-library) returns
+come with a `match` that knows every case, [`DataFrame`](/type-checking/dataframes) is a table whose
+columns the checker follows through every query, and the [standard library](/reference/standard-library) returns
 `Result`, `List` and `Dict` values instead of `NA` or a warning:
 
 ```r
@@ -199,5 +199,5 @@ The type system is still growing, so a new release can report findings an older 
 is why CI should pin the version.
 
 ry's own runtime is under construction. It still reads base R from your GNU R installation, and a
-script that uses something it lacks stops with an error that names it. Records, tagged unions, frames and
+script that uses something it lacks stops with an error that names it. Records, tagged unions, `DataFrame` and
 the standard library run only on it, so for production work today, run plain R and typed R on GNU R.

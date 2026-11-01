@@ -228,7 +228,7 @@ call_it: <T> fn(d: T) -> Unknown
 #description Imports: data.table
 load <- function(path) fread(path)
 #++++
-load: fn(path: character) -> frame
+load: fn(path: character) -> data.table
 
 #---- inactive_namespace_stays_dark
 load <- function(path) fread(path)
@@ -241,7 +241,7 @@ library(data.table)
 load <- function(path) fread(path)
 #++++
 Any
-load: fn(path: character) -> frame
+load: fn(path: character) -> data.table
 
 #---- brackets_keep_the_class_through_chains
 #description Imports: data.table
@@ -367,3 +367,18 @@ f <- function(x) .Call(C_endpoints, x)
 #++++
 f: <T> fn(x: T) -> Unknown
 23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins.
+
+#---- a_parameter_named_like_an_unknown_import_calls_the_import
+#namespace import(fs)
+read_description <- function(path) {
+  path <- path(path, "DESCRIPTION")
+  path
+}
+#++++
+read_description: <T> fn(path: T) -> Unknown
+
+#---- a_parameter_applied_to_itself_without_an_import_is_an_infinite_type
+apply_twice <- function(path) path(path)
+#++++
+apply_twice: Unknown
+30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.

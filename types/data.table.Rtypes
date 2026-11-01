@@ -14,12 +14,12 @@ data.table : fn(...: Any, [keep.rownames]: logical | character, [check.names]: l
 as.data.table : fn(x: Any, [keep.rownames]: logical | character, ...: Any) -> data.table
 is.data.table : fn(x: Any) -> logical
 copy : <T> fn(x: T) -> T
-# ry's table replaces data.table, so reading, stacking and reshaping return a frame. The checker
+# ry's table replaces data.table, so reading, stacking and reshaping return a `data.table`. The checker
 # sharpens the columns from the arguments: the file's sniffed layout, the stacked pieces, or the
 # melted columns.
-fread : fn([input]: character, [file]: character, [text]: character, [cmd]: character, ...: Any) -> frame
+fread : fn([input]: character, [file]: character, [text]: character, [cmd]: character, ...: Any) -> data.table
 fwrite : fn(x: Any, [file]: character, ...: Any) -> NULL
-rbindlist : fn(l: Any, [use.names]: logical | character, [fill]: logical, [idcol]: character | logical) -> frame
+rbindlist : fn(l: Any, [use.names]: logical | character, [fill]: logical, [idcol]: character | logical) -> data.table
 
 # The set*() family mutates by reference and returns its input invisibly.
 setDT : fn(x: Any, [keep.rownames]: logical | character, [key]: character[], [check.names]: logical) -> data.table
@@ -41,8 +41,8 @@ getDTthreads : fn([verbose]: logical) -> integer
 
 # Reshaping returns tables; the formula/value arguments stay Any (their
 # column vocabulary is out of static reach).
-melt : fn(data: Any, ...: Any) -> frame
-dcast : fn(data: Any, [formula]: Any, ...: Any) -> frame
+melt : fn(data: Any, ...: Any) -> data.table
+dcast : fn(data: Any, [formula]: Any, ...: Any) -> data.table
 merge : fn(x: Any, y: Any, ...: Any) -> data.table
 transpose : fn(l: Any, [fill]: Any, [ignore.empty]: logical, [keep.names]: character, [make.names]: Any) -> Any
 

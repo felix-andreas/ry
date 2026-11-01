@@ -1977,14 +1977,25 @@ primitives, and nothing built or installed packages.
 - **Header export coverage is checked by the compiler** (`-aux-info` and `-E` in
   `tests/test_headers.rs`), not by scanning header text, because rename macros and struct fields
   defeat a text scan.
-- **Package installation is the `rcmd` crate.** ry's R home has ry's headers and `libR.so`, an
-  `etc/Makeconf` written for ry, `share/make/shlib.mk`, and a `bin/R` that runs `ry-rcmd`, so
-  `configure` scripts asking `R CMD config` get ry's toolchain. A source install compiles `src/`
-  as `R CMD INSTALL` does and records `RyBuilt:`; the R-level half (lazy-load database, help,
-  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript`, and `bin/R`
-  for anything but `R CMD` and `R RHOME`, run GNU R for the R code configure scripts and
-  `Makevars` evaluate (`R -f tools/examples.R`): an explicit build-time delegation that the
-  interpreter replaces, not a fallback on failure.
+- **Package installation is the `rcmd` crate, and it runs on ry.** ry's R home has ry's
+  headers and `libR.so`, an `etc/Makeconf` written for ry and `share/make/shlib.mk`. It links
+  everything else from GNU R's home: the `library/` packages (base R's R code), `share/`,
+  `etc/` and the `R CMD` scripts in `bin/` (build, check, Rdconv, ...). Its own `bin/R`,
+  `bin/Rscript` and `bin/Rcmd` exec `ry-rcmd`, which answers `R CMD INSTALL|SHLIB|config` and
+  `R RHOME` in Rust and runs every other command line (`-e`, `-f`, a script, stdin) on ry's
+  interpreter by dlopening the home's `libR.so` and calling `ry_run`. GNU R's `R CMD` scripts
+  call back into `bin/R`, so they run on ry too; no GNU R process runs at install time.
+  - Install: Rust configures and compiles `src/`, then an embedded R driver
+    (`crates/rcmd/src/install.R`) runs the R-level half on ry with GNU R's own `tools`
+    functions, in `tools:::.install_packages`' order (DESCRIPTION and `Meta/`, collated code,
+    `sysdata`, lazy data, demos, `inst/`, the lazy-load database, Rd objects and help indices,
+    vignette index, `nsInfo`), then test-loads in a fresh ry process. Reusing `tools` keeps the
+    installed layout GNU R's byte for byte in structure, so GNU R can read what ry installs.
+  - **Nothing is byte-compiled.** ry compiles closures itself when they run, and GNU R
+    bytecode in a lazy-load database is read back as its source expression anyway, so a GNU R
+    compile step would only cost install time. `ByteCompile: yes` is ignored.
+  - The previous shape delegated `bin/R` and `bin/Rscript` to GNU R and kept `R/` as sources;
+    both are gone.
 - **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
   algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
   which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random
@@ -2953,6 +2964,46 @@ first lines R had already read, leaving R mid-command.
   fixtures in `crates/ide/tests/ide/records-and-tags.R.test`, `frames.R.test` and the typing suite's
   `mismatch_blame` group pin the behavior.
 
+## The DataFrame API is Polars', and ry's own types are UpperCamelCase
+
+- **Previous shape:** the built-in table was `frame`, queried only through data.table's
+  `x[i, j, by]`, and ry's own types were lowercase (`frame{...}`, `record{...}`, `tuple{...}`), so
+  nothing in a type told R's types from ry's.
+- **Names:** every type and type constructor ry adds to R is UpperCamelCase (`DataFrame`,
+  `LazyFrame`, `GroupBy`, `LazyGroupBy`, `Expr`, `Record{...}`, `Tuple{...}`, alongside the
+  standard library's `Result`, `List`, `Str`, `Dict`, `Set`), and R's own types stay lowercase.
+  The case is the visible line between R's types and ry's. No lowercase alias was kept: the old
+  names had no users outside this repository, so a deprecation path would only add a second
+  spelling to every renderer and fixture.
+- **API:** Polars' verbs over expressions, as qualified functions used with `|>`:
+  `DataFrame.select`, `with_columns`, `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`,
+  `head`/`tail`, `lazy`, and the `LazyFrame.*` mirror with `collect` and `explain`. Expressions are
+  `col("x")`, `lit(v)`, R's operators through `Ops.Expr`, and `Expr.*` functions (`alias`, the
+  aggregations, `len`, `is_null`, `if_else`, `cor`). There is no method dispatch: a qualified name
+  always means one function, which keeps the checker's and the IDE's view a plain name lookup. A
+  string names a column wherever a verb takes an expression, as in Polars.
+- **One plan for eager and lazy:** every verb appends a `table::lazy::Step` to a `Plan`, and an
+  eager verb collects at once. The optimizer pushes filters below `with_columns` and projections
+  and into a scan, prunes scan columns, and turns a leading `head` into a scan row limit;
+  `crates/table/tests/test_lazy.rs` fuzzes that optimizing never changes a result. Errors name the
+  schema of the longest valid prefix (`Plan::valid_schema`), so a misspelled column lists the
+  columns that exist at that step.
+- **Typing:** the checker refines a verb call after the ordinary call has checked the arguments
+  against `types/ry.Rtypes` (`refine_dataframe_call` in `crates/semantics/src/check.rs`), reading
+  each argument's syntax for its output name and column type. The refinement applies only when the
+  name reaches the library (`reaches_library`), so a project's own `DataFrame.filter` is an
+  ordinary function. An argument the checker cannot read (an `Expr` in a variable) leaves the
+  columns unknown rather than guessing. `as.data.table` and `as.DataFrame` keep the columns.
+- **data.table syntax stays as compatibility, typing included.** The runtime still answers
+  `x[i, j, by]` on a DataFrame and routes plain data.table queries to the same engine, so existing
+  code keeps working; the bracket typing already existed and costs nothing to keep. The docs teach
+  the verbs and present the brackets only as compatibility.
+- **R-side classes:** the value's class is `"DataFrame"` alone; `as.data.frame` and
+  `as.data.table` methods are registered with `registerS3method` into the generics' namespaces, so
+  they work whether or not the package is attached first.
+- **Impact:** column checks and completion cover the whole query rather than one bracket;
+  incremental analysis is unchanged, since the refinement reads only the item's own recorded types.
+
 
 # Decision record: positioning
 
@@ -2985,8 +3036,9 @@ first lines R had already read, leaving R mid-command.
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
   people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
 - **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
-  tab when the JIT benchmark table lands, and a table tab when the `DataFrame` API lands (data.table
-  syntax is compatibility only, so it is not shown as ry's table API). No placeholder tabs.
+  tab when the JIT benchmark table lands. The DataFrame tab shows the Polars-style API, never
+  data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
+  `tools/bench/table` result. No placeholder tabs.
 - **The migration has four steps, each with a real snippet and real output:** check the code you
   have, add types as `#:` comments, switch to inline types, then move data to ry's records, tags
   and tables under strict mode. Each step is optional and reversible, which is what makes adopting
@@ -3035,3 +3087,18 @@ first lines R had already read, leaving R mid-command.
   already depends on, so incremental analysis is unchanged. The `nominal_grid` typing group, the
   nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
   pin the behavior.
+
+## data.table's helpers run data.table's own C, and the C API is what makes them fast
+
+- **Previous shape.** The plan was to route R calls to `fread`, `fwrite`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`, `fifelse`, `tstrsplit` and friends to the engine's kernels in `table::ops` and `table::io`, which beat data.table when measured from Rust. Under ry's runtime those calls ran data.table's own C through libr, at up to 2.5 times GNU R's time, because every C API call (`TRUELENGTH`, `STRING_ELT`, `LENGTH`, `INTEGER`, the type predicates, `PROTECT`) entered the full error boundary.
+- **What measurement showed.** With the boundary skipped on those calls, data.table's C under ry runs at GNU R's speed or faster: `fread` of the 1e7-row groupby file takes 2.3 s against GNU R's 2.8 to 3.1 s, and `transpose` (the core of `tstrsplit`) 0.062 s against 0.055 to 0.068 s at 1e6 rows. Routing `fread` to the engine's reader made it slower, 3.2 to 3.7 s: the reader itself takes 1.4 s, but turning its columns into R vectors (one CHARSXP per string) costs about 1.9 s. The numeric helpers are already a `memmove` or a single loop in data.table's C, so the engine has nothing to win there.
+- **Target shape.** No routing hook for the helpers. They stay data.table's own code, so their output is data.table's by construction. Their speed comes from the C API (`crates/libr/src/vectors.rs` and `memory.rs`): an accessor whose argument is a plain, non-ALTREP object of the right type reads it directly, and enters the boundary only to raise an error. Every package with compiled code gains from this, not only data.table. The engine is fastest where data stays inside it: frames (`frame_read_csv` reads the same file in 1.4 s) and the `[` bridge, whose results are small.
+- **The `[` bridge imports only what a query reads.** It plans against a schema read from the R vectors' types, `query::referenced_columns` names the columns the plan reads, and only those convert. A character column converts each distinct CHARSXP once, because R interns its strings, and then gathers the views. Converting every column used to make `x[, sum(v1), by = id4]` on the groupby table 20 times slower than data.table.
+- **Impact.** One source of truth for each helper's semantics, data.table's own code. The checker still types `fread`, `rbindlist`, `melt` and `dcast` as returning frames, which is not true at run time (`backlog.md`, "The checker and the runtime disagree about data.table's readers").
+
+## An escape lasts until the outermost native call returns
+
+- **Previous shape.** A vector whose writable element pointer native code took (`STRING_PTR`, `DATAPTR`, `VECTOR_PTR` on a character vector or list) joined the escaped set for good, and every minor collection rescanned all of its elements. data.table calls `STRING_PTR` on its input columns, so after one `unique(x)` every later minor collection reread the 3e7 string elements of the groupby table, each read a cache miss on a CHARSXP header. `shift(x$v1)` went from 0.024 s to 0.14 s once any such call had run.
+- **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
+- **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
+- **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.

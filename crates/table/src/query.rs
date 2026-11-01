@@ -369,6 +369,55 @@ pub fn execute_with_plans_only(table: &mut Table, query: Query) -> Result<Execut
     execute_with(table, query, false)
 }
 
+/// The subject's columns `query` reads, or `None` when it reads all of them: without `j` or with
+/// a join, the result carries every column. A `:=` reads the columns it assigns, since an update
+/// through `i` keeps their other rows.
+pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
+    let mut columns = HashSet::new();
+    match &query.rows {
+        Rows::All | Rows::Positions(_) => {}
+        Rows::Filter(condition) => expression_columns(condition, &mut columns),
+        Rows::Order(keys) => keys.iter().for_each(|key| expression_columns(&key.expr, &mut columns)),
+        Rows::Join(_) => return None,
+    }
+    match &query.select {
+        Select::All => return None,
+        Select::Columns(items) => items.iter().for_each(|(_, expr)| expression_columns(expr, &mut columns)),
+        Select::Value(expr) => expression_columns(expr, &mut columns),
+        Select::Assign(items) => {
+            for (name, expr) in items {
+                columns.insert(name.clone());
+                if let Some(expr) = expr {
+                    expression_columns(expr, &mut columns);
+                }
+            }
+        }
+    }
+    query.by.iter().for_each(|(_, expr)| expression_columns(expr, &mut columns));
+    Some(columns)
+}
+
+fn expression_columns(expr: &Expr, columns: &mut HashSet<PlSmallStr>) {
+    match expr {
+        Expr::Column(name) => {
+            columns.insert(name.clone());
+        }
+        Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Character(_) | Expr::Na(_) | Expr::Count => {}
+        Expr::Unary(_, inner) | Expr::Head(inner, _) | Expr::Aggregate { arg: inner, .. } => {
+            expression_columns(inner, columns)
+        }
+        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+            expression_columns(left, columns);
+            expression_columns(right, columns);
+        }
+        Expr::IfElse(test, yes, no) => {
+            expression_columns(test, columns);
+            expression_columns(yes, columns);
+            expression_columns(no, columns);
+        }
+    }
+}
+
 fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Executed> {
     let sums = grouped_integer_sums(&table.schema(), table.key(), &query)?;
     let mut warnings = Vec::new();
@@ -1888,7 +1937,7 @@ fn grouped(
 
 /// Whether an expression yields one value per group. One that does not (`head`, or a plain
 /// column) yields a list per group, which is exploded into rows as data.table recycles it.
-fn collapses(expr: &Expr) -> bool {
+pub(crate) fn collapses(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate { .. } | Expr::Count | Expr::Correlation(..) => true,
         Expr::Integer(_)
