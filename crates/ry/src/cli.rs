@@ -1071,7 +1071,8 @@ static REPORTER: LazyLock<Reporter> = LazyLock::new(|| {
         .with_show_related_as_nested(true);
     let handler = match console::user_attended_stderr() {
         true => handler.with_width(console::Term::stderr().size().1 as usize),
-        false => handler,
+        // A pipe has no width, and a wrapped line breaks `grep` and every tool reading the output.
+        false => handler.with_wrap_lines(false),
     };
     Reporter {
         handler,

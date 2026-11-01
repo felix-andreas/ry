@@ -177,6 +177,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Table engine | `table` property tests | the eager implementation |
 | Package install | the `install-package` scenario; `test_install` | the package's own results |
 | CLI | scenarios run the real binary | expected output and exit status |
+| Docs examples | every marked output block in the docs, and the landing page samples (`test_docs`) | the output the page shows |
 
 The PROTECT balance check runs on every `.Call` and `.C` in every build: when a routine returns with a
 different protect-stack depth than it entered with, ry warns `stack imbalance in '<routine>'`, as GNU R
@@ -193,6 +194,7 @@ does. A stricter checker that catches an unprotected object at the moment it is 
 | `just gc-torture` | Every oracle case under collection stress. |
 | `just fuzz-deep` | The semantic pipeline's long seeded run. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer (needs a nightly toolchain). |
+| `just docs-test [PAGE]` / `just docs-bless [PAGE]` | The docs examples, or a rewrite of their exact output from the real tool. |
 
 ## Gaps
 

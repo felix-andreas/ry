@@ -14,8 +14,10 @@ use oracle::fuzz::{SeedReport, check_seed, program, render_divergences};
 use oracle::{Engine, ProcessEngine, gnu_r_available, ry_runtime_available};
 use syntax::testing::fuzz_iterations;
 
-/// A debug build runs a fuzz program in well under a second, so a run this long is a hang.
+/// A debug build runs a fuzz program in a few seconds, so a run this long is a hang.
 const TIMEOUT: Duration = Duration::from_secs(120);
+/// Collecting on every allocation makes a fuzz program take up to a few minutes on a busy machine.
+const TORTURE_TIMEOUT: Duration = Duration::from_secs(900);
 
 #[test]
 fn programs_are_deterministic() {
@@ -66,7 +68,7 @@ fn fuzz_programs_survive_gc_torture() {
     // Torture is compared with ry unstressed, so it reports what collection stress changes and
     // not the divergences from GNU R that the pass above already reports.
     let ry = ProcessEngine::ry().with_timeout(TIMEOUT);
-    let torture = ProcessEngine::ry_gc_torture().with_timeout(TIMEOUT);
+    let torture = ProcessEngine::ry_gc_torture().with_timeout(TORTURE_TIMEOUT);
     let reports = run_seeds(&ry, &[&torture], fuzz_iterations(8).div_ceil(4));
     assert_agree(&reports);
 }

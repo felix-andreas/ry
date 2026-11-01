@@ -134,51 +134,67 @@ bench = false
 
 # Polars is a dependency, not a fuzzing subject, and at opt-level 3 with
 # coverage instrumentation its largest crates need more memory than a 16GB
-# machine has. A lower level keeps the build within it.
+# machine has. A lower level without debug info keeps the build within it.
 [profile.release.package.polars]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-arrow]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-compute]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-core]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-expr]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-io]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-lazy]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-mem-engine]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-ops]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-parquet]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-plan]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-row]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-sql]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-stream]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-time]
 opt-level = 1
+debug = false
 
 [profile.release.package.polars-utils]
 opt-level = 1
+debug = false

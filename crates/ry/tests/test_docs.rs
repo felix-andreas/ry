@@ -329,7 +329,9 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                     return Err(format!("{location}: `#>` output is always exact"));
                 }
                 if config.continues {
-                    return Err(format!("{location}: `continue` applies to output blocks only"));
+                    return Err(format!(
+                        "{location}: `continue` applies to output blocks only"
+                    ));
                 }
                 flush_unpaired(page, &mut unpaired, &mut examples);
                 let variant = Variant {
@@ -607,7 +609,11 @@ fn parse_landing(page: &str, text: &str) -> Result<Vec<Example>, String> {
                 (CommandKind::Run(Runtime::Ry), Some((*file).to_owned()))
             }
             ["ry", "run", file] => (CommandKind::Run(Runtime::GnuR), Some((*file).to_owned())),
-            _ => return Err(format!("{page}:{line}: an unknown sample command `{command}`")),
+            _ => {
+                return Err(format!(
+                    "{page}:{line}: an unknown sample command `{command}`"
+                ));
+            }
         };
         examples.push(Example {
             page: page.to_owned(),
@@ -731,7 +737,8 @@ fn plan_jobs(examples: &[Example]) -> Plan {
         for (variant_index, variant) in example.variants.iter().enumerate() {
             // The excerpt rule skips the findings in the earlier blocks' code.
             let prelude = variant.prelude.concat();
-            plan.single.insert((example_index, variant_index), plan.jobs.len());
+            plan.single
+                .insert((example_index, variant_index), plan.jobs.len());
             plan.jobs.push(Job {
                 directory: root.join(job_name(example, variant)),
                 file: example
@@ -765,7 +772,9 @@ fn plan_jobs(examples: &[Example]) -> Plan {
         let script: String = blocks
             .iter()
             .enumerate()
-            .map(|(block_index, code)| format!("cat(\"\\n<<ry-docs {block_index} 0>>\\n\")\n{code}"))
+            .map(|(block_index, code)| {
+                format!("cat(\"\\n<<ry-docs {block_index} 0>>\\n\")\n{code}")
+            })
             .collect();
         let slug = page.replace(['/', '.'], "-");
         plan.jobs.push(Job {
@@ -896,6 +905,7 @@ fn run_job(job: &Job) -> Result<String, String> {
         .read_to_string(&mut output)
         .map_err(|error| error.to_string())?;
     child.wait().map_err(|error| error.to_string())?;
+    fs::remove_dir_all(&job.directory).map_err(|error| error.to_string())?;
     let directory = format!("{}/", job.directory.display());
     Ok(strip_ansi(&output).replace(&directory, ""))
 }
@@ -1081,7 +1091,8 @@ fn findings_without_snippets(output: &str) -> String {
         .lines()
         .map(str::trim)
         .filter(|line| {
-            let after_number = line.trim_start_matches(|character: char| character.is_ascii_digit());
+            let after_number =
+                line.trim_start_matches(|character: char| character.is_ascii_digit());
             !line.is_empty()
                 && !line.starts_with("--[")
                 && !line.starts_with('|')
