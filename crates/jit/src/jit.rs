@@ -25,7 +25,13 @@ use interp::{
     values,
 };
 use runtime::{Activation, Compiled, MAX_COMPILES};
-use std::{cell::Cell, ffi::c_void, panic::resume_unwind};
+use bumpalo::Bump;
+use std::{
+    cell::{Cell, RefCell},
+    ffi::c_void,
+    panic::resume_unwind,
+    time::Instant,
+};
 
 /// How the JIT is configured for the session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,6 +59,9 @@ const BACK_EDGE_THRESHOLD: i32 = 500;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
+    /// The arena every compilation's plan lives in. It is reset after each compilation, which
+    /// keeps its largest chunk, so a compilation usually allocates nothing from the system.
+    static ARENA: RefCell<Bump> = RefCell::new(Bump::new());
 }
 
 /// Installs the JIT in the current interpreter, in the mode `RY_JIT` asks for.
@@ -136,10 +145,26 @@ unsafe fn describe(code: Sexp) -> String {
 }
 
 unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
+    ARENA.with(|arena| match arena.try_borrow_mut() {
+        Ok(mut arena) => {
+            let compiled = compile_in(&arena, machine);
+            arena.reset();
+            compiled
+        }
+        // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
+        // that ever changes.
+        Err(_) => compile_in(&Bump::new(), machine),
+    })
+}
+
+unsafe fn compile_in<'a>(arena: &Bump, machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
-        let plan = analysis::plan(machine.code, machine.function.car(), enclosure)?;
+        let started = Instant::now();
+        let plan = analysis::plan(arena, machine.code, machine.function.car(), enclosure)?;
+        let planned = started.elapsed();
         let entry = codegen::compile(&plan, machine.code)?;
+        let generated = started.elapsed() - planned;
         if std::env::var_os("RY_JIT_LOG").is_some() {
             // The instructions left to tier 0 are where compiled code is slow.
             let steps: Vec<String> = plan
@@ -150,8 +175,11 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
                 .map(|(inst, _)| format!("{:?}@{}", inst.op, inst.pc))
                 .collect();
             eprintln!(
-                "jit: compiled {} ({} speculations; tier 0 runs: {})",
+                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {} speculations; tier 0 runs: {})",
                 describe(machine.code),
+                (planned + generated).as_micros(),
+                planned.as_micros(),
+                generated.as_micros(),
                 plan.speculations.len(),
                 if steps.is_empty() { "nothing".to_string() } else { steps.join(", ") }
             );
@@ -161,9 +189,9 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
             entry,
             enclosure,
             registers: plan.registers,
-            slots: plan.slots.clone(),
+            slots: plan.slots.to_vec(),
             loops: plan.loops,
-            speculations: plan.speculations.clone(),
+            speculations: plan.speculations.to_vec(),
             epoch: Cell::new(heap().binding_epoch()),
             osr,
         });
