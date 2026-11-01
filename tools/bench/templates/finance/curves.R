@@ -2,20 +2,25 @@
 #@ param LEVEL float 0.02 0.06 3
 #@ param SLOPE float -0.03 -0.005 3
 # Nelson-Siegel yield curves, fitted and evaluated.
+#: double[]
 curve_maturities_@ID@ <- c(0.25, 0.5, 1, 2, 3, 5, 7, 10, 20, 30)
 
+#: fn([level]: double, [slope]: double, [curvature]: double, [lambda]: double) -> double[]
 curve_rates_@ID@ <- function(level = @LEVEL@, slope = @SLOPE@, curvature = 0.01, lambda = 0.6) {
   m <- curve_maturities_@ID@
   loading <- (1 - exp(-lambda * m)) / (lambda * m)
   level + slope * loading + curvature * (loading - exp(-lambda * m))
 }
 
+#: fn([rates]: double[], [maturities]: double[]) -> matrix
 fit_curve_@ID@ <- function(rates = curve_rates_@ID@(), maturities = curve_maturities_@ID@) {
   rate_series <- zoo::zoo(matrix(rates, nrow = 1, dimnames = list(NULL, paste0("m", maturities))), order.by = as.Date("2024-01-02"))
   YieldCurve::Nelson.Siegel(rate = as.matrix(rate_series), maturity = maturities)
 }
 
+#: fn(rates: double[], maturities: double[], from: double, to: double) -> double[]
 forward_rate_@ID@ <- function(rates, maturities, from, to) {
+  #: fn(v: double[]) -> double[]
   spot <- stats::approxfun(maturities, rates, rule = 2)
   ((1 + spot(to))^to / (1 + spot(from))^from)^(1 / (to - from)) - 1
 }

@@ -7,9 +7,12 @@ use {
         Db, Item, ItemKind, ProjectFiles, SourceFile,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
         check::{CalleeTarget, ItemCheck},
-        diagnostics::TypeRenderer,
+        diagnostics::{Diagnostic, TypeRenderer},
         file_type_definitions, global_scheme,
-        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind, Symbol},
+        hir::{
+            Argument, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId, PatternKind,
+            Symbol,
+        },
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
@@ -23,13 +26,16 @@ use {
         visible_type_definitions,
     },
     std::{
+        cmp::Reverse,
         collections::{BTreeSet, HashMap, HashSet},
         iter::once,
     },
     syntax::{
         SyntaxElement,
         SyntaxKind::{self, *},
-        SyntaxNode, SyntaxToken, TextRange, TextSize, is_inline_annotation, is_syntactic_name,
+        SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
+        ast::BinaryExpr,
+        is_inline_annotation, is_syntactic_name,
         kind::KEYWORDS,
     },
 };
@@ -200,10 +206,10 @@ fn member_at<'db>(
             continue;
         }
         match &pattern.kind {
-            PatternKind::Tag { name_range, .. } => {
-                let range: TextRange = tag_range(*name_range)?;
+            PatternKind::Tag { name, .. } => {
+                let range: TextRange = tag_range(hir.name_range(*name))?;
                 if range.contains_inclusive(relative) {
-                    let ty = check.pattern_types.get(PatId(index as u32))?;
+                    let ty = check.pattern_types.get(PatId::new(index))?;
                     return Some(Member {
                         range,
                         label: None,
@@ -237,7 +243,7 @@ fn member_at<'db>(
                     .find(|parameter| parameter.range.contains_inclusive(relative))
                 {
                     let TyKind::Function(function) =
-                        check.expression_types.get(&ExprId(index as u32))?.kind(db)
+                        check.expression_types.get(&ExprId::new(index))?.kind(db)
                     else {
                         return None;
                     };
@@ -254,13 +260,12 @@ fn member_at<'db>(
             }
             ExpressionKind::For {
                 variable: Some(variable),
-                variable_range: Some(variable_range),
                 ..
-            } if variable_range.contains_inclusive(relative) => {
+            } if hir.name_range(*variable).contains_inclusive(relative) => {
                 return Some(Member {
-                    range: *variable_range,
-                    label: Some(variable.to_string()),
-                    ty: *check.loop_variables.get(&ExprId(index as u32))?,
+                    range: hir.name_range(*variable),
+                    label: Some(hir.name(*variable).to_string()),
+                    ty: *check.loop_variables.get(&ExprId::new(index))?,
                 });
             }
             ExpressionKind::Record(fields) => {
@@ -278,18 +283,21 @@ fn member_at<'db>(
             ExpressionKind::Field {
                 target,
                 name: Some(name),
-                name_range: Some(name_range),
                 ..
-            } if name_range.contains_inclusive(relative) => {
+            } if hir.name_range(*name).contains_inclusive(relative) => {
+                let NameSite {
+                    name,
+                    range: name_range,
+                } = hir[name];
                 // An assignment target records no type of its own, but its record still says
                 // what the field holds.
                 let ty = check
                     .expression_types
-                    .get(&ExprId(index as u32))
+                    .get(&ExprId::new(index))
                     .copied()
-                    .or_else(|| field_type(db, *check.expression_types.get(target)?, name))?;
+                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))?;
                 return Some(Member {
-                    range: *name_range,
+                    range: name_range,
                     label: Some(name.to_string()),
                     ty,
                 });
@@ -315,7 +323,7 @@ fn member_at<'db>(
                     db,
                     hir,
                     check,
-                    ExprId(index as u32),
+                    ExprId::new(index),
                     &hir[arguments],
                     relative,
                 ) {
@@ -508,7 +516,7 @@ fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
 
 fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Option<Item<'db>> {
     package_definitions(db, files)
-        .get(name)
+        .get(&Symbol::new(name))
         .copied()
         .or_else(|| {
             files.files(db).iter().find_map(|&file| {
@@ -626,7 +634,7 @@ pub fn definition(
             .or_else(|| stub_tag_target(db, &name).map(DefinitionTarget::Stub)),
         target @ (Target::Global(_) | Target::S4 { .. }) => {
             if let Target::Global(name) = &target
-                && let Some(winner) = package_definitions(db, files).get(name)
+                && let Some(winner) = package_definitions(db, files).get(&Symbol::new(name))
             {
                 return item_target(db, *winner).map(DefinitionTarget::Project);
             }
@@ -736,11 +744,12 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
 
         for (index, kind) in hir.kinds().iter().enumerate() {
             if let ExpressionKind::For {
-                variable_range: Some(variable_range),
+                variable: Some(variable),
                 ..
             } = kind
             {
-                if let Some(&ty) = check.loop_variables.get(&ExprId(index as u32))
+                let variable_range = hir.name_range(*variable);
+                if let Some(&ty) = check.loop_variables.get(&ExprId::new(index))
                     && is_hintable(db, ty, false)
                 {
                     hints.push(InlayHint {
@@ -756,7 +765,7 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             if !matches!(hir.kind(*target), ExpressionKind::NameRef(_)) {
                 continue;
             }
-            let id = ExprId(index as u32);
+            let id = ExprId::new(index);
             let is_root = hir.root == Some(id);
             if (is_root && annotated)
                 || annotated_expressions.contains(&id)
@@ -791,24 +800,51 @@ fn spells_its_type(hir: &Module, item_node: &SyntaxNode, value: ExprId) -> bool 
         )
 }
 
-/// What a highlighted token is. R grammars already color R, so only ry's own syntax gets a class:
-/// annotation and type-definition bodies, tags, `match` and its arms.
+/// What a highlighted token is. R grammars already color R's own tokens, so plain R gets a class
+/// only where the grammar cannot know it: a function parameter wherever it is read, a called or
+/// defined function, and a namespace. ry's own syntax is classified in full: annotation and
+/// type-definition bodies, tags, `match` and its arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticClass {
     Type,
     TypeParameter,
-    /// A field or parameter name inside a type.
+    /// A field or parameter name inside a type, or a function's parameter and its reads.
     Parameter,
     Operator,
     /// An `@` directive or the `@` of a nominal constructor.
     Decorator,
     Keyword,
     Tag,
+    /// A called name, or a name assigned a function literal.
+    Function,
+    /// The package of `pkg::name`.
+    Namespace,
 }
 
 pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, SemanticClass)> {
     let root = semantics::parse(db, file).syntax_node();
     let mut spans = Vec::new();
+    // A read is a parameter only by resolution, which the syntax alone cannot tell.
+    let mut parameter_reads: HashSet<TextSize> = HashSet::new();
+    for &item in item_tree(db, file) {
+        let (Some(node), Some(hir), Some(naming)) = (
+            item_node(db, item),
+            item_hir(db, item),
+            item_naming(db, item),
+        ) else {
+            continue;
+        };
+        let offset = node.text_range().start();
+        for (expression, binding) in naming.resolutions.iter() {
+            if naming
+                .bindings
+                .get(binding)
+                .is_some_and(|info| info.kind == BindingKind::Parameter)
+            {
+                parameter_reads.insert(hir.range(*expression).start() + offset);
+            }
+        }
+    }
     // Tokens arrive in order, so one region's binders serve all of its tokens.
     let mut current_region: Option<(SyntaxNode, Vec<String>)> = None;
     for token in root
@@ -849,7 +885,13 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                     })
                 }
             }
-            None => classify_ry_token(&token),
+            None => classify_ry_token(&token).or_else(|| {
+                if token.kind() == IDENT && parameter_reads.contains(&token.text_range().start()) {
+                    Some(SemanticClass::Parameter)
+                } else {
+                    classify_r_name(&token)
+                }
+            }),
         };
         if let Some(class) = class {
             spans.push((token.text_range(), class));
@@ -902,6 +944,43 @@ fn classify_ry_token(token: &SyntaxToken) -> Option<SemanticClass> {
     }
 }
 
+/// The classes the syntax decides on its own: a parameter's declaration, a call's head, a name
+/// assigned a function literal, and both halves of `pkg::name`.
+fn classify_r_name(token: &SyntaxToken) -> Option<SemanticClass> {
+    if token.kind() != IDENT {
+        return None;
+    }
+    let parent = token.parent()?;
+    if parent.kind() == PARAMETER {
+        return Some(SemanticClass::Parameter);
+    }
+    if parent.kind() != NAME {
+        return None;
+    }
+    let holder = parent.parent()?;
+    let is_first_child = holder.first_child().as_ref() == Some(&parent);
+    match holder.kind() {
+        NAMESPACE_EXPR if is_first_child => Some(SemanticClass::Namespace),
+        NAMESPACE_EXPR => holder
+            .parent()
+            .filter(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder))
+            .map(|_| SemanticClass::Function),
+        CALL_EXPR if is_first_child => Some(SemanticClass::Function),
+        BINARY_EXPR if is_first_child => {
+            let binary = BinaryExpr::cast(holder)?;
+            let assigns = binary
+                .operator()
+                .is_some_and(|operator| matches!(operator.kind(), LESS_MINUS | EQ | COLON_EQ));
+            (assigns
+                && binary
+                    .rhs()
+                    .is_some_and(|value| value.kind() == FUNCTION_DEF))
+            .then_some(SemanticClass::Function)
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureHelp {
     pub signatures: Vec<SignatureData>,
@@ -933,9 +1012,9 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
                 && !expression.range.is_empty()
                 && expression.range.contains_inclusive(position.relative)
         })
-        .map(|(index, expression)| (expression.range, ExprId(index as u32)))
+        .map(|(index, expression)| (expression.range, ExprId::new(index)))
         .collect();
-    calls.sort_by_key(|(range, id)| (range.len(), range.start(), id.0));
+    calls.sort_by_key(|(range, id)| (range.len(), range.start(), *id));
 
     let (callee, function, overloads, arguments) = calls.iter().find_map(|(_, id)| {
         let ExpressionKind::Call { callee, arguments } = &hir.kind(*id) else {
@@ -992,16 +1071,83 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     } else {
         TypeScheme::monomorphic(function)
     };
+    let mut signature = scheme_signature(db, &scheme, &hir[arguments], hir, position.relative);
+    if let Some(name) = callee_name(hir, callee)
+        && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
+        && let Some(files) = ProjectFiles::try_get(db)
+        && let Some(&definition) = package_definitions(db, files).get(&Symbol::new(&name))
+        && let Some(node) = item_node(db, definition)
+    {
+        show_defaults(&mut signature, &parameter_defaults(&node));
+    }
     Some(SignatureHelp {
-        signatures: vec![scheme_signature(
-            db,
-            &scheme,
-            &hir[arguments],
-            hir,
-            position.relative,
-        )],
+        signatures: vec![signature],
         active_signature: 0,
     })
+}
+
+/// The default of each parameter of the function a definition assigns, as written.
+fn parameter_defaults(definition: &SyntaxNode) -> Vec<(String, String)> {
+    let Some(parameters) = definition
+        .descendants()
+        .find(|node| node.kind() == FUNCTION_DEF)
+        .and_then(|function| child_node(&function, PARAMETER_LIST))
+    else {
+        return Vec::new();
+    };
+    parameters
+        .children()
+        .filter(|parameter| parameter.kind() == PARAMETER)
+        .filter_map(|parameter| {
+            let name = child_token(&parameter, IDENT)?;
+            let default = parameter.children().last()?;
+            Some((name.text().to_owned(), default.text().to_string()))
+        })
+        .collect()
+}
+
+/// A long default is cut, since the label is one line in a popup.
+const DEFAULT_WIDTH: usize = 24;
+
+/// Rewrites an optional parameter `[name]: T` as `name: T = default` when the definition spells
+/// its default, which tells a reader more than the brackets do.
+fn show_defaults(signature: &mut SignatureData, defaults: &[(String, String)]) {
+    if defaults.is_empty() {
+        return;
+    }
+    let mut label = String::new();
+    let mut parameters = Vec::new();
+    let mut copied = 0;
+    for span in &signature.parameters {
+        let (start, end) = (usize::from(span.start()), usize::from(span.end()));
+        let (Some(before), Some(part)) = (
+            signature.label.get(copied..start),
+            signature.label.get(start..end),
+        ) else {
+            return;
+        };
+        label.push_str(before);
+        let rewritten = part.strip_prefix('[').and_then(|rest| {
+            let (name, ty) = rest.split_once("]: ")?;
+            let (_, default) = defaults.iter().find(|(parameter, _)| parameter == name)?;
+            // A default written over several lines still fits the one-line label.
+            let default = default.split_whitespace().collect::<Vec<_>>().join(" ");
+            let default = if default.chars().count() > DEFAULT_WIDTH {
+                let cut: String = default.chars().take(DEFAULT_WIDTH).collect();
+                format!("{cut}...")
+            } else {
+                default
+            };
+            Some(format!("{name}: {ty} = {default}"))
+        });
+        let at = TextSize::of(label.as_str());
+        label.push_str(rewritten.as_deref().unwrap_or(part));
+        parameters.push(TextRange::new(at, TextSize::of(label.as_str())));
+        copied = end;
+    }
+    label.push_str(signature.label.get(copied..).unwrap_or_default());
+    signature.label = label;
+    signature.parameters = parameters;
 }
 
 fn callee_name(hir: &Module, callee: ExprId) -> Option<String> {
@@ -1299,6 +1445,8 @@ pub enum CodeActionKind {
     InsertInferredAnnotation,
     /// The whole-file source action covering every eligible binding.
     AddMissingAnnotations,
+    /// The mechanical fix a diagnostic carries, such as a suggested spelling.
+    DiagnosticFix,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1407,7 +1555,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             let ExpressionKind::NameRef(name) = &hir.kind(*target) else {
                 continue;
             };
-            let id = ExprId(index as u32);
+            let id = ExprId::new(index);
             let is_root = hir.root == Some(id);
             if (is_root && annotated)
                 || annotated_expressions.contains(&id)
@@ -1451,6 +1599,26 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
     }
 
     actions
+}
+
+/// The quick fixes of the findings that touch `viewport`. The caller passes the findings it
+/// publishes, so a suppressed or disabled finding offers no fix.
+pub fn diagnostic_fixes(diagnostics: &[Diagnostic], viewport: TextRange) -> Vec<CodeAction> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| ranges_overlap(diagnostic.range, viewport))
+        .filter_map(|diagnostic| {
+            let fix = diagnostic.fix.as_ref()?;
+            Some(CodeAction {
+                title: fix.title.clone(),
+                kind: CodeActionKind::DiagnosticFix,
+                edits: vec![TextEdit {
+                    range: fix.range,
+                    replacement: fix.replacement.clone(),
+                }],
+            })
+        })
+        .collect()
 }
 
 fn ranges_overlap(left: TextRange, right: TextRange) -> bool {
@@ -1509,6 +1677,8 @@ pub enum DocumentSymbolKind {
     R6Method,
     /// A non-function R6 member, or an `active` binding.
     R6Field,
+    /// An RStudio-style section header (`# Title ----`) and what follows it.
+    Section,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1518,7 +1688,7 @@ pub struct DocumentSymbol {
     pub detail: Option<String>,
     pub range: TextRange,
     pub selection: TextRange,
-    /// R6 class members; empty for every other kind.
+    /// R6 class members, functions defined inside a function, and the contents of a section.
     pub children: Vec<DocumentSymbol>,
 }
 
@@ -1575,7 +1745,12 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                     } else {
                         DocumentSymbolKind::Value
                     };
-                    (kind, function_detail(&node), Vec::new())
+                    let children = node
+                        .descendants()
+                        .find(|child| child.kind() == FUNCTION_DEF)
+                        .map(|function| nested_functions(&function))
+                        .unwrap_or_default();
+                    (kind, function_detail(&node), children)
                 }
             };
         symbols.push(DocumentSymbol {
@@ -1635,8 +1810,435 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
             children: Vec::new(),
         });
     }
-    symbols.sort_by_key(|symbol| (symbol.range.start(), symbol.range.end()));
-    symbols
+    let text = file.text(db);
+    let lines = Lines::new(text);
+    for header in section_headers(&root, text, &lines) {
+        // A bare `# ----` separator still ends the section above it, but a symbol needs a name.
+        if header.scope.is_some() || header.title.is_empty() {
+            continue;
+        }
+        symbols.push(DocumentSymbol {
+            name: header.title,
+            kind: DocumentSymbolKind::Section,
+            detail: None,
+            range: TextRange::new(header.range.start(), lines.end_of(text, header.end_line)),
+            selection: header.range,
+            children: Vec::new(),
+        });
+    }
+    // Sections nest by containment: a section's range ends where the next header of the same or
+    // a higher level begins, so every symbol it contains sorts after it and before that header.
+    symbols.sort_by_key(|symbol| (symbol.range.start(), Reverse(symbol.range.end())));
+    let mut nested: Vec<DocumentSymbol> = Vec::new();
+    let mut open: Vec<DocumentSymbol> = Vec::new();
+    for symbol in symbols {
+        close_sections(&mut open, &mut nested, symbol.range.start());
+        if symbol.kind == DocumentSymbolKind::Section {
+            open.push(symbol);
+        } else {
+            match open.last_mut() {
+                Some(section) => section.children.push(symbol),
+                None => nested.push(symbol),
+            }
+        }
+    }
+    close_sections(
+        &mut open,
+        &mut nested,
+        TextSize::of(text) + TextSize::from(1),
+    );
+    nested
+}
+
+/// Closes every open section that ends before `start`, attaching it to its parent.
+fn close_sections(
+    open: &mut Vec<DocumentSymbol>,
+    nested: &mut Vec<DocumentSymbol>,
+    start: TextSize,
+) {
+    while open
+        .last()
+        .is_some_and(|section| section.range.end() < start)
+    {
+        let Some(section) = open.pop() else {
+            break;
+        };
+        match open.last_mut() {
+            Some(parent) => parent.children.push(section),
+            None => nested.push(section),
+        }
+    }
+}
+
+/// Functions assigned by name inside `function`, each with its own nested functions. Anonymous
+/// functions are searched through, because a helper defined inside an `lapply` callback is still
+/// one a reader looks for.
+fn nested_functions(function: &SyntaxNode) -> Vec<DocumentSymbol> {
+    let mut found = Vec::new();
+    let mut stack: Vec<SyntaxNode> = function.children().collect();
+    stack.reverse();
+    while let Some(node) = stack.pop() {
+        if let Some(binary) = BinaryExpr::cast(node.clone())
+            && binary
+                .operator()
+                .is_some_and(|operator| matches!(operator.kind(), LESS_MINUS | EQ | COLON_EQ))
+            && let Some(name) = binary.lhs().filter(|lhs| lhs.kind() == NAME)
+            && let Some(value) = binary.rhs().filter(|rhs| rhs.kind() == FUNCTION_DEF)
+        {
+            found.push(DocumentSymbol {
+                name: display_name_text(&name.text().to_string()),
+                kind: DocumentSymbolKind::Function,
+                detail: function_detail(&value),
+                range: node.text_range(),
+                selection: name.text_range(),
+                children: nested_functions(&value),
+            });
+            continue;
+        }
+        let start = stack.len();
+        stack.extend(node.children());
+        stack[start..].reverse();
+    }
+    found
+}
+
+/// A backticked name is listed by its spelling, as R reads it.
+fn display_name_text(text: &str) -> String {
+    text.strip_prefix('`')
+        .and_then(|rest| rest.strip_suffix('`'))
+        .unwrap_or(text)
+        .to_owned()
+}
+
+/// The ranges a selection grows through from `offset`, innermost first: the token, the text
+/// inside a string's quotes, then each enclosing node, where a block, an argument list, a
+/// parameter list, or parentheses first select their contents without the delimiters.
+pub fn selection_ranges(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<TextRange> {
+    let root = semantics::parse(db, file).syntax_node();
+    let text = file.text(db);
+    let mut ranges: Vec<TextRange> = Vec::new();
+    let mut push = |range: TextRange| {
+        if range.is_empty() {
+            return;
+        }
+        // Each step must grow the previous one; a contents range that a cursor on a
+        // delimiter falls outside of is skipped.
+        if ranges
+            .last()
+            .is_none_or(|last| *last != range && range.contains_range(*last))
+        {
+            ranges.push(range);
+        }
+    };
+    let token = match root.token_at_offset(offset) {
+        TokenAtOffset::None => None,
+        TokenAtOffset::Single(token) => Some(token),
+        TokenAtOffset::Between(left, right) => {
+            if right.kind().is_trivia() && !left.kind().is_trivia() {
+                Some(left)
+            } else {
+                Some(right)
+            }
+        }
+    };
+    let mut parent = Some(root.clone());
+    if let Some(token) = token {
+        if !matches!(token.kind(), WHITESPACE | NEWLINE) {
+            if matches!(token.kind(), STRING | RAW_STRING) {
+                push(string_contents(&token));
+            }
+            push(token.text_range());
+        }
+        parent = token.parent();
+    }
+    for node in parent.iter().flat_map(|node| node.ancestors()) {
+        if matches!(
+            node.kind(),
+            BRACE_EXPR | ARGUMENT_LIST | PARAMETER_LIST | PAREN_EXPR
+        ) && let Some(contents) = delimited_contents(&node, text)
+        {
+            push(contents);
+        }
+        push(node.text_range());
+    }
+    ranges
+}
+
+/// The text between a string token's quotes; a raw string keeps its `r"(` and `)"` delimiters
+/// out as well.
+fn string_contents(token: &SyntaxToken) -> TextRange {
+    let text = token.text();
+    let range = token.text_range();
+    let (open, close) = if token.kind() == RAW_STRING {
+        let Some(open) = text.find(['(', '[', '{']) else {
+            return range;
+        };
+        // The closing `)"` mirrors the opening `r"`, dashes included.
+        (open + 1, open)
+    } else {
+        (1, 1)
+    };
+    match (
+        TextSize::try_from(open),
+        TextSize::try_from(text.len().saturating_sub(close)),
+    ) {
+        (Ok(start), Ok(end)) if start <= end => {
+            TextRange::new(range.start() + start, range.start() + end)
+        }
+        _ => range,
+    }
+}
+
+/// The node's text without its first and last token (the delimiters), trimmed of whitespace.
+fn delimited_contents(node: &SyntaxNode, text: &str) -> Option<TextRange> {
+    let first = node.first_token()?;
+    let last = node.last_token()?;
+    if first == last {
+        return None;
+    }
+    let start = usize::from(first.text_range().end());
+    let end = usize::from(last.text_range().start());
+    let inside = text.get(start..end)?;
+    let leading = inside.len() - inside.trim_start().len();
+    let trimmed = inside.trim();
+    let start = TextSize::try_from(start + leading).ok()?;
+    Some(TextRange::at(start, TextSize::of(trimmed)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldKind {
+    /// Braces, parentheses, argument and parameter lists, and multi-line strings.
+    Block,
+    /// A run of comment lines.
+    Comment,
+    /// An RStudio-style section, from its header to the next header of the same or a higher
+    /// level.
+    Section,
+    /// The lines between `# region` and `# endregion` markers.
+    Region,
+}
+
+/// Zero-based, inclusive lines. Lines are counted the same in every position encoding, so the
+/// server sends them unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub kind: FoldKind,
+}
+
+/// A block keeps its closing delimiter's line visible, as rust-analyzer does, so a folded
+/// function still shows where it ends.
+pub fn folding_ranges(db: &dyn Db, file: SourceFile) -> Vec<Fold> {
+    let root = semantics::parse(db, file).syntax_node();
+    let text = file.text(db);
+    let lines = Lines::new(text);
+    let mut folds = Vec::new();
+    let mut push = |start_line: u32, end_line: u32, kind: FoldKind| {
+        if end_line > start_line {
+            folds.push(Fold {
+                start_line,
+                end_line,
+                kind,
+            });
+        }
+    };
+    for element in root.descendants_with_tokens() {
+        let (range, is_block) = match &element {
+            SyntaxElement::Node(node) => (
+                node.text_range(),
+                matches!(
+                    node.kind(),
+                    BRACE_EXPR | PAREN_EXPR | ARGUMENT_LIST | PARAMETER_LIST
+                ),
+            ),
+            SyntaxElement::Token(token) => (
+                token.text_range(),
+                matches!(token.kind(), STRING | RAW_STRING),
+            ),
+        };
+        if is_block {
+            let start = lines.line_of(range.start());
+            let end = lines.line_of(range.end());
+            push(start, end.saturating_sub(1), FoldKind::Block);
+        }
+    }
+
+    let headers = section_headers(&root, text, &lines);
+    for header in &headers {
+        push(header.line, header.end_line, FoldKind::Section);
+    }
+    let mut region_starts: Vec<u32> = Vec::new();
+    let mut comment_lines: Vec<u32> = Vec::new();
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|token| token.kind() == COMMENT)
+    {
+        let start = token.text_range().start();
+        // A trailing comment belongs to its code line, not to a comment block.
+        if !lines.text_before(text, start).trim().is_empty() {
+            continue;
+        }
+        let line = lines.line_of(start);
+        let marker = token
+            .text()
+            .trim_start_matches('#')
+            .split_whitespace()
+            .next();
+        if marker == Some("endregion") {
+            if let Some(start) = region_starts.pop() {
+                push(start, line, FoldKind::Region);
+            }
+        } else if marker == Some("region") {
+            region_starts.push(line);
+        } else if !headers.iter().any(|header| header.line == line) {
+            comment_lines.push(line);
+        }
+    }
+    comment_lines.dedup();
+    let mut run: Option<(u32, u32)> = None;
+    for line in comment_lines {
+        run = match run {
+            Some((start, end)) if line == end + 1 => Some((start, line)),
+            Some((start, end)) => {
+                push(start, end, FoldKind::Comment);
+                Some((line, line))
+            }
+            None => Some((line, line)),
+        };
+    }
+    if let Some((start, end)) = run {
+        push(start, end, FoldKind::Comment);
+    }
+    folds.sort_by_key(|fold| (fold.start_line, Reverse(fold.end_line)));
+    folds.dedup_by_key(|fold| (fold.start_line, fold.end_line));
+    folds
+}
+
+/// An RStudio section header: a comment alone on its line whose text ends in four or more `-`,
+/// `=`, or `#` characters. Its level is the number of leading `#` characters.
+struct SectionHeader {
+    title: String,
+    level: usize,
+    range: TextRange,
+    line: u32,
+    /// The last non-blank line before the next header of the same or a higher level in the same
+    /// scope, or before the scope ends.
+    end_line: u32,
+    /// The enclosing block or argument list, or `None` at the top level of the file.
+    scope: Option<TextRange>,
+}
+
+fn section_headers(root: &SyntaxNode, text: &str, lines: &Lines) -> Vec<SectionHeader> {
+    let mut headers: Vec<SectionHeader> = Vec::new();
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|token| token.kind() == COMMENT)
+    {
+        let comment = token.text().trim_end();
+        let body = comment.trim_start_matches('#');
+        let level = comment.len() - body.len();
+        let title = body.trim_end_matches(['-', '=', '#']);
+        if body.len() - title.len() < 4 || body.starts_with(['\'', ':']) {
+            continue;
+        }
+        let range = token.text_range();
+        let line = lines.line_of(range.start());
+        if !lines.text_before(text, range.start()).trim().is_empty() {
+            continue;
+        }
+        let scope = token
+            .parent_ancestors()
+            .find(|node| matches!(node.kind(), BRACE_EXPR | ARGUMENT_LIST))
+            .map(|block| block.text_range());
+        headers.push(SectionHeader {
+            title: title.trim().to_owned(),
+            level,
+            range,
+            line,
+            end_line: line,
+            scope,
+        });
+    }
+    let last_content_line = |scope: Option<TextRange>| match scope {
+        // The closing delimiter's line stays visible.
+        Some(block) => lines.line_of(block.end()).saturating_sub(1),
+        None => lines.line_of(TextSize::of(text.trim_end())),
+    };
+    for index in 0..headers.len() {
+        let (line, level, scope) = (
+            headers[index].line,
+            headers[index].level,
+            headers[index].scope,
+        );
+        let mut end = headers[index + 1..]
+            .iter()
+            .find(|next| next.scope == scope && next.level <= level)
+            .map_or_else(
+                || last_content_line(scope),
+                |next| next.line.saturating_sub(1),
+            );
+        while end > line && lines.is_blank(text, end) {
+            end -= 1;
+        }
+        headers[index].end_line = end;
+    }
+    headers
+}
+
+/// Line starts of a text, for mapping offsets to zero-based lines.
+struct Lines {
+    starts: Vec<TextSize>,
+}
+
+impl Lines {
+    fn new(text: &str) -> Self {
+        let starts = once(TextSize::from(0))
+            .chain(
+                text.match_indices('\n')
+                    .filter_map(|(at, _)| TextSize::try_from(at + 1).ok()),
+            )
+            .collect();
+        Lines { starts }
+    }
+
+    fn line_of(&self, offset: TextSize) -> u32 {
+        let line = self
+            .starts
+            .partition_point(|start| *start <= offset)
+            .saturating_sub(1);
+        u32::try_from(line).unwrap_or(u32::MAX)
+    }
+
+    /// The offset of the line's end, before its newline.
+    fn end_of(&self, text: &str, line: u32) -> TextSize {
+        let next = usize::try_from(line).map_or(usize::MAX, |line| line.saturating_add(1));
+        self.starts
+            .get(next)
+            .map_or(TextSize::of(text), |start| *start - TextSize::from(1))
+    }
+
+    fn text_before<'text>(&self, text: &'text str, offset: TextSize) -> &'text str {
+        let line = usize::try_from(self.line_of(offset)).unwrap_or_default();
+        let start = self.starts.get(line).copied().unwrap_or_default();
+        text.get(usize::from(start)..usize::from(offset))
+            .unwrap_or_default()
+    }
+
+    fn is_blank(&self, text: &str, line: u32) -> bool {
+        let index = usize::try_from(line).unwrap_or(usize::MAX);
+        let Some(start) = self.starts.get(index) else {
+            return true;
+        };
+        let end = self
+            .starts
+            .get(index + 1)
+            .map_or(text.len(), |next| usize::from(*next));
+        text.get(usize::from(*start)..end)
+            .is_none_or(|line| line.trim().is_empty())
+    }
 }
 
 /// `name` is used only for bare statements; assigned constructions keep the assigned name.
@@ -3374,7 +3976,7 @@ fn literal_expected_fields(
         hir.expressions()
             .enumerate()
             .filter(|(_, expression)| expression.range == range)
-            .find_map(|(index, _)| check.literal_expectations.get(&ExprId(index as u32)))
+            .find_map(|(index, _)| check.literal_expectations.get(&ExprId::new(index)))
             .copied()
     };
 
@@ -3649,8 +4251,8 @@ fn argument_name_completions(
     // arguments; anywhere inside an argument's own expression or name, a name would not fit.
     let mut typed = None;
     for (index, argument) in arguments.iter().enumerate() {
-        if argument
-            .name_range
+        if hir
+            .argument_name_range(argument)
             .is_some_and(|range| range.contains_inclusive(relative))
         {
             return Vec::new();
@@ -3674,7 +4276,7 @@ fn argument_name_completions(
     };
     let claimed: HashSet<&str> = arguments
         .iter()
-        .filter_map(|argument| argument.name.map(Symbol::as_str))
+        .filter_map(|argument| hir.argument_name(argument).map(Symbol::as_str))
         .collect();
     let positional = arguments
         .iter()
@@ -3963,10 +4565,10 @@ fn active_parameter(
 
     let mut consumed = vec![false; matchable_count];
     for argument in arguments.iter().take(cursor_index) {
-        match &argument.name {
+        match hir.argument_name(argument) {
             // Named arguments are never routed into `...`, so an unmatched name consumes no slot.
             Some(name) => {
-                if let Some(slot) = slot_for_name(name) {
+                if let Some(slot) = slot_for_name(&name) {
                     consumed[slot] = true;
                 }
             }
@@ -3981,8 +4583,8 @@ fn active_parameter(
     // The cursor's own named argument targets the parameter it names, else `...`.
     let named_target = arguments
         .get(cursor_index)
-        .and_then(|argument| argument.name.as_deref())
-        .and_then(|name| slot_for_name(name).or(variadic_slot));
+        .and_then(|argument| hir.argument_name(argument))
+        .and_then(|name| slot_for_name(&name).or(variadic_slot));
 
     Some(
         named_target
@@ -4261,7 +4863,7 @@ fn target_at<'db>(
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a
 /// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
-    project_global_names(db, files).contains(&Symbol::new(name))
+    Symbol::lookup(name).is_some_and(|name| project_global_names(db, files).contains(&name))
 }
 
 fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occurrence> {
@@ -4489,7 +5091,7 @@ impl PositionedItem<'_> {
                 (
                     expression.range.len(),
                     !matches!(expression.kind, ExpressionKind::NameRef(_)),
-                    ExprId(index as u32),
+                    ExprId::new(index),
                 )
             })
             .collect();

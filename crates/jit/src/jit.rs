@@ -126,10 +126,21 @@ unsafe fn compiled_for<'a>(
         let constants = machine.code.cdr();
         let tier1 = constants.element(TIER1);
         if tier1 != values::nil() {
-            let compiled = &*(tier1.external_address() as *const Compiled);
-            // Closures made by one `function` expression share their body but not their
-            // enclosure, which the compiled lookups are specialized to.
-            return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+            if tier1.external_protected().weak_key() != values::nil() {
+                let compiled = &*(tier1.external_address() as *const Compiled);
+                // Closures made by one `function` expression share their body but not their
+                // enclosure, which the compiled lookups are specialized to.
+                return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+            }
+            // The enclosure the code was compiled for died, and no activation can still run the
+            // code, because a running one keeps its enclosure reachable. The address is cleared
+            // so that a copy of the constants sharing this pointer does not free it twice.
+            let address = tier1.external_address() as *mut Compiled;
+            if !address.is_null() {
+                tier1.set_external_address(std::ptr::null_mut());
+                drop(Box::from_raw(address));
+            }
+            heap().set_element(constants, TIER1, values::nil());
         }
         let counters = values::ints_mut(constants.element(PROFILE));
         let state = counters[profile::TIER_STATE];
@@ -267,7 +278,10 @@ unsafe fn compile_in<'a>(
             osr,
         });
         // Everything the machine code and the speculations point to stays reachable from the
-        // external pointer, so the collector never frees an object compiled code embeds.
+        // external pointer while the enclosure lives, so the collector never frees an object
+        // compiled code embeds. They hang off a weak reference keyed on the enclosure, because
+        // the body outlives any one closure: R6 gives every object's methods the same body, and a
+        // strong reference would keep the first object compiled for alive with its finalizer.
         let mut kept = vec![enclosure];
         kept.extend(plan.slots.iter().copied());
         for speculation in &plan.speculations {
@@ -283,8 +297,12 @@ unsafe fn compile_in<'a>(
             for (index, object) in kept.iter().enumerate() {
                 heap.set_element(protected, index, *object);
             }
+            let weak = heap
+                .alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
+                .map_err(|_| error("the JIT could not allocate its code object"))?;
+            heap.root(weak);
             let address = Box::into_raw(compiled) as *mut c_void;
-            heap.alloc_external_ptr(address, values::nil(), protected)
+            heap.alloc_external_ptr(address, values::nil(), weak)
                 .map_err(|_| error("the JIT could not allocate its code object"))
         })();
         heap.release_handles(mark);

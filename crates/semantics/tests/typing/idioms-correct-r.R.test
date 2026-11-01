@@ -711,8 +711,8 @@ run <- function() guarded(1 + 1)
 #++++
 reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
 total: <T, U> fn(values: list[T] | T[]) -> U
-guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> Unknown
-run: fn() -> Unknown
+guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> T
+run: fn() -> double
 
 #---- a_formal_captured_by_a_defuser_is_optional
 enquo <- function(arg) substitute(arg)
@@ -776,3 +776,22 @@ neg <- function(x) -x
 #++++
 neg: fn(x: double | NULL) -> double
 54..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | NULL`
+
+#---- a_formal_tested_by_an_rlang_type_predicate_takes_any_type
+is_string <- function(x) is.character(x) && length(x) == 1
+as_function <- function(x) {
+  if (is_string(x)) return(get(x, mode = "function"))
+  x
+}
+map <- function(.x, .f, ...) {
+  .f <- as_function(.f)
+  lapply(.x, .f, ...)
+}
+g <- function(xs) map(xs, function(d) d + 1)
+h <- function(xs) map(xs, "identity")
+#++++
+is_string: fn(x: Unknown) -> logical
+as_function: fn(x: Unknown) -> Any
+map: <T> fn(.x: Unknown, .f: T, ...: Any) -> Unknown
+g: <T> fn(xs: T) -> Unknown
+h: <T> fn(xs: T) -> Unknown

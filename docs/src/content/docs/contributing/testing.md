@@ -157,6 +157,11 @@ on purpose.
   A target inside the stub corpus renders the token its range covers, as in
   ``declared in stub source 0 at `print` ``, rather than a byte offset, because an offset shifts
   whenever an unrelated declaration is added, while the token proves the range is right.
+- **`crates/ide/tests/structure`**: whole-file editor features. Each case renders the outline
+  (nested by indentation), the folds as zero-based inclusive line ranges, the semantic tokens for
+  R names, the quick fixes the diagnostics and default lints offer, and, when the source has a `$0`
+  marker, every step of selection expansion from it. Run it with
+  `cargo test -p ide --test test_ide_fixtures structure`.
 
 ## Fuzzing and property tests
 
@@ -324,6 +329,11 @@ into old ones and collects at random points, with and without collection stress,
 collection checks each object the model still reaches. It also re-interns every string ever made,
 so an intern-table entry that outlived its string shows up. A disabled write barrier, a frame whose
 cells are not traced, and a minor collection that keeps dead strings in the table each turn it red.
+
+Tests that load base R take it from the GNU R installation `R_HOME` names (the system R when it is
+unset), and the runtime then behaves as that version. Run them once per supported version, for
+example `R_HOME=/opt/R/4.6.1/lib/R cargo test -p interp`, and the oracle the same way with
+`ORACLE_R` ([Corpus and oracle](/contributing/corpus-and-oracle)).
 
 `crates/libr/tests/test_fuzz_native.rs` fuzzes the native boundary itself. It nests every
 non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`, `R_tryCatchError`,

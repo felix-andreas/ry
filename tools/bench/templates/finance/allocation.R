@@ -2,6 +2,7 @@
 #@ param ITEMS int 3 7
 #@ param BUDGET int 20 60
 # Discrete allocation: lot selection as a mixed-integer programme, plus subset search.
+#: fn(values: double[], costs: double[], [budget]: double) -> integer[]
 select_lots_@ID@ <- function(values, costs, budget = @BUDGET@L) {
   n <- length(values)
   model <- ompr::MIPModel() |>
@@ -10,22 +11,29 @@ select_lots_@ID@ <- function(values, costs, budget = @BUDGET@L) {
     ompr::add_constraint(ompr::sum_over(costs[i] * x[i], i = 1:n) <= budget)
   loadNamespace("ROI.plugin.highs")
   result <- ompr::solve_model(model, ompr.roi::with_ROI(solver = "highs"))
-  as.integer(round(ompr::get_solution(result, x[i])$value))
+  #: double[]
+  picked <- ompr::get_solution(result, x[i])$value
+  as.integer(round(picked))
 }
 
+#: fn(returns: double[], [cap]: double) -> double[]
 lp_allocation_@ID@ <- function(returns, cap = 0.5) {
   n <- length(returns)
+  #: matrix
+  constraints <- rbind(rep(1, n), diag(n))
   solution <- Rglpk::Rglpk_solve_LP(
-    obj = returns, mat = rbind(rep(1, n), diag(n)),
+    obj = returns, mat = constraints,
     dir = c("==", rep("<=", n)), rhs = c(1, rep(cap, n)), max = TRUE
   )
   solution$solution
 }
 
+#: fn(notionals: double[], target: double) -> list[integer[]]
 trade_subsets_@ID@ <- function(notionals, target) {
   FLSSS::FLSSS(len = length(notionals), v = notionals, target = target, ME = 0, solutionNeed = 1)
 }
 
+#: fn(units: integer) -> partition
 lot_splits_@ID@ <- function(units) {
   partitions::parts(units)
 }

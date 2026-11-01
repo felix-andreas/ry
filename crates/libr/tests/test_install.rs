@@ -99,6 +99,34 @@ fn r_cmd_config_reports_ry_s_toolchain() {
     assert_eq!(blas, "-lblas");
 }
 
+/// `R CMD SHLIB` reads the user's Makevars last, so it overrides the toolchain, as pkgbuild's
+/// `without_compiler` expects.
+#[test]
+fn the_user_makevars_overrides_the_compiler() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("user-makevars");
+    drop(std::fs::remove_dir_all(&directory));
+    std::fs::create_dir_all(&directory).expect("a directory");
+    std::fs::write(directory.join("probe.c"), "int probe(void) { return 1; }\n").expect("a source");
+    std::fs::write(directory.join("user.mk"), "CC = false\n").expect("a user Makevars");
+    let shlib = |user_makevars: Option<&Path>| {
+        let mut command = Command::new(home().join("bin/R"));
+        command
+            .args(["CMD", "SHLIB", "probe.c"])
+            .current_dir(&directory)
+            .env_remove("R_MAKEVARS_USER");
+        if let Some(path) = user_makevars {
+            command.env("R_MAKEVARS_USER", path);
+        }
+        command.output().expect("run R CMD SHLIB").status.success()
+    };
+    assert!(shlib(None), "probe.c compiles with ry's toolchain");
+    drop(std::fs::remove_file(directory.join("probe.o")));
+    assert!(
+        !shlib(Some(&directory.join("user.mk"))),
+        "CC = false in the user Makevars fails the build"
+    );
+}
+
 /// rytest as a source package: DESCRIPTION, NAMESPACE and its src/.
 fn rytest_source() -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rytest-source");
@@ -293,6 +321,59 @@ fn the_r_level_half_runs_on_ry() {
         output,
         "Hello, ry! 9 30 \n3 installed from inst/ \ngreet.Rd \n"
     );
+}
+
+/// `install.packages` installs a source package only when the home has `bin/INSTALL`, which
+/// S7's and pkgload's tests rely on.
+#[test]
+fn install_packages_installs_a_source_package() {
+    let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-packages-library");
+    drop(std::fs::remove_dir_all(&library));
+    std::fs::create_dir_all(&library).expect("a library");
+    let script = format!(
+        "install.packages('{}', lib = '{}', repos = NULL, type = 'source', quiet = TRUE)\n\
+         library(rcode, lib.loc = '{}')\ncat(greet('ry'))\n",
+        rcode_source().display(),
+        library.display(),
+        library.display()
+    );
+    let output = run_home("Rscript", &["-e", &script], &library);
+    assert_eq!(output, "Hello, ry!");
+}
+
+/// `R CMD INSTALL --build` leaves a binary tarball in the working directory, which installs
+/// again as a binary package. pkgbuild's binary builds depend on it.
+#[test]
+fn install_build_packs_a_binary_package() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-build");
+    drop(std::fs::remove_dir_all(&directory));
+    std::fs::create_dir_all(directory.join("first")).expect("a library");
+    let source = rcode_source().display().to_string();
+    run_home(
+        "R",
+        &["CMD", "INSTALL", "--build", "-l", "first", &source],
+        &directory,
+    );
+    let tarball = std::fs::read_dir(&directory)
+        .expect("the build directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .map(|name| name.to_string_lossy().into_owned())
+        .find(|name| {
+            name.starts_with("rcode_") && name.contains("_R_") && name.ends_with(".tar.gz")
+        })
+        .expect("a binary tarball");
+    std::fs::create_dir_all(directory.join("second")).expect("a library");
+    run_home(
+        "R",
+        &["CMD", "INSTALL", "-l", "second", &tarball],
+        &directory,
+    );
+    let output = run_home(
+        "Rscript",
+        &["-e", "library(rcode, lib.loc = 'second'); cat(greet('ry'))"],
+        &directory,
+    );
+    assert_eq!(output, "Hello, ry!");
 }
 
 /// Rcpp turns dynamic symbols off and only then registers its routines, and still calls the

@@ -33,14 +33,13 @@ use {
     futures::future::BoxFuture,
     ide::{
         CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
-        HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
+        FoldKind, HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
         classify_type_token,
     },
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics},
-        file_conditional_writers, file_interface_reads, item_naming, item_tree,
+        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics, warm_project_folds},
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -72,7 +71,7 @@ use {
         thread,
         time::{Duration, Instant},
     },
-    syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name},
+    syntax::{SyntaxElement, TextRange, TextSize, is_syntactic_name},
     tokio::{runtime::Handle, sync::oneshot},
     tower::ServiceBuilder,
 };
@@ -333,8 +332,17 @@ impl ServerState {
     {
         let (reply, receive) = oneshot::channel();
         let job = Job::Run(Box::new(move |worker| {
+            // An edit that lands mid-request cancels its queries; the client asks again for the
+            // new text, so the answer is `ContentModified` rather than a dead worker.
+            let response = salsa::Cancelled::catch(AssertUnwindSafe(|| build(worker)))
+                .unwrap_or_else(|_| {
+                    Err(ResponseError::new(
+                        ErrorCode::CONTENT_MODIFIED,
+                        "the document changed during the request",
+                    ))
+                });
             // The receiver is gone only when the client cancelled the request.
-            reply.send(build(worker)).ok();
+            reply.send(response).ok();
         }));
         // Queued first: a background unit cancelled before the request is queued would just
         // start the next one.
@@ -870,8 +878,9 @@ impl Worker {
         }
     }
 
-    /// Scans every file's attach facts and applies their union once, then derives every
-    /// item's naming and the per-file folds the project-wide maps read, across all cores.
+    /// Scans every file's attach facts and applies their union once, then derives the per-file
+    /// folds the project-wide maps read, across all cores. Naming every item is left to the
+    /// prime queue: a file's check names only the items its interface reaches.
     fn warm_up(&mut self) {
         if !self.unscanned.is_empty() {
             let paths = mem::take(&mut self.unscanned);
@@ -888,22 +897,18 @@ impl Worker {
             if !self.unscanned.is_empty() {
                 return;
             }
-            // Before naming: every memo that reads the attach set would re-run after it.
+            // Before the folds: every memo that reads the attach set would re-run after it.
             self.apply_attached_union();
         }
         let paths = mem::take(&mut self.unwarmed);
         let cancel = self.cancel.clone();
-        // A cancel can be lost to salsa's uncancel between two items, so a large file
-        // also checks the queue per item and is requeued when it stopped early.
+        // A cancel can be lost to salsa's uncancel between two files, so each file checks the
+        // queue and is requeued when it stopped early.
         let (done, mut rest) = self.in_parallel(paths, |db, file| {
-            for &item in item_tree(db, file) {
-                if cancel.has_queued_jobs() {
-                    return false;
-                }
-                item_naming(db, item);
+            if cancel.has_queued_jobs() {
+                return false;
             }
-            file_interface_reads(db, file);
-            file_conditional_writers(db, file);
+            warm_project_folds(db, file);
             true
         });
         rest.extend(
@@ -1088,10 +1093,10 @@ impl Worker {
     }
 
     fn to_text_range(&self, text: &str, range: lsp_types::Range) -> TextRange {
-        TextRange::new(
-            self.to_offset(text, range.start),
-            self.to_offset(text, range.end),
-        )
+        // A client may send a reversed range; it still names the same span.
+        let start = self.to_offset(text, range.start);
+        let end = self.to_offset(text, range.end);
+        TextRange::new(start.min(end), start.max(end))
     }
 
     fn to_range(&self, text: &str, range: TextRange) -> lsp_types::Range {
@@ -1900,13 +1905,16 @@ fn initialize_result(
             references_provider: Some(lsp_types::OneOf::Left(true)),
             document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
             folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+            selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(
+                true,
+            )),
             rename_provider: Some(lsp_types::OneOf::Left(true)),
             semantic_tokens_provider: Some(
                 lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                     lsp_types::SemanticTokensOptions {
                         legend: lsp_types::SemanticTokensLegend {
-                            // In `semantic_class_index` order. Only ry's own syntax is
-                            // colored, because R grammars already color R.
+                            // In `semantic_class_index` order. R grammars already color R's
+                            // tokens, so plain R gets only the classes they cannot know.
                             token_types: vec![
                                 lsp_types::SemanticTokenType::TYPE,
                                 lsp_types::SemanticTokenType::TYPE_PARAMETER,
@@ -1915,11 +1923,13 @@ fn initialize_result(
                                 lsp_types::SemanticTokenType::DECORATOR,
                                 lsp_types::SemanticTokenType::KEYWORD,
                                 lsp_types::SemanticTokenType::ENUM_MEMBER,
+                                lsp_types::SemanticTokenType::FUNCTION,
+                                lsp_types::SemanticTokenType::NAMESPACE,
                             ],
                             token_modifiers: Vec::new(),
                         },
                         full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
-                        range: None,
+                        range: Some(true),
                         work_done_progress_options: Default::default(),
                     },
                 ),
@@ -2314,8 +2324,18 @@ impl LanguageServer for ServerState {
             };
             let text = worker.text(file);
             let range = worker.to_text_range(&text, params.range);
+            // Fixes come from the findings the server publishes, after suppressions, so a
+            // suppressed finding offers nothing.
             let actions = worker
-                .cancellable(|worker| ide::code_actions(&worker.db, file, range))
+                .cancellable(|worker| {
+                    let published = apply_suppressions(
+                        document_diagnostics(&worker.db, file, &worker.config),
+                        &text,
+                    );
+                    let mut actions = ide::diagnostic_fixes(&published, range);
+                    actions.extend(ide::code_actions(&worker.db, file, range));
+                    actions
+                })
                 .unwrap_or_default();
             if actions.is_empty() {
                 return Ok(None);
@@ -2333,9 +2353,13 @@ impl LanguageServer for ServerState {
                                 new_text: edit.replacement,
                             })
                             .collect();
+                        // A diagnostic's own fix is what an editor's "fix" shortcut applies.
+                        let is_preferred =
+                            (action.kind == ide::CodeActionKind::DiagnosticFix).then_some(true);
                         lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
                             title: action.title,
                             kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                            is_preferred,
                             edit: Some(lsp_types::WorkspaceEdit {
                                 changes: Some(HashMap::from([(uri.clone(), edits)])),
                                 ..Default::default()
@@ -2504,10 +2528,63 @@ impl LanguageServer for ServerState {
         params: lsp_types::FoldingRangeParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::FoldingRange>>, Self::Error>> {
         self.read(move |worker| {
+            let Some((file, _)) = worker.document(&params.text_document.uri) else {
+                return Ok(None);
+            };
+            let folds = worker
+                .cancellable(|worker| ide::folding_ranges(&worker.db, file))
+                .unwrap_or_default();
+            Ok(Some(
+                folds
+                    .into_iter()
+                    .map(|fold| lsp_types::FoldingRange {
+                        start_line: fold.start_line,
+                        start_character: None,
+                        end_line: fold.end_line,
+                        end_character: None,
+                        kind: Some(match fold.kind {
+                            FoldKind::Comment => lsp_types::FoldingRangeKind::Comment,
+                            FoldKind::Block | FoldKind::Section | FoldKind::Region => {
+                                lsp_types::FoldingRangeKind::Region
+                            }
+                        }),
+                        collapsed_text: None,
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
+    fn selection_range(
+        &mut self,
+        params: lsp_types::SelectionRangeParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::SelectionRange>>, Self::Error>> {
+        self.read(move |worker| {
             let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            Ok(Some(folding_ranges(&worker.db, file, &text)))
+            let mut selections = Vec::new();
+            for position in params.positions {
+                let offset = worker.to_offset(&text, position);
+                let ranges = worker
+                    .cancellable(|worker| ide::selection_ranges(&worker.db, file, offset))
+                    .unwrap_or_default();
+                // The protocol links each range to its parent, so the chain is built outermost
+                // first.
+                let mut selection: Option<lsp_types::SelectionRange> = None;
+                for range in ranges.into_iter().rev() {
+                    selection = Some(lsp_types::SelectionRange {
+                        range: worker.to_range(&text, range),
+                        parent: selection.map(Box::new),
+                    });
+                }
+                // Every position needs an answer, so an empty chain falls back to the cursor.
+                selections.push(selection.unwrap_or(lsp_types::SelectionRange {
+                    range: lsp_types::Range::new(position, position),
+                    parent: None,
+                }));
+            }
+            Ok(Some(selections))
         })
     }
 
@@ -2532,8 +2609,42 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding);
+            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding, None);
             Ok(Some(lsp_types::SemanticTokensResult::Tokens(
+                lsp_types::SemanticTokens {
+                    result_id: None,
+                    data: tokens,
+                },
+            )))
+        })
+    }
+
+    fn semantic_tokens_range(
+        &mut self,
+        params: lsp_types::SemanticTokensRangeParams,
+    ) -> BoxFuture<'static, Result<Option<lsp_types::SemanticTokensRangeResult>, Self::Error>> {
+        self.read(move |worker| {
+            let Some(path) = worker.document_path(&params.text_document.uri) else {
+                return Ok(None);
+            };
+            // A stub is small and has no tree, so its range request answers with every token.
+            if let Some(stub) = worker.stub_documents.get(&path).cloned() {
+                let tokens = stub_semantic_tokens(&stub, worker.encoding);
+                return Ok(Some(lsp_types::SemanticTokensRangeResult::Tokens(
+                    lsp_types::SemanticTokens {
+                        result_id: None,
+                        data: tokens,
+                    },
+                )));
+            }
+            let Some(&file) = worker.files.get(&path) else {
+                return Ok(None);
+            };
+            let text = worker.text(file);
+            let viewport = worker.to_text_range(&text, params.range);
+            let tokens =
+                ry_semantic_tokens(&worker.db, file, &text, worker.encoding, Some(viewport));
+            Ok(Some(lsp_types::SemanticTokensRangeResult::Tokens(
                 lsp_types::SemanticTokens {
                     result_id: None,
                     data: tokens,
@@ -2649,6 +2760,8 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
             lsp_types::SymbolKind::METHOD
         }
         DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        // The kind RStudio's outline and the R language server use for sections.
+        DocumentSymbolKind::Section => lsp_types::SymbolKind::STRING,
     }
 }
 
@@ -2788,71 +2901,21 @@ fn diagnostics_cancelled_error() -> ResponseError {
     )
 }
 
-/// Brace/paren/argument-list folds keep the closing delimiter visible;
-/// consecutive comments (including `#:` blocks) fold as one region.
-fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_types::FoldingRange> {
-    let index = LineIndex::new(text);
-    let parse = semantics::parse(db, file);
-    let mut ranges = Vec::new();
-    for node in parse.syntax_node().descendants() {
-        if matches!(
-            node.kind(),
-            SyntaxKind::BRACE_EXPR | SyntaxKind::PAREN_EXPR | SyntaxKind::ARGUMENT_LIST
-        ) {
-            let start = index.line_column(node.text_range().start());
-            let end = index.line_column(node.text_range().end());
-            if end.line > start.line {
-                ranges.push(lsp_types::FoldingRange {
-                    start_line: start.line,
-                    start_character: None,
-                    end_line: end.line - 1,
-                    end_character: None,
-                    kind: Some(lsp_types::FoldingRangeKind::Region),
-                    collapsed_text: None,
-                });
-            }
-        }
-    }
-    let mut comment_lines: Vec<u32> = parse
-        .syntax_node()
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::COMMENT)
-        .map(|token| index.line_column(token.text_range().start()).line)
-        .collect();
-    comment_lines.sort_unstable();
-    comment_lines.dedup();
-    let mut runs: Vec<(u32, u32)> = Vec::new();
-    for line in comment_lines {
-        match runs.last_mut() {
-            Some((_, end)) if line == *end + 1 => *end = line,
-            _ => runs.push((line, line)),
-        }
-    }
-    ranges.extend(
-        runs.into_iter()
-            .filter(|(start, end)| end > start)
-            .map(|(start, end)| lsp_types::FoldingRange {
-                start_line: start,
-                start_character: None,
-                end_line: end,
-                end_character: None,
-                kind: Some(lsp_types::FoldingRangeKind::Comment),
-                collapsed_text: None,
-            }),
-    );
-    ranges.sort_by_key(|range| (range.start_line, range.end_line));
-    ranges
-}
-
+/// `viewport` keeps the tokens that overlap it, for a range request on a large file.
 fn ry_semantic_tokens(
     db: &RootDatabase,
     file: SourceFile,
     text: &str,
     encoding: PositionEncoding,
+    viewport: Option<TextRange>,
 ) -> Vec<lsp_types::SemanticToken> {
     let spans = ide::semantic_tokens(db, file)
         .into_iter()
+        .filter(|(range, _)| {
+            viewport.is_none_or(|viewport| {
+                range.start() < viewport.end() && viewport.start() < range.end()
+            })
+        })
         .map(|(range, class)| (range, semantic_class_index(class)))
         .collect();
     delta_encode_tokens(spans, text, encoding)
@@ -2868,6 +2931,8 @@ fn semantic_class_index(class: SemanticClass) -> u32 {
         SemanticClass::Decorator => 4,
         SemanticClass::Keyword => 5,
         SemanticClass::Tag => 6,
+        SemanticClass::Function => 7,
+        SemanticClass::Namespace => 8,
     }
 }
 

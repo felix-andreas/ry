@@ -10,6 +10,7 @@ use {
         object::{Sexp, SexpType, gp},
         strings::Encoding,
     },
+    interp::platform::{self, Iconv},
     std::{
         borrow::Cow,
         ffi::{CStr, c_char, c_int},
@@ -305,23 +306,29 @@ pub unsafe extern "C" fn PRINTNAME(symbol: Sexp) -> Sexp {
     })
 }
 
-/// `Riconv_open`: GNU R's wrapper over the C library's `iconv`, where `""` names the native
-/// encoding, which is UTF-8 here.
+/// `Riconv_open`: GNU R's wrapper over `iconv_open`, where `""` names the native encoding,
+/// which is UTF-8 here. The descriptor is a boxed `Iconv`, so the same contract holds on
+/// Windows, where the conversion is ry's own; failure is `(void *) -1`, as from `iconv_open`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riconv_open(
     to: *const c_char,
     from: *const c_char,
 ) -> *mut std::ffi::c_void {
-    let native = |name: *const c_char| {
-        if c_bytes(name).is_empty() {
-            c"UTF-8".as_ptr()
-        } else {
-            name
-        }
+    let name = |name: *const c_char| match c_bytes(name) {
+        b"" => "UTF-8".to_string(),
+        bytes => String::from_utf8_lossy(bytes).into_owned(),
     };
-    libc::iconv_open(native(to), native(from))
+    match Iconv::open(&name(from), &name(to)) {
+        Some(converter) => Box::into_raw(Box::new(converter)).cast(),
+        None => {
+            platform::set_errno(libc::EINVAL);
+            usize::MAX as *mut std::ffi::c_void
+        }
+    }
 }
 
+/// `Riconv`: `iconv(3)`'s contract over a descriptor from `Riconv_open`, including a null
+/// input that writes the final shift sequence (or, with a null output too, resets the state).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riconv(
     descriptor: *mut std::ffi::c_void,
@@ -330,18 +337,56 @@ pub unsafe extern "C" fn Riconv(
     output: *mut *mut c_char,
     output_left: *mut usize,
 ) -> usize {
-    libc::iconv(
-        descriptor,
-        input as *mut *mut c_char,
-        input_left,
-        output,
-        output_left,
-    )
+    let Some(converter) = descriptor.cast::<Iconv>().as_mut() else {
+        platform::set_errno(libc::EINVAL);
+        return usize::MAX;
+    };
+    let no_output = output.is_null() || (*output).is_null() || output_left.is_null();
+    if input.is_null() || (*input).is_null() {
+        if no_output {
+            converter.reset();
+            return 0;
+        }
+        let buffer = std::slice::from_raw_parts_mut((*output).cast::<u8>(), *output_left);
+        let (written, outcome) = converter.finish(buffer);
+        *output = (*output).add(written);
+        *output_left -= written;
+        return match outcome {
+            Ok(()) => 0,
+            Err(stop) => {
+                platform::set_errno(stop.errno());
+                usize::MAX
+            }
+        };
+    }
+    let mut rest = std::slice::from_raw_parts((*input).cast::<u8>(), *input_left);
+    let buffer: &mut [u8] = if no_output {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut((*output).cast::<u8>(), *output_left)
+    };
+    let (written, outcome) = converter.convert(&mut rest, buffer);
+    *input = (*input).add(*input_left - rest.len());
+    *input_left = rest.len();
+    if !no_output {
+        *output = (*output).add(written);
+        *output_left -= written;
+    }
+    match outcome {
+        Ok(()) => 0,
+        Err(stop) => {
+            platform::set_errno(stop.errno());
+            usize::MAX
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riconv_close(descriptor: *mut std::ffi::c_void) -> c_int {
-    libc::iconv_close(descriptor)
+    if !descriptor.is_null() && descriptor as usize != usize::MAX {
+        drop(Box::from_raw(descriptor.cast::<Iconv>()));
+    }
+    0
 }
 
 /// How two strings sort. GNU R sorts with the locale's collation; ry's runtime collates in

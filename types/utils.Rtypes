@@ -7,11 +7,13 @@
 # Taking a slice of a list keeps its names, so the named candidate comes ahead of
 # the plain list one.
 head : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
+head : fn(x: Date, [n]: integer, ...: Any) -> Date
 head : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
 head : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
 head : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]
 head : fn(x: Any, [n]: Any, ...: Any) -> Any
 tail : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
+tail : fn(x: Date, [n]: integer, ...: Any) -> Date
 tail : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
 tail : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
 tail : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]

@@ -10,11 +10,11 @@ use {
             TypeErrorKind, column_element,
         },
         exhaustiveness::{MatchFinding, MatchFindingKind},
-        file_syntax_sites, file_type_definitions,
+        file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-        item_tree,
+        item_syntax, item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
@@ -54,6 +54,9 @@ pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
     pub related: Vec<RelatedLocation>,
+    /// The one edit that resolves the finding, when it is mechanical. Editors offer it as a
+    /// quick fix, so the finding and its fix cannot disagree about the range.
+    pub fix: Option<Fix>,
 }
 
 impl Diagnostic {
@@ -64,8 +67,25 @@ impl Diagnostic {
             code,
             message,
             related: Vec::new(),
+            fix: None,
         }
     }
+
+    pub fn with_fix(mut self, title: String, range: TextRange, replacement: String) -> Self {
+        self.fix = Some(Fix {
+            title,
+            range,
+            replacement,
+        });
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct Fix {
+    pub title: String,
+    pub range: TextRange,
+    pub replacement: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -75,9 +95,9 @@ pub struct RelatedLocation {
     pub message: &'static str,
 }
 
-/// Derives every fact a later pass reads from the file's tree, while the tree is resident.
-/// A cold pass that evicts trees between batches calls this first, so checking a file never
-/// re-parses another one: past this point only the file's own diagnostics read its tree.
+/// Derives every fact a later pass reads from the file's tree. A cold pass calls this for
+/// every file across all cores first, so a later check that reaches another file finds its
+/// facts memoized instead of walking that file's tree on the checking thread.
 pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = crate::metadata::file_attached_namespaces(db, file);
     let _ = file_error_ranges(db, file);
@@ -86,8 +106,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = definition_agreement_candidates(db, file);
     let _ = crate::lints::file_syntax_lints(db, file, *lints);
     let _ = crate::file_typing_mode(db, file);
-    let _ = crate::file_type_definitions(db, file);
-    let _ = type_declaration_names(db, file);
+    warm_project_folds(db, file);
     let _ = parse_stage_diagnostics(db, file);
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
@@ -332,6 +351,17 @@ fn file_error_ranges(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
         .collect()
 }
 
+/// Derives the file's share of every project-wide map a single file's check folds, so a host
+/// can spread that work across cores before the first check. Without it, the first check
+/// derives the share of every file of the project on one thread.
+pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
+    file_definitions(db, file);
+    file_conditional_writers(db, file);
+    file_type_definitions(db, file);
+    type_declaration_names(db, file);
+    file_global_variable_declarations(db, file);
+}
+
 #[salsa::tracked(returns(clone))]
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = parse_stage_diagnostics(db, file);
@@ -355,12 +385,17 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         for error in &check.errors {
-            diagnostics.push(Diagnostic::new(
-                error.range + offset,
+            let range = error.range + offset;
+            let diagnostic = Diagnostic::new(
+                range,
                 Severity::Error,
                 "type-mismatch",
                 render_type_error_message(db, error),
-            ));
+            );
+            diagnostics.push(match misspelling_fix(file.text(db), range, &error.kind) {
+                Some((title, at, replacement)) => diagnostic.with_fix(title, at, replacement),
+                None => diagnostic,
+            });
         }
         // Without inline annotations, records, tags and `match` are reported as `ry-syntax`
         // and their coverage is not counted.
@@ -465,18 +500,22 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             }
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
             let range = module.range(*expression) + offset;
             let display = display_name(name);
-            let suggestion = suggestion
+            let hint = suggestion
+                .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
-            diagnostics.push(Diagnostic::new(range, Severity::Warning, "unresolved", format!(
-                    "I could not resolve `{display}` in this package, its imports, or builtins.{suggestion}"
-                )));
+            diagnostics.push(with_name_fix(
+                Diagnostic::new(range, Severity::Warning, "unresolved", format!(
+                    "I could not resolve `{display}` in this package, its imports, or builtins.{hint}"
+                )),
+                suggestion.as_deref(),
+            ));
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
@@ -489,12 +528,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
-            let suggestion = nearest_name(name, miss.columns.iter().map(String::as_str))
-                .or(suggestion)
+            let suggestion =
+                nearest_name(name, miss.columns.iter().map(String::as_str)).or(suggestion);
+            let hint = suggestion
+                .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let subject = match &miss.frame {
@@ -502,14 +543,17 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 None => "this frame".to_owned(),
             };
             let range = module.range(*expression) + offset;
-            diagnostics.push(Diagnostic::new(
-                range,
-                Severity::Warning,
-                "unresolved",
-                format!(
-                    "{subject} has no column `{}`, and nothing else defines that name.{suggestion}",
-                    display_name(name)
+            diagnostics.push(with_name_fix(
+                Diagnostic::new(
+                    range,
+                    Severity::Warning,
+                    "unresolved",
+                    format!(
+                        "{subject} has no column `{}`, and nothing else defines that name.{hint}",
+                        display_name(name)
+                    ),
                 ),
+                suggestion.as_deref(),
             ));
         }
     }
@@ -544,12 +588,13 @@ fn classify_non_local_read(
     check: &ItemCheck<'_>,
     naming: &ItemNaming,
     expression: &ExprId,
-    name: &str,
+    symbol: Symbol,
 ) -> NonLocalRead {
+    let name = symbol.as_str();
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if let Some(&earliest) = frame_slot_positions(db, file).get(name)
+    if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
             || naming.deferred_quiet_reads.contains(expression))
@@ -577,7 +622,7 @@ fn classify_non_local_read(
             let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
-        || super_globals(db, file).contains(name)
+        || super_globals(db, file).contains(&symbol)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -642,11 +687,20 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     .map(String::as_str)
                     .chain(ANNOTATION_PRIMITIVES.iter().copied()),
             )
-            .map(|nearest| format!(" Did you mean `{nearest}`?"))
-            .unwrap_or_default();
-            Diagnostic::new(range, Severity::Error, "annotation", format!(
-                    "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{suggestion}"
-                ))
+            ;
+            let hint = suggestion
+                .as_ref()
+                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .unwrap_or_default();
+            let diagnostic = Diagnostic::new(range, Severity::Error, "annotation", format!(
+                    "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{hint}"
+                ));
+            match suggestion {
+                Some(nearest) => {
+                    diagnostic.with_fix(format!("Change to `{nearest}`"), range, nearest)
+                }
+                None => diagnostic,
+            }
         })
         .collect()
 }
@@ -774,8 +828,7 @@ struct AnnotationReferences<'db> {
 
 /// Every annotation in the file lowered with file ranges (the `#:` blocks, and the inline
 /// sites unless inline annotations are turned off), keeping only those that reference a
-/// type or report a typing error. Memoized because it reads the tree, which a cold check
-/// evicts after its first pass.
+/// type or report a typing error. Memoized so that diagnostics never walk the tree again.
 #[salsa::tracked(returns(ref))]
 fn file_annotation_references<'db>(
     db: &'db dyn Db,
@@ -871,6 +924,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                             TypeRenderer::default().render(db, pair.inline),
                             TypeRenderer::default().render(db, pair.comment)
                         ),
+                        fix: None,
                         related: vec![RelatedLocation {
                             file,
                             range: pair.comment_range,
@@ -917,6 +971,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             severity: Severity::Warning,
             code: "annotation-mismatch",
             message: format!("{disagreement}. {winner}; make the two agree, or delete one"),
+            fix: None,
             related: vec![RelatedLocation {
                 file,
                 range: pair.comment_range,
@@ -928,8 +983,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
 }
 
 /// A disagreement between a statement's inline annotation and its `#:` comment, found from
-/// syntax alone. Memoized because it reads the tree, which a cold check evicts after its
-/// first pass.
+/// syntax alone. Memoized so that diagnostics never walk the tree again.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum AgreementCandidate<'db> {
     /// Compared as written (a type-parameter constraint, a definition's kind or arity), so
@@ -1046,6 +1100,7 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
                     describe(inline_constraint),
                     describe(comment_constraint)
                 ),
+                fix: None,
                 related: vec![RelatedLocation {
                     file,
                     range: comment_range,
@@ -1155,6 +1210,7 @@ fn definition_agreement_candidates<'db>(
                 message: format!(
                     "{disagreement}. ry uses the inline definition; make the two agree, or delete one"
                 ),
+                fix: None,
                 related: vec![RelatedLocation {
                     file,
                     range: related_range,
@@ -1408,36 +1464,13 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
     sites
 }
 
-/// Range-free, so the project-wide duplicate map depends only on which names
-/// exist and survives body edits unchanged.
+/// Near-empty in healthy projects, so its value-equality firewall holds: a new name that
+/// duplicates nothing leaves every file's duplicate check untouched.
 #[salsa::tracked(returns(ref))]
-fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
-    let mut names = Vec::new();
-    for &item in item_tree(db, file) {
-        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
-            continue;
-        }
-        if let Some(name) = item.name(db).clone() {
-            names.push(name);
-        }
-    }
-    names
-}
-
-/// Near-empty in healthy projects, so its value-equality firewall holds.
-#[salsa::tracked(returns(ref))]
-fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<String, Vec<SourceFile>> {
-    let mut sites: FxHashMap<String, Vec<SourceFile>> = FxHashMap::default();
-    for &project_file in files.files(db) {
-        if *project_file.kind(db) != DocumentKind::Package {
-            continue;
-        }
-        for name in top_level_binding_names(db, project_file) {
-            sites.entry(name.clone()).or_default().push(project_file);
-        }
-    }
-    sites.retain(|_, files| files.len() >= 2);
-    sites
+fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Vec<SourceFile>> {
+    crate::package_definition_index(db, files)
+        .duplicates
+        .clone()
 }
 
 /// Each site warns: per-site winner semantics make every earlier binding dead.
@@ -1453,9 +1486,9 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     if map.is_empty() {
         return Vec::new();
     }
-    let mut own_duplicated: Vec<&str> = Vec::new();
-    for name in top_level_binding_names(db, file) {
-        if map.contains_key(name) && !own_duplicated.contains(&name.as_str()) {
+    let mut own_duplicated: Vec<Symbol> = Vec::new();
+    for &(name, _) in file_definitions(db, file) {
+        if map.contains_key(&name) && !own_duplicated.contains(&name) {
             own_duplicated.push(name);
         }
     }
@@ -1463,13 +1496,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     for name in own_duplicated {
         let mut sites: Vec<(SourceFile, TextRange)> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
-        for &site_file in &map[name] {
+        for &site_file in &map[&name] {
             if seen_files.contains(&site_file) {
                 continue;
             }
             seen_files.push(site_file);
             for (site_name, range) in top_level_name_sites(db, site_file) {
-                if site_name == name {
+                if *site_name == name {
                     sites.push((site_file, *range));
                 }
             }
@@ -1487,6 +1520,7 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     message: format!(
                         "Top-level binding `{name}` overwrites an earlier top-level binding in this package."
                     ),
+                    fix: None,
                     related: vec![RelatedLocation {
                         file: earlier_file,
                         range: earlier_range,
@@ -1503,6 +1537,7 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     message: format!(
                         "Top-level binding `{name}` is overwritten by a later top-level binding in this package."
                     ),
+                    fix: None,
                     related: vec![RelatedLocation {
                         file: later_file,
                         range: later_range,
@@ -1604,7 +1639,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
             }
             seen_files.push(site_file);
             for (site_name, range) in type_declaration_sites(db, site_file) {
-                if site_name == name {
+                if *site_name == name {
                     sites.push((site_file, *range));
                 }
             }
@@ -1625,6 +1660,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
                 message: format!(
                     "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one project-global namespace."
                 ),
+                fix: None,
                 related: vec![RelatedLocation {
                     file: neighbour_file,
                     range: neighbour_range,
@@ -1656,6 +1692,7 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
             message: format!(
                 "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file."
             ),
+            fix: None,
             related: vec![RelatedLocation {
                 file,
                 range: neighbour_range,
@@ -1716,7 +1753,24 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
 fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     use crate::hir::LiteralKind;
     let mut declared = BTreeSet::new();
+    // Every file of the project is asked, so the common answer must not cost a tree walk.
+    if !file.text(db).contains("globalVariables") {
+        return declared;
+    }
     for &item in item_tree(db, file) {
+        // Lowering every item of the project to find a handful of calls would dominate a
+        // single file's check, so the name is matched on the syntax first.
+        let spelled = *item.kind(db) == ItemKind::Statement
+            && item_syntax(db, item).is_some_and(|syntax| {
+                syntax
+                    .syntax_node()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.text().trim_matches('`') == "globalVariables")
+            });
+        if !spelled {
+            continue;
+        }
         let Some(module) = item_hir(db, item) else {
             continue;
         };
@@ -1837,16 +1891,21 @@ fn project_typo_suggestion<'db>(
     name: Name<'db>,
     tests: bool,
 ) -> Option<String> {
+    let text = name.text(db);
+    let characters = text.chars().count();
     let test_names = tests
         .then(|| crate::test_definitions(db, files).keys())
         .into_iter()
         .flatten();
+    // The scan reruns whenever any file adds a name, so it filters on the interned length
+    // and reads only the spellings that could be within budget.
     nearest_name(
-        name.text(db),
+        text,
         crate::package_definitions(db, files)
             .keys()
             .chain(test_names)
-            .map(String::as_str),
+            .filter(|candidate| candidate.characters().abs_diff(characters) <= 2)
+            .map(|candidate| candidate.as_str()),
     )
 }
 
@@ -1862,6 +1921,75 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .chain(library.known_exports.iter())
             .map(String::as_str),
     )
+}
+
+/// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
+/// may cover a whole call or subset. The fix replaces that spelling only when it occurs exactly
+/// once as a whole name, so it never guesses between two places.
+fn misspelling_fix(
+    text: &str,
+    range: TextRange,
+    kind: &TypeErrorKind<'_>,
+) -> Option<(String, TextRange, String)> {
+    let (wrong, nearest) = match kind {
+        TypeErrorKind::NamedArgumentMismatch {
+            argument,
+            suggestion: Some(nearest),
+            duplicate: false,
+            ..
+        } => (argument, nearest),
+        TypeErrorKind::FieldDoesNotExist {
+            field,
+            suggestion: Some(nearest),
+            ..
+        } => (field, nearest),
+        TypeErrorKind::ColumnDoesNotExist {
+            column,
+            suggestion: Some(nearest),
+            ..
+        } => (column, nearest),
+        _ => return None,
+    };
+    let start = usize::from(range.start());
+    let covered = text.get(start..usize::from(range.end()))?;
+    let is_name_character =
+        |character: char| character.is_alphanumeric() || matches!(character, '.' | '_');
+    let mut whole_names = covered.match_indices(wrong.as_str()).filter(|(at, _)| {
+        !covered[..*at].ends_with(is_name_character)
+            && !covered[at + wrong.len()..].starts_with(is_name_character)
+    });
+    let (at, _) = whole_names.next()?;
+    if whole_names.next().is_some() {
+        return None;
+    }
+    // Inside quotes or backticks the bare spelling is what belongs there.
+    let quoted = covered[..at].ends_with(['"', '\'', '`']);
+    let replacement = if quoted || is_syntactic_name(nearest) {
+        nearest.clone()
+    } else {
+        format!("`{nearest}`")
+    };
+    let at = TextSize::try_from(start + at).ok()?;
+    Some((
+        format!("Change to `{nearest}`"),
+        TextRange::at(at, TextSize::of(wrong.as_str())),
+        replacement,
+    ))
+}
+
+/// Offers the suggested spelling as the fix for a misspelled name that the diagnostic's range
+/// covers exactly. A non-syntactic suggestion is written in backticks so the edit still parses.
+fn with_name_fix(diagnostic: Diagnostic, suggestion: Option<&str>) -> Diagnostic {
+    let Some(nearest) = suggestion else {
+        return diagnostic;
+    };
+    let replacement = if is_syntactic_name(nearest) {
+        nearest.to_owned()
+    } else {
+        format!("`{nearest}`")
+    };
+    let range = diagnostic.range;
+    diagnostic.with_fix(format!("Change to `{nearest}`"), range, replacement)
 }
 
 /// Ties break lexicographically for determinism. The budget is deliberately
@@ -1897,7 +2025,8 @@ pub(crate) fn nearest_name<'a>(
     let mut current: Vec<usize> = Vec::new();
     let mut best: Option<(usize, &str)> = None;
     for candidate in candidates {
-        if candidate == name {
+        // Most candidates fail on length alone, and counting is cheaper than collecting.
+        if candidate == name || candidate.chars().count().abs_diff(name_characters.len()) > budget {
             continue;
         }
         candidate_characters.clear();
@@ -2131,7 +2260,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         };
         for (expression, name) in &naming.non_locals {
             if !matches!(
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name),
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name),
                 NonLocalRead::Tolerated
             ) {
                 continue;

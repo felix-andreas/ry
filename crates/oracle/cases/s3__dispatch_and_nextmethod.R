@@ -31,3 +31,9 @@ first_missing.foo <- function(x, y) "foo"
 first_missing.default <- function(x, y) "default"
 first_missing(y = structure(1, class = "foo"))
 first_missing()
+
+# An empty first argument is still the dispatch object.
+k <- function(x, y) UseMethod("k")
+k.default <- function(x, y) "default"
+k.foo <- function(x, y) "foo"
+print(k(, structure(1, class = "foo")))

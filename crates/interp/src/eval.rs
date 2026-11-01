@@ -16,7 +16,10 @@ use {
             triple, unbound,
         },
     },
-    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
+    heap::{
+        Formal,
+        object::{NA_INTEGER, Sexp, SexpType, gp},
+    },
     smallvec::{SmallVec, smallvec},
     std::sync::atomic::Ordering,
 };
@@ -468,7 +471,10 @@ unsafe fn call_builtin_reusing(
     {
         Err(refused)
     } else {
-        scope(|| function(&context))
+        // An ALTREP method's error, parked by the element accessor the builtin went through,
+        // is raised before the builtin's value goes anywhere, so `tryCatch` around the call
+        // sees it and no code acts on the placeholder the read returned.
+        scope(|| function(&context)).and_then(|value| crate::unwind::raise_parked().map(|()| value))
     };
     // A jump out of the builtin (`return(invisible(x))`) keeps the visibility of the value it
     // carries.
@@ -845,6 +851,7 @@ pub unsafe fn bind_arguments(
     let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
     heap.root(env);
     env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     if supplied.is_none() && positional(formals, args) {
         // Most calls pass every argument by position to a function without `...`, which needs no
         // matching table: argument `i` binds formal `i`, and the formals past the last argument
@@ -853,7 +860,7 @@ pub unsafe fn bind_arguments(
         let mut index = 0;
         while formal.kind() == SexpType::Pairlist {
             let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-            bind_formal(env, formal, actual)?;
+            bindings.push(formal_binding(env, formal, actual)?);
             formal = formal.cdr();
             index += 1;
         }
@@ -861,10 +868,11 @@ pub unsafe fn bind_arguments(
         let actuals = match_args(formals, args, call)?;
         let mut formal = formals;
         for &actual in &actuals {
-            bind_formal(env, formal, actual)?;
+            bindings.push(formal_binding(env, formal, actual)?);
             formal = formal.cdr();
         }
     }
+    heap.define_formals(env, &bindings)?;
     heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
@@ -890,13 +898,11 @@ unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
     args.len() <= count && args.iter().all(|arg| arg.tag == nil())
 }
 
-/// Binds the formal at the head of `formal` to its matched argument, or to a promise of its
-/// default when the argument is missing.
-unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
-    let heap = crate::heap();
+/// The binding of the formal at the head of `formal` to its matched argument, or to a promise of
+/// its default when the argument is missing.
+unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     let missing = missing_arg();
     let symbol = formal.tag();
-    // The environment is fresh and formals are distinct, so each binding is new.
     if actual == missing && formal.car() != missing {
         // A literal default evaluates to itself, so it is bound as is: the promise would cost
         // an allocation and a force on every call that omits it, for the same value.
@@ -906,12 +912,17 @@ unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
         } else {
             make_promise(default, env)?
         };
-        let cell = heap.define_fresh(env, symbol, value)?;
-        cell.set_gp_bits(gp::BINDING_MISSING, true);
-    } else {
-        heap.define_fresh(env, symbol, actual)?;
+        return Ok(Formal {
+            symbol,
+            value,
+            missing: true,
+        });
     }
-    Ok(())
+    Ok(Formal {
+        symbol,
+        value: actual,
+        missing: false,
+    })
 }
 
 /// The arguments as a pairlist of their values or promises, which a frame records.
@@ -1435,6 +1446,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("invisible", -1, do_invisible).invisible(),
     builtin("nargs", 0, do_nargs),
     special("forceAndCall", -1, do_force_and_call).keep_visibility(),
+    special("Tailcall", -1, do_tailcall).keep_visibility(),
+    special("Exec", -1, do_exec).keep_visibility(),
+    special("declare", -1, |_| Ok(nil())).invisible(),
     internal("eval", 3, do_eval).keep_visibility(),
     internal("withVisible", 1, do_with_visible),
     internal("Recall", -1, do_recall).keep_visibility(),
@@ -1566,9 +1580,10 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     // The first srcref is the brace's own; each statement runs with its srcref current, which
     // the calls it makes record for `sys.call` and `traceback`.
     let saved = interp().srcref;
-    // Only the last value stays rooted, so an object a statement drops can be collected (and
-    // finalized) by a `gc()` later in the same block.
+    // Nothing a statement made stays rooted while the next one runs, not even its value, so an
+    // object it drops can be collected (and finalized) by a `gc()` later in the same block.
     let mark = crate::heap().handle_mark();
+    let last = call.args.len().saturating_sub(1);
     for (index, arg) in call.args.iter().enumerate() {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index + 1);
@@ -1578,7 +1593,9 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
         crate::heap().release_handles(mark);
         match result {
             Ok(next) => {
-                crate::heap().root(next);
+                if index == last {
+                    crate::heap().root(next);
+                }
                 value = next;
             }
             Err(unwind) => {
@@ -2084,6 +2101,68 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+/// `Tailcall(FUN, ...)`, R 4.4's request to call `FUN(...)` in place of the calling frame.
+/// GNU R only reuses the frame when the call is in tail position and no `on.exit` is pending,
+/// and otherwise evaluates the call normally, which is what this does every time: the value is
+/// the same, but deep recursion still grows the stack.
+unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
+    let Some((function, rest)) = call.args.split_first() else {
+        return Err(error("argument \"FUN\" is missing, with no default"));
+    };
+    if function.value == values::missing_arg() {
+        return Err(error("argument \"FUN\" is missing, with no default"));
+    }
+    let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
+        values::install(&values::string_at(function.value, 0).unwrap_or_default())?
+    } else {
+        function.value
+    };
+    let rest = values::pairlist(
+        &rest
+            .iter()
+            .map(|arg| (arg.tag, arg.value))
+            .collect::<Vec<_>>(),
+        SexpType::Pairlist,
+    )?;
+    eval(values::lcons(function, rest)?, call.env)
+}
+
+/// `Exec(expr, envir)`: evaluates the call `expr` in `envir`, by default the caller's frame,
+/// as a tail call in the same sense as [`do_tailcall`].
+unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
+    let mut expr = None;
+    let mut envir = None;
+    let mut positional = Vec::new();
+    for arg in call.args {
+        match arg.tag {
+            tag if tag != nil() && values::symbol_name(tag) == "expr" => expr = Some(arg.value),
+            tag if tag != nil() && values::symbol_name(tag) == "envir" => envir = Some(arg.value),
+            _ => positional.push(arg.value),
+        }
+    }
+    let mut positional = positional.into_iter();
+    let expr = expr.or_else(|| positional.next());
+    let envir = envir.or_else(|| positional.next());
+    if positional.next().is_some() {
+        return Err(error("unused argument"));
+    }
+    let Some(expr) = expr.filter(|expr| *expr != values::missing_arg()) else {
+        return Err(error("argument \"expr\" is missing, with no default"));
+    };
+    let mut expr = eval(expr, call.env)?;
+    if expr.kind() == SexpType::Expression && length(expr) == 1 {
+        expr = values::list_elt(expr, 0);
+    }
+    if expr.kind() != SexpType::Language {
+        return Err(error("\"expr\" must be a call expression"));
+    }
+    let env = match envir.filter(|envir| *envir != values::missing_arg()) {
+        Some(envir) => eval(envir, call.env)?,
+        None => call.env,
+    };
+    eval(expr, env)
+}
+
 /// `R_forceAndCall`: evaluates `call` in `env`, forcing the promises of a closure's first
 /// `count` arguments before its body runs. The apply family calls `FUN` this way, so a closure
 /// that captures its argument sees this iteration's element, not the last one.
@@ -2214,20 +2293,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
-        SexpType::Expression => {
-            let srcrefs = values::get_attr(expression, symbols().srcref);
-            let saved = interp().srcref;
-            let mut value = nil();
-            for index in 0..length(expression) {
-                if srcrefs != nil() {
-                    interp().srcref = statement_srcref(srcrefs, index);
-                }
-                let result = eval(expression.element(index), env);
-                interp().srcref = saved;
-                value = result?;
-            }
-            Ok(value)
-        }
+        SexpType::Expression => eval_all(expression, env),
         SexpType::Promise => force_promise(expression),
         _ => eval(expression, env),
     });
@@ -2850,11 +2916,36 @@ unsafe fn replacement_function(getter: Sexp, whole: Sexp) -> R<Sexp> {
     }
 }
 
-/// Evaluates every top-level expression of `expressions` in `env`, returning the last value.
+/// Evaluates each element of an expression vector in turn, with its srcref current, and
+/// returns the last value.
 pub unsafe fn eval_all(expressions: Sexp, env: Sexp) -> R<Sexp> {
+    let srcrefs = values::get_attr(expressions, symbols().srcref);
+    let saved = interp().srcref;
+    // As in `{`, nothing an element made stays rooted while the next one runs, so an object
+    // it drops can be finalized by a `gc()` in a later element (testthat evaluates a whole
+    // test file this way).
+    let mark = crate::heap().handle_mark();
+    let count = length(expressions);
     let mut value = nil();
-    for index in 0..length(expressions) {
-        value = eval(expressions.element(index), env)?;
+    for index in 0..count {
+        if srcrefs != nil() {
+            interp().srcref = statement_srcref(srcrefs, index);
+        }
+        let result = eval(expressions.element(index), env);
+        interp().srcref = saved;
+        crate::heap().release_handles(mark);
+        match result {
+            Ok(next) => {
+                if index + 1 == count {
+                    crate::heap().root(next);
+                }
+                value = next;
+            }
+            Err(unwind) => {
+                unwind.root();
+                return Err(unwind);
+            }
+        }
     }
     Ok(value)
 }

@@ -440,10 +440,19 @@ instead (the two-level namespace), and CRAN's binaries name
 its own `libR.dylib`. ry therefore loads a copy of each such library whose `libR` load command is
 rewritten in place to `@rpath/libR.dylib`, the install name of ry's `libR.dylib`, and re-signed ad
 hoc (`crates/libr/src/macho.rs`, `crates/libr/src/dynload.rs`). dyld matches that load command
-against the already loaded image with the same install name, so the package binds to ry. Packages
+against the already loaded image with the same install name, so the package binds to ry. A
+dependency the package finds relative to itself must resolve from the copy too, so the cache
+mirrors the original's surroundings with links: the copy's directory links to every file beside
+the original, and when a load command or rpath climbs (`@loader_path/../lib`), as many ancestor
+directories are mirrored as it climbs, each linking to the original's entries. Packages
 that `rcmd` builds on macOS link with `-undefined dynamic_lookup` and record no `libR` at all, so
 the same build loads under ry and under GNU R. `decisions.md` ("macOS packages bind to ry's libR")
 has the reasoning.
+
+Windows needs no rewriting. A package DLL that Rtools built imports from `R.dll` by module name,
+and the Windows loader satisfies that from an already loaded module with the same base name, so
+naming ry's library `R.dll` and loading it first is enough. Package DLLs load with `LoadLibraryExW`
+and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own dependent DLLs in `libs/x64/` resolve.
 
 ### Threads
 
@@ -955,9 +964,11 @@ Each step ends with something real running, and each one is a large, whole chang
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
-   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
-   `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
-   but write no image.
+   implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime
+   with the R_GE_version 17 device API, so base graphics, grid, lattice and device packages such as
+   ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
+   `tiff` devices are engine devices too. On ragg captures, base graphics, grid and lattice match
+   GNU R pixel for pixel.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -975,9 +986,13 @@ Each step ends with something real running, and each one is a large, whole chang
    installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
-   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
-   `rcmd` does not run yet, although the interpreter now exists.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. `rcmd`
+   also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
+   on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
+   packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
+   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
+   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
@@ -996,7 +1011,8 @@ Each step ends with something real running, and each one is a large, whole chang
    4), and `rcmd` reads its toolchain from GNU R's `Makeconf`. All of this is verified by
    cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
    the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
-   Windows is next (section 11).
+   Windows builds `R.dll` and `ry.exe` for `x86_64-pc-windows-gnu`, and `ry run` runs base R
+   under Wine; what is verified and what is open is in section 11.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
@@ -1005,24 +1021,67 @@ JIT fits around them.
 
 ## 11. Open questions
 
-- **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
-  alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
-  benchmark's test suites.
-- **Windows runtime.** Designed, not built. The design:
-  - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
-    so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has
-    loaded it, with no rewriting.
-  - Exports come from a generated `.def` file holding the same names as the Linux version script,
-    and `libr`'s build emits the matching import library for packages that `rcmd` builds.
-  - The headers' `LibExtern` becomes `__declspec(dllimport) extern` under `_WIN32`, because data
-    exports such as `R_NilValue` need an import thunk on Windows.
-  - Package DLLs load with `LoadLibraryExW` and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own
-    dependent DLLs in its `libs/x64/` resolve.
+- **Windows runtime.** Built for `x86_64-pc-windows-gnu`, and run under Wine, not yet on
+  Windows. What exists:
+  - `libr` builds as `R.dll`, the mingw-w64 ABI that Rtools builds packages with. `native.c`
+    marks its exports `__declspec(dllexport)` and rustc exports the Rust side, so no `.def` file
+    is needed, and the linker writes the import library `libR.dll.a` beside the DLL.
+  - The headers' `LibExtern` is `__declspec(dllimport) extern` under `_WIN32`, as in GNU R, so a
+    package that `rcmd` builds reaches data exports such as `R_NilValue` through the import table.
+  - `native.c` uses `__builtin_setjmp` and `__builtin_longjmp` on Windows, because mingw's
+    `longjmp` unwinds through SEH. A jump never crosses a Rust frame either way.
+  - The interpreter's operating-system calls go through `crates/interp/src/platform.rs`: CPU
+    times, file modes, the umask, file times, links, globbing, processes, dynamic libraries,
+    `errno`, the native codeset and `iconv`. Windows has no `iconv(3)`, so ry converts there
+    itself (UTF-8, Latin-1, ASCII, UTF-16, UTF-32, and the other encodings `encoding_rs` knows),
+    behind the same interface `Riconv` exposes to packages.
+  - The session reports itself as Windows: `.Platform$OS.type` is `"windows"`, the path
+    separator `;`, the platform `x86_64-w64-mingw32`, and `normalizePath` returns backslashes
+    without the `\\?\` prefix Rust's canonical paths carry. The default packages' DLLs are
+    found under `library/<pkg>/libs/x64/`, and the Windows-only routines that `utils` and
+    `grDevices` call at load time (`winver`, `getIdentification`, `readRegistry` and so on) are
+    registered (`WINDOWS_ROUTINES` in `crates/interp/src/builtin_libraries.rs`).
+  - `ry.exe` reserves a 64 MiB main-thread stack (`crates/ry/build.rs`), because the session
+    evaluates on the main thread and Windows' default of 1 MiB overflows while base R loads.
+  - `ry run` loads `R.dll` from beside `ry.exe`.
 
-  The gap: the interpreter uses about 70 Unix-only libc items (`iconv`, `glob`, `popen`, signals,
-  `getpwuid` and others), and `libr`'s C layer includes `dlfcn.h` and `sys/select.h`, so neither
-  compiles for Windows yet. R home discovery from the registry and Program Files exists and serves
-  `ry R` today.
+  The DLL must be linked with LLVM's `lld`. GNU ld as packaged by Ubuntu's mingw-w64 (2.41)
+  emits a base relocation for each `SECREL32` thread-local offset, so when Windows loads the DLL
+  at another address than its preferred one (ASLR does this routinely), every `thread_local`
+  access lands on a garbage address and crashes. lld writes no such relocation. mingw's `gcc`
+  ignores `-fuse-ld=lld`, so the build uses `clang` as the linker driver:
+
+  ```sh
+  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=clang \
+  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="-C link-arg=--target=x86_64-w64-mingw32 -C link-arg=-fuse-ld=lld" \
+    cargo build --target x86_64-pc-windows-gnu -p libr -p ry-lang
+  ```
+
+  Verified under Wine 9 with a Windows R 4.5 home whose DLLs were not executed: scripts that
+  print, sort, summarize `mtcars`, format dates, run regular expressions, read files, load
+  `stats`, `utils` and `tools`, and call `normalizePath()` print what GNU R prints. That
+  comparison is against GNU R's documented and Unix output, since GNU R itself did not run.
+  `win.version()` and `Sys.info()` report a fixed `Windows 10 x64` with no build number.
+
+  Open:
+  - BLAS and LAPACK come from the R installation's `bin/x64/Rblas.dll` and `Rlapack.dll`, which
+    no check has loaded yet, so `lm` and the rest of linear algebra are unverified.
+  - The C runtime differs. Rust's `windows-gnu` target links `msvcrt.dll`, while Rtools 4.2 and
+    newer link the UCRT. The R API itself does not cross the C runtime, but `errno`, `FILE *`
+    and `malloc`/`free` pairs do: a package that frees memory R allocated with `malloc`, or reads
+    `errno` after `Riconv`, sees a different runtime's state. Building `R.dll` with the
+    `x86_64-pc-windows-gnullvm` target (UCRT) closes this, and needs an llvm-mingw toolchain.
+  - No package DLL has been loaded yet, because the only ones at hand were GNU R's own, which
+    the checks do not execute.
+  - The release workflow builds `ry.exe` with MSVC and does not build `R.dll`, so the Windows
+    archive carries no runtime. Shipping it means installing the `x86_64-pc-windows-gnu` target,
+    a mingw-w64 sysroot and LLVM on the Windows runner, linking with lld as above, and either
+    building `ry.exe` for the same target or confirming that the MSVC `ry.exe` loads it (the
+    runtime identity is a hash of the sources, so the two targets agree on it).
+  - `rcmd` assembles its R home from symbolic links, which Windows creates only in Developer Mode
+    or as administrator.
+  - Rust's `windows-gnu` target embeds no application manifest that selects UTF-8 as the active
+    code page, so the console and the narrow Win32 APIs use the system code page.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,
   but it costs install time.

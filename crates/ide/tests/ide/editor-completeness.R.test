@@ -168,8 +168,8 @@ hover 56..58: se: Unknown
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(first: T, [second]: U) -> T
-parameters: first: T | [[second]: U]
+signature: <T, U> fn(first: T, second: U = 2L) -> T
+parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
 completion (80): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
@@ -211,8 +211,8 @@ hover 57..69: integer
 definition: none
 references: none
 rename: none
-signature: fn(first: integer, [second]: integer, [third]: integer) -> integer
-parameters: first: integer | [[second]: integer] | [third]: integer
+signature: fn(first: integer, second: integer = 2L, third: integer = 3L) -> integer
+parameters: first: integer | [second: integer = 2L] | third: integer = 3L
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
 completion (128+): second = , third = , helper, break, else, FALSE, for, function
@@ -226,8 +226,8 @@ hover 57..77: T
 definition: none
 references: none
 rename: none
-signature: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
-parameters: [first: T] | [second]: U | [third]: V
+signature: <T, U, V> fn(first: T, second: U = 2L, third: V = 3L) -> T
+parameters: [first: T] | second: U = 2L | third: V = 3L
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
 completion (128+): first = , second = , helper, break, else, FALSE, for, function
@@ -241,9 +241,43 @@ hover 45..62: T
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(first: T, [second]: U) -> T
-parameters: first: T | [[second]: U]
+signature: <T, U> fn(first: T, second: U = 2L) -> T
+parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
 completion (128+): helper, break, else, FALSE, for, function, if, in
 hint @6: <T, U> fn(first: T, [second]: U) -> T
+
+#---- base_data_frame_hover
+fra$0me <- data.frame(region = c("eu", "us"), units = c(3L, 5L))
+#++++
+hover 0..5: frame: data.frame
+hover-definition: global 0..5
+definition 0..5
+references: 0..5*
+rename: 1 edit(s)
+type-definition: stub source base at `data.frame`
+signature: none
+action: Add inferred type annotation for `frame`
+  edit 0..0 -> "#: data.frame\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
+completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head
+hint @5: data.frame
+
+#---- base_matrix_hover
+gr$0id <- matrix(0, nrow = 2L, ncol = 2L)
+#++++
+hover 0..4: grid: matrix
+hover-definition: global 0..4
+definition 0..4
+references: 0..4*
+rename: 1 edit(s)
+type-definition: stub source base at `matrix`
+signature: none
+action: Add inferred type annotation for `grid`
+  edit 0..0 -> "#: matrix\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: matrix\n"
+completion (17): grid, graphics.off, gray, gray.colors, grconvertX, grconvertY, gregexec, gregexpr
+hint @4: matrix
