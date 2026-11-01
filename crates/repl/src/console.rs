@@ -5,7 +5,7 @@
 use {
     crate::{
         ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
-        libr::{self, RApi},
+        libr::{self, CallRoutine, RApi, Sexp},
     },
     crossterm::{
         event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -29,7 +29,10 @@ use {
         panic::catch_unwind,
         path::PathBuf,
         slice,
-        sync::{Arc, Mutex, PoisonError},
+        sync::{
+            Arc, Mutex, PoisonError,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::Duration,
     },
     syntax::{
@@ -40,7 +43,12 @@ use {
 
 pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let batch = options.batch;
-    let routines = std::mem::take(&mut options.routines);
+    let mut routines = std::mem::take(&mut options.routines);
+    routines.push(CallRoutine {
+        name: c"ry_console_interrupted",
+        function: console_interrupted as *const (),
+        arguments: 0,
+    });
     let startup = std::mem::take(&mut options.startup);
     let arguments = std::mem::take(&mut options.arguments);
     install(options, false, None)?;
@@ -53,6 +61,7 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
         api.eval(statement);
     }
     if !batch {
+        api.eval(INTERRUPT_HANDLER);
         // R's `width` defaults to 80 whatever the terminal is, and R exports no setter.
         // Evaluated directly: fed input taken before the first prompt leaves the terminal
         // in R's state. Profiles have run, so only R's untouched default is replaced.
@@ -303,16 +312,19 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             };
             // Input for `readline()`, `menu()` or the browser must reach them untouched.
             let at_top_level = console.ry_runtime || libr::at_top_level();
-            if !console.piped && console.typeahead.is_empty() {
-                let text = std::mem::take(&mut console.typeahead_partial) + &take_typeahead();
-                // A pasted `\r\n` ends one line, not two.
-                let mut lines: Vec<String> = text
-                    .replace("\r\n", "\n")
-                    .split(['\n', '\r'])
-                    .map(str::to_owned)
-                    .collect();
-                console.typeahead_partial = lines.pop().unwrap_or_default();
-                console.typeahead.extend(lines);
+            if !console.piped {
+                // Ctrl-C while a command ran flushed the terminal's input, so it cancels the
+                // input this console holds the same way.
+                if take_interrupt(console.ry_runtime) {
+                    console.typeahead.clear();
+                    console.typeahead_partial.clear();
+                }
+                if console.typeahead.is_empty() {
+                    match take_typed_line() {
+                        Some(text) => queue_typeahead(console, &text),
+                        None => console.typeahead_partial.clear(),
+                    }
+                }
             }
             let signal = if console.piped {
                 Ok(read_piped_line())
@@ -338,7 +350,19 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                         .editor
                         .run_edit_commands(&[EditCommand::InsertString(partial)]);
                 }
-                console.editor.read_line(&RPrompt { text: prompt_text })
+                let signal = console.editor.read_line(&RPrompt { text: prompt_text });
+                // Keys that arrived in the same read as Enter were typed before the command
+                // runs, so they run after it.
+                if matches!(signal, Ok(Signal::Success(_))) {
+                    match take_editor_events() {
+                        Some(text) => queue_typeahead(console, &text),
+                        None => {
+                            console.typeahead.clear();
+                            console.typeahead_partial.clear();
+                        }
+                    }
+                }
+                signal
             };
             match signal {
                 Ok(Signal::Success(line)) => {
@@ -395,19 +419,117 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
     })
 }
 
-/// Takes what was typed while the editor did not hold the terminal. The terminal keeps such
+/// Splits typed-ahead text into the lines that run at the coming prompts and the unfinished
+/// rest, which joins the unfinished line already held.
+fn queue_typeahead(console: &mut Console, text: &str) {
+    let text = std::mem::take(&mut console.typeahead_partial) + text;
+    // A pasted `\r\n` ends one line, not two.
+    let mut lines: Vec<String> = text
+        .replace("\r\n", "\n")
+        .split(['\n', '\r'])
+        .map(str::to_owned)
+        .collect();
+    console.typeahead_partial = lines.pop().unwrap_or_default();
+    console.typeahead.extend(lines);
+}
+
+/// Takes one line typed while the editor did not hold the terminal, or the unfinished line if
+/// no line is complete, and `None` for a Ctrl-C among the keys. The terminal keeps such
 /// typeahead in its cooked-mode buffer, where each Enter has already become `\n`; the editor
-/// reads in raw mode, where `\n` is Ctrl-J, so left to the editor every typed-ahead line would be
-/// lost. Raw mode also releases an unfinished line, which cooked mode withholds until Enter.
+/// reads in raw mode, where `\n` is Ctrl-J, so left to the editor every typed-ahead line would
+/// be lost. Raw mode also releases an unfinished line, which cooked mode withholds until Enter.
 ///
-/// It reads through crossterm's event reader rather than the descriptor, because the editor
-/// leaves the keys that followed its last submitted line in that reader's queue, and they were
-/// typed before anything still in the descriptor. The reader also parses escape sequences, so an
-/// arrow key pressed ahead of the prompt is dropped whole instead of leaving `[A` in the line.
-fn take_typeahead() -> String {
+/// It reads the descriptor a byte at a time and stops at the first line end, because the lines
+/// after it may be input for the command it starts: `readLines(file("stdin"))` or a `system()`
+/// child reads them from the same descriptor, as under GNU R's readline. The terminal stays
+/// raw, as the editor needs it: in cooked mode, a line typed before the editor took over would
+/// end in `\n` again, and the editor submits only the first line of a batch that arrives
+/// together.
+#[cfg(unix)]
+fn take_typed_line() -> Option<String> {
     if terminal::enable_raw_mode().is_err() {
-        return String::new();
+        return Some(String::new());
     }
+    let mut line = Vec::new();
+    let mut escape = Escape::None;
+    while let Some(byte) = read_ready_byte() {
+        escape = match (escape, byte) {
+            // An arrow or function key pressed ahead of the prompt is dropped whole instead of
+            // leaving `[A` in the line.
+            (Escape::None, 0x1b) => Escape::Start,
+            (Escape::Start, b'[') => Escape::Csi,
+            (Escape::Start, b'O') => Escape::Ss3,
+            (Escape::Start | Escape::Ss3, _) => Escape::None,
+            (Escape::Csi, 0x40..=0x7e) => Escape::None,
+            (Escape::Csi, _) => Escape::Csi,
+            (Escape::None, b'\n' | b'\r') => {
+                line.push(b'\n');
+                break;
+            }
+            (Escape::None, 0x03) => {
+                // The terminal's own Ctrl-C flushes its input; a Ctrl-C typed while it was raw
+                // reaches here as a key instead, and cancels the same input.
+                // SAFETY: `tcflush` only discards the terminal's pending input.
+                unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
+                return None;
+            }
+            (Escape::None, 0x7f | 0x08) => {
+                while line.pop().is_some_and(|byte| byte & 0xc0 == 0x80) {}
+                Escape::None
+            }
+            (Escape::None, b'\t' | 0x20..) => {
+                line.push(byte);
+                Escape::None
+            }
+            (Escape::None, _) => Escape::None,
+        };
+    }
+    Some(String::from_utf8_lossy(&line).into_owned())
+}
+
+/// Where a typed escape sequence has got to, so its bytes are dropped together.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum Escape {
+    None,
+    Start,
+    Csi,
+    Ss3,
+}
+
+/// One byte the terminal already holds, without waiting for more.
+#[cfg(unix)]
+fn read_ready_byte() -> Option<u8> {
+    let mut ready = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut byte = 0u8;
+    // SAFETY: `poll` reads one valid `pollfd`, and `read` writes at most one byte into `byte`.
+    unsafe {
+        (libc::poll(&mut ready, 1, 0) == 1
+            && ready.revents & libc::POLLIN != 0
+            && libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1) == 1)
+            .then_some(byte)
+    }
+}
+
+/// Windows delivers keys as console events rather than bytes, so typeahead is taken whole.
+#[cfg(not(unix))]
+fn take_typed_line() -> Option<String> {
+    if terminal::enable_raw_mode().is_err() {
+        return Some(String::new());
+    }
+    take_editor_events()
+}
+
+/// Takes the keys left in crossterm's event queue, and `None` for a Ctrl-C among them. The
+/// editor reads keys in batches and returns at the first Enter, leaving the keys that followed
+/// it in the queue; they were typed before anything still in the descriptor, so they must be
+/// taken before the descriptor is read again. The reader also parses escape sequences, so an
+/// arrow key is dropped whole.
+fn take_editor_events() -> Option<String> {
     let mut text = String::new();
     while matches!(event::poll(Duration::ZERO), Ok(true)) {
         let Ok(event) = event::read() else {
@@ -423,6 +545,7 @@ fn take_typeahead() -> String {
                 KeyCode::Enter => text.push('\n'),
                 KeyCode::Tab => text.push('\t'),
                 KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => text.push('\n'),
+                KeyCode::Char('c') if modifiers == KeyModifiers::CONTROL => return None,
                 KeyCode::Char(character) if (modifiers - KeyModifiers::SHIFT).is_empty() => {
                     text.push(character)
                 }
@@ -434,10 +557,7 @@ fn take_typeahead() -> String {
             _ => {}
         }
     }
-    // The terminal stays raw, as the editor needs it: in cooked mode, a line typed before the
-    // editor took over would end in `\n` again, and the editor submits only the first line of
-    // a batch that arrives together.
-    text
+    text.into()
 }
 
 /// One line of piped input, or end-of-input when the pipe closes or cannot be read.
@@ -516,6 +636,71 @@ unsafe extern "system" fn ctrl_c_to_r_flags(ctrl_type: u32) -> i32 {
 /// No R session can start here (`libr::load` refuses), so there is nothing to interrupt.
 #[cfg(not(any(unix, windows)))]
 fn install_sigint_handler() {}
+
+/// Set when Ctrl-C interrupts a command: by GNU R's `interrupt` condition through
+/// [`console_interrupted`], or by [`note_interrupt`] in front of ry's runtime's SIGINT handler.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// The calling handler that reports GNU R's interrupts. R swaps in its own SIGINT handler while
+/// it waits (`Sys.sleep()`, a `system()` child), so only the condition sees every interrupt.
+const INTERRUPT_HANDLER: &str = "if (exists(\"globalCallingHandlers\")) globalCallingHandlers(\
+    interrupt = function(condition) .Call(\"ry_console_interrupted\", PACKAGE = \"(embedding)\"))";
+
+extern "C" fn console_interrupted() -> Sexp {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+    libr::null()
+}
+
+/// Reports whether Ctrl-C interrupted a command since the last call. On ry's runtime it also
+/// keeps [`note_interrupt`] in front of the runtime's SIGINT handler, which the runtime installs
+/// at its own point of startup, so the console chains to whichever one is in place when it
+/// prompts.
+#[cfg_attr(not(unix), expect(unused_variables))]
+fn take_interrupt(ry_runtime: bool) -> bool {
+    #[cfg(unix)]
+    if ry_runtime {
+        chain_sigint();
+    }
+    INTERRUPTED.swap(false, Ordering::SeqCst)
+}
+
+/// The SIGINT handler [`note_interrupt`] runs after its own store, as an address.
+#[cfg(unix)]
+static RUNTIME_SIGINT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(unix)]
+fn chain_sigint() {
+    use std::{mem, ptr};
+    let ours = note_interrupt as *const () as usize;
+    // SAFETY: `sigaction` reads and writes only the structs passed to it, and the handler it
+    // installs performs atomic operations and calls the handler it replaced.
+    unsafe {
+        let mut current: libc::sigaction = mem::zeroed();
+        if libc::sigaction(libc::SIGINT, ptr::null(), &mut current) == 0
+            && current.sa_sigaction != ours
+            && current.sa_sigaction != libc::SIG_DFL
+            && current.sa_sigaction != libc::SIG_IGN
+            && current.sa_flags & libc::SA_SIGINFO == 0
+        {
+            RUNTIME_SIGINT.store(current.sa_sigaction, Ordering::SeqCst);
+            let mut action = current;
+            action.sa_sigaction = ours;
+            libc::sigaction(libc::SIGINT, &action, ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn note_interrupt(signal: c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+    let handler = RUNTIME_SIGINT.load(Ordering::SeqCst);
+    if handler != 0 {
+        // SAFETY: the address came from `sigaction` for a handler without `SA_SIGINFO`, which
+        // takes the signal number alone.
+        let handler: extern "C" fn(c_int) = unsafe { std::mem::transmute(handler) };
+        handler(signal);
+    }
+}
 
 struct RPrompt {
     text: String,

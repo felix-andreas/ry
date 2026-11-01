@@ -82,6 +82,9 @@ pub struct RunOptions {
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
     pub filter: Option<Box<dyn InputFilter>>,
+    /// The package `startup` loads. ry's runtime starts analyzing it while base R loads; GNU R
+    /// ignores it.
+    pub package: Option<PathBuf>,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so
@@ -99,9 +102,13 @@ pub fn run_on_ry_runtime(
     input: Option<&str>,
     arguments: &[String],
     flags: RuntimeFlags,
+    package: Option<&std::path::Path>,
 ) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
     let library = ry_runtime()?;
+    if let Some(package) = package {
+        prepare_package(library, package, flags)?;
+    }
     type Run = unsafe extern "C" fn(
         *const c_char,
         *const c_char,
@@ -172,6 +179,9 @@ pub fn run_console_on_ry_runtime(
         ));
     }
     let library = ry_runtime()?;
+    if let Some(package) = &options.package {
+        prepare_package(library, package, flags)?;
+    }
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
     type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
@@ -197,6 +207,21 @@ pub fn run_console_on_ry_runtime(
             flags.bits(),
         )
     })
+}
+
+/// Has ry's runtime start analyzing the package at `package` in the background.
+fn prepare_package(
+    library: &'static RuntimeLibrary,
+    package: &std::path::Path,
+    flags: RuntimeFlags,
+) -> Result<(), ReplError> {
+    use std::ffi::{CString, c_char, c_int};
+    let prepare =
+        runtime_entry::<unsafe extern "C" fn(*const c_char, c_int)>(library, "ry_loader_prepare")?;
+    let path = CString::new(package.to_string_lossy().as_bytes())
+        .map_err(|_| ReplError("the package path contains a NUL byte".into()))?;
+    unsafe { prepare(path.as_ptr(), flags.bits()) };
+    Ok(())
 }
 
 /// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.

@@ -9,7 +9,10 @@ time you edit a file, the next command sees the change without a `load_all()` or
 RStudio. Outside a package, `ry run` is a plain R console with the extras below.
 
 You can type ahead. Lines you type while the console starts or while a command runs are kept, and
-they run in order at the next prompt; an unfinished last line waits in the editor for the rest.
+they run in order at the next prompt; an unfinished last line waits in the editor for the rest. A
+command that reads standard input, such as `readLines(file("stdin"), n = 1)` or a `system()`
+child, reads the lines typed after it, as in a terminal. Ctrl-C interrupts the running command and
+discards the lines queued behind it.
 
 ## Completion that knows your values
 

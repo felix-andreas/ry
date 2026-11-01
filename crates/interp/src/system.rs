@@ -184,10 +184,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 return Err(error("invalid 'time' value"));
             }
             if seconds.is_finite() && seconds > 0.0 {
-                std::thread::sleep(
-                    std::time::Duration::try_from_secs_f64(seconds)
-                        .unwrap_or(std::time::Duration::MAX),
-                );
+                let total = std::time::Duration::try_from_secs_f64(seconds)
+                    .unwrap_or(std::time::Duration::MAX);
+                // Slept in slices, so Ctrl-C stops the wait within one slice.
+                let slice = std::time::Duration::from_millis(20);
+                let start = std::time::Instant::now();
+                while let Some(left) = total
+                    .checked_sub(start.elapsed())
+                    .filter(|left| !left.is_zero())
+                {
+                    crate::unwind::poll_interrupt()?;
+                    std::thread::sleep(left.min(slice));
+                }
             }
             Ok(nil())
         }
