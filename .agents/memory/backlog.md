@@ -3011,7 +3011,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Not done from rust-analyzer's list, with the reason:
   - Code lens (run test, references count): needs client commands the VS Code extension does not
     register yet; add them together.
-  - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
   - Document highlight already exists.

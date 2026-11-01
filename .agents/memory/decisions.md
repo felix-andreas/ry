@@ -4453,3 +4453,29 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
+
+## Range formatting is a cut of the whole-file format
+
+- Previously the formatter had only a whole-file entry point, and an unfinished range formatter
+  formatted the selected text on its own, so a selection and the file could disagree about a line
+  (indentation, a brace added by auto-bracing, a comment's attachment).
+- Range formatting (`format::format_range`) formats the whole file, pairs source and formatted trees
+  statement by statement, and returns the formatted text of the statements the selection touches.
+  The formatted file is the single source of truth, so restriction and additivity hold by
+  construction and the range invariant battery (`check_range_format_invariants`, also a fuzz target)
+  can check them. Cost is a whole-file format per request, which is cheap next to analysis.
+- On-type formatting reuses it: a line break formats the line just finished, `}` the construct it
+  closes. The language server advertises both unconditionally; the experimental-features registry
+  that gated them was removed, and its config key still parses with a warning.
+
+## Bug lints are on by default, style lints are opt-in
+
+- A lint is on by default when the code it flags behaves differently from how it reads
+  (`equals-na`, `vector-logic`, `length-sequence`, `class-equals`, `trailing-comma`, `T`/`F`), and
+  off when it only flags taste (`redundant-return`, `commented-code`, naming, shadowing). lintr turns
+  both kinds on, which teaches users to ignore it; ry's defaults must stay clean on a tidy codebase.
+- A fix that changes behavior on purpose (`x == NA` to `is.na(x)`, `&` to `&&`) is unsafe even when
+  it is almost certainly what the author meant, because `ry check --fix` applies safe fixes unseen.
+  `redundant-return` is safe except when it unwraps an assignment, whose visibility differs.
+- The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
+  the contract.
