@@ -22,8 +22,10 @@ use std::{
     process::Command,
 };
 
-/// The R version ry presents, as `R.version` and `Built:` report it.
-pub const R_VERSION: &str = "4.6.2";
+/// ry implements the API that data.table guards on its revision (`R_mapAttrib`, the resizable
+/// vectors) whatever base R it runs, so it reports at least this revision, as the interpreter
+/// does (`interp::system::MINIMUM_SVN_REVISION`).
+pub const MINIMUM_SVN_REVISION: u32 = 89194;
 
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
@@ -108,6 +110,11 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         fs::create_dir_all(&path).map_err(io_error(&path))?;
     }
     copy_tree(sources.include, &root.join("include"))?;
+    let base_description = sources.gnu_r_home.join("library/base/DESCRIPTION");
+    let version = BaseVersion::read(&base_description)?;
+    // The headers present the version of the base R the interpreter runs, as `R.version` does,
+    // so a package's C code and its R code take the same version branches.
+    write(&root.join("include/Rversion.h"), &version.header())?;
     let libr = root.join("lib/libR.so");
     // Replacing rather than overwriting keeps a running session's mapping of the old file valid.
     remove_file_if_present(&libr)?;
@@ -166,6 +173,7 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
 
     let home = root.display();
     let rcmd = sources.rcmd.display();
+    let r_version = &version.version;
     let gnu_doc = gnu_doc.display();
     // `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR` stay plain `NAME='value'` lines: the
     // interpreter reads them back from this script, as it does from GNU R's.
@@ -205,7 +213,7 @@ exec '{rcmd}' R "$@"
 # bin/, or a program on PATH, run with R's environment.
 test $# -eq 0 && exec "$R_HOME/bin/R" --help
 R_CMD="$R_HOME/bin/Rcmd"
-R_VERSION={R_VERSION}
+R_VERSION={r_version}
 R_OSTYPE=unix
 TEXINPUTS=".:${{TEXINPUTS:+$TEXINPUTS:}}$R_SHARE_DIR/texmf/tex/latex:"
 BIBINPUTS=".:${{BIBINPUTS:+$BIBINPUTS:}}$R_SHARE_DIR/texmf/bibtex/bib:"
@@ -291,8 +299,10 @@ fn link(target: &Path, link_path: &Path) -> Result<()> {
 /// What an `R` or `Rscript` command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Session {
-    /// `--version` and `--help`: text to print, with no session.
+    /// `--help`: text to print, with no session.
     Print(String),
+    /// `--version`, which prints [`version_text`].
+    Version,
     /// A session that runs `file`, or `expressions` (`-e`), or else R code read from stdin.
     Run {
         file: Option<String>,
@@ -301,30 +311,143 @@ pub enum Session {
         arguments: Vec<String>,
         /// `Rscript --default-packages=`, which becomes `R_DEFAULT_PACKAGES`.
         default_packages: Option<String>,
+        /// Off with `--vanilla` or `--no-site-file`.
+        site_profile: bool,
+        /// Off with `--vanilla` or `--no-init-file`.
+        user_profile: bool,
     },
 }
 
-fn version_text() -> String {
-    format!(
-        "R version {R_VERSION} (ry {})\nry's runtime: R code runs on ry's interpreter.\n",
-        env!("CARGO_PKG_VERSION")
-    )
+/// Which startup profiles a command line turns off, from GNU R's options for them.
+struct Profiles {
+    site: bool,
+    user: bool,
 }
 
-/// Reads GNU R's `R [options] [< infile]` command line. Session options that change nothing in
-/// a non-interactive run on ry (`--vanilla`, `--no-save`, `--no-echo`, memory sizes) are
-/// accepted and ignored.
+impl Profiles {
+    /// Reads one option, returning whether it was a profile option.
+    fn read(&mut self, option: &str) -> bool {
+        match option {
+            "--vanilla" => {
+                self.site = false;
+                self.user = false;
+            }
+            "--no-site-file" => self.site = false,
+            "--no-init-file" => self.user = false,
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// What `R --version` prints for the R home at `home`.
+pub fn version_text(home: &Path) -> Result<String> {
+    let version = BaseVersion::read(&home.join("library/base/DESCRIPTION"))?;
+    Ok(format!(
+        "R version {} ({}-{}-{}) (ry {})\nry's runtime: R code runs on ry's interpreter.\n",
+        version.version,
+        version.year,
+        version.month,
+        version.day,
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// The version of a base package, from its `DESCRIPTION`: the R version ry presents.
+struct BaseVersion {
+    version: String,
+    year: String,
+    month: String,
+    day: String,
+    revision: u32,
+}
+
+impl BaseVersion {
+    fn read(description: &Path) -> Result<Self> {
+        let text = fs::read_to_string(description).map_err(io_error(description))?;
+        let field = |name: &str| {
+            text.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let version = field("Version").ok_or_else(|| {
+            Error::Package(format!("{} has no Version field", description.display()))
+        })?;
+        // The revision and release date live in `SVN-REVISION` of the GNU R home the base
+        // package really belongs to; ry's own home links `library/base` there.
+        let svn = description
+            .parent()
+            .and_then(|base| fs::canonicalize(base).ok())
+            .and_then(|base| Some(base.parent()?.parent()?.join("SVN-REVISION")))
+            .and_then(|path| fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        let svn_field = |name: &str| {
+            svn.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let date = svn_field("Last Changed Date").unwrap_or_default();
+        let mut date = date.splitn(3, '-').map(str::to_owned);
+        let revision = svn_field("Revision")
+            .and_then(|revision| revision.parse().ok())
+            .unwrap_or(0);
+        Ok(BaseVersion {
+            version,
+            year: date.next().unwrap_or_default(),
+            month: date.next().unwrap_or_default(),
+            day: date.next().unwrap_or_default(),
+            revision: revision.max(MINIMUM_SVN_REVISION),
+        })
+    }
+
+    fn header(&self) -> String {
+        let parts: Vec<&str> = self.version.split('.').collect();
+        let part = |index: usize| parts.get(index).copied().unwrap_or("0");
+        let (major, minor, patch) = (part(0), part(1), part(2));
+        let revision = self.revision;
+        format!(
+            "/* Generated by ry's R home assembly from the base package it runs, as R.version reports it. */\n\
+             #ifndef R_VERSION_H\n#define R_VERSION_H\n\n\
+             #define R_Version(v, p, s) (((v) * 65536) + ((p) * 256) + (s))\n\
+             #define R_VERSION R_Version({major}, {minor}, {patch})\n\
+             #define R_NICK \"ry\"\n\
+             #define R_MAJOR \"{major}\"\n\
+             #define R_MINOR \"{minor}.{patch}\"\n\
+             #define R_STATUS \"\"\n\
+             #define R_YEAR \"{year}\"\n#define R_MONTH \"{month}\"\n#define R_DAY \"{day}\"\n\
+             #define R_SVN_REVISION {revision}\n\
+             #define R_FILEVERSION {major}, {minor}{patch}, {revision}, 0\n\n#endif\n",
+            year = self.year,
+            month = self.month,
+            day = self.day,
+        )
+    }
+}
+
+/// Reads GNU R's `R [options] [< infile]` command line. `--vanilla`, `--no-site-file` and
+/// `--no-init-file` turn the startup profiles off; other session options that change nothing in
+/// a non-interactive run on ry (`--no-save`, `--no-echo`, memory sizes) are accepted and
+/// ignored.
 pub fn r_command_line(arguments: &[String]) -> Result<Session> {
     let mut file = None;
     let mut expressions: Vec<String> = Vec::new();
     let mut rest = arguments.iter();
     let mut trailing = Vec::new();
+    let mut profiles = Profiles {
+        site: true,
+        user: true,
+    };
     while let Some(argument) = rest.next() {
+        if profiles.read(argument) {
+            continue;
+        }
         match argument.as_str() {
             "--args" => {
                 trailing.extend(rest.by_ref().cloned());
             }
-            "--version" => return Ok(Session::Print(version_text())),
+            "--version" => return Ok(Session::Version),
             "-h" | "--help" => {
                 return Ok(Session::Print(
                     "Usage: R [options] [< infile] [> outfile]\n   or: R CMD command [arguments]\n\n\
@@ -360,6 +483,8 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
         arguments: trailing,
         default_packages: None,
+        site_profile: profiles.site,
+        user_profile: profiles.user,
     })
 }
 
@@ -368,16 +493,22 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
 pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
     let mut expressions: Vec<String> = Vec::new();
     let mut default_packages = None;
+    let mut profiles = Profiles {
+        site: true,
+        user: true,
+    };
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
-        if argument == "-e" {
+        if profiles.read(argument) {
+            index += 1;
+        } else if argument == "-e" {
             let expression = arguments
                 .get(index + 1)
                 .ok_or_else(|| Error::Usage("-e not followed by an expression".into()))?;
             expressions.push(expression.clone());
             index += 2;
         } else if argument == "--version" {
-            return Ok(Session::Print(version_text()));
+            return Ok(Session::Version);
         } else if let Some(packages) = argument.strip_prefix("--default-packages=") {
             default_packages = Some(packages.to_owned());
             index += 1;
@@ -403,6 +534,8 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
         arguments: rest.to_vec(),
         default_packages,
+        site_profile: profiles.site,
+        user_profile: profiles.user,
     })
 }
 

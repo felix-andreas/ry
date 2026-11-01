@@ -30,14 +30,15 @@ const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
 /// zeroing cost a cold check more time than parsing did. mimalloc reads the option when it
-/// creates its first arena, which happens before `main`, so the option is set from a constructor.
+/// creates its first arena, which happens before `main`, so the option is set from a constructor,
+/// as a default that `MIMALLOC_ARENA_EAGER_COMMIT` can still override.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static LAZY_ARENA_COMMIT: extern "C" fn() = {
     extern "C" fn lazy_arena_commit() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
     }
     lazy_arena_commit
 };
@@ -314,11 +315,12 @@ fn run_load(
 
 /// With inline annotations turned off they are erased and nothing checks them, at run time
 /// as in analysis. With object systems turned off, user code cannot define S4, R6 or Reference
-/// Classes.
+/// Classes. In strict mode, `ry load` binds a package's pure constants lazily.
 fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     repl::RuntimeFlags {
         annotation_checks: config.check.inline_annotations,
         object_systems: config.check.object_systems,
+        strict: config.check.strict,
     }
 }
 

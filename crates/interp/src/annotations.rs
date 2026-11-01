@@ -219,7 +219,14 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
                     }
                 }
             } else if let Some(cell) = heap.frame_cell(env, formal.tag()) {
-                check_argument(call, signature, slot, cell.cdr(), depth)?;
+                let mut value = cell.cdr();
+                // A literal default is bound as a value rather than a promise, but it is checked
+                // only when the body uses it, so it gets the promise it would otherwise skip.
+                if cell.has_gp(gp::BINDING_MISSING) && value.kind() != SexpType::Promise {
+                    value = crate::eval::make_promise(value, env)?;
+                    heap.set_binding_value(cell, value)?;
+                }
+                check_argument(call, signature, slot, value, depth)?;
             }
         }
         formal = formal.cdr();

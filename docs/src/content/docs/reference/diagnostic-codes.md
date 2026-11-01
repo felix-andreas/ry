@@ -148,8 +148,15 @@ it already cover, so it never runs.
 
 **`strict`** (error), with `[check] strict = true` or `# typing: strict`: each place where a value's
 type could not be determined, each parameter nothing constrains, and each name that resolves only
-because an unknown package was attached. It also raises `unresolved` from a warning to an error, so a gate on
-`--min-severity error` counts it.
+because an unknown package was attached. In a file under `R/`, it also reports each top-level
+statement that does more than define something, on the call, loop or assignment that has the effect,
+and says where the code belongs ([a package file's top level](/reference/type-system#a-package-files-top-level)):
+
+```text
+x strict mode: this calls `cat`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+```
+
+It also raises `unresolved` from a warning to an error, so a gate on `--min-severity error` counts it.
 
 **`maybe-undefined`** (warning), with `[check] maybe-undefined = true`: a read that some path reaches
 before any write, which R reports as `object 'v' not found` on that path. It is off because it treats

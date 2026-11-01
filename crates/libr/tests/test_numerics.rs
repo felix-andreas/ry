@@ -81,7 +81,8 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
 
 /// How closely a case must agree with GNU R. Direct algorithms follow GNU R's operation order,
 /// so they agree to rounding; the iterative ones compound rounding differences over their
-/// iterations (and the system BLAS GNU R uses for `dnrm2` and friends rounds differently).
+/// iterations. GNU R's LINPACK routines also call the system BLAS for `dnrm2` and friends,
+/// whose rounding depends on the BLAS build, so even the direct ones agree only to rounding.
 fn tolerance(case: &str) -> f64 {
     match case {
         "lbfgsb" | "optif9" | "quadrature" => 1e-6,
@@ -266,7 +267,10 @@ fn r_pretty_agrees_with_gnu_r() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// The recorded expectations are what GNU R answers today.
+/// The recorded expectations are what GNU R answers today. GNU R's LINPACK routines call the
+/// system's level-1 BLAS, and BLAS builds sum in different orders (reference BLAS and OpenBLAS
+/// disagree in the last bits of `dqrdc2`, `svd` and `lbfgsb`), so values are compared with the
+/// same per-case tolerance as ry's answers; everything else must match exactly.
 #[test]
 fn expectations_match_a_fresh_gnu_r_run() {
     if !gnu_r_available() {
@@ -284,16 +288,38 @@ fn expectations_match_a_fresh_gnu_r_run() {
     assert!(status.success());
     let fresh = std::fs::read_to_string(&output).expect("the fresh recording");
     let recorded = std::fs::read_to_string(expected_path()).expect("the recorded expectations");
-    let first_difference = fresh
-        .lines()
-        .zip(recorded.lines())
-        .position(|(fresh, recorded)| fresh != recorded);
-    assert!(
-        fresh == recorded,
-        "tests/data/numerics.expected is stale (first difference at line {first_difference:?}, \
-         {} fresh lines, {} recorded); regenerate it with tests/data/numerics.R",
-        fresh.lines().count(),
-        recorded.lines().count()
+    let (fresh_lines, recorded_lines) = (fresh.lines().count(), recorded.lines().count());
+    let mut case = "";
+    let first_difference =
+        fresh
+            .lines()
+            .zip(recorded.lines())
+            .enumerate()
+            .find(|(_, (fresh, recorded))| {
+                if let Some(name) = recorded.strip_prefix("case\t") {
+                    case = name;
+                }
+                match (
+                    fresh.strip_prefix("value\t"),
+                    recorded.strip_prefix("value\t"),
+                ) {
+                    (Some(fresh), Some(recorded)) => {
+                        !tokens_agree(recorded, fresh, tolerance(case))
+                    }
+                    _ => fresh != recorded,
+                }
+            });
+    if let Some((index, (fresh, recorded))) = first_difference {
+        panic!(
+            "tests/data/numerics.expected is stale at line {}: GNU R now gives {fresh:?}, the \
+             recording has {recorded:?}; regenerate it with tests/data/numerics.R",
+            index + 1
+        );
+    }
+    assert_eq!(
+        fresh_lines, recorded_lines,
+        "tests/data/numerics.expected is stale: GNU R now gives {fresh_lines} lines, the \
+         recording has {recorded_lines}; regenerate it with tests/data/numerics.R"
     );
 }
 

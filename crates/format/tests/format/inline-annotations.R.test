@@ -96,3 +96,10 @@ repeat x :integer <- 1L
 repeat {
   x: integer <- 1L
 }
+
+#---- pure_marker_keeps_one_space
+twice <- @pure   function(x) x * 2
+halve <- @pure \(x)   x / 2
+#++++
+twice <- @pure function(x) x * 2
+halve <- @pure \(x) x / 2

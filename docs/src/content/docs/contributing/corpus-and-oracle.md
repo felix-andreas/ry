@@ -74,7 +74,8 @@ it runs the driver through `ry run --runtime ry` with the workspace's debug buil
 `ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
 build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
-the compiled tier on every case. Without `--engine` or `ORACLE_ENGINE` the second engine
+the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
+`RY_GC_STRESS=1`, which collects before every allocation once the script starts. Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
@@ -150,12 +151,12 @@ compared with. That makes `compare` the check for a new R release:
 ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
-Under R 4.6.1, `compare` passes 117 of 124 cases, against 123 of 124 under 4.3.3. The remaining
-differences come from how that GNU R was built, not from the R version: OpenBLAS changes the last
-digits of `lm` and `arima` results, glibc's `mktime` resolves a repeated wall-clock time
-differently after it has seen a time in a spring-forward gap, the sign of `NA^NaN` depends on the
-compiler, and one case calls `C_pKS2`, a routine R 4.6 removed. `stats__lbfgsb` differs under every
-version.
+Under R 4.6.1, `compare` passes 117 of 124 cases, against 123 of 124 under 4.3.3. Four of the
+remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
+and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
+seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
+calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines
+and runs it. `stats__lbfgsb` differs under every version.
 
 The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
 `verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing
@@ -211,6 +212,6 @@ The two time ratios answer different questions. Suite time adds up the `test_tha
 it measures evaluation. Process wall time also counts what happens between blocks, and at the full
 benchmark size (`--lines 300000 --files 500`) that is dominated by testthat calling `gc()` after
 every test file that registered a teardown. A full collection with the whole package loaded takes
-about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still match GNU R
+about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still beat GNU R
 end to end.
 

@@ -21,8 +21,12 @@ pub const BUILTINS: &[BuiltinDef] = &[internal("mkUnbound", 1, do_mk_unbound).in
 pub struct StartOptions {
     /// `commandArgs()`.
     pub command_args: Vec<String>,
-    /// Skips the site and user profiles, as `--vanilla` does.
-    pub vanilla: bool,
+    /// Sources the site profile (`R_PROFILE`, else `R_HOME/etc/Rprofile.site`), which
+    /// `--vanilla` and `--no-site-file` turn off.
+    pub site_profile: bool,
+    /// Sources the user profile (`R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`) into
+    /// the global environment, which `--vanilla` and `--no-init-file` turn off.
+    pub user_profile: bool,
     /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
     /// profile sets it from `interactive()`).
     pub interactive: bool,
@@ -62,14 +66,36 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
-    if !options.vanilla {
-        let site =
-            std::env::var("R_PROFILE").unwrap_or_else(|_| format!("{home}/etc/Rprofile.site"));
+    eval_text(".OptRequireMethods()", global_env())?;
+    // GNU R's order: the site profile, then the user profile, both after `methods` loads.
+    if options.site_profile {
+        let site = std::env::var("R_PROFILE")
+            .ok()
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| format!("{home}/etc/Rprofile.site"));
         if std::path::Path::new(&site).exists() {
             source_file(&site, base_env())?;
         }
     }
-    eval_text(".OptRequireMethods()", global_env())?;
+    if options.user_profile {
+        // A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
+        // points it at its own profile).
+        let user = match std::env::var("R_PROFILE_USER")
+            .ok()
+            .filter(|path| !path.is_empty())
+        {
+            Some(path) => Some(crate::connections::expand_path(&path)),
+            None => [
+                ".Rprofile".to_owned(),
+                crate::connections::expand_path("~/.Rprofile"),
+            ]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists()),
+        };
+        if let Some(user) = user.filter(|path| std::path::Path::new(path).exists()) {
+            source_file(&user, global_env())?;
+        }
+    }
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;
     conditions::print_warnings();
@@ -259,7 +285,13 @@ unsafe fn keep_source() -> bool {
 /// Runs a read-eval-print loop: `read` returns the next chunk of input after showing a prompt,
 /// or `None` at the end of input. Input that ends inside an unfinished expression is
 /// continued on the next chunk, and each complete expression runs as its own top-level call.
-pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
+/// With `halt_on_error`, the console is GNU R's non-interactive one (`R < file`, or callr
+/// driving `R` over a pipe): the first error ends the session with `Execution halted`, unless
+/// `options(error =)` holds a handler.
+pub unsafe fn run_console(
+    mut read: impl FnMut(&str) -> Option<String>,
+    halt_on_error: bool,
+) -> Outcome {
     let mut buffer = String::new();
     loop {
         let prompt = if buffer.is_empty() { "> " } else { "+ " };
@@ -287,23 +319,37 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
                             }
                         };
                     if !succeeded {
+                        if halt_on_error && crate::envir::get_option("error") == nil() {
+                            crate::heap().release_handles(mark);
+                            write_console(b"Execution halted\n", true);
+                            return Outcome::Failed;
+                        }
                         break;
                     }
                 }
             }
             Err(Unwind::Error(failure)) => {
                 write_console(format!("Error: {}\n", failure.message).as_bytes(), true);
+                if halt_on_error {
+                    crate::heap().release_handles(mark);
+                    write_console(b"Execution halted\n", true);
+                    return Outcome::Failed;
+                }
             }
             Err(_) => {}
         }
         crate::heap().release_handles(mark);
     }
+    Outcome::Completed
 }
 
 /// Ends a session as GNU R does before it exits: closes every graphics device, which writes
 /// the files they were drawing.
 pub unsafe fn finish() {
     if let Err(unwind) = crate::graphics::close_all_devices() {
+        report_toplevel(unwind);
+    }
+    if let Err(unwind) = crate::utils::stop_profiler() {
         report_toplevel(unwind);
     }
 }

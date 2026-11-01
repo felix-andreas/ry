@@ -813,7 +813,7 @@ unsafe fn list_items(list: Sexp, named: bool) -> Result<Vec<(Option<Sexp>, Sexp)
         let name = name.filter(|name| *name != values::na_string() && !name.bytes().is_empty());
         let field = match (named, name) {
             (true, Some(name)) => Some(
-                values::install_bytes(name.bytes())
+                values::install_charsxp(name)
                     .map_err(|_| "cannot intern a field name".to_owned())?,
             ),
             (true, None) => return Err(format!("element {} has no name", index + 1)),

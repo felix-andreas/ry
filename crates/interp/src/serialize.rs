@@ -957,7 +957,7 @@ pub unsafe fn saved_bindings(
 }
 
 /// `memCompress(from, type)`, with `type` 1 to 5 for none, gzip (a zlib stream, as GNU R
-/// writes), bzip2, xz and zstd. Base R offers zstd from R 4.6 on.
+/// writes), bzip2, xz and zstd. Base R offers zstd from R 4.5 on.
 unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
     let from = values::raws(call.arg(0));
     let compressed = match values::as_integer_scalar(call.arg(1)) {

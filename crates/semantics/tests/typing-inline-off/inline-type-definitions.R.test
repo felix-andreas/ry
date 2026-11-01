@@ -32,3 +32,10 @@ x: @trust integer <- readRDS("x.rds")
 #++++
 x: Any
 1..17 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
+
+#==== pure_marker
+#---- inline_pure_marker_warns_and_declares_nothing
+twice <- @pure function(x) x * 2
+#++++
+twice: <T: numeric> fn(x: T) -> double
+9..14 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
