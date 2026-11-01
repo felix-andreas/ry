@@ -127,10 +127,12 @@ rest (a bare `setClass` call is reported only when the file does not bind `setCl
 two annotations disagree only when their types differ once aliases expand).
 
 The CLI's cold check leans on this to cap its peak. It runs three passes over the files, largest
-first, in batches spread over the cores, and calls `trigger_lru_eviction` between batches:
-`diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is resident,
-then every item is named, then the diagnostics are assembled. Each file is therefore parsed exactly
-once, and at most a few batches of trees are alive at a time. `RootDatabase::one_shot` also turns
+first, spread over the cores. The first pass works in batches and calls `trigger_lru_eviction`
+between them: `diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is
+resident. The second pass names every item and derives its interface and top-level read sets, and
+the third assembles the diagnostics. Neither later pass reads a tree, so each runs as one batch
+with no barriers. Each file is therefore parsed exactly once, and at most a few batches of trees
+are alive at a time. `RootDatabase::one_shot` also turns
 off the splice cache, which would otherwise keep the previous tree of every file. A
 `test_incremental.rs` case pins the one-parse property.
 
@@ -138,14 +140,26 @@ Most tree readers look for a handful of node kinds in a large file, and a red-tr
 red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
 takes a predicate over a green node and its parent, and builds red nodes only for the matches and
 their ancestors, while `syntax::for_each_token` visits token texts with no red nodes at all. The
-parse invariants check both against the red walks on every parsed program.
+per-file site collectors share one walk, `file_syntax_sites`, and the syntax lints walk the green
+tree with `syntax::walk_green`, building a red node (`syntax::node_at`) only where a cheap green
+test says a lint may fire. The parse invariants check these against the red walks on every parsed
+program.
 
-The cold check is CPU-bound and scales about 3.8 times on 4 cores, so per-file constant costs set its
-wall time. Two of them are worth knowing. Every salsa read of a tracked function with several
-arguments interns its key and verifies a memo, which is why one item check caches the frame
-definitions and package names it looks up in `SalsaGlobals`. And mimalloc commits its arenas lazily
-(`crates/ry/src/main.rs`): eager commit made the kernel zero huge pages that a short-lived process
-never touched.
+The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file constant costs set its
+wall time. Several of them are worth knowing:
+
+- Every salsa read of a tracked function with several arguments interns its key and verifies a
+  memo. So one item check resolves all its frame binders in one query (`item_frame_binders`) and
+  caches the package names and schemes it looks up in `SalsaGlobals`. `package_name` and
+  `test_name` take only the name and read `ProjectFiles` themselves.
+- Salsa's interning takes a shard lock, and the atomics that track an interned value's last use
+  bounce between cores. `Name` and `Ty` are interned with `revisions = usize::MAX`, so they are never
+  collected and skip that bookkeeping, and `Symbol::new` checks a thread-local table before the
+  shared one.
+- The CLI creates every input at high durability except the attached namespaces, which it sets
+  after the first pass. Memos that never read that set skip verification in the new revision.
+- mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
+  huge pages that a short-lived process never touched.
 
 The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
 bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
