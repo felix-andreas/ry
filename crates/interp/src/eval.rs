@@ -982,12 +982,13 @@ pub unsafe fn run_closure(
 }
 
 /// With object systems turned off, a call that defines a class (`setClass`, `setRefClass`,
-/// `R6::R6Class`, ...) fails when user code makes it. User code is whatever runs at the global
-/// environment's top level, which covers scripts and the console. Calls made inside a package, an
-/// installed one or a loaded project package, are exempt, so a package that defines classes of its
-/// own keeps loading. The callee is recognized by the name the call uses (`setClass(...)` or
-/// `methods::setClass(...)`) and by the package that owns the closure, so a local function of the
-/// same name is left alone and a renamed alias (`f <- setClass`) is not caught.
+/// `R6::R6Class`, ...) fails when project code makes it. Project code is whatever runs with the
+/// global environment as its top level, which covers scripts and the console, or inside a
+/// namespace `ry load` built, which carries `.__ry_loader__.`. Calls made inside an installed
+/// package are exempt, so a dependency that defines classes of its own keeps loading. The
+/// callee is recognized by the name the call uses (`setClass(...)` or `methods::setClass(...)`)
+/// and by the package that owns the closure, so a local function of the same name is left alone
+/// and a renamed alias (`f <- setClass`) is not caught.
 unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
     let mut head = call.car();
     if head.kind() == SexpType::Language
@@ -1004,9 +1005,15 @@ unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> 
         return Ok(());
     };
     let owner = crate::dispatch::top_env(function.tag());
-    if crate::envir::namespace_name(owner).as_deref() != Some(home)
-        || crate::dispatch::top_env(sys_parent) != values::global_env()
-    {
+    if crate::envir::namespace_name(owner).as_deref() != Some(home) {
+        return Ok(());
+    }
+    let caller = crate::dispatch::top_env(sys_parent);
+    let project = caller == values::global_env()
+        || crate::heap()
+            .frame_cell(caller, symbols().dot_ry_loader)
+            .is_some();
+    if !project {
         return Ok(());
     }
     Err(error_in(

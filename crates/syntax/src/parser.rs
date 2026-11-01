@@ -526,6 +526,8 @@ impl Parser<'_, '_> {
                     self.error_here(format!("expected a type after `@{name}`"));
                 }
             }
+            // Purity carries no payload; a type after it is the block's own annotation.
+            "pure" => {}
             "strict" => {
                 self.ann_trivia(end);
                 if self.ann_at(IDENT, end) && self.token_str(self.pos) == "off" {
@@ -1611,6 +1613,7 @@ impl Parser<'_, '_> {
             }
             IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
             COLON if self.next_token_is(IDENT) => self.tag_expr(),
+            AT if self.pure_marker_ahead() => self.function_def(),
             // `obj@slot` broken across lines stays R's own syntax error: at a line start only
             // `@Name(` or `@Name<` reads as a constructor, while after an operator a bare
             // `@Name` is one being typed.
@@ -1807,8 +1810,39 @@ impl Parser<'_, '_> {
         }
     }
 
+    /// `@pure` then, on the same line, `function` or `\`. R reads `@` only as slot access
+    /// after an operand, so no R program has this shape.
+    fn pure_marker_ahead(&self) -> bool {
+        if !self.at(AT)
+            || !self.next_token_is(IDENT)
+            || !self.adjacent(self.pos + 1)
+            || self.token_str(self.pos + 1) != "pure"
+        {
+            return false;
+        }
+        let mut pos = self.pos + 2;
+        while self
+            .tokens
+            .get(pos)
+            .is_some_and(|token| token.kind == WHITESPACE)
+        {
+            pos += 1;
+        }
+        matches!(
+            self.tokens.get(pos).map(|token| token.kind),
+            Some(FUNCTION_KW | BACKSLASH)
+        )
+    }
+
     fn function_def(&mut self) {
         self.start(FUNCTION_DEF);
+        if self.at(AT) {
+            self.start(PURE_MARKER);
+            self.bump();
+            self.bump();
+            self.finish();
+            self.eat_trivia(false);
+        }
         let keyword_range = self.token_range(self.pos);
         self.bump();
         self.eat_trivia(true);

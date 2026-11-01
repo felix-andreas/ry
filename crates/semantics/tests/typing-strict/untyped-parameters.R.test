@@ -48,6 +48,7 @@ apply_to: <T, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
 doubled <- lapply(1:3, function(x) x * 2L)
 #++++
 doubled: list[integer]
+11..42 error[strict] strict mode: this calls `lapply`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- a_lambda_passed_to_a_callback_parameter_is_not_judged
 apply_one <- function(f: fn(integer) -> NULL) f(1L)
@@ -55,3 +56,4 @@ apply_one(function(x) NULL)
 #++++
 apply_one: fn(f: fn(integer) -> NULL) -> NULL
 NULL
+52..79 error[strict] strict mode: this calls `apply_one`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts, or mark `apply_one` `@pure` if calling it has no effect

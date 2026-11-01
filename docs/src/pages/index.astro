@@ -131,9 +131,9 @@ Error in ada$email :
         label: "DataFrame",
         file: "sales.R",
         code: `sales <- DataFrame(
-  region = c("eu", "us", "eu", "us"),
-  units = c(3L, 5L, 2L, 1L),
-  price = c(1.5, 2, 4, 3)
+  region = ["eu", "us", "eu", "us"],
+  units = [3L, 5L, 2L, 1L],
+  price = [1.5, 2, 4, 3]
 )
 sales |>
   DataFrame.filter(col("units") > 1L) |>

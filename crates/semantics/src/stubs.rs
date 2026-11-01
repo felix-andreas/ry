@@ -32,6 +32,10 @@ pub struct StubLibrary<'db> {
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
     pub masked: FxHashMap<String, Vec<String>>,
+    /// Names whose winning declaration is marked `@pure`: calling them never has an effect.
+    pub pure: FxHashSet<String>,
+    /// `@pure` names per declaring namespace, for `pkg::name` calls.
+    pub pure_by_namespace: FxHashMap<String, FxHashSet<String>>,
     /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
     pub exports_by_namespace: FxHashMap<String, FxHashSet<String>>,
@@ -112,6 +116,7 @@ pub fn shipped_stub_sources() -> Vec<(String, String)> {
         ("dplyr", include_str!("../../../types/dplyr.Rtypes")),
         ("ggplot2", include_str!("../../../types/ggplot2.Rtypes")),
         ("testthat", include_str!("../../../types/testthat.Rtypes")),
+        ("memoise", include_str!("../../../types/memoise.Rtypes")),
         (STANDARD_LIBRARY, include_str!("../../../types/ry.Rtypes")),
     ]
     .into_iter()
@@ -181,6 +186,7 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
 /// with an unknowable export set disables unresolved-name detection project-wide.
 pub const CONDITIONAL_NAMESPACES: &[&str] = &[
     "data.table",
+    "memoise",
     "dplyr",
     "ggplot2",
     "testthat",
@@ -313,19 +319,30 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if name.is_empty() || !is_stub_name(name) {
                 continue;
             }
-            let masked = if let Some(rest) = type_text.strip_prefix("@masked") {
-                type_text = rest.trim_start();
-                true
-            } else {
-                false
-            };
+            let markers = declaration_markers(type_text);
+            type_text = markers.type_text;
             let Some(scheme) = lower_type_text(db, type_text) else {
                 continue;
             };
-            if masked && let Some(leading) = masked_leading_formals(db, &scheme) {
+            if markers.masked
+                && let Some(leading) = masked_leading_formals(db, &scheme)
+            {
                 library.masked.insert(name.to_owned(), leading);
             }
             namespace_exports.insert(name.to_owned());
+            let first_here = !seen_here.contains(name);
+            // Purity belongs to the name: any candidate's marker marks it, and a later
+            // source's first declaration decides afresh.
+            if markers.pure {
+                library.pure.insert(name.to_owned());
+                library
+                    .pure_by_namespace
+                    .entry(namespace.clone())
+                    .or_default()
+                    .insert(name.to_owned());
+            } else if first_here {
+                library.pure.remove(name);
+            }
             if seen_here.insert(name) {
                 if documentation.is_empty() {
                     library.documentation.remove(name);
@@ -379,6 +396,37 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         }
     }
     library
+}
+
+struct DeclarationMarkers<'text> {
+    masked: bool,
+    pure: bool,
+    type_text: &'text str,
+}
+
+/// The `@masked` and `@pure` markers that may precede a declaration's type, in any order.
+fn declaration_markers(mut type_text: &str) -> DeclarationMarkers<'_> {
+    let mut markers = DeclarationMarkers {
+        masked: false,
+        pure: false,
+        type_text,
+    };
+    loop {
+        let (marker, rest) = if let Some(rest) = type_text.strip_prefix("@masked") {
+            (&mut markers.masked, rest)
+        } else if let Some(rest) = type_text.strip_prefix("@pure") {
+            (&mut markers.pure, rest)
+        } else {
+            break;
+        };
+        if !rest.starts_with(char::is_whitespace) {
+            break;
+        }
+        *marker = true;
+        type_text = rest.trim_start();
+    }
+    markers.type_text = type_text;
+    markers
 }
 
 /// `None` when the scheme is not variadic: `stub_source_problems` reports that, and the loader
@@ -502,11 +550,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             });
             continue;
         }
-        let mut masked = false;
-        if let Some(rest) = type_text.strip_prefix("@masked") {
-            type_text = rest.trim_start();
-            masked = true;
-        }
+        let markers = declaration_markers(type_text);
+        type_text = markers.type_text;
+        let masked = markers.masked;
         let Some(scheme) = lower_type_text(db, type_text) else {
             problems.push(StubProblem {
                 line,

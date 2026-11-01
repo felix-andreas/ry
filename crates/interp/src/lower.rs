@@ -275,6 +275,7 @@ fn is_skipped(node: &SyntaxNode) -> bool {
             | SyntaxKind::TYPE_BINDER_LIST
             | SyntaxKind::TYPE_DEFINITION
             | SyntaxKind::NEW_TYPE
+            | SyntaxKind::PURE_MARKER
     )
 }
 
