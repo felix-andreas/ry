@@ -245,9 +245,10 @@ paste0 : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]
 
 # `sprintf`/`format`/`gettextf` take a leading required argument then variadic extras. Formals before
 # the `...` fill positionally (and by name), formals after it by name only, matching R. `format`'s
-# post-dots formals cover the common `format.default` controls.
-sprintf : fn(fmt: character, ...: Any) -> character
-gettextf : fn(fmt: character, ...: Any, [domain]: Any) -> character
+# post-dots formals cover the common `format.default` controls. Both vectorize over `fmt`; the result
+# keeps the scalar claim.
+sprintf : fn(fmt: character[], ...: Any) -> character
+gettextf : fn(fmt: character[], ...: Any, [domain]: Any) -> character
 format : fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
 formatC : fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
 prettyNum : fn(x: Any, [big.mark]: character, ...: Any) -> character
@@ -267,7 +268,7 @@ regmatches : Any
 strtoi : fn(x: Any, [base]: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
-strsplit : fn(x: Any, split: character, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
+strsplit : fn(x: Any, split: character[], [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
 
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
@@ -532,8 +533,14 @@ sapply : Any
 # `character` under a `numeric(1)` template is the error R raises at runtime
 # ("values must be type 'double'"), caught statically here. The template accepts
 # `V[] | V` because the idiomatic spelling is a length-1 vector (`numeric(1)`)
-# while the callback returns a scalar. A multi-element template makes R return a
+# while the callback returns a scalar. R promotes a logical result under an
+# `integer` template and a logical or integer one under a `double` template, so
+# the atomic templates come first, narrowest first, because a wider template
+# would also accept a narrower one. A multi-element template makes R return a
 # matrix; the result claim stays `V[]` (scalar-claim, as elsewhere in this file).
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical, FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer | logical, FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any
@@ -609,7 +616,7 @@ bquote : fn(expr: Any, [where]: Any, [splice]: logical) -> Any
 deparse : fn(expr: Any, [width.cutoff]: Any, [backtick]: logical, [control]: Any, [nlines]: Any) -> character
 parse : fn([file]: Any, [n]: Any, [text]: Any, [prompt]: Any, [keep.source]: logical, [srcfile]: Any, [encoding]: character) -> Any
 body : fn(fun: Any) -> Any
-formals : fn(fun: Any, [envir]: Any) -> Any
+formals : fn([fun]: Any, [envir]: Any) -> Any
 args : fn(name: Any) -> Any
 # NSE data-masking helpers: deliberately not modeled beyond resolution.
 subset : Any
@@ -648,7 +655,7 @@ path.expand : fn(path: Any) -> character
 list.files : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: logical) -> character[]
 dir : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: logical) -> character[]
 list.dirs : fn([path]: Any, [full.names]: logical, [recursive]: logical) -> character[]
-tempfile : fn([pattern]: character, [tmpdir]: character, [fileext]: character) -> character
+tempfile : fn([pattern]: character[], [tmpdir]: character[], [fileext]: character[]) -> character
 tempdir : fn([check]: logical) -> character
 
 # Reading, writing, and serialization. Connection constructors return connection objects the grammar

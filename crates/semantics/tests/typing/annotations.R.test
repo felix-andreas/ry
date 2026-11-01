@@ -833,7 +833,6 @@ guarded <- function(title = NULL) {
 #++++
 unguarded: fn([title]: character | NULL) -> character
 guarded: fn([title]: character | NULL) -> character
-242..247 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `character | NULL`
 
 #==== annotations_in_argument_lists
 #---- an_annotation_beside_a_lambda_argument_is_reported

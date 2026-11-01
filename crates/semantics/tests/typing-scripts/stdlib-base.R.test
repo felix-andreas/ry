@@ -859,7 +859,7 @@ greet <- function(name, punct) {
 }
 greet("ada")
 #++++
-greet: <T> fn(name: T, [punct]: T) -> T
+greet: <T> fn([name]: T, [punct]: T) -> T
 character
 
 #---- unguarded_formal_stays_required

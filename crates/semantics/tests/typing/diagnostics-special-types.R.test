@@ -59,12 +59,10 @@ cell <- values[1, 2]
 #++++
 values: list{integer, integer}
 cell: Unknown
-31..43 error[type-mismatch] indexing with 2 indexes is not supported yet. ry does not model matrix and data.frame subsetting
 
-#---- empty_index_is_reported_as_indexing
+#---- empty_index_is_the_subject
 values <- list(1L, 2L)
 copy <- values[]
 #++++
 values: list{integer, integer}
-copy: Unknown
-31..39 error[type-mismatch] indexing with an empty index (`x[]`) is not supported yet
+copy: list{integer, integer}

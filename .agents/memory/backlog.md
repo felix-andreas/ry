@@ -76,16 +76,10 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
-- **An inferred numeric parameter rejects a `logical`.** `f(TRUE, 0.5)` for `function(price, rate)
-  price * rate` is refused, while mixed `integer` and `double` widen (`InferenceTable::widen_numeric_binding`).
-  Promotion has to live in the type, not the binding (see "Promotion needs to live in the type").
-- **`pkg::name` does not activate a conditional namespace.** `dplyr::mutate()` or
-  `jsonlite::fromJSON()` in a script without `library()` or `DESCRIPTION` reports an unknown
-  namespace. The read names its package, so it should activate the namespace (or at least validate
-  against the shipped manifest). `metadata::namespace_active` and `diagnostics::namespace_read_message`.
-- **Positional append on `list()` infers dict-like.** `res <- list(); for (i in ...) res[[i]] <- x;
-  res[[1]]` reports `position 1 does not exist in list{} | list[named: integer]`. An integer index
-  write should infer list-like.
+- **`pkg::name` on an inactive shipped namespace is not validated.** `dplyr::mutat` in a script with
+  no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
+  `::` loads without attaching; validating it against the shipped manifest and stub types without
+  activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
 - **A trailing comma inside rlang's dynamic dots.** `mutate(d, y = 1, )` runs in dplyr, because
   rlang's `list2()` drops a trailing empty argument, but `trailing-comma` reports it as an error.
   The lint should skip calls to functions the stubs mark as taking dynamic dots (the `@masked`
@@ -97,15 +91,8 @@ False reports on correct R, worst first:
 - **`source()` is not followed.** `source("utils.R"); util_fn(1)` reports `util_fn` as unresolved in
   the caller and unused in `utils.R`. Following a literal `source()` path would remove both; until
   then, limitations.md recommends moving shared helpers into `R/`.
-- **The loop variable after a `for` loop.** At the top level of a file, `for (i in xs) {}; print(i)`
-  reports `i` as unresolved, although R keeps the last value. Inside a function the read is
-  `Unknown` and not reported.
-- **A non-function binding in call position.** After `mean <- 3`, `mean(x)` reports calling a
-  `double`, but R's function lookup skips non-function bindings.
 - **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
   c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
-- **A vector operand pins its partner to a scalar.** On `function(x) x + c(1L, 2L)`, the call
-  `f(c(1, 2))` reports `expected double, found double[]`.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
   above `amount <- df$amount` still reports the origin and tells the user to "add a type
   annotation"; only `# ry: allow(strict)` clears it.
@@ -116,6 +103,10 @@ False reports on correct R, worst first:
 
 Smaller gaps:
 
+- Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
+  unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
+  message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
+  "did you mean".
 - After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
   finding.
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
@@ -147,6 +138,38 @@ Smaller gaps:
 - The Zed extension's binary download asks for the latest non-pre-release, which is `0.1.1` with
   `roughly-*` assets, so it fails; `editors/zed/src/lib.rs`. The install page tells users to put
   `ry` on `PATH` meanwhile.
+
+## Open: what `ry check` still reports on the GNU R corpus
+
+Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
+went from 3,112 errors to 624 after the false-report fixes listed in `limitations.md` and the
+reference. A random sample of the rest is still almost entirely false reports on correct R. The
+classes, largest first:
+
+- **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
+  `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
+  caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
+  `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
+  has not been isolated yet. The likely fix is leniency for shape-only mismatches at calls to
+  unannotated project functions, which needs the callee's annotation provenance at the argument check.
+- **Inferred unions in conditions.** `T | logical | NULL` and `logical | NULL` reach `if` and `&&`
+  after `if (is.null(x)) x <- ...` rebinds (processx `conn_connect_fifo`, data.table, lattice).
+- **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
+  an `if` without `else` assigns the value (httr2 `sprintf(type, kind)`, `gsub` replacement).
+- **Callbacks whose arity the interface fixes.** purrr `.fmap(.x, function(x) ...)` against
+  `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
+  named parameters.
+- **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics),
+  xtable's string `+` method, `*` between `double[]` and a matrix.
+- **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
+  (httr `oauth_listener(url)$code`, rlang `trace$call`).
+- One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
+  and no such function exists.
+- Singletons: `lapply` over `as.data.frame(x)`, an infinite-type error
+  in pkgdown `news_search_index`, `Sys.getenv()` value passed to a `logical` helper (renv `not`).
+
+To reproduce, give each package a `ry.toml` with `[check]` `typing = true` (typing is off by
+default) and run `ry check --output json R` inside it.
 
 ## Open: where findings point, and what the type system still refuses
 
