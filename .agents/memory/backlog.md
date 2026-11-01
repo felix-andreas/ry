@@ -1862,9 +1862,6 @@ The end-to-end guard rests on the corpus suites.
   evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
   runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
   leaves the IR built against the old schema.
-- **The bytecode compiles `[` as a generic call**, because it is a special, so a JIT-compiled loop
-  that subsets no longer runs `[` through `CallBuiltin`. Re-measure `tools/bench/jit` vector loops
-  and give plain subjects a fast path again if they regressed.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
