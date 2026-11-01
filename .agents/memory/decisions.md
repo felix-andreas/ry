@@ -3119,6 +3119,19 @@ first lines R had already read, leaving R mid-command.
 - **Semantic tokens are an `ide` query** (`semantic_tokens`, `classify_type_token`), and the server
   only maps `SemanticClass` to its legend. Before this the classification lived in the server and
   covered annotations only, which left `match`, `=>` and tags uncolored.
+- **Semantic tokens also color R names an R grammar cannot classify**: parameters (declarations and
+  reads that resolve to a parameter binding), call heads as functions, the package of `pkg::name` as a
+  namespace, and the left side of a function assignment. Everything else stays with the editor's R
+  grammar, so tokens add facts rather than replace the grammar. The server also answers range
+  requests, so a large file only pays for the viewport.
+- **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
+  `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
+  finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics
+  it publishes, after suppressions, so a suppressed finding offers no fix. `ry check --fix` can reuse
+  the same field.
+- **Outline sections and folds come from RStudio section comments** (a comment alone on its line
+  ending in four or more `-`, `=` or `#`). A section ends at the next header of the same or a higher
+  level in the same block, which matches RStudio's outline, so files written there look the same.
 - **An inlay hint states what the code does not.** A payload-free tag or an `@Name(...)` constructor
   already spells its type, so it gets no hint and no "add annotation" action, and a vector of
   records, tuples or tags (`Position[]`) is dropped from a hinted union because no such value exists.

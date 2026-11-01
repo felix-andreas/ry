@@ -152,6 +152,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **The server** is one async-lsp frontend thread plus one worker owning the database. Edits flip salsa's cancellation token, and later jobs use a fresh storage handle. Host assembly (config gating, typing modes, suppressions, lints) is shared with the CLI in `crates/ry/src/diagnostics.rs`.
 - **Coherence failures panic** (document sync), and IDE lookups never panic.
 - **CLI reporting is miette's** (`crates/ry/src/cli.rs`). Its header column counts bytes, so `read_span` re-counts characters. A range over several lines clamps to the first, and sources are borrowed (`NamedText`), never `NamedSource`.
+- **A quick fix is a field on the diagnostic** (`Diagnostic.fix`), never a re-derivation in `ide`; the server reads fixes from the diagnostics it publishes after suppressions. Whole-file features (outline, folds, tokens, fixes, selection) have their own fixture suite, `crates/ide/tests/structure`. Gaps: `backlog.md`, "Open: editor parity".
 - **The IDE fixtures print the token a range covers**, not a byte offset, so a stub addition never forces a re-bless. If one fails after a corpus change, the range is genuinely wrong.
 
 ### Package loader

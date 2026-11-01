@@ -2903,6 +2903,15 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
+## Open: editor parity
+
+- `ry check --fix` that applies `Diagnostic.fix` from the command line.
+- More quick fixes: an unused binding (remove or prefix), a missing `library()` for a namespaced name,
+  and an annotation that disagrees with the inline one.
+- Semantic tokens: a `defaultLibrary` modifier for stub-declared functions, and coloring of
+  `$` fields and frame columns.
+- The outline does not show sections inside function bodies (folding does).
+
 ## Open: editor latency at 300,000 lines
 
 Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .bench/finbench

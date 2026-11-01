@@ -227,9 +227,17 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
         GreenEvent::Token { kind, text, range }
             if kind == SyntaxKind::IDENT && annotation_depth == 0 =>
         {
-            let message = match text {
-                "T" => "Use TRUE, not T, for Boolean values",
-                "F" => "Use FALSE, not F, for Boolean values",
+            let (message, title, replacement) = match text {
+                "T" => (
+                    "Use TRUE, not T, for Boolean values",
+                    "Change to `TRUE`",
+                    "TRUE",
+                ),
+                "F" => (
+                    "Use FALSE, not F, for Boolean values",
+                    "Change to `FALSE`",
+                    "FALSE",
+                ),
                 _ => return,
             };
             push_lint(
@@ -239,6 +247,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 "boolean-shorthand",
                 range,
                 message,
+                Some((title, replacement)),
             );
         }
         GreenEvent::Token { .. } => {}
@@ -292,6 +301,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             "assignment-operator",
             operator.text_range(),
             "Use <-, not =, for assignment",
+            Some(("Change to `<-`", "<-")),
         );
     }
     if let Some(style) = config.naming_style
@@ -372,6 +382,7 @@ fn object_system_lint(
             format!(
                 "`{function}` defines {defines}. ry recommends a record or a tagged union instead"
             ),
+            None,
         );
     }
     match package {
@@ -412,6 +423,7 @@ fn trailing_comma_lint(
             "trailing-comma",
             range,
             "Unexpected comma after last argument",
+            Some(("Remove the trailing comma", "")),
         );
     }
 }
@@ -467,6 +479,7 @@ fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option
     ))
 }
 
+/// `fix` is a title and the text that replaces the whole reported range.
 fn push_lint(
     diagnostics: &mut Vec<Diagnostic>,
     level: LintLevel,
@@ -474,9 +487,16 @@ fn push_lint(
     code: &'static str,
     range: TextRange,
     message: impl Into<String>,
+    fix: Option<(&str, &str)>,
 ) {
     if let Some(severity) = lint_severity(level, Some(default_severity)) {
-        diagnostics.push(Diagnostic::new(range, severity, code, message.into()));
+        let diagnostic = Diagnostic::new(range, severity, code, message.into());
+        diagnostics.push(match fix {
+            Some((title, replacement)) => {
+                diagnostic.with_fix(title.to_owned(), range, replacement.to_owned())
+            }
+            None => diagnostic,
+        });
     }
 }
 
