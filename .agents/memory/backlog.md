@@ -294,6 +294,16 @@ protects construction but nothing after it.
   the callee. A call from compiled code should enter the callee's compiled code directly, with
   arguments in registers and no promise when the callee provably never reflects
   (`substitute`, `missing`, `sys.call`).
+- **Calls dominate the benchmark packages' test suites.** A `perf` profile of full-size dsbench's
+  testthat suites (JIT on) puts 12% of samples under `jit::`, and about 85% of that is
+  `jit::runtime::jit_step` handing a call back to tier 0. Each closure call there still matches
+  arguments, allocates an environment, defines each formal and makes a promise per argument, which
+  together with the collections they trigger is most of the 13% spent in allocation and GC.
+  Global function lookups (`bytecode::lookup_function`, `eval::find_fun`) walk 3 to 5
+  environments with a hash probe each (`Heap::frame_cell`, 3.7% self): an inline cache checked
+  against the binding epoch, or a direct cell for namespace and import lookups, would make that
+  one load. `bytecode::step` dispatch is 6.6% self. Reproduce with `tools/bench/generate.py` and
+  `just bench-compare`.
 - **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
   reads the checker's per-function summaries yet, and strict typing does not remove guards
   (`decisions.md`, "Static types do not remove guards"). Typed code currently runs at the speed of
