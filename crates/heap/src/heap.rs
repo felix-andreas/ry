@@ -817,7 +817,7 @@ impl Heap {
         self.binding_epoch
     }
 
-    /// The symbols bound in `env`'s own frame.
+    /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
     pub unsafe fn frame_symbols(&self, env: Sexp) -> Vec<Sexp> {
         if self.is_symbol_frame(env) {
             return self
@@ -831,10 +831,23 @@ impl Heap {
             return Vec::new();
         }
         (*env.frame_ptr())
-            .cells()
+            .listed_cells()
             .iter()
             .map(|cell| cell.car())
             .collect()
+    }
+
+    /// Makes `env`'s frame hashed, as `new.env(hash = TRUE, size = size)` creates it, which
+    /// decides the order the frame is listed in.
+    pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
+        if !self.is_symbol_frame(env) && env != self.known.empty_env {
+            (*env.frame_ptr()).set_hashed(size);
+        }
+    }
+
+    /// Marks the bindings of a closure frame made so far as its formals.
+    pub unsafe fn mark_frame_formals(&mut self, env: Sexp) {
+        (*env.frame_ptr()).mark_formals();
     }
 
     // Roots.

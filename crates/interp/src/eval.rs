@@ -572,6 +572,7 @@ pub unsafe fn apply_closure(
         formal = formal.cdr();
         index += 1;
     }
+    heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
@@ -682,9 +683,21 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         interp().handlers = interp().frames[depth - 1].handlers.clone();
         let exit = eval(expression, env);
         interp().handlers = saved_handlers;
-        if let Err(unwind) = exit {
-            outcome = Err(unwind);
-            break;
+        match exit {
+            // `on.exit(return(x))` makes `x` the frame's value.
+            Err(unwind) if unwind.returns_to(env) => {
+                let Unwind::Jump(jump) = unwind else {
+                    unreachable!()
+                };
+                if let Jump::Return { value, .. } = *jump {
+                    outcome = Ok(value);
+                }
+            }
+            Err(unwind) => {
+                outcome = Err(unwind);
+                break;
+            }
+            Ok(_) => {}
         }
     }
     crate::heap().release_handles(mark);
@@ -1860,7 +1873,11 @@ pub unsafe fn complex_assign(
         }
         items.push((symbols.value, value_promise));
         let setter_call = values::pairlist(&items, SexpType::Language)?;
-        replacement = eval(setter_call, env)?;
+        let depth = interp().frames.len();
+        let outer = interp().assignment_call.replace((setter_call, whole, depth));
+        let result = eval(setter_call, env);
+        interp().assignment_call = outer;
+        replacement = result?;
     }
     assign_symbol(inner, replacement, env, superassign)
 }
