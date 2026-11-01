@@ -4,6 +4,10 @@
 //! rewritten at parse time and `->` becomes `<-`, as in GNU R. ry's inline type annotations are
 //! dropped from the language objects, and a function's parameter and return types are registered
 //! as checks at its boundary instead (`annotations`).
+//!
+//! When a parse keeps source (`keep.source`), the lowering also attaches GNU R's source
+//! references: a `srcref` list on the expression vector and on every `{` call, and a srcref as
+//! the fourth element of every `function` call. Without it, none of that work happens.
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
@@ -11,7 +15,7 @@ use crate::{
     values::{self, alloc, install, missing_arg, nil, symbols},
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("parse", 6, do_parse),
@@ -21,6 +25,52 @@ pub const BUILTINS: &[BuiltinDef] = &[
 
 /// Parses `text` into an expression vector, or reports the first syntax error in GNU R's form.
 pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
+    parse_with_srcfile(text, source_name, nil())
+}
+
+/// Parses `text` like [`parse_text`], and keeps source references against `srcfile` when it is a
+/// srcfile environment, as GNU R's parser does when `parse` is given one.
+pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -> R<Sexp> {
+    let script = parse_script(text, source_name)?;
+    let source = if srcfile.kind() == SexpType::Environment {
+        Some(SourceMap::new(text, 0, srcfile)?)
+    } else {
+        None
+    };
+    let count = script.expressions.len();
+    let result = alloc(SexpType::Expression, count)?;
+    let srcrefs = match &source {
+        Some(_) => alloc(SexpType::List, count)?,
+        None => nil(),
+    };
+    for (index, node) in script.expressions.iter().enumerate() {
+        values::set_elt(result, index, lower(node, source.as_ref())?);
+        if let Some(source) = &source {
+            values::set_elt(srcrefs, index, srcref(source, significant_range(node))?);
+        }
+    }
+    if let Some(source) = &source {
+        // GNU R reads each line of the text with its newline, so the whole parse ends at the
+        // start of the line after the last one.
+        let end_line = text.matches('\n').count() as i32 + 2;
+        let whole = srcref_object(source, [1, 0, end_line, 0, 0, 0, 1, end_line])?;
+        values::set_attr(result, symbols().srcref, srcrefs)?;
+        values::set_attr(result, symbols().srcfile, srcfile)?;
+        values::set_attr(result, symbols().whole_srcref, whole)?;
+    }
+    Ok(result)
+}
+
+/// Source text that parsed without a syntax error, with its top-level expressions still to be
+/// lowered. A console lowers them one at a time, because `options(keep.source)` may change
+/// between two of them.
+pub struct Script<'text> {
+    text: &'text str,
+    pub expressions: Vec<SyntaxNode>,
+}
+
+/// Parses `text`, or reports the first syntax error in GNU R's form.
+pub fn parse_script<'text>(text: &'text str, source_name: &str) -> R<Script<'text>> {
     let parse = syntax::parse(text);
     // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
     if let Some(failure) = parse.errors().iter().find(|failure| !failure.in_annotation) {
@@ -36,10 +86,9 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
             failure.message
         )));
     }
-    let root = parse.syntax_node();
     let may_hold_placeholder = text.contains('_');
     let mut expressions = Vec::new();
-    for child in root.children() {
+    for child in parse.syntax_node().children() {
         if is_skipped(&child) {
             continue;
         }
@@ -50,19 +99,134 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
                 "invalid use of pipe placeholder ({source_name}:{line}:0)"
             )));
         }
-        expressions.push(lower(&child)?);
+        expressions.push(child);
     }
-    let result = alloc(SexpType::Expression, expressions.len())?;
-    for (index, expression) in expressions.into_iter().enumerate() {
-        values::set_elt(result, index, expression);
+    Ok(Script { text, expressions })
+}
+
+/// Lowers one top-level expression of `script`. With `keep_source`, it keeps source references
+/// against a srcfile of its own that holds the lines it spans, as GNU R's console keeps them for
+/// each input it reads.
+pub unsafe fn lower_script_expression(script: &Script<'_>, node: &SyntaxNode, keep_source: bool) -> R<Sexp> {
+    if !keep_source {
+        return lower(node, None);
     }
-    Ok(result)
+    let text = script.text;
+    let range = significant_range(node);
+    let start = text[..usize::from(range.start())].rfind('\n').map_or(0, |newline| newline + 1);
+    let end = text[usize::from(range.end())..]
+        .find('\n')
+        .map_or(text.len(), |newline| usize::from(range.end()) + newline);
+    let lines: Vec<&str> = text[start..end].split('\n').collect();
+    let srcfile = values::new_env(values::empty_env())?;
+    let heap = crate::heap();
+    heap.define(srcfile, install("filename")?, values::scalar_string("")?)?;
+    heap.define(srcfile, install("lines")?, values::string_vector(&lines)?)?;
+    heap.define(srcfile, install("fixedNewlines")?, values::scalar_bool(true)?)?;
+    values::set_attr(srcfile, symbols().class, values::string_vector(&["srcfilecopy", "srcfile"])?)?;
+    let first_line = text[..start].matches('\n').count();
+    let source = SourceMap::new(text, first_line, srcfile)?;
+    lower(node, Some(&source))
+}
+
+/// What the lowering needs to build source references: the text with an index of its line
+/// starts, the line that is line 1 of the srcfile, and the srcfile environment itself.
+pub struct SourceMap<'text> {
+    text: &'text str,
+    line_starts: Vec<usize>,
+    first_line: usize,
+    srcfile: Sexp,
+    /// The `srcref` class vector every srcref of this parse shares.
+    class: Sexp,
+}
+
+impl<'text> SourceMap<'text> {
+    unsafe fn new(text: &'text str, first_line: usize, srcfile: Sexp) -> R<SourceMap<'text>> {
+        let line_starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(index, _)| index + 1))
+            .collect();
+        Ok(SourceMap {
+            text,
+            line_starts,
+            first_line,
+            srcfile,
+            class: values::scalar_string("srcref")?,
+        })
+    }
+}
+
+/// The srcref of the text in `range`: an integer vector of the first line and byte, the last line
+/// and byte, the first and last column, then the first and last line again (GNU R's "parsed"
+/// lines, which differ only after a `#line` directive). All are 1-based and the last ones
+/// inclusive; bytes count UTF-8 bytes and columns count characters.
+unsafe fn srcref(source: &SourceMap, range: TextRange) -> R<Sexp> {
+    let start = usize::from(range.start());
+    let end = usize::from(range.end());
+    let last = source.text[..end]
+        .chars()
+        .next_back()
+        .map_or(start, |character| end - character.len_utf8())
+        .max(start);
+    let (first_line, first_byte, first_column) = position(source, start);
+    let (last_line, last_byte, last_column) = position(source, last);
+    let last_byte = last_byte + (end - last).max(1) as i32 - 1;
+    srcref_object(
+        source,
+        [first_line, first_byte, last_line, last_byte, first_column, last_column, first_line, last_line],
+    )
+}
+
+unsafe fn srcref_object(source: &SourceMap, fields: [i32; 8]) -> R<Sexp> {
+    let object = values::integer_vector(&fields)?;
+    values::set_attr(object, symbols().srcfile, source.srcfile)?;
+    values::set_attr(object, symbols().class, source.class)?;
+    Ok(object)
+}
+
+/// The srcfile line, byte and column of the character at byte `offset`. A tab advances the column
+/// to the next multiple of 8, as in GNU R's parser.
+fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
+    let line = source.line_starts.partition_point(|&start| start <= offset).saturating_sub(1);
+    let line_start = source.line_starts.get(line).copied().unwrap_or(0);
+    let through = source.text[offset..]
+        .chars()
+        .next()
+        .map_or(offset, |character| offset + character.len_utf8());
+    let mut column = 0;
+    for character in source.text[line_start..through].chars() {
+        column = if character == '\t' { (column + 8) & !7 } else { column + 1 };
+    }
+    let line_number = line as i32 - source.first_line as i32 + 1;
+    (line_number, (offset - line_start) as i32 + 1, column)
+}
+
+/// The range of a node from its first to its last token of R code, without the comments and
+/// whitespace around it or `#:` annotations at its edges.
+fn significant_range(node: &SyntaxNode) -> TextRange {
+    let range = node.text_range();
+    let significant = |token: &SyntaxToken| {
+        !token.kind().is_trivia()
+            && !token
+                .parent_ancestors()
+                .take_while(|ancestor| ancestor != node)
+                .any(|ancestor| is_skipped(&ancestor))
+    };
+    let first = std::iter::successors(node.first_token(), SyntaxToken::next_token)
+        .take_while(|token| range.contains_range(token.text_range()))
+        .find(significant);
+    let last = std::iter::successors(node.last_token(), SyntaxToken::prev_token)
+        .take_while(|token| range.contains_range(token.text_range()))
+        .find(significant);
+    match (first, last) {
+        (Some(first), Some(last)) => TextRange::new(first.text_range().start(), last.text_range().end()),
+        _ => range,
+    }
 }
 
 /// Lowers one expression node of a tree that parsed without errors, such as a top-level item
 /// of a file the analysis already parsed, so a host that holds the tree needs no second parse.
 pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
-    lower(node)
+    lower(node, None)
 }
 
 fn is_skipped(node: &SyntaxNode) -> bool {
@@ -87,7 +251,7 @@ fn significant_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
         .collect()
 }
 
-unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
+unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     match node.kind() {
         SyntaxKind::NAME => name_symbol(node),
         SyntaxKind::LITERAL => {
@@ -100,19 +264,24 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
         SyntaxKind::PAREN_EXPR => {
             let inner = expression_children(node);
             let value = match inner.first() {
-                Some(inner) => lower(inner)?,
+                Some(inner) => lower(inner, source)?,
                 None => return Err(error("unexpected ')'")),
             };
             values::call(symbols().paren, &[value])
         }
         SyntaxKind::BRACE_EXPR => {
             let mut items = vec![(nil(), symbols().brace)];
-            for child in expression_children(node) {
-                items.push((nil(), lower(&child)?));
+            let statements = expression_children(node);
+            for child in &statements {
+                items.push((nil(), lower(child, source)?));
             }
-            values::pairlist(&items, SexpType::Language)
+            let call = values::pairlist(&items, SexpType::Language)?;
+            if let Some(source) = source {
+                block_srcrefs(call, node, &statements, source)?;
+            }
+            Ok(call)
         }
-        SyntaxKind::BINARY_EXPR => binary(node),
+        SyntaxKind::BINARY_EXPR => binary(node, source),
         SyntaxKind::UNARY_EXPR => {
             let operator = significant_tokens(node)
                 .into_iter()
@@ -122,7 +291,7 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
                 .into_iter()
                 .next()
                 .ok_or_else(|| error("missing operand"))?;
-            let operand = lower(&operand)?;
+            let operand = lower(&operand, source)?;
             let symbol = install(operator.text())?;
             values::call(symbol, &[operand])
         }
@@ -134,9 +303,9 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
                 }
                 _ => return Err(error("malformed call")),
             };
-            let function = lower(function)?;
+            let function = lower(function, source)?;
             let mut items = vec![(nil(), function)];
-            items.extend(argument_list(arguments)?);
+            items.extend(argument_list(arguments, source)?);
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR => {
@@ -150,8 +319,8 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             } else {
                 symbols().bracket2
             };
-            let mut items = vec![(nil(), operator), (nil(), lower(object)?)];
-            items.extend(argument_list(arguments)?);
+            let mut items = vec![(nil(), operator), (nil(), lower(object, source)?)];
+            items.extend(argument_list(arguments, source)?);
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR | SyntaxKind::NAMESPACE_EXPR => {
@@ -169,26 +338,26 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
                 })
                 .ok_or_else(|| error("missing operator"))?;
             let (left, right) = match children.as_slice() {
-                [left, right, ..] => (lower(left)?, lower(right)?),
+                [left, right, ..] => (lower(left, source)?, lower(right, source)?),
                 [left] => {
                     // A keyword or string on the right is a token, not a node.
                     let token = significant_tokens(node)
                         .into_iter()
                         .last()
                         .ok_or_else(|| error("missing name"))?;
-                    (lower(left)?, literal(&token)?)
+                    (lower(left, source)?, literal(&token)?)
                 }
                 _ => return Err(error("malformed extraction")),
             };
             let symbol = install(operator.text())?;
             values::call(symbol, &[left, right])
         }
-        SyntaxKind::FUNCTION_DEF => function_definition(node),
+        SyntaxKind::FUNCTION_DEF => function_definition(node, source),
         SyntaxKind::IF_EXPR => {
             let children = expression_children(node);
             let mut items = vec![(nil(), symbols().if_)];
             for child in &children {
-                items.push((nil(), lower(child)?));
+                items.push((nil(), lower(child, source)?));
             }
             values::pairlist(&items, SexpType::Language)
         }
@@ -196,7 +365,7 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             let children = expression_children(node);
             let mut items = vec![(nil(), symbols().for_)];
             for child in &children {
-                items.push((nil(), lower(child)?));
+                items.push((nil(), lower(child, source)?));
             }
             values::pairlist(&items, SexpType::Language)
         }
@@ -204,7 +373,7 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             let children = expression_children(node);
             let mut items = vec![(nil(), symbols().while_)];
             for child in &children {
-                items.push((nil(), lower(child)?));
+                items.push((nil(), lower(child, source)?));
             }
             values::pairlist(&items, SexpType::Language)
         }
@@ -212,7 +381,7 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             let children = expression_children(node);
             let mut items = vec![(nil(), symbols().repeat)];
             for child in &children {
-                items.push((nil(), lower(child)?));
+                items.push((nil(), lower(child, source)?));
             }
             values::pairlist(&items, SexpType::Language)
         }
@@ -220,7 +389,7 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             let head = if node.kind() == SyntaxKind::RECORD_EXPR { ".ry_record" } else { ".ry_tuple" };
             let mut items = vec![(nil(), install(head)?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
-                items.extend(literal_items(&arguments)?);
+                items.extend(literal_items(&arguments, source)?);
             }
             values::pairlist(&items, SexpType::Language)
         }
@@ -228,11 +397,11 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag needs a name"))?;
             let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
-                items.extend(literal_items(&arguments)?);
+                items.extend(literal_items(&arguments, source)?);
             }
             values::pairlist(&items, SexpType::Language)
         }
-        SyntaxKind::MATCH_EXPR => match_expression(node),
+        SyntaxKind::MATCH_EXPR => match_expression(node, source),
         SyntaxKind::BREAK_EXPR => values::call(symbols().break_, &[]),
         SyntaxKind::NEXT_EXPR => values::call(symbols().next, &[]),
         SyntaxKind::ERROR => Err(error(format!("unexpected '{}'", node.text()))),
@@ -240,7 +409,27 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
     }
 }
 
-unsafe fn binary(node: &SyntaxNode) -> R<Sexp> {
+/// Attaches a `{` call's source references: a `srcref` list of the brace itself and then each
+/// statement, the srcfile, and a `wholeSrcref` from the start of the srcfile to the closing brace.
+unsafe fn block_srcrefs(call: Sexp, node: &SyntaxNode, statements: &[SyntaxNode], source: &SourceMap) -> R<()> {
+    let range = significant_range(node);
+    let srcrefs = alloc(SexpType::List, statements.len() + 1)?;
+    let open = TextRange::at(range.start(), 1.into());
+    values::set_elt(srcrefs, 0, srcref(source, open)?);
+    for (index, statement) in statements.iter().enumerate() {
+        values::set_elt(srcrefs, index + 1, srcref(source, significant_range(statement))?);
+    }
+    let close = srcref(source, range)?;
+    let fields = values::ints(close);
+    let (last_line, last_byte, last_column) = (fields[2], fields[3], fields[5]);
+    let whole = srcref_object(source, [1, 0, last_line, last_byte, 0, last_column, 1, last_line])?;
+    values::set_attr(call, symbols().srcref, srcrefs)?;
+    values::set_attr(call, symbols().srcfile, source.srcfile)?;
+    values::set_attr(call, symbols().whole_srcref, whole)?;
+    Ok(())
+}
+
+unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     let children = expression_children(node);
     let operator = significant_tokens(node)
         .into_iter()
@@ -251,13 +440,13 @@ unsafe fn binary(node: &SyntaxNode) -> R<Sexp> {
         [left] => (left, None),
         _ => return Err(error("malformed binary expression")),
     };
-    let left_value = lower(left)?;
+    let left_value = lower(left, source)?;
     let Some(right) = right else {
         // A formula with only a left side is `~` applied to it.
         let symbol = install(operator.text())?;
         return values::call(symbol, &[left_value]);
     };
-    let right_value = lower(right)?;
+    let right_value = lower(right, source)?;
     match operator.kind() {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
@@ -349,10 +538,10 @@ fn child_of_kind(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
 
 /// The items of a record, tuple or tag payload. Unlike a call's arguments, a trailing comma adds
 /// no empty item: `(1L,)` has one.
-unsafe fn literal_items(node: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
+unsafe fn literal_items(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<(Sexp, Sexp)>> {
     node.children()
         .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-        .map(|argument| argument_value(&argument))
+        .map(|argument| argument_value(&argument, source))
         .collect()
 }
 
@@ -368,16 +557,16 @@ unsafe fn tag_name(name: &SyntaxNode) -> R<Sexp> {
 /// `match (x) { arms }` becomes `.ry_match(x, `=>`(pattern, body), `=>`(pattern, guard, body))`.
 /// A parenthesized scrutinee lowers to its inner expression, because the parentheses belong to
 /// the `match` syntax, as they do for `if`.
-unsafe fn match_expression(node: &SyntaxNode) -> R<Sexp> {
+unsafe fn match_expression(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     let children = expression_children(node);
     let (scrutinee, arms) = children
         .split_first()
         .ok_or_else(|| error("a `match` needs a value"))?;
     let scrutinee = if scrutinee.kind() == SyntaxKind::PAREN_EXPR {
         let inner = expression_children(scrutinee);
-        lower(inner.first().ok_or_else(|| error("a `match` needs a value"))?)?
+        lower(inner.first().ok_or_else(|| error("a `match` needs a value"))?, source)?
     } else {
-        lower(scrutinee)?
+        lower(scrutinee, source)?
     };
     let arrow = install("=>")?;
     let mut items = vec![(nil(), install(".ry_match")?), (nil(), scrutinee)];
@@ -391,9 +580,9 @@ unsafe fn match_expression(node: &SyntaxNode) -> R<Sexp> {
             if part.kind() == SyntaxKind::MATCH_GUARD {
                 let condition = expression_children(part);
                 let condition = condition.first().ok_or_else(|| error("an arm guard needs a condition"))?;
-                arm_items.push((nil(), lower(condition)?));
+                arm_items.push((nil(), lower(condition, source)?));
             } else {
-                arm_items.push((nil(), lower(part)?));
+                arm_items.push((nil(), lower(part, source)?));
             }
         }
         if arm_items.len() < 3 {
@@ -500,7 +689,7 @@ unsafe fn negate(value: Sexp) -> R<Sexp> {
 }
 
 /// The arguments of a call or subset, with empty arguments as `R_MissingArg`.
-unsafe fn argument_list(node: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
+unsafe fn argument_list(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<(Sexp, Sexp)>> {
     // An argument slot sits between separators; R keeps empty slots (`x[1, ]`).
     let mut slots: Vec<Option<SyntaxNode>> = vec![None];
     let mut saw_any = false;
@@ -526,13 +715,13 @@ unsafe fn argument_list(node: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
     for slot in slots {
         match slot {
             None => arguments.push((nil(), missing_arg())),
-            Some(argument) => arguments.push(argument_value(&argument)?),
+            Some(argument) => arguments.push(argument_value(&argument, source)?),
         }
     }
     Ok(arguments)
 }
 
-unsafe fn argument_value(node: &SyntaxNode) -> R<(Sexp, Sexp)> {
+unsafe fn argument_value(node: &SyntaxNode, source: Option<&SourceMap>) -> R<(Sexp, Sexp)> {
     let has_equals = significant_tokens(node)
         .iter()
         .any(|token| token.kind() == SyntaxKind::EQ);
@@ -541,7 +730,7 @@ unsafe fn argument_value(node: &SyntaxNode) -> R<(Sexp, Sexp)> {
         .filter(|element| !element.kind().is_trivia());
     if !has_equals {
         return match elements.next() {
-            Some(SyntaxElement::Node(child)) => Ok((nil(), lower(&child)?)),
+            Some(SyntaxElement::Node(child)) => Ok((nil(), lower(&child, source)?)),
             Some(SyntaxElement::Token(token)) => Ok((nil(), literal(&token)?)),
             None => Ok((nil(), missing_arg())),
         };
@@ -561,7 +750,7 @@ unsafe fn argument_value(node: &SyntaxNode) -> R<(Sexp, Sexp)> {
             SyntaxElement::Token(token) if !after_equals => {
                 tag = install(&token_name(&token)?)?;
             }
-            SyntaxElement::Node(child) => value = lower(&child)?,
+            SyntaxElement::Node(child) => value = lower(&child, source)?,
             SyntaxElement::Token(token) => value = literal(&token)?,
         }
     }
@@ -615,33 +804,37 @@ fn identifier(text: &str) -> String {
     }
 }
 
-unsafe fn function_definition(node: &SyntaxNode) -> R<Sexp> {
+unsafe fn function_definition(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     let mut formals = Vec::new();
     let mut body = None;
     for child in expression_children(node) {
         if child.kind() == SyntaxKind::PARAMETER_LIST {
             for parameter in child.children() {
                 if parameter.kind() == SyntaxKind::PARAMETER {
-                    formals.push(parameter_value(&parameter)?);
+                    formals.push(parameter_value(&parameter, source)?);
                 }
             }
         } else {
-            body = Some(lower(&child)?);
+            body = Some(lower(&child, source)?);
         }
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
     let body = body.unwrap_or(nil());
     crate::annotations::register_definition(node, formals, body)?;
+    let srcref = match source {
+        Some(source) => srcref(source, significant_range(node))?,
+        None => nil(),
+    };
     let items = [
         (nil(), symbols().function),
         (nil(), formals),
         (nil(), body),
-        (nil(), nil()),
+        (nil(), srcref),
     ];
     values::pairlist(&items, SexpType::Language)
 }
 
-unsafe fn parameter_value(node: &SyntaxNode) -> R<(Sexp, Sexp)> {
+unsafe fn parameter_value(node: &SyntaxNode, source: Option<&SourceMap>) -> R<(Sexp, Sexp)> {
     let mut tag = nil();
     let mut default = missing_arg();
     let mut after_equals = false;
@@ -657,7 +850,7 @@ unsafe fn parameter_value(node: &SyntaxNode) -> R<(Sexp, Sexp)> {
             }
             SyntaxElement::Node(child) if is_skipped(&child) => {}
             SyntaxElement::Node(child) if !after_equals => tag = tag_from_node(&child)?,
-            SyntaxElement::Node(child) => default = lower(&child)?,
+            SyntaxElement::Node(child) => default = lower(&child, source)?,
             SyntaxElement::Token(token) => default = literal(&token)?,
         }
     }
@@ -879,15 +1072,36 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
         let name = crate::connections::description(file).unwrap_or_else(|| "<file>".into());
         (content, name)
     };
-    let expressions = parse_text(&source, &name)?;
-    if count >= 0 && (count as usize) < values::length(expressions) {
-        let truncated = alloc(SexpType::Expression, count as usize)?;
-        for index in 0..count as usize {
-            values::set_elt(truncated, index, expressions.element(index));
-        }
-        return Ok(truncated);
+    let expressions = parse_with_srcfile(&source, &name, call.arg(4))?;
+    truncate_parse(expressions, count)
+}
+
+/// The first `count` expressions of a parse with their source references, or all of them when
+/// `count` is negative.
+pub unsafe fn truncate_parse(expressions: Sexp, count: i32) -> R<Sexp> {
+    if count < 0 || count as usize >= values::length(expressions) {
+        return Ok(expressions);
     }
-    Ok(expressions)
+    let count = count as usize;
+    let truncated = alloc(SexpType::Expression, count)?;
+    for index in 0..count {
+        values::set_elt(truncated, index, expressions.element(index));
+    }
+    let srcrefs = values::get_attr(expressions, symbols().srcref);
+    if srcrefs != nil() {
+        let kept = alloc(SexpType::List, count)?;
+        for index in 0..count {
+            values::set_elt(kept, index, srcrefs.element(index));
+        }
+        for (name, value) in [
+            (symbols().srcref, kept),
+            (symbols().srcfile, values::get_attr(expressions, symbols().srcfile)),
+            (symbols().whole_srcref, values::get_attr(expressions, symbols().whole_srcref)),
+        ] {
+            values::set_attr(truncated, name, value)?;
+        }
+    }
+    Ok(truncated)
 }
 
 unsafe fn do_str2lang(call: &Call<'_>) -> R<Sexp> {

@@ -121,7 +121,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
         SexpType::Special | SexpType::Builtin => {
             print_primitive(value)?;
         }
-        SexpType::Closure => print_closure(value)?,
+        SexpType::Closure => print_closure(value, options)?,
         SexpType::Environment => out(&format!("{}\n", environment_label(value)?)),
         SexpType::Promise => out("<promise>\n"),
         SexpType::Language => {
@@ -130,7 +130,11 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
             }
         }
         SexpType::Expression => {
-            let lines = deparse::deparse_lines(value, 60, deparse::options::SIMPLE);
+            let opts = match options.use_source {
+                true => deparse::options::SIMPLE | deparse::options::USE_SOURCE,
+                false => deparse::options::SIMPLE,
+            };
+            let lines = deparse::deparse_lines(value, 60, opts);
             for line in lines {
                 out(&format!("{line}\n"));
             }
@@ -225,8 +229,12 @@ unsafe fn print_primitive(value: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn print_closure(function: Sexp) -> R<()> {
-    let lines = deparse::deparse_lines(function, 60, deparse::options::SIMPLE);
+unsafe fn print_closure(function: Sexp, options: &PrintOptions) -> R<()> {
+    let source = match options.use_source {
+        true => deparse::source_lines(get_attr(function, symbols().srcref)),
+        false => None,
+    };
+    let lines = source.unwrap_or_else(|| deparse::deparse_lines(function, 60, deparse::options::SIMPLE));
     for line in lines {
         out(&format!("{line}\n"));
     }
@@ -739,11 +747,13 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     Ok(value)
 }
 
+/// `print.function(x, useSource, ...)`.
 unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
-    let options = PrintOptions::defaults(call.env);
+    let mut options = PrintOptions::defaults(call.env);
+    options.use_source = values::as_logical_scalar(call.arg(1)) != 0;
     match function.kind() {
-        SexpType::Closure => print_closure(function)?,
+        SexpType::Closure => print_closure(function, &options)?,
         SexpType::Builtin | SexpType::Special => print_primitive(function)?,
         _ => print_value(function, &options, &mut String::new())?,
     }

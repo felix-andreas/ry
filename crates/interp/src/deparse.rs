@@ -264,7 +264,10 @@ impl Deparser {
             self.depth -= 1;
             return;
         }
-        let attributes = self.opts & options::SHOW_ATTRIBUTES != 0 && has_shown_attributes(object);
+        // An expression vector written from its source text shows none of its attributes.
+        let attributes = self.opts & options::SHOW_ATTRIBUTES != 0
+            && has_shown_attributes(object)
+            && self.expression_srcrefs(object).is_none();
         if attributes {
             self.print("structure(");
         }
@@ -314,13 +317,16 @@ impl Deparser {
                 self.print(")");
             }
             SexpType::List => self.list(object, "list("),
-            SexpType::Expression => {
-                // The elements of `expression()` are code, which its call does not evaluate.
-                let saved = self.opts;
-                self.opts &= !options::QUOTE_EXPRESSIONS;
-                self.list(object, "expression(");
-                self.opts = saved;
-            }
+            SexpType::Expression => match self.expression_srcrefs(object) {
+                Some(srcrefs) => self.expression_from_source(object, srcrefs),
+                None => {
+                    // The elements of `expression()` are code, which its call does not evaluate.
+                    let saved = self.opts;
+                    self.opts &= !options::QUOTE_EXPRESSIONS;
+                    self.list(object, "expression(");
+                    self.opts = saved;
+                }
+            },
             SexpType::Object => self.print("<S4 object of class structure>"),
             SexpType::Record => self.native(object),
             kind if kind.is_atomic() => self.vector(object),
@@ -346,7 +352,47 @@ impl Deparser {
         self.print(")");
     }
 
+    /// The `srcref` list an expression vector is written from under `useSource`: one srcref per
+    /// element.
+    unsafe fn expression_srcrefs(&self, object: Sexp) -> Option<Sexp> {
+        if self.opts & options::USE_SOURCE == 0 || object.kind() != SexpType::Expression {
+            return None;
+        }
+        let srcrefs = get_attr(object, symbols().srcref);
+        (srcrefs.kind() == SexpType::List && length(srcrefs) == length(object)).then_some(srcrefs)
+    }
+
+    unsafe fn expression_from_source(&mut self, object: Sexp, srcrefs: Sexp) {
+        self.print("expression(");
+        for index in 0..length(object) {
+            if index > 0 {
+                self.print(", ");
+            }
+            match source_lines(srcrefs.element(index)) {
+                Some(lines) => self.source(&lines),
+                None => self.deparse(object.element(index)),
+            }
+        }
+        self.print(")");
+    }
+
+    /// Writes source text as it is, line by line.
+    fn source(&mut self, lines: &[String]) {
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                self.write_line();
+            }
+            self.print(line);
+        }
+    }
+
     unsafe fn closure(&mut self, function: Sexp) {
+        if self.opts & options::USE_SOURCE != 0 {
+            if let Some(lines) = source_lines(get_attr(function, symbols().srcref)) {
+                self.source(&lines);
+                return;
+            }
+        }
         let saved = self.opts;
         self.opts &= !options::QUOTE_EXPRESSIONS;
         self.print("function (");
@@ -1139,6 +1185,24 @@ impl Deparser {
             cell = cell.cdr();
         }
     }
+}
+
+/// The source text a srcref points at, as `as.character(srcref)` reads it from its srcfile, or
+/// `None` when `srcref` is not a srcref or the text cannot be read. GNU R's deparser falls back
+/// to deparsing the code in that case too.
+pub unsafe fn source_lines(srcref: Sexp) -> Option<Vec<String>> {
+    if srcref.kind() != SexpType::Integer || length(srcref) < 6 {
+        return None;
+    }
+    let lines = crate::scope(|| {
+        let call = values::call(values::install("as.character")?, &[srcref])?;
+        crate::eval::eval(call, values::base_env())
+    })
+    .ok()?;
+    if lines.kind() != SexpType::String {
+        return None;
+    }
+    Some(values::strings(lines).into_iter().map(Option::unwrap_or_default).collect())
 }
 
 /// Whether names can be written inline (`c(a = 1)`) rather than as an attribute.

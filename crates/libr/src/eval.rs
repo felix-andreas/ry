@@ -69,26 +69,18 @@ impl Evaluator for Interpreter {
         interp::eval::apply(call, function, &args, env)
     }
 
-    unsafe fn parse(&self, text: Sexp, count: c_int, _srcfile: Sexp) -> ApiResult<ParseOutcome> {
+    unsafe fn parse(&self, text: Sexp, count: c_int, srcfile: Sexp) -> ApiResult<ParseOutcome> {
         let lines: Vec<String> = interp::values::strings(text)
             .into_iter()
             .map(|line| line.unwrap_or_else(|| "NA".into()))
             .collect();
-        let Ok(expressions) = interp::lower::parse_text(&lines.join("\n"), "<text>") else {
+        let Ok(expressions) = interp::lower::parse_with_srcfile(&lines.join("\n"), "<text>", srcfile) else {
             return Ok(ParseOutcome {
                 expressions: runtime().nil(),
                 status: ParseStatus::Error,
             });
         };
-        let expressions = if count >= 0 && (count as usize) < interp::values::length(expressions) {
-            let truncated = interp::values::alloc(SexpType::Expression, count as usize)?;
-            for index in 0..count as usize {
-                interp::values::set_elt(truncated, index, expressions.element(index));
-            }
-            truncated
-        } else {
-            expressions
-        };
+        let expressions = interp::lower::truncate_parse(expressions, count)?;
         Ok(ParseOutcome {
             expressions,
             status: ParseStatus::Ok,
@@ -123,8 +115,23 @@ impl Evaluator for Interpreter {
             .map_or(runtime().heap.known().global_env, |frame| frame.env)
     }
 
-    unsafe fn current_srcref(&self, _skip: c_int) -> ApiResult<Sexp> {
-        Ok(runtime().nil())
+    unsafe fn current_srcref(&self, skip: c_int) -> ApiResult<Sexp> {
+        // The current srcref, then the one each frame recorded when it was called, innermost
+        // first; a negative `skip` counts from the outermost.
+        let state = interp::interp();
+        let count = state.frames.len() + 1;
+        let index = if skip >= 0 {
+            skip as usize
+        } else {
+            match count.checked_sub(skip.unsigned_abs() as usize) {
+                Some(index) => index,
+                None => return Ok(runtime().nil()),
+            }
+        };
+        Ok(match index {
+            0 => state.srcref,
+            _ => state.frames.iter().rev().nth(index - 1).map_or(runtime().nil(), |frame| frame.srcref),
+        })
     }
 
     unsafe fn dot_last(&self) -> ApiResult<()> {
@@ -1068,6 +1075,7 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         vanilla: true,
+        interactive: false,
     };
     match interp::session::start(options) {
         Ok(()) => 0,
@@ -1110,6 +1118,7 @@ pub unsafe extern "C" fn ry_run(
     let options = interp::session::StartOptions {
         command_args,
         vanilla: true,
+        interactive: false,
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);
@@ -1170,6 +1179,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         vanilla: false,
+        interactive: true,
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);

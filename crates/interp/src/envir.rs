@@ -75,7 +75,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("detach", 1, do_detach),
     internal("options", -1, do_options).keep_visibility(),
     internal("getOption", 1, do_get_option),
-    builtin("interactive", 0, |_| unsafe { scalar_bool(false) }),
+    builtin("interactive", 0, |_| unsafe { scalar_bool(interp().interactive) }),
     internal("getRegisteredNamespace", 1, do_get_registered_namespace),
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
@@ -184,12 +184,22 @@ unsafe fn sys_call_at(n: i32, context: Option<usize>, function: bool) -> R<Sexp>
             if function {
                 Ok(frame.function)
             } else {
-                values::duplicate(frame.call)
+                call_with_srcref(frame)
             }
         }
         _ if back == depth => Ok(nil()),
         _ => Err(error("not that many frames on the stack")),
     }
+}
+
+/// A copy of a frame's call, with the srcref current when the call was made as its `srcref`
+/// attribute, as GNU R's `sys.call` returns it.
+pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
+    let call = values::duplicate(frame.call)?;
+    if frame.srcref != nil() {
+        values::set_attr(call, symbols().srcref, values::duplicate(frame.srcref)?)?;
+    }
+    Ok(call)
 }
 
 /// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
@@ -1218,7 +1228,7 @@ pub unsafe fn install_default_options() -> R<()> {
         ("verbose", scalar_bool(false)?),
         ("check.bounds", scalar_bool(false)?),
         ("keep.source", scalar_bool(false)?),
-        ("keep.source.pkgs", scalar_bool(false)?),
+        ("keep.source.pkgs", scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?),
         ("keep.parse.data", scalar_bool(true)?),
         ("keep.parse.data.pkgs", scalar_bool(false)?),
         ("warning.length", scalar_integer(1000)?),

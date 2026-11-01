@@ -89,6 +89,9 @@ pub struct Frame {
     pub on_exit: Vec<Sexp>,
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
+    /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
+    /// attach to the call, and which is current again once the call returns.
+    pub srcref: Sexp,
 }
 
 /// Services the heap's owner provides because they need native code or process-wide state the
@@ -135,6 +138,9 @@ pub struct Interp {
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
+    /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
+    /// references sets it for each statement, and a closure call sets it to the closure's own.
+    pub srcref: Sexp,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
     /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
@@ -165,6 +171,8 @@ pub struct Interp {
     pub started: std::time::Instant,
     /// `commandArgs()`.
     pub command_args: Vec<String>,
+    /// `interactive()`: whether a person reads the output, as in a console.
+    pub interactive: bool,
     /// The default packages' libraries `dyn.load` loaded, with the paths it was given.
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
@@ -243,6 +251,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         handlers: None,
         restarts: None,
         global_handlers: None,
+        srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: FxHashMap::default(),
@@ -261,6 +270,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         max_depth: 5000,
         started: std::time::Instant::now(),
         command_args: Vec::new(),
+        interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
     });
@@ -358,6 +368,7 @@ impl RootSource for InterpRoots {
                     frame.env,
                     frame.sys_parent,
                     frame.promargs,
+                    frame.srcref,
                 ] {
                     marker.mark(object);
                 }
@@ -370,6 +381,7 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.handlers, marker);
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
+            marker.mark(interp.srcref);
             for &(call, _) in &interp.warnings {
                 marker.mark(call);
             }

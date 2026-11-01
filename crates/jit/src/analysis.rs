@@ -781,6 +781,8 @@ impl Builder<'_> {
                 state.visible = Some(true);
                 Action::LogicRight { dst: operand(0), left: operand(1), right: operand(2), is_and: operand(4) == 1 }
             }
+            // The interpreter's own step sets the current srcref; it touches no register.
+            Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
             Op::Closure => {
                 state.visible = Some(true);
                 state.registers[operand(0)] = Ty::Boxed;
@@ -1054,7 +1056,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible => {}
+        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::JumpUnless | Op::Return => gen_(operand(0), live),
         Op::Arithmetic => {
             kill(operand(1), live);

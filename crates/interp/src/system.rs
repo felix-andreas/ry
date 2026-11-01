@@ -139,7 +139,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
     internal("reg.finalizer", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("traceback", 1, |_| unsafe { Ok(nil()) }),
+    internal("traceback", 1, |call| unsafe {
+        crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
+    }),
     internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),

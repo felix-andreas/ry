@@ -202,14 +202,14 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
         function_argument
     };
     match function_argument.kind() {
-        SexpType::Closure => crate::eval::make_closure(function_argument.car(), body, function_argument.tag()),
+        SexpType::Closure => crate::eval::make_closure(function_argument.car(), body, values::nil(), function_argument.tag()),
         SexpType::String => {
             let mut formals = Vec::with_capacity(length(function_argument));
             for name in values::strings(function_argument).into_iter().flatten() {
                 formals.push((values::install(&name)?, values::missing_arg()));
             }
             let formals = values::pairlist(&formals, SexpType::Pairlist)?;
-            crate::eval::make_closure(formals, body, values::global_env())
+            crate::eval::make_closure(formals, body, values::nil(), values::global_env())
         }
         _ => {
             let result = values::alloc(SexpType::Expression, 1)?;

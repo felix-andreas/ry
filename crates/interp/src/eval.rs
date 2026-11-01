@@ -746,8 +746,11 @@ pub unsafe fn run_closure(
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
+        srcref: state.srcref,
     });
     let depth = state.frames.len();
+    let caller_srcref = state.srcref;
+    state.srcref = values::get_attr(function, symbols().srcref);
     let signature = crate::annotations::enter(call, function, env, depth);
     let result = signature.and_then(|signature| {
         let result = scope(|| {
@@ -778,6 +781,7 @@ pub unsafe fn run_closure(
     state.handlers = state.frames[depth - 1].handlers.clone();
     state.frames.truncate(depth - 1);
     state.restarts = restarts;
+    state.srcref = caller_srcref;
     result
 }
 
@@ -1209,10 +1213,32 @@ unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     let mut value = nil();
     interp().visible = true;
-    for arg in call.args {
-        value = eval(arg.value, call.env)?;
+    let srcrefs = values::get_attr(call.call, symbols().srcref);
+    if srcrefs == nil() {
+        for arg in call.args {
+            value = eval(arg.value, call.env)?;
+        }
+        return Ok(value);
+    }
+    // The first srcref is the brace's own; each statement runs with its srcref current, which
+    // the calls it makes record for `sys.call` and `traceback`.
+    let saved = interp().srcref;
+    for (index, arg) in call.args.iter().enumerate() {
+        interp().srcref = statement_srcref(srcrefs, index + 1);
+        let result = eval(arg.value, call.env);
+        interp().srcref = saved;
+        value = result?;
     }
     Ok(value)
+}
+
+/// Element `index` of a `srcref` list, or `NULL` when the list has no such srcref.
+pub unsafe fn statement_srcref(srcrefs: Sexp, index: usize) -> Sexp {
+    if srcrefs.kind() != SexpType::List || index >= length(srcrefs) {
+        return nil();
+    }
+    let srcref = srcrefs.element(index);
+    if srcref.kind() == SexpType::Integer && length(srcref) >= 6 { srcref } else { nil() }
 }
 
 unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
@@ -1388,16 +1414,20 @@ unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_function(call: &Call<'_>) -> R<Sexp> {
-    let formals = call.arg(0);
-    let body = call.arg(1);
-    make_closure(formals, body, call.env)
+    make_closure(call.arg(0), call.arg(1), call.arg(2), call.env)
 }
 
-pub unsafe fn make_closure(formals: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
+/// A closure of `formals` and `body` in `env`. A `function` call parsed with source references
+/// carries its srcref as a fourth element, which becomes the closure's `srcref` attribute.
+pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -> R<Sexp> {
     if !matches!(formals.kind(), SexpType::Nil | SexpType::Pairlist) {
         return Err(error("invalid formal argument list for \"function\""));
     }
-    triple(SexpType::Closure, formals, body, env)
+    let closure = triple(SexpType::Closure, formals, body, env)?;
+    if srcref != nil() {
+        values::set_attr(closure, symbols().srcref, srcref)?;
+    }
+    Ok(closure)
 }
 
 unsafe fn do_quote(call: &Call<'_>) -> R<Sexp> {
@@ -1713,13 +1743,21 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
+        srcref: state.srcref,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
         SexpType::Expression => {
+            let srcrefs = values::get_attr(expression, symbols().srcref);
+            let saved = interp().srcref;
             let mut value = nil();
             for index in 0..length(expression) {
-                value = eval(expression.element(index), env)?;
+                if srcrefs != nil() {
+                    interp().srcref = statement_srcref(srcrefs, index);
+                }
+                let result = eval(expression.element(index), env);
+                interp().srcref = saved;
+                value = result?;
             }
             Ok(value)
         }

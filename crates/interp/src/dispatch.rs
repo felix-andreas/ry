@@ -827,6 +827,7 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
+        srcref: state.srcref,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, &promised, env, &found.vars);

@@ -23,11 +23,15 @@ pub struct StartOptions {
     pub command_args: Vec<String>,
     /// Skips the site and user profiles, as `--vanilla` does.
     pub vanilla: bool,
+    /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
+    /// profile sets it from `interactive()`).
+    pub interactive: bool,
 }
 
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
+    interp().interactive = options.interactive;
     read_renviron();
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;
@@ -185,26 +189,42 @@ pub enum Outcome {
 
 /// Runs a script the way `Rscript` does: each top-level expression is evaluated in the global
 /// environment, a visible value is printed, and the first error stops the run.
+///
+/// Like `Rscript`, which reads the script as console input, each expression is lowered just
+/// before it runs, so `options(keep.source = TRUE)` keeps source references for the expressions
+/// after it.
 pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
-    let expressions = match crate::lower::parse_text(text, source_name) {
-        Ok(expressions) => expressions,
+    let script = match crate::lower::parse_script(text, source_name) {
+        Ok(script) => script,
         Err(Unwind::Error(failure)) => {
             write_console(format!("Error: {}\nExecution halted\n", failure.message).as_bytes(), true);
             return Outcome::Failed;
         }
         Err(_) => return Outcome::Failed,
     };
-    crate::heap().root(expressions);
-    for index in 0..length(expressions) {
-        let expression = expressions.element(index);
+    for node in &script.expressions {
+        let mark = crate::heap().handle_mark();
+        let succeeded = match crate::lower::lower_script_expression(&script, node, keep_source()) {
+            Ok(expression) => run_toplevel(expression),
+            Err(unwind) => {
+                report_toplevel(unwind);
+                false
+            }
+        };
+        crate::heap().release_handles(mark);
         // A script stops at its first error unless `options(error =)` holds a handler, which
         // GNU R runs and then carries on with the next expression.
-        if !run_toplevel(expression) && crate::envir::get_option("error") == nil() {
+        if !succeeded && crate::envir::get_option("error") == nil() {
             write_console(b"Execution halted\n", true);
             return Outcome::Failed;
         }
     }
     Outcome::Completed
+}
+
+/// `getOption("keep.source")`: whether console input keeps its source references.
+unsafe fn keep_source() -> bool {
+    values::as_logical_scalar(crate::envir::get_option("keep.source")) == 1
 }
 
 /// Runs a read-eval-print loop: `read` returns the next chunk of input after showing a prompt,
@@ -226,11 +246,17 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
         }
         let text = std::mem::take(&mut buffer);
         let mark = crate::heap().handle_mark();
-        match crate::lower::parse_text(&text, "<text>") {
-            Ok(expressions) => {
-                crate::heap().root(expressions);
-                for index in 0..length(expressions) {
-                    if !run_toplevel(expressions.element(index)) {
+        match crate::lower::parse_script(&text, "<text>") {
+            Ok(script) => {
+                for node in &script.expressions {
+                    let succeeded = match crate::lower::lower_script_expression(&script, node, keep_source()) {
+                        Ok(expression) => run_toplevel(expression),
+                        Err(unwind) => {
+                            report_toplevel(unwind);
+                            false
+                        }
+                    };
+                    if !succeeded {
                         break;
                     }
                 }
@@ -270,6 +296,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().frames.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
+    interp().srcref = nil();
     conditions::print_warnings();
     // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
     let visible = interp().visible;

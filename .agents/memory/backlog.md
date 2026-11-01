@@ -1838,6 +1838,13 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
   computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
   daylight-saving changes differ from GNU R.
+- **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
+  stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
+  with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
+  expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
+  the column of a second expression after `;` differ. `.Internal(.traceback(x))`, the helper
+  behind `traceback()` printing, is still a stub that returns `NULL`, and the interactive
+  `traceback()` output ("at #2") is unchecked against GNU R.
 - **Tier-0 speed.** A scalar `for` loop runs about 6x slower than GNU R's bytecode (`s <- s + i * 2`,
   1e6 iterations: 0.27 s against 0.04 s). The cost is per-instruction allocation of scalar results,
   handle-stack pushes, and the guard and frame probes. Next: reuse a register's scalar when it is

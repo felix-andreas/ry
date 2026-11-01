@@ -178,8 +178,30 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
             outcome = unwind;
         }
     }
+    // GNU R records the stack for `traceback()` only after the `error` option ran, so a
+    // handler there still sees the previous error's.
+    if let Err(unwind) = traceback_calls(0).and_then(|calls| {
+        Ok(crate::heap().define(values::base_env(), values::install(".Traceback")?, calls)?)
+    }) {
+        outcome = unwind;
+    }
     interp().in_error -= 1;
     outcome
+}
+
+/// The calls on the stack, innermost first and without the innermost `skip`, each deparsed and
+/// carrying the srcref of where it was made: `.Traceback` as GNU R records it.
+pub unsafe fn traceback_calls(skip: usize) -> R<Sexp> {
+    let mut items = Vec::new();
+    for frame in interp().frames.iter().rev().skip(skip) {
+        let lines = deparse::deparse_lines(frame.call, 60, deparse::options::SIMPLE);
+        let text = values::string_vector(&lines)?;
+        if frame.srcref != nil() {
+            values::set_attr(text, symbols().srcref, values::duplicate(frame.srcref)?)?;
+        }
+        items.push((nil(), text));
+    }
+    values::pairlist(&items, SexpType::Pairlist)
 }
 
 /// GNU R's concise traceback: the functions on the stack, outermost first, or `None` when the

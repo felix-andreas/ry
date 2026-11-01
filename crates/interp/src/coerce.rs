@@ -840,7 +840,7 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
         formals.push((values::install(&name)?, value));
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
-    crate::eval::make_closure(formals, list.element(count - 1), env)
+    crate::eval::make_closure(formals, list.element(count - 1), values::nil(), env)
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
