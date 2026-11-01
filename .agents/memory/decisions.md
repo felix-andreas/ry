@@ -3925,15 +3925,49 @@ explicit allocators".
 - **ry-built packages.** `rcmd` links with `-undefined dynamic_lookup` and an empty `LIBR`, so the
   binary records no libR and resolves R's API in the flat lookup that falls back to every loaded
   image. The same build then loads under ry and under GNU R, and needs no rewriting.
-- **Known gaps.** A package that loads a sibling dylib through `@loader_path` breaks in the
-  rebound copy, because the copy lives outside the package's `libs/`. A failed load of a rebound copy says so in its error. CRAN's own `libRblas.dylib`
-  could pull in GNU R's libR if a package links it directly; unobserved. The install-name match is
-  reasoned from dyld's source and verified only once the release smoke test runs on a Mac.
-- **Windows (designed, not built).** Name the library `R.dll`: the loader reuses an already loaded
-  module with the same base name, so Rtools-built package DLLs bind to ry's copy with no
-  rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
-  `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
-  The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).
+- **Relative dependencies.** The copy lives in the cache, outside the package's `libs/`, so the
+  cache mirrors the original's surroundings with links (`mirror_surroundings` in `dynload.rs`):
+  the copy's directory links every file beside the original, and `macho::Rebound::climb`, the
+  most `..` components any `@loader_path` load command or rpath starts with, decides how many
+  ancestor directories are mirrored too. Rewriting `@loader_path` to the original's absolute
+  directory was rejected: the longer string does not fit in the load command in place, and
+  growing load commands needs header padding and moves offsets. `.target` in the cache entry
+  records where the copy sits in the mirror.
+- **Known gaps.** CRAN's own `libRblas.dylib` could pull in GNU R's libR if a package links it
+  directly; unobserved. An `@rpath/../x` name combined with an `@loader_path` rpath is not counted
+  in the climb. The install-name match is reasoned from dyld's source and verified only once the
+  release smoke test runs on a Mac.
+
+## Windows runtime: `R.dll` for windows-gnu, linked with lld
+
+- **Before.** The runtime called libc directly (`dlopen`, `umask`, `utimensat`, `nl_langinfo`,
+  `iconv`, `kill` and signal numbers, process priorities, `getpwnam`), so it built only on Unix, and the Windows archive
+  carried `ry.exe` alone.
+- **Target.** `x86_64-pc-windows-gnu`, the mingw-w64 ABI Rtools builds packages with. Package DLLs
+  import from `R.dll` by module name, and the loader reuses an already loaded module with the same
+  base name, so naming ry's library `R.dll` binds them with no rewriting. Exports come from
+  `__declspec(dllexport)` in `native.c` plus rustc's own exports, so there is no `.def` file to
+  drift from the code; the linker writes `libR.dll.a` for `rcmd`. `LibExtern` is
+  `__declspec(dllimport) extern` under `_WIN32`.
+- **One platform seam.** Every operating-system call the interpreter makes goes through
+  `crates/interp/src/platform.rs`, which has a Unix and a Windows `imp` with the same functions.
+  Callers never `cfg` on the OS themselves, so a new libc use shows up as a Windows build error in
+  one file. Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
+  same interface `Riconv` exports.
+- **lld is required.** GNU ld 2.41 (Ubuntu's mingw-w64) emits a `HIGHLOW` base relocation for
+  each `SECREL32` thread-local offset, so a relocated `R.dll` (ASLR, or a base-address collision)
+  computes a garbage address on every `thread_local` access. lld emits none. mingw's `gcc` is
+  configured `--with-ld` and ignores `-fuse-ld=lld`, so `clang --target=x86_64-w64-mingw32
+  -fuse-ld=lld` is the linker driver (`contributing/design/r-runtime.md`, section 11, has the
+  command).
+- **A 64 MiB main-thread stack** for `ry.exe` (`crates/ry/build.rs`): the session evaluates on the
+  main thread, and base R's startup overflows Windows' 1 MiB default.
+- **Windows-only routines** that `utils` and `grDevices` reference at load time are registered in
+  `WINDOWS_ROUTINES` (`builtin_libraries.rs`), chained in only on Windows so Unix sessions keep
+  GNU R's Unix routine table.
+- **Impact.** `ry run` runs base R under Wine with no GNU R binary executed. Open: BLAS through
+  `Rblas.dll`, the msvcrt versus UCRT mismatch with Rtools-built packages (the `gnullvm` target
+  closes it), and building `R.dll` in the release workflow.
 
 ## The runtime emulates the GNU R version it loads base R from
 

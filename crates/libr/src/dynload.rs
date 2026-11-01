@@ -141,9 +141,8 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
         );
         if opened != canonical {
             message.push_str(&format!(
-                "\n  ry loaded a copy rebound to its runtime, {opened}, beside links to the \
-                 files next to the original; a dependency found through a path that leaves \
-                 that directory (@loader_path/..) cannot load from the copy"
+                "\n  ry loaded a copy rebound to its runtime, {opened}, among links that \
+                 mirror the files around the original"
             ));
         }
         return Err(error(message));
@@ -184,10 +183,11 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
 /// library that needs no rewrite leaves an empty marker, so it is not read again either. The
 /// copy keeps the original's file name, so dyld's messages name the library the user loaded.
 ///
-/// The copy's directory also links to every other file beside the original, so a library that
-/// finds its own dependencies through `@loader_path` (or an `@loader_path` rpath) finds them
-/// from the copy too. A path that climbs out of the directory (`@loader_path/../lib`) is not
-/// covered.
+/// Around the copy, links mirror the original's surroundings as far up as the library's
+/// `@loader_path` references and rpaths climb ([`mirror_surroundings`]), so a library that finds
+/// its dependencies relative to itself, such as `@loader_path/libdep.dylib` or an
+/// `@loader_path/../lib` rpath, finds them from the copy too. `.target` in the cache directory
+/// names the copy's place in that mirror.
 ///
 /// A path that cannot be read here (a bare name dyld searches for, or a system library that
 /// exists only in dyld's shared cache) is left to `dlopen`, which reports its own error.
@@ -214,10 +214,13 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
         .join("rebound")
         .join(format!("{:016x}", key.finish()));
     let file_name = Path::new(path).file_name().unwrap_or_default();
-    let target = cache.join(file_name);
+    let marker = cache.join(".target");
     let unchanged = cache.join(".unchanged");
-    if target.exists() {
-        return Ok(Some(target.to_string_lossy().into_owned()));
+    if let Ok(relative) = std::fs::read_to_string(&marker) {
+        let target = cache.join(relative);
+        if target.exists() {
+            return Ok(Some(target.to_string_lossy().into_owned()));
+        }
     }
     if unchanged.exists() {
         return Ok(None);
@@ -225,15 +228,26 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
     let Ok(mut image) = std::fs::read(path) else {
         return Ok(None);
     };
-    let rewritten = crate::macho::rebind_libr(&mut image).map_err(failed)?;
+    let rebound = crate::macho::rebind_libr(&mut image).map_err(failed)?;
     std::fs::create_dir_all(&cache).map_err(|failure| failed(failure.to_string()))?;
-    if rewritten == 0 {
+    if rebound.rewritten == 0 {
         std::fs::write(&unchanged, b"").map_err(|failure| failed(failure.to_string()))?;
         return Ok(None);
     }
+    let directory = Path::new(path)
+        .parent()
+        .ok_or_else(|| failed("the library path has no directory".into()))?;
+    let copy_directory =
+        mirror_surroundings(directory, file_name, rebound.climb, &cache).map_err(|failure| {
+            failed(format!(
+                "cannot link the files around it into {}: {failure}",
+                cache.display()
+            ))
+        })?;
+    let target = copy_directory.join(file_name);
     // Written and signed under a temporary name, then renamed, so a concurrent session never
     // loads a half-written or unsigned copy.
-    let staging = cache.join(format!(
+    let staging = copy_directory.join(format!(
         ".{}.{}",
         file_name.to_string_lossy(),
         std::process::id()
@@ -251,14 +265,6 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
         failed(failure)
     };
     std::fs::write(&staging, &image).map_err(|failure| abandon(failure.to_string()))?;
-    if let Some(directory) = Path::new(path).parent() {
-        link_siblings(directory, file_name, &cache).map_err(|failure| {
-            abandon(format!(
-                "cannot link the files beside it into {}: {failure}",
-                cache.display()
-            ))
-        })?;
-    }
     // An absolute path, because an editor started from the Dock runs with a minimal PATH.
     let signed = std::process::Command::new("/usr/bin/codesign")
         .args(["--force", "--sign", "-"])
@@ -276,7 +282,46 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
         )));
     }
     std::fs::rename(&staging, &target).map_err(|failure| abandon(failure.to_string()))?;
+    let relative = target.strip_prefix(&cache).unwrap_or(&target);
+    std::fs::write(&marker, relative.to_string_lossy().as_bytes())
+        .map_err(|failure| failed(failure.to_string()))?;
     Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+/// Mirrors `directory`, the one holding the library `file_name`, and `climb` of its ancestors
+/// into `cache`, and returns the mirror of `directory`, where the copy goes. Each mirrored
+/// directory is real and holds links to every entry of the original except the one on the way
+/// down, which is the next mirrored directory (or, at the bottom, the copy). A path relative to
+/// the copy that climbs at most `climb` levels therefore resolves to the same file it reaches
+/// from the original: `@loader_path/../lib/libdep.dylib` from `pkg/libs/pkg.so` is
+/// `<cache>/pkg/lib/libdep.dylib`, a link to `pkg/lib/libdep.dylib`. A climb past the root
+/// stops there.
+#[cfg(any(target_os = "macos", test))]
+fn mirror_surroundings(
+    directory: &std::path::Path,
+    file_name: &std::ffi::OsStr,
+    climb: usize,
+    cache: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let originals: Vec<&std::path::Path> = directory.ancestors().take(climb + 1).collect();
+    let mut mirror = cache.to_path_buf();
+    let mut levels = Vec::with_capacity(originals.len());
+    for (level, original) in originals.iter().enumerate().rev() {
+        if level + 1 < originals.len() {
+            let name = original.file_name().ok_or_else(|| {
+                std::io::Error::other(format!("{} has no name", original.display()))
+            })?;
+            mirror.push(name);
+        }
+        levels.push((*original, mirror.clone()));
+    }
+    std::fs::create_dir_all(&mirror)?;
+    let mut skipped = file_name;
+    for (original, mirrored) in levels.iter().rev() {
+        link_siblings(original, skipped, mirrored)?;
+        skipped = original.file_name().unwrap_or_default();
+    }
+    Ok(mirror)
 }
 
 /// Links each entry of `directory` other than `skipped` into `cache` under the same name. A
@@ -306,7 +351,7 @@ fn link_siblings(
 /// beside the copy) invalidates every copy and marker an earlier version left. Bump it
 /// whenever either changes.
 #[cfg(target_os = "macos")]
-const REBIND_VERSION: u32 = 3;
+const REBIND_VERSION: u32 = 4;
 
 /// FNV-1a, which is stable across builds and runs, unlike the standard library's hasher, so
 /// the cache key survives a rebuild of ry.
@@ -729,25 +774,52 @@ pub unsafe extern "C" fn ry_native_symbol(name: *const c_char, package: *const c
 
 #[cfg(test)]
 mod tests {
-    use super::link_siblings;
+    use super::mirror_surroundings;
 
     #[test]
-    fn the_rebound_copy_sees_the_files_beside_the_original() {
-        let root = std::env::temp_dir().join(format!("ry-link-siblings-{}", std::process::id()));
-        let (libs, cache) = (root.join("libs"), root.join("cache"));
-        std::fs::create_dir_all(&libs).expect("create libs");
-        std::fs::create_dir_all(&cache).expect("create cache");
+    fn the_rebound_copy_sees_the_files_around_the_original() {
+        let root = std::env::temp_dir().join(format!("ry-mirror-{}", std::process::id()));
+        let package = root.join("library").join("pkg");
+        let (libs, lib, cache) = (
+            package.join("libs"),
+            package.join("lib"),
+            root.join("cache"),
+        );
+        for directory in [&libs, &lib, &cache] {
+            std::fs::create_dir_all(directory).expect("create directory");
+        }
         std::fs::write(libs.join("pkg.so"), b"package").expect("write package");
-        std::fs::write(libs.join("libdep.dylib"), b"dependency").expect("write dependency");
-        let skipped = std::ffi::OsStr::new("pkg.so");
-        link_siblings(&libs, skipped, &cache).expect("link");
-        // A second session racing to the same cache directory finds the links already there.
-        link_siblings(&libs, skipped, &cache).expect("link again");
+        std::fs::write(libs.join("libsibling.dylib"), b"sibling").expect("write sibling");
+        std::fs::write(lib.join("libdep.dylib"), b"dependency").expect("write dependency");
+        let file_name = std::ffi::OsStr::new("pkg.so");
+
+        let flat = mirror_surroundings(&libs, file_name, 0, &cache.join("flat")).expect("mirror");
+        assert_eq!(flat, cache.join("flat"));
         assert_eq!(
-            std::fs::read(cache.join("libdep.dylib")).expect("read through the link"),
+            std::fs::read(flat.join("libsibling.dylib")).expect("read"),
+            b"sibling"
+        );
+        assert!(!flat.join("pkg.so").exists());
+
+        let deep = cache.join("deep");
+        let copy_directory = mirror_surroundings(&libs, file_name, 1, &deep).expect("mirror");
+        // A second session racing to the same cache directory finds the links already there.
+        mirror_surroundings(&libs, file_name, 1, &deep).expect("mirror again");
+        assert_eq!(copy_directory, deep.join("libs"));
+        assert!(!copy_directory.is_symlink(), "the copy's directory is real");
+        assert!(!copy_directory.join("pkg.so").exists());
+        assert_eq!(
+            std::fs::read(copy_directory.join("../lib/libdep.dylib")).expect("climb one level"),
             b"dependency"
         );
-        assert!(!cache.join("pkg.so").exists());
+        assert_eq!(
+            std::fs::read(copy_directory.join("libsibling.dylib")).expect("read"),
+            b"sibling"
+        );
+
+        let rooted = mirror_surroundings(&libs, file_name, 100, &cache.join("rooted"))
+            .expect("a climb past the root stops there");
+        assert!(rooted.ends_with(libs.strip_prefix("/").expect("absolute")));
         std::fs::remove_dir_all(&root).expect("clean up");
     }
 }

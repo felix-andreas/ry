@@ -17,6 +17,11 @@
 //! A load command also records the compatibility version of the library it names, and GNU R
 //! links libR with its own version (4.5.0, say). dyld refuses a library whose current version is
 //! lower, and ry's libR has none, so the rewrite zeroes the recorded version, which accepts any.
+//!
+//! The rewritten copy lives in ry's cache, not beside the original, so a dependency the package
+//! finds relative to itself (`@loader_path/libdep.dylib`, or an `@loader_path/../lib` rpath) must
+//! be reachable from the copy's directory too. [`Rebound::climb`] reports how many directories
+//! such a path climbs, which tells the caller how much of the original's surroundings to mirror.
 
 /// The install name of ry's libR (`crates/libr/build.rs` sets it).
 pub const RY_LIBR_INSTALL_NAME: &str = "@rpath/libR.dylib";
@@ -31,19 +36,31 @@ const MACH_HEADER_64_SIZE: usize = 32;
 const DYLIB_COMMANDS: [u32; 5] = [0xc, 0x8000_0018, 0x8000_001f, 0x20, 0x8000_0023];
 /// The offset of `compatibility_version` in a `dylib_command`.
 const COMPATIBILITY_VERSION_OFFSET: usize = 20;
+const LC_RPATH: u32 = 0x8000_001c;
+const LOADER_PATH: &str = "@loader_path/";
+
+/// What [`rebind_libr`] did to an image and what loading it from elsewhere needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rebound {
+    /// How many load commands now name ry's runtime. Zero means the binary does not link libR
+    /// (ry built it with `-undefined dynamic_lookup`, or it is not a package library) and can
+    /// load as it is.
+    pub rewritten: usize,
+    /// The most `..` components any `@loader_path` library reference or rpath starts with:
+    /// `@loader_path/libdep.dylib` climbs 0 and `@loader_path/../lib` climbs 1.
+    pub climb: usize,
+}
 
 /// Rewrites every load command of `image` that names GNU R's libR to ry's install name, in
-/// each 64-bit architecture of a universal binary, and returns how many it rewrote. Zero means
-/// the binary does not link libR (ry built it with `-undefined dynamic_lookup`, or it is not a
-/// package library) and can load as it is. A file that is not a 64-bit Mach-O image is left
-/// alone for `dlopen` to accept or refuse; a malformed one is an error.
-pub fn rebind_libr(image: &mut [u8]) -> Result<usize, String> {
+/// each 64-bit architecture of a universal binary. A file that is not a 64-bit Mach-O image is
+/// left alone for `dlopen` to accept or refuse; a malformed one is an error.
+pub fn rebind_libr(image: &mut [u8]) -> Result<Rebound, String> {
     match read_u32_be(image, 0)? {
         FAT_MAGIC | FAT_MAGIC_64 => {
             let wide = read_u32_be(image, 0)? == FAT_MAGIC_64;
             let count = read_u32_be(image, 4)? as usize;
             let entry_size = if wide { 32 } else { 20 };
-            let mut rewritten = 0;
+            let mut rebound = Rebound::default();
             for index in 0..count {
                 let entry = 8 + index * entry_size;
                 let (offset, size) = if wide {
@@ -62,9 +79,11 @@ pub fn rebind_libr(image: &mut [u8]) -> Result<usize, String> {
                     .checked_add(usize::try_from(size).map_err(|_| truncated())?)
                     .ok_or_else(truncated)?;
                 let slice = image.get_mut(start..end).ok_or_else(truncated)?;
-                rewritten += rebind_thin(slice)?;
+                let slice_rebound = rebind_thin(slice)?;
+                rebound.rewritten += slice_rebound.rewritten;
+                rebound.climb = rebound.climb.max(slice_rebound.climb);
             }
-            Ok(rewritten)
+            Ok(rebound)
         }
         _ => rebind_thin(image),
     }
@@ -72,11 +91,11 @@ pub fn rebind_libr(image: &mut [u8]) -> Result<usize, String> {
 
 /// A slice that is not 64-bit (an old i386 or ppc slice of a universal binary) is skipped,
 /// because dyld only ever maps the host's slice.
-fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
+fn rebind_thin(image: &mut [u8]) -> Result<Rebound, String> {
+    let mut rebound = Rebound::default();
     if read_u32_le(image, 0)? != MH_MAGIC_64 {
-        return Ok(0);
+        return Ok(rebound);
     }
-    let mut rewritten = 0;
     let command_count = read_u32_le(image, 16)? as usize;
     let mut offset = MACH_HEADER_64_SIZE;
     for _ in 0..command_count {
@@ -86,7 +105,9 @@ fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
             return Err("a load command has an invalid size".into());
         }
         let end = offset.checked_add(size).ok_or_else(truncated)?;
-        if DYLIB_COMMANDS.contains(&command) {
+        let is_dylib = DYLIB_COMMANDS.contains(&command);
+        if is_dylib || command == LC_RPATH {
+            // Both commands hold their path as an `lc_str` offset right after `cmdsize`.
             let name_start = offset
                 .checked_add(read_u32_le(image, offset + 8)? as usize)
                 .ok_or_else(truncated)?;
@@ -96,7 +117,15 @@ fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
                 .position(|&byte| byte == 0)
                 .unwrap_or(field.len());
             let name = std::str::from_utf8(&field[..length]).unwrap_or("");
-            if names_gnu_r_libr(name) {
+            if let Some(relative) = name.strip_prefix(LOADER_PATH) {
+                let climb = relative
+                    .split('/')
+                    .filter(|component| *component != "." && !component.is_empty())
+                    .take_while(|component| *component == "..")
+                    .count();
+                rebound.climb = rebound.climb.max(climb);
+            }
+            if is_dylib && names_gnu_r_libr(name) {
                 let replacement = RY_LIBR_INSTALL_NAME.as_bytes();
                 // The name stays NUL-terminated inside its field.
                 if replacement.len() >= field.len() {
@@ -111,12 +140,12 @@ fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
                     return Err("a library reference overlaps its version fields".into());
                 }
                 image[version..version + 4].fill(0);
-                rewritten += 1;
+                rebound.rewritten += 1;
             }
         }
         offset = end;
     }
-    Ok(rewritten)
+    Ok(rebound)
 }
 
 /// GNU R's libR, linked as `-lR` (`.../lib/libR.dylib`) or as `-framework R`, whose binary
@@ -183,6 +212,10 @@ mod tests {
         image
     }
 
+    fn rewritten(image: &mut [u8]) -> Result<usize, String> {
+        rebind_libr(image).map(|rebound| rebound.rewritten)
+    }
+
     /// The library names an image's load commands reference, in order.
     fn names(image: &[u8]) -> Vec<String> {
         let count = read_u32_le(image, 16).unwrap() as usize;
@@ -214,7 +247,7 @@ mod tests {
                 "/usr/lib/libSystem.B.dylib",
             ]
         );
-        assert_eq!(rebind_libr(&mut bytes), Ok(1));
+        assert_eq!(rewritten(&mut bytes), Ok(1));
         assert_eq!(
             names(&bytes),
             [RY_LIBR_INSTALL_NAME, "/usr/lib/libSystem.B.dylib"]
@@ -230,7 +263,7 @@ mod tests {
             "/usr/lib/libSystem.B.dylib",
         ]);
         let before = bytes.len();
-        assert_eq!(rebind_libr(&mut bytes), Ok(2));
+        assert_eq!(rewritten(&mut bytes), Ok(2));
         assert_eq!(bytes.len(), before);
         assert_eq!(
             names(&bytes),
@@ -241,20 +274,20 @@ mod tests {
                 "/usr/lib/libSystem.B.dylib",
             ]
         );
-        assert_eq!(rebind_libr(&mut bytes), Ok(0), "rewriting is idempotent");
+        assert_eq!(rewritten(&mut bytes), Ok(0), "rewriting is idempotent");
     }
 
     #[test]
     fn an_old_framework_binary_counts_as_libr() {
         let mut bytes = image(&["/Library/Frameworks/R.framework/Versions/3.6/R"]);
-        assert_eq!(rebind_libr(&mut bytes), Ok(1));
+        assert_eq!(rewritten(&mut bytes), Ok(1));
     }
 
     #[test]
     fn a_binary_without_libr_is_left_alone() {
         let mut bytes = image(&["/usr/lib/libSystem.B.dylib"]);
         let original = bytes.clone();
-        assert_eq!(rebind_libr(&mut bytes), Ok(0));
+        assert_eq!(rewritten(&mut bytes), Ok(0));
         assert_eq!(bytes, original);
     }
 
@@ -276,7 +309,7 @@ mod tests {
         fat.extend(&thin);
         fat.resize(second as usize, 0);
         fat.extend(&thin);
-        assert_eq!(rebind_libr(&mut fat), Ok(2));
+        assert_eq!(rewritten(&mut fat), Ok(2));
     }
 
     /// Mutates valid images at random and checks that the rewriter never panics and never
@@ -320,7 +353,7 @@ mod tests {
     #[test]
     fn a_file_that_is_not_mach_o_is_left_for_dlopen() {
         let mut elf = [0x7f, b'E', b'L', b'F', 0, 0, 0, 0];
-        assert_eq!(rebind_libr(&mut elf), Ok(0));
+        assert_eq!(rewritten(&mut elf), Ok(0));
     }
 
     #[test]
@@ -331,13 +364,50 @@ mod tests {
             + read_u32_le(&bytes, MACH_HEADER_64_SIZE + 4).unwrap() as usize
             + COMPATIBILITY_VERSION_OFFSET;
         assert_eq!(read_u32_le(&bytes, first), Ok(0x10000));
-        assert_eq!(rebind_libr(&mut bytes), Ok(1));
+        assert_eq!(rewritten(&mut bytes), Ok(1));
         assert_eq!(read_u32_le(&bytes, first), Ok(0));
         assert_eq!(
             read_u32_le(&bytes, second),
             Ok(0x10000),
             "only libR's is cleared"
         );
+    }
+
+    #[test]
+    fn loader_path_references_report_how_far_they_climb() {
+        let mut bytes = image(&[
+            "/opt/R/lib/libR.dylib",
+            "@loader_path/libsibling.dylib",
+            "@loader_path/./../../lib/libdep.dylib",
+        ]);
+        assert_eq!(
+            rebind_libr(&mut bytes),
+            Ok(Rebound {
+                rewritten: 1,
+                climb: 2
+            })
+        );
+        let mut bytes = image(&["@loader_path/libsibling.dylib"]);
+        assert_eq!(rebind_libr(&mut bytes).map(|rebound| rebound.climb), Ok(0));
+    }
+
+    #[test]
+    fn a_loader_path_rpath_counts_toward_the_climb() {
+        let mut bytes = image(&["@rpath/libdep.dylib"]);
+        let path = "@loader_path/../lib";
+        let size = (12 + path.len() + 1).div_ceil(8) * 8;
+        let mut command = Vec::new();
+        for value in [LC_RPATH, size as u32, 12] {
+            command.extend_from_slice(&value.to_le_bytes());
+        }
+        command.extend_from_slice(path.as_bytes());
+        command.resize(size, 0);
+        bytes.extend(&command);
+        let count = read_u32_le(&bytes, 16).unwrap() + 1;
+        let commands_size = read_u32_le(&bytes, 20).unwrap() + size as u32;
+        bytes[16..20].copy_from_slice(&count.to_le_bytes());
+        bytes[20..24].copy_from_slice(&commands_size.to_le_bytes());
+        assert_eq!(rebind_libr(&mut bytes).map(|rebound| rebound.climb), Ok(1));
     }
 
     #[test]

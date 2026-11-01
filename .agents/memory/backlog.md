@@ -2276,9 +2276,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
-- **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
-  only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
-  need their own paths.
+- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
+  its R home from symbolic links, which need Developer Mode.
 
 ## Explicitly out of scope for now
 

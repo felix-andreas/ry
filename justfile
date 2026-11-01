@@ -176,7 +176,8 @@ package version:
     mkdir -p "$stage"
     case "$target" in
     	*windows*)
-    		# ry's runtime is not built for Windows yet, so the archive carries the CLI alone.
+    		# R.dll needs the windows-gnu target linked with lld (r-runtime.md, section 11), which this
+    		# runner does not set up yet, so the archive carries the CLI alone.
     		cargo build --release --locked -p ry-lang
     		cp "$build/ry.exe" LICENSE "$stage/"
     		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE >/dev/null)
