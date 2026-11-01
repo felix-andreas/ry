@@ -1313,7 +1313,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder_of(db, item, name, deferred),
+            None => frame_binder(db, item, types::Name::new(db, name.as_str()), deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -1462,9 +1462,8 @@ fn item_interface_edges<'db>(
 }
 
 /// Whether the item's top-level writes are at most its own binding, read off its syntax so the
-/// common case needs no naming pass.
-/// A syntax fact of its own, so the naming pass decides from a memoized flag instead of the
-/// item's tree, which a one-shot check has released by then.
+/// common case needs no naming pass. It is memoized on its own because the naming pass runs
+/// after a one-shot check has released the item's tree.
 #[salsa::tracked(returns(copy))]
 pub fn item_binds_only_own_name<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
     item_syntax(db, item).is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))

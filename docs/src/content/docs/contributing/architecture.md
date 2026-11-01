@@ -100,8 +100,9 @@ The analysis of a project has five inputs:
 - `AnalysisSettings` is a singleton carrying the configuration that changes what analysis means
   rather than which findings a host publishes: `[check] inline-annotations` and `[check] strict`.
   The first is read only where an inline annotation exists, so toggling it re-checks only the
-  items that have one. The second is the project default behind `semantics::file_is_strict`, the
-  one place that decides a file's mode (its `# typing:` directive wins). A check records the
+  items that have one. The second is the project default behind `semantics::file_is_strict`,
+  which decides a file's mode for the check (its `# typing:` directive wins). The package loader
+  keeps its own `load_index::file_is_strict`, which reads the loaded package's default instead. A check records the
   origins strict mode reports only for an item in a strict file, so a project that is not strict
   never builds that table.
 
@@ -137,9 +138,10 @@ check's wall time when the capacities stayed set). The released file trees come 
 caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
 all cores. A tree read after the release still works, by reparsing that file.
 
-Every query that reads a tree is a memoized query whose result is small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
-annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
-`lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+Every query that reads a tree is a memoized query whose result is small: the item HIR and
+annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
+agreement candidates in `diagnostics.rs`, `item_name_range`, `item_binds_only_own_name`,
+`top_level::item_declared_pure`, and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
 joins it with the rest (a bare `setClass` call is reported only when the file does not bind

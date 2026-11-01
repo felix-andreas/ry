@@ -93,6 +93,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
         let _ = crate::item_annotations(db, item);
         let _ = item_name_range(db, item);
         let _ = crate::item_binds_only_own_name(db, item);
+        let _ = crate::top_level::item_declared_pure(db, item);
     }
 }
 

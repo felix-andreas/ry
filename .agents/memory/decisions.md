@@ -3712,8 +3712,9 @@ check` releases its trees once, and memoized records are compact" below).
     raises the capacity to one, touches every tree on one thread, calls
     `trigger_lru_eviction`, and lowers it again. The CLI calls it after the syntax pass and hands
     each file tree to the naming worker that names that file, which frees it.
-  - `AnalysisSettings` carries `[check] strict`, and `semantics::file_is_strict` is the only
-    decider. The checker records strict origins only when it is true.
+  - `AnalysisSettings` carries `[check] strict`, and `semantics::file_is_strict` decides a
+    file's mode for the check (the loader's `load_index::file_is_strict` reads the package
+    default). The checker records strict origins only when it is true.
   - Frozen per-item tables are `SortedMap`/`SortedSet` (`crates/semantics/src/sorted.rs`) over a
     `ThinVec`, which is one pointer wide and allocates nothing when empty. The same goes for the
     check and naming lists and the HIR module's side arrays.

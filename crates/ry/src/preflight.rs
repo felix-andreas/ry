@@ -172,7 +172,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             .spawn_scoped(scope, || {
                 let analysis =
                     analyze_project(root, config.clone(), std::slice::from_ref(&sources))?;
-                let errors = strict_errors(&analysis, config);
+                let errors = strict_errors(&analysis);
                 Ok::<_, CommandError>((analysis, errors))
             });
         match worker {
@@ -204,7 +204,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
 
 /// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does
 /// not cover.
-fn strict_errors(analysis: &ProjectAnalysis, config: &Config) -> Vec<Vec<Diagnostic>> {
+fn strict_errors(analysis: &ProjectAnalysis) -> Vec<Vec<Diagnostic>> {
     analysis
         .files
         .iter()
