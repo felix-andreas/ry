@@ -163,8 +163,8 @@ targets share exactly the same contracts: `syntax::testing::check_parse_invarian
 `format::check_format_invariants` for the formatter, and `semantics::testing::check_semantics_input`
 for the semantic pipeline. The last one folds every lint, under a configuration that turns them all
 on, into its rendering, so the lint layer inherits the same invariants. The `format` and `semantics`
-harnesses also carry a `fuzz_regressions_hold_invariants` battery that pins every input the
-coverage-guided targets have ever broken. `syntax` and `ide` have no such battery yet.
+harnesses, and those of `syntax` and `ide`, also carry a `fuzz_regressions_hold_invariants` battery
+that pins every input the coverage-guided targets have ever broken.
 
 ### The semantic pipeline
 
@@ -349,10 +349,30 @@ engine, each printing rows, columns and a checksum, so the answers compare line 
 
 ### Coverage-guided fuzzing
 
-`fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. It holds the
-libFuzzer targets `parse`, `format`, and `semantics`, each a thin wrapper around the exported
-invariant batteries. The `semantics` target derives its document kind and an incremental edit from
-the input bytes, so a single byte stream drives the full battery, the splice cache included.
+`fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. Each target is a
+thin wrapper around a battery its crate exports, which the crate's in-tree harness runs too:
+
+| Target | Battery |
+| --- | --- |
+| `parse` | `syntax::testing::check_parse_invariants` |
+| `format` | `format::check_format_invariants` |
+| `semantics` | `semantics::testing::check_semantics_input` |
+| `ide` | `ide::testing::check_ide_invariants` |
+| `position` | `ry::position::check_position_invariants` |
+| `config` | `ry::config::check_config_invariants` |
+| `lsp` | the language-server simulator, `run_session`, reading its choices from the input |
+| `load_index`, `reload` | `loader::testing::check_load_index_input`, `check_random_reload` |
+| `sniff` | `sniff::check_sniff_invariants` |
+| `csv` | `table::io::check_csv_input` |
+| `interp_lower`, `interp_unserialize`, `bytecode` | `interp::testing::check_lowering_input`, `check_unserialize_input`, `check_bytecode_agreement` |
+| `unserialize` | `R::serialize::check_unserialize_input` |
+
+The `semantics` target derives its document kind and an incremental edit from the input bytes, so a
+single byte stream drives the full battery, the splice cache included. The generator-driven targets
+(`lsp`, `reload`, `bytecode`) read the generator's choices from the input through
+`syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session. The
+runtime targets link polars, so `cargo fuzz build --no-default-features` builds only the analysis
+targets on a machine with little memory.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
 cargo-fuzz`, then from `fuzz/`:
@@ -464,7 +484,7 @@ every tab, with typing on. An unmarked output block is not tested.
 | `KEY=VALUE` | Any other `[check]` key, written as in `ry.toml`, such as `object-systems=false`. |
 | `runtime=ry` / `runtime=gnu-r` | Which runtime `run` uses; GNU R by default, as on the command line. |
 | `exact` | Compare the whole output instead of an excerpt. |
-| `continue` | Run the page's earlier `r` blocks first, as one session, and compare only this block's output. |
+| `continue` | Run the page's earlier `r` blocks first, as one session, and compare only this block's output. A `check` takes every earlier block; a `run` takes only those whose output the page checks, so an illustration that needs a package the machine lacks does not stop it. |
 | `tab=LABEL` | Only that tab produces this output, for the rare example whose spellings legitimately differ. |
 | `dput` | On an `r` block with `#>` output, print each result with `dput()` instead of `print()`. |
 

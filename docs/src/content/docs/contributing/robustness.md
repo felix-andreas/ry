@@ -168,13 +168,13 @@ harness of that kind yet; the gap is filed in the backlog.
 | Incrementality and cancellation | the simulator's edits and injected cancellations; `test_incremental` | a fresh server; per-item firewalls |
 | Formatter | seeds, mutations, fixture sources (`format` `test_fuzz`); `cargo fuzz` `format` | preservation, idempotence, determinism |
 | IDE features | generated documents and positions (`ide` `test_fuzz`); `cargo fuzz` `ide` | no panic, ranges inside the document |
-| Language server | the simulator; scenarios | a fresh server, the push contract, range geometry |
+| Language server | the simulator; scenarios; `cargo fuzz` `lsp` | a fresh server, the push contract, range geometry |
 | Loader | random reload sequences (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load |
 | Interpreter | generated programs (`interp` `test_fuzz`); differential fuzzing; `cargo fuzz` `interp_lower`, `bytecode` | GNU R, tier 0 |
 | Garbage collector | `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | the unstressed run, the write-barrier invariant |
 | C API | native fuzzing (`libr` `test_fuzz_native`); `cargo fuzz` `unserialize` | GNU R's behavior; the PROTECT balance check on every `.Call` |
 | JIT | `test_tiers`; differential fuzzing with `RY_JIT=force` | tier 0, GNU R |
-| Table engine | `table` property tests | the eager implementation |
+| Table engine | `table` property tests; `cargo fuzz` `csv` | the eager implementation; the sniffer's promised columns |
 | Package install | the `install-package` scenario; `test_install` | the package's own results |
 | CLI | scenarios run the real binary | expected output and exit status |
 | Docs examples | every marked output block in the docs, and the landing page samples (`test_docs`) | the output the page shows |
@@ -193,7 +193,8 @@ does. A stricter checker that catches an unprotected object at the moment it is 
 | `just fuzz-differential SEED COUNT ENGINES` | Generated programs under GNU R and ry's engines. |
 | `just gc-torture` | Every oracle case under collection stress. |
 | `just fuzz-deep` | The semantic pipeline's long seeded run. |
-| `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer (needs a nightly toolchain). |
+| `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |
+| `just fuzz-all SECONDS` | Every `cargo fuzz` target for `SECONDS` each, after seeding the corpora. |
 | `just docs-test [PAGE]` / `just docs-bless [PAGE]` | The docs examples, or a rewrite of their exact output from the real tool. |
 
 ## Gaps
@@ -203,5 +204,5 @@ does. A stricter checker that catches an unprotected object at the moment it is 
 - Allocation failure is not injectable; the heap aborts on an out-of-memory condition.
 - The loader, the REPL and the runtime are not driven by a seeded scheduler; their nondeterminism
   (GNU R's own, threads in packages) is controlled only by running them single-threaded.
-- `R CMD INSTALL` under ry writes no `Meta/package.rds` or lazy-load database yet, so `library()`
-  rejects the installed package and the install scenario loads it by hand.
+- The simulator interrupts a step only with a notification, so a request preempting idle work is not
+  simulated.

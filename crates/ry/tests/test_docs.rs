@@ -143,7 +143,8 @@ struct Example {
 struct Variant {
     label: Option<String>,
     code: String,
-    /// With `continue`, the code of each of the page's earlier `r` blocks, which runs first.
+    /// With `continue`, the code of the earlier `r` blocks, which runs first: every one for a
+    /// `check`, and those whose output the page checks for a `run`.
     prelude: Vec<String>,
 }
 
@@ -225,7 +226,11 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
     let mut examples = Vec::new();
     let mut tabs: Option<Vec<(String, Option<String>)>> = None;
     let mut source: Option<Vec<Variant>> = None;
-    let mut history: Vec<Vec<Variant>> = Vec::new();
+    // Every `r` block or tab group so far, and whether the page checks its output. A `run` with
+    // `continue` replays only the checked ones, so an illustration the test cannot run (one that
+    // needs a package the machine lacks) does not stop the blocks after it. A `check` replays
+    // them all, because checking runs nothing.
+    let mut history: Vec<(Vec<Variant>, bool)> = Vec::new();
     let mut tabs_line = 0;
     // The latest tab group, until an output block pairs with it or other code replaces it.
     let mut unpaired: Option<(usize, Vec<Variant>)> = None;
@@ -254,7 +259,7 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                 if variants.len() > 1 {
                     unpaired = Some((tabs_line, variants.clone()));
                 }
-                history.push(variants.clone());
+                history.push((variants.clone(), false));
                 source = Some(variants);
             }
         } else if let Some(rest) = trimmed.strip_prefix("<TabItem label=\"") {
@@ -316,7 +321,7 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                     code: join_lines(&body),
                     prelude: Vec::new(),
                 }];
-                history.push(variants.clone());
+                history.push((variants.clone(), false));
                 source = Some(variants);
             }
             (Some(config), true, None) => {
@@ -345,7 +350,7 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                     code,
                     prelude: Vec::new(),
                 };
-                history.push(vec![variant.clone()]);
+                history.push((vec![variant.clone()], true));
                 source = Some(vec![variant.clone()]);
                 examples.push(Example {
                     page: page.to_owned(),
@@ -370,12 +375,17 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                         "{location}: a `run` with `continue` follows one `r` block, not a tab group"
                     ));
                 }
+                if let Some(latest) = history.last_mut() {
+                    latest.1 = true;
+                }
                 if config.continues {
+                    let replays_all = config.command == CommandKind::Check;
                     let earlier = &history[..history.len().saturating_sub(1)];
                     for variant in &mut variants {
                         variant.prelude = earlier
                             .iter()
-                            .filter_map(|group| {
+                            .filter(|(_, checked)| replays_all || *checked)
+                            .filter_map(|(group, _)| {
                                 group
                                     .iter()
                                     .find(|candidate| candidate.label == variant.label)
@@ -602,30 +612,51 @@ fn snippet_path(expected: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
-/// The landing page's samples are TypeScript objects with `code`, `command` and `output`
-/// template literals. Each is checked as an excerpt with typing on.
+/// The landing page's samples are TypeScript objects with a `code` template literal (or the name
+/// of a `const` holding one), an optional `command` (`ry check` when absent) and an `output`
+/// template literal. Each is checked as an excerpt with typing on.
 fn parse_landing(page: &str, text: &str) -> Result<Vec<Example>, String> {
     let mut examples = Vec::new();
     let mut rest = text;
-    while let Some(position) = rest.find("code: `") {
+    while let Some(position) = rest.find("code: ") {
         let consumed = text.len() - rest.len() + position;
         let line = text[..consumed].lines().count();
-        let after_code = &rest[position + "code: `".len()..];
-        let (code, after) = template_literal(after_code)
-            .ok_or_else(|| format!("{page}:{line}: an unterminated `code` literal"))?;
-        let command_start = after
-            .find("command: \"")
-            .ok_or_else(|| format!("{page}:{line}: a sample without `command`"))?;
-        let command_text = &after[command_start + "command: \"".len()..];
-        let command_end = command_text
-            .find('"')
-            .ok_or_else(|| format!("{page}:{line}: an unterminated `command`"))?;
-        let command = &command_text[..command_end];
-        let output_start = command_text
+        let after_key = &rest[position + "code: ".len()..];
+        let (code, after) = match after_key.strip_prefix('`') {
+            Some(literal) => template_literal(literal)
+                .ok_or_else(|| format!("{page}:{line}: an unterminated `code` literal"))?,
+            None => {
+                let name_end = after_key
+                    .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+                    .unwrap_or(after_key.len());
+                let name = &after_key[..name_end];
+                // `code: string;` is the samples' type declaration, not a sample.
+                if name == "string" {
+                    rest = &after_key[name_end..];
+                    continue;
+                }
+                let value = landing_constant(text, name)
+                    .ok_or_else(|| format!("{page}:{line}: no `const {name}` literal"))?;
+                (value, &after_key[name_end..])
+            }
+        };
+        let code = interpolate(text, &code)
+            .ok_or_else(|| format!("{page}:{line}: an interpolation the test cannot evaluate"))?;
+        let output_start = after
             .find("output: `")
             .ok_or_else(|| format!("{page}:{line}: a sample without `output`"))?;
+        let command = match after[..output_start].find("command: \"") {
+            Some(command_start) => {
+                let command_text = &after[command_start + "command: \"".len()..];
+                let command_end = command_text
+                    .find('"')
+                    .ok_or_else(|| format!("{page}:{line}: an unterminated `command`"))?;
+                &command_text[..command_end]
+            }
+            None => "ry check",
+        };
         let (output, after_output) =
-            template_literal(&command_text[output_start + "output: `".len()..])
+            template_literal(&after[output_start + "output: `".len()..])
                 .ok_or_else(|| format!("{page}:{line}: an unterminated `output` literal"))?;
         let words: Vec<&str> = command.split_whitespace().collect();
         let (kind, file) = match words.as_slice() {
@@ -665,6 +696,42 @@ fn parse_landing(page: &str, text: &str) -> Result<Vec<Example>, String> {
         rest = after_output;
     }
     Ok(examples)
+}
+
+/// The template literal a landing-page `const NAME = \`...\`` holds.
+fn landing_constant(text: &str, name: &str) -> Option<String> {
+    let start = text.find(&format!("const {name} = `"))? + format!("const {name} = `").len();
+    template_literal(&text[start..]).map(|(value, _)| value)
+}
+
+/// Expands the `${NAME}` and `${NAME.replace('old', 'new')}` interpolations the samples use.
+fn interpolate(text: &str, code: &str) -> Option<String> {
+    let mut expanded = String::new();
+    let mut rest = code;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let end = start + rest[start..].find('}')?;
+        let expression = &rest[start + 2..end];
+        let (name, replacement) = match expression.split_once(".replace(") {
+            Some((name, arguments)) => {
+                let arguments = arguments.strip_suffix(')')?;
+                let (old, new) = arguments.split_once("', '")?;
+                (
+                    name,
+                    Some((old.strip_prefix('\'')?, new.strip_suffix('\'')?)),
+                )
+            }
+            None => (expression, None),
+        };
+        let value = landing_constant(text, name)?;
+        match replacement {
+            Some((old, new)) => expanded.push_str(&value.replacen(old, new, 1)),
+            None => expanded.push_str(&value),
+        }
+        rest = &rest[end + 1..];
+    }
+    expanded.push_str(rest);
+    Some(expanded)
 }
 
 /// Reads a template literal's text up to its closing backtick, undoing the `\`` and `\\`

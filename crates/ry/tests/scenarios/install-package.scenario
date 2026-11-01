@@ -43,14 +43,8 @@ install pkg
 expect exit 0
 expect file library/tally/DESCRIPTION "RyBuilt"
 
-# `library(tally, lib.loc = "library")` is the journey's real last step, but the installed
-# directory has no `Meta/package.rds` or lazy-load database yet, so `library()` rejects it
-# under both runtimes (backlog.md, "R CMD INSTALL output that library() accepts"). Until
-# then the script loads the installed pieces by hand.
 file use.R
-| info <- dyn.load("library/tally/libs/tally.so")
-| tally_sum <- getNativeSymbolInfo("tally_sum", info)
-| source("library/tally/R/tally.R")
+| library(tally, lib.loc = "library")
 | print(tally(c(1, 2, 3.5)))
 | print(tally(1:10))
 

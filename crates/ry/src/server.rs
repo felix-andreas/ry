@@ -251,25 +251,18 @@ enum Outbox {
 }
 
 fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
-    let cancel = seed.cancel.clone();
     let mut seed = Some(seed);
     let mut worker: Option<Worker> = None;
     loop {
         let job = if worker.as_ref().is_some_and(Worker::has_idle_work) {
             match receiver.try_recv() {
-                Ok(job) => {
-                    cancel.job_received();
-                    Some(job)
-                }
+                Ok(job) => Some(job),
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }
         } else {
             match receiver.recv() {
-                Ok(job) => {
-                    cancel.job_received();
-                    Some(job)
-                }
+                Ok(job) => Some(job),
                 Err(_) => return,
             }
         };
@@ -289,6 +282,17 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
 /// `None`. The production loop and the simulator both schedule through this function, so the
 /// simulator exercises exactly the worker's own transitions.
 fn run_job(seed: &mut Option<WorkerSeed>, worker: &mut Option<Worker>, job: Option<Job>) {
+    // The seed holds the handle until initialize hands it to the worker.
+    let cancel = match (seed.as_ref(), worker.as_ref()) {
+        (Some(seed), _) => Some(&seed.cancel),
+        (None, Some(worker)) => Some(&worker.cancel),
+        (None, None) => None,
+    };
+    if job.is_some()
+        && let Some(cancel) = cancel
+    {
+        cancel.job_received();
+    }
     match job {
         Some(Job::Initialize(params, reply)) => {
             let seed = seed.take().expect("initialize arrives exactly once");

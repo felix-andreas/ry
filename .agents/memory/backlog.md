@@ -972,13 +972,7 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 - **Startup-mode collection stress (`RY_GC_STRESS=startup`) is unusable in a debug build**: an empty script runs for over 300 s, because each collection scans every root and every eighth is major. Cheaper root scanning would make it usable.
 - **Run `just gc-torture` over every oracle case on an idle machine.** No full run has completed yet; a debug build needs several minutes per four cases.
 - **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.
-- **The simulator must model idle preemption once `CancelHandle` lands** (`preempt_idle`/`set_idle` in `server.rs`: a request queued during an idle unit cancels that unit, never a sync or another request). Schedule requests mid-idle-unit and check the preempted unit is redone, including `pending_lowering`.
-- **`R CMD INSTALL` output that `library()` accepts.** `rcmd::install` writes `DESCRIPTION`,
-  `NAMESPACE`, `R/*.R` and `libs/`, but no `Meta/package.rds`, `Meta/nsInfo.rds` or lazy-load
-  database, so `library(pkg, lib.loc = ...)` fails with "not a valid installed package" under both
-  ry's runtime and GNU R. Reproduce with `just scenarios install-package` after changing `use.R` in
-  `crates/ry/tests/scenarios/install-package.scenario` back to `library(tally, lib.loc = "library")`.
-  The packaging draft promises one directory both runtimes load.
+- **The simulator does not model idle preemption** (`preempt_idle`/`set_idle` in `server.rs`: a request queued during an idle unit cancels that unit, never a sync or another request). Its interrupted steps deliver only notifications, so schedule requests mid-idle-unit and check the preempted unit is redone, including `pending_lowering` and the parallel warm-up.
 - **An in-memory file system for the server.** The simulator's file-system seam is a real directory,
   so read errors, partial writes and permission failures are never injected. The worker reads the
   disk directly (`fs::read_to_string` in `did_close`, watcher handling, metadata), so the seam is a
