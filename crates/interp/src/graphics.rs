@@ -12,7 +12,9 @@ use {
         builtin_libraries::{NativeCall, NativeFn},
         coerce::coerce_vector,
         format::c_general,
-        graphics_engine::{self, DevDesc, Event, GEContext, GEDevDesc, guarded, guarded_sexp},
+        graphics_engine::{
+            self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
+        },
         graphics_render::{self, Format, Rect, Shape, Stroke},
         unwind::{R, error},
         values::{
@@ -2434,28 +2436,462 @@ const HELVETICA_BOLD_WIDTHS: [u16; 95] = [
     278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
 ];
 
+/// The kerning pairs of Helvetica and Helvetica-Bold between printable ASCII characters, in
+/// thousandths of the font size and sorted by pair, from the same font metrics. GNU R's pdf and
+/// PostScript devices apply them to string widths.
+const HELVETICA_KERNING: [(u8, u8, i16); 215] = [
+    (32, 84, -50),
+    (32, 86, -50),
+    (32, 87, -40),
+    (32, 89, -90),
+    (32, 96, -60),
+    (39, 32, -70),
+    (39, 39, -57),
+    (39, 100, -50),
+    (39, 114, -50),
+    (39, 115, -50),
+    (44, 39, -100),
+    (46, 32, -60),
+    (46, 39, -100),
+    (58, 32, -50),
+    (59, 32, -50),
+    (65, 67, -30),
+    (65, 71, -30),
+    (65, 79, -30),
+    (65, 81, -30),
+    (65, 84, -120),
+    (65, 85, -50),
+    (65, 86, -70),
+    (65, 87, -50),
+    (65, 89, -100),
+    (65, 117, -30),
+    (65, 118, -40),
+    (65, 119, -40),
+    (65, 121, -40),
+    (66, 44, -20),
+    (66, 46, -20),
+    (66, 85, -10),
+    (67, 44, -30),
+    (67, 46, -30),
+    (68, 44, -70),
+    (68, 46, -70),
+    (68, 65, -40),
+    (68, 86, -70),
+    (68, 87, -40),
+    (68, 89, -90),
+    (70, 44, -150),
+    (70, 46, -150),
+    (70, 65, -80),
+    (70, 97, -50),
+    (70, 101, -30),
+    (70, 111, -30),
+    (70, 114, -45),
+    (74, 44, -30),
+    (74, 46, -30),
+    (74, 65, -20),
+    (74, 97, -20),
+    (74, 117, -20),
+    (75, 79, -50),
+    (75, 101, -40),
+    (75, 111, -40),
+    (75, 117, -30),
+    (75, 121, -50),
+    (76, 39, -160),
+    (76, 84, -110),
+    (76, 86, -110),
+    (76, 87, -70),
+    (76, 89, -140),
+    (76, 121, -30),
+    (79, 44, -40),
+    (79, 46, -40),
+    (79, 65, -20),
+    (79, 84, -40),
+    (79, 86, -50),
+    (79, 87, -30),
+    (79, 88, -60),
+    (79, 89, -70),
+    (80, 44, -180),
+    (80, 46, -180),
+    (80, 65, -120),
+    (80, 97, -40),
+    (80, 101, -50),
+    (80, 111, -50),
+    (81, 85, -10),
+    (82, 79, -20),
+    (82, 84, -30),
+    (82, 85, -40),
+    (82, 86, -50),
+    (82, 87, -30),
+    (82, 89, -50),
+    (83, 44, -20),
+    (83, 46, -20),
+    (84, 44, -120),
+    (84, 45, -140),
+    (84, 46, -120),
+    (84, 58, -20),
+    (84, 59, -20),
+    (84, 65, -120),
+    (84, 79, -40),
+    (84, 97, -120),
+    (84, 101, -120),
+    (84, 111, -120),
+    (84, 114, -120),
+    (84, 117, -120),
+    (84, 119, -120),
+    (84, 121, -120),
+    (85, 44, -40),
+    (85, 46, -40),
+    (85, 65, -40),
+    (86, 44, -125),
+    (86, 45, -80),
+    (86, 46, -125),
+    (86, 58, -40),
+    (86, 59, -40),
+    (86, 65, -80),
+    (86, 71, -40),
+    (86, 79, -40),
+    (86, 97, -70),
+    (86, 101, -80),
+    (86, 111, -80),
+    (86, 117, -70),
+    (87, 44, -80),
+    (87, 45, -40),
+    (87, 46, -80),
+    (87, 65, -50),
+    (87, 79, -20),
+    (87, 97, -40),
+    (87, 101, -30),
+    (87, 111, -30),
+    (87, 117, -30),
+    (87, 121, -20),
+    (89, 44, -140),
+    (89, 45, -140),
+    (89, 46, -140),
+    (89, 58, -60),
+    (89, 59, -60),
+    (89, 65, -110),
+    (89, 79, -85),
+    (89, 97, -140),
+    (89, 101, -140),
+    (89, 105, -20),
+    (89, 111, -140),
+    (89, 117, -110),
+    (96, 96, -57),
+    (97, 118, -20),
+    (97, 119, -20),
+    (97, 121, -30),
+    (98, 44, -40),
+    (98, 46, -40),
+    (98, 98, -10),
+    (98, 108, -20),
+    (98, 117, -20),
+    (98, 118, -20),
+    (98, 121, -20),
+    (99, 44, -15),
+    (99, 107, -20),
+    (101, 44, -15),
+    (101, 46, -15),
+    (101, 118, -30),
+    (101, 119, -20),
+    (101, 120, -30),
+    (101, 121, -20),
+    (102, 39, 50),
+    (102, 44, -30),
+    (102, 46, -30),
+    (102, 97, -30),
+    (102, 101, -30),
+    (102, 111, -30),
+    (103, 114, -10),
+    (104, 121, -30),
+    (107, 101, -20),
+    (107, 111, -20),
+    (109, 117, -10),
+    (109, 121, -15),
+    (110, 117, -10),
+    (110, 118, -20),
+    (110, 121, -15),
+    (111, 44, -40),
+    (111, 46, -40),
+    (111, 118, -15),
+    (111, 119, -15),
+    (111, 120, -30),
+    (111, 121, -30),
+    (112, 44, -35),
+    (112, 46, -35),
+    (112, 121, -30),
+    (114, 44, -50),
+    (114, 46, -50),
+    (114, 58, 30),
+    (114, 59, 30),
+    (114, 97, -10),
+    (114, 105, 15),
+    (114, 107, 15),
+    (114, 108, 15),
+    (114, 109, 25),
+    (114, 110, 25),
+    (114, 112, 30),
+    (114, 116, 40),
+    (114, 117, 15),
+    (114, 118, 30),
+    (114, 121, 30),
+    (115, 44, -15),
+    (115, 46, -15),
+    (115, 119, -30),
+    (118, 44, -80),
+    (118, 46, -80),
+    (118, 97, -25),
+    (118, 101, -25),
+    (118, 111, -25),
+    (119, 44, -60),
+    (119, 46, -60),
+    (119, 97, -15),
+    (119, 101, -10),
+    (119, 111, -10),
+    (120, 101, -30),
+    (121, 44, -100),
+    (121, 46, -100),
+    (121, 97, -20),
+    (121, 101, -20),
+    (121, 111, -20),
+    (122, 101, -15),
+    (122, 111, -15),
+];
+
+const HELVETICA_BOLD_KERNING: [(u8, u8, i16); 203] = [
+    (32, 84, -100),
+    (32, 86, -80),
+    (32, 87, -80),
+    (32, 89, -120),
+    (32, 96, -60),
+    (39, 32, -80),
+    (39, 39, -46),
+    (39, 100, -80),
+    (39, 108, -20),
+    (39, 114, -40),
+    (39, 115, -60),
+    (39, 118, -20),
+    (44, 32, -40),
+    (44, 39, -120),
+    (46, 32, -40),
+    (46, 39, -120),
+    (58, 32, -40),
+    (59, 32, -40),
+    (65, 67, -40),
+    (65, 71, -50),
+    (65, 79, -40),
+    (65, 81, -40),
+    (65, 84, -90),
+    (65, 85, -50),
+    (65, 86, -80),
+    (65, 87, -60),
+    (65, 89, -110),
+    (65, 117, -30),
+    (65, 118, -40),
+    (65, 119, -30),
+    (65, 121, -30),
+    (66, 65, -30),
+    (66, 85, -10),
+    (68, 44, -30),
+    (68, 46, -30),
+    (68, 65, -40),
+    (68, 86, -40),
+    (68, 87, -40),
+    (68, 89, -70),
+    (70, 44, -100),
+    (70, 46, -100),
+    (70, 65, -80),
+    (70, 97, -20),
+    (74, 44, -20),
+    (74, 46, -20),
+    (74, 65, -20),
+    (74, 117, -20),
+    (75, 79, -30),
+    (75, 101, -15),
+    (75, 111, -35),
+    (75, 117, -30),
+    (75, 121, -40),
+    (76, 39, -140),
+    (76, 84, -90),
+    (76, 86, -110),
+    (76, 87, -80),
+    (76, 89, -120),
+    (76, 121, -30),
+    (79, 44, -40),
+    (79, 46, -40),
+    (79, 65, -50),
+    (79, 84, -40),
+    (79, 86, -50),
+    (79, 87, -50),
+    (79, 88, -50),
+    (79, 89, -70),
+    (80, 44, -120),
+    (80, 46, -120),
+    (80, 65, -100),
+    (80, 97, -30),
+    (80, 101, -30),
+    (80, 111, -40),
+    (81, 44, 20),
+    (81, 46, 20),
+    (81, 85, -10),
+    (82, 79, -20),
+    (82, 84, -20),
+    (82, 85, -20),
+    (82, 86, -50),
+    (82, 87, -40),
+    (82, 89, -50),
+    (84, 44, -80),
+    (84, 45, -120),
+    (84, 46, -80),
+    (84, 58, -40),
+    (84, 59, -40),
+    (84, 65, -90),
+    (84, 79, -40),
+    (84, 97, -80),
+    (84, 101, -60),
+    (84, 111, -80),
+    (84, 114, -80),
+    (84, 117, -90),
+    (84, 119, -60),
+    (84, 121, -60),
+    (85, 44, -30),
+    (85, 46, -30),
+    (85, 65, -50),
+    (86, 44, -120),
+    (86, 45, -80),
+    (86, 46, -120),
+    (86, 58, -40),
+    (86, 59, -40),
+    (86, 65, -80),
+    (86, 71, -50),
+    (86, 79, -50),
+    (86, 97, -60),
+    (86, 101, -50),
+    (86, 111, -90),
+    (86, 117, -60),
+    (87, 44, -80),
+    (87, 45, -40),
+    (87, 46, -80),
+    (87, 58, -10),
+    (87, 59, -10),
+    (87, 65, -60),
+    (87, 79, -20),
+    (87, 97, -40),
+    (87, 101, -35),
+    (87, 111, -60),
+    (87, 117, -45),
+    (87, 121, -20),
+    (89, 44, -100),
+    (89, 46, -100),
+    (89, 58, -50),
+    (89, 59, -50),
+    (89, 65, -110),
+    (89, 79, -70),
+    (89, 97, -90),
+    (89, 101, -80),
+    (89, 111, -100),
+    (89, 117, -100),
+    (96, 96, -46),
+    (97, 103, -10),
+    (97, 118, -15),
+    (97, 119, -15),
+    (97, 121, -20),
+    (98, 108, -10),
+    (98, 117, -20),
+    (98, 118, -20),
+    (98, 121, -20),
+    (99, 104, -10),
+    (99, 107, -20),
+    (99, 108, -20),
+    (99, 121, -10),
+    (100, 100, -10),
+    (100, 118, -15),
+    (100, 119, -15),
+    (100, 121, -15),
+    (101, 44, 10),
+    (101, 46, 20),
+    (101, 118, -15),
+    (101, 119, -15),
+    (101, 120, -15),
+    (101, 121, -15),
+    (102, 39, 30),
+    (102, 44, -10),
+    (102, 46, -10),
+    (102, 101, -10),
+    (102, 111, -20),
+    (103, 101, 10),
+    (103, 103, -10),
+    (104, 121, -20),
+    (107, 111, -15),
+    (108, 119, -15),
+    (108, 121, -15),
+    (109, 117, -20),
+    (109, 121, -30),
+    (110, 117, -10),
+    (110, 118, -40),
+    (110, 121, -20),
+    (111, 118, -20),
+    (111, 119, -15),
+    (111, 120, -30),
+    (111, 121, -20),
+    (112, 121, -15),
+    (114, 44, -60),
+    (114, 45, -20),
+    (114, 46, -60),
+    (114, 99, -20),
+    (114, 100, -20),
+    (114, 103, -15),
+    (114, 111, -20),
+    (114, 113, -20),
+    (114, 115, -15),
+    (114, 116, 20),
+    (114, 118, 10),
+    (114, 121, 10),
+    (115, 119, -15),
+    (118, 44, -80),
+    (118, 46, -80),
+    (118, 97, -20),
+    (118, 111, -30),
+    (119, 44, -40),
+    (119, 46, -40),
+    (119, 111, -20),
+    (120, 101, -10),
+    (121, 44, -80),
+    (121, 46, -80),
+    (121, 97, -30),
+    (121, 101, -10),
+    (121, 111, -25),
+    (122, 101, 10),
+];
+
 /// The height of a capital letter in Helvetica, in thousandths of the font size.
 const HELVETICA_CAP_HEIGHT: f64 = 718.0;
 
 /// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
 /// are bold).
 pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
-    let widths = if font == 2 || font == 4 {
-        &HELVETICA_BOLD_WIDTHS
+    let (widths, kerning): (&[u16; 95], &[(u8, u8, i16)]) = if font == 2 || font == 4 {
+        (&HELVETICA_BOLD_WIDTHS, &HELVETICA_BOLD_KERNING)
     } else {
-        &HELVETICA_WIDTHS
+        (&HELVETICA_WIDTHS, &HELVETICA_KERNING)
     };
-    line.chars()
-        .map(|character| {
-            let code = character as usize;
-            let width = if (32..127).contains(&code) {
-                widths[code - 32]
-            } else {
-                556
-            };
-            f64::from(width) / 1000.0
-        })
-        .sum()
+    let ascii = |character: char| {
+        u8::try_from(character)
+            .ok()
+            .filter(|code| (32..127).contains(code))
+    };
+    let mut total = 0i32;
+    let mut previous = None;
+    for character in line.chars() {
+        let code = ascii(character);
+        total += code.map_or(556, |code| i32::from(widths[usize::from(code - 32)]));
+        if let (Some(left), Some(right)) = (previous, code)
+            && let Ok(found) = kerning.binary_search_by_key(&(left, right), |&(a, b, _)| (a, b))
+        {
+            total += i32::from(kerning[found].2);
+        }
+        previous = code;
+    }
+    f64::from(total) / 1000.0
 }
 
 /// The lines of each label of a `strwidth` or `text` argument: strings line by line, other
@@ -2540,27 +2976,24 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
                 pars.usr[1] - pars.usr[0],
             )
         };
-        let sizes: Vec<f64> = labels
-            .iter()
-            .map(|lines| {
-                let inches = if height {
-                    let extra = lines.len().saturating_sub(1) as f64 * line_inches;
-                    extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
-                } else {
-                    lines
-                        .iter()
-                        .map(|line| text_width_ems(line, font))
-                        .fold(0.0, f64::max)
-                        * points
-                        / 72.0
-                };
-                match units {
-                    1 => inches / plot_inches * user_range,
-                    2 => inches / figure_inches,
-                    _ => inches,
+        let mut sizes = Vec::with_capacity(labels.len());
+        for lines in &labels {
+            let inches = if height {
+                let extra = lines.len().saturating_sub(1) as f64 * line_inches;
+                extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
+            } else {
+                let mut widest: f64 = 0.0;
+                for line in lines {
+                    widest = widest.max(text_inches(device, line, cex, font)?);
                 }
-            })
-            .collect();
+                widest
+            };
+            sizes.push(match units {
+                1 => inches / plot_inches * user_range,
+                2 => inches / figure_inches,
+                _ => inches,
+            });
+        }
         Ok(sizes)
     })?;
     values::real_vector(&sizes)
@@ -3110,23 +3543,30 @@ fn push_shape(device: &mut Device, clip: Rect, shape: Shape) -> R<()> {
                 let [x, y] = device.to_device(centre);
                 graphics_engine::circle(x, y, radius / device.unit_inches(), &mut gc, dd)
             }
-            Shape::Text {
-                origin,
-                text,
-                points,
-                font,
-                rotation,
-                hadj,
-                colour,
-            } => {
-                let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
-                gc.col = colour as c_int;
-                gc.ps = points;
-                gc.fontface = font;
-                let [x, y] = device.to_device(origin);
-                graphics_engine::text(x, y, &text, hadj, 0.0, rotation, &gc, dd)
-            }
+            Shape::Text { .. } => Ok(()),
         }
+    }
+}
+
+/// Draws a rectangle with corners in inches through the engine's rectangle primitive, as GNU
+/// R's `rect()` does, so a device renders it with its own rectangle callback.
+fn push_rect(
+    device: &mut Device,
+    clip: Rect,
+    [x0, y0, x1, y1]: [f64; 4],
+    fill: Colour,
+    stroke: &Stroke,
+) -> R<()> {
+    let dd = device.dd;
+    let [clip_x0, clip_y0] = device.to_device([clip.x0, clip.y0]);
+    let [clip_x1, clip_y1] = device.to_device([clip.x1, clip.y1]);
+    let [x0, y0] = device.to_device([x0, y0]);
+    let [x1, y1] = device.to_device([x1, y1]);
+    let mut gc = shape_context(device, Some(stroke), fill);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(clip_x0, clip_y0, clip_x1, clip_y1, dd)?;
+        graphics_engine::rect(x0, y0, x1, y1, &mut gc, dd)
     }
 }
 
@@ -3190,7 +3630,8 @@ fn text_points(pars: &Pars, cex: f64) -> f64 {
 
 /// Records the lines of a label anchored at `anchor`. `hadj` places the anchor along each
 /// line, 0 at its start and 1 at its end; `yadj` places it across the block of lines, 0 on
-/// the last line's baseline and 1 at the top of the first line's capitals.
+/// the last line's baseline and 1 at the top of the first line's capitals, and when it is
+/// not finite the engine centres the label on its glyphs' own extent.
 #[allow(clippy::too_many_arguments)]
 fn push_text(
     device: &mut Device,
@@ -3204,33 +3645,37 @@ fn push_text(
     font: i32,
     colour: Colour,
 ) -> R<()> {
-    let points = text_points(&device.pars, cex);
-    let line_height = 1.2 * f64::from(device.pars.ps) * cex / 72.0 * device.pars.lheight;
-    let cap = HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0;
-    let (sin, cos) = rotation.to_radians().sin_cos();
-    let count = lines.len();
-    for (index, line) in lines.iter().enumerate() {
-        let up = ((count - 1) as f64 * (1.0 - yadj) - index as f64) * line_height - yadj * cap;
-        push_shape(
-            device,
-            clip,
-            Shape::Text {
-                origin: [anchor[0] - up * sin, anchor[1] + up * cos],
-                text: line.clone(),
-                points,
-                font,
-                rotation,
-                hadj,
-                colour,
-            },
-        )?;
+    let dd = device.dd;
+    let [x0, y0] = device.to_device([clip.x0, clip.y0]);
+    let [x1, y1] = device.to_device([clip.x1, clip.y1]);
+    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
+    gc.col = colour as c_int;
+    gc.ps = text_points(&device.pars, cex);
+    gc.fontface = font;
+    gc.lineheight = device.pars.lheight;
+    let [x, y] = device.to_device(anchor);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(x0, y0, x1, y1, dd)?;
+        graphics_engine::text(x, y, &lines.join("\n"), hadj, yadj, rotation, &gc, dd)
     }
-    Ok(())
 }
 
-/// The width of a line of text in inches.
-fn text_inches(pars: &Pars, line: &str, cex: f64, font: i32) -> f64 {
-    text_width_ems(line, font) * text_points(pars, cex) / 72.0
+/// The width of a line of text in inches, measured by the device as GNU R's `GStrWidth` does,
+/// so a device with its own fonts (ragg) lays labels out by the glyphs it will draw.
+fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
+    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
+    gc.ps = text_points(&device.pars, cex);
+    gc.fontface = font;
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        let width = graphics_engine::str_width(line, &gc, device.dd)?;
+        Ok(graphics_engine::from_device_width(
+            width,
+            Unit::Inches,
+            device.dd,
+        ))
+    }
 }
 
 /// Places a label in a margin as `mtext` and `axis` do: on line `line` of side `side` at
@@ -3946,7 +4391,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             0.25
         } else {
             1.0
-        } * text_inches(&pars, "m", label_cex, label_font);
+        } * text_inches(device, "m", label_cex, label_font)?;
         let mut last_end = f64::NEG_INFINITY;
         let ascending = shown
             .first()
@@ -3967,10 +4412,11 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 let line_height = 1.2 * f64::from(pars.ps) * label_cex / 72.0;
                 line_height * lines.len() as f64
             } else {
-                lines
-                    .iter()
-                    .map(|line| text_inches(&pars, line, label_cex, label_font))
-                    .fold(0.0, f64::max)
+                let mut widest: f64 = 0.0;
+                for line in lines {
+                    widest = widest.max(text_inches(device, line, label_cex, label_font)?);
+                }
+                widest
             };
             let start = along - extent * if perpendicular { 0.5 } else { hadj };
             if start < last_end + gap {
@@ -4068,7 +4514,12 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
     let outer = values::as_logical_scalar(call.arg(5)) == 1;
     with_inline_pars(call, 6, |device| {
         let pars = device.pars.clone();
-        let clip = device_rect(device);
+        // GNU R clips titles to at least the figure region, and outer titles to the device.
+        let clip = if outer || !matches!(pars.xpd, 0 | 1) {
+            device_rect(device)
+        } else {
+            region_rect(device, 8)
+        };
         let region = region_rect(device, if outer { 7 } else { 17 });
         let along_x = lerp([region.x0, region.x1], pars.adj);
         let along_y = lerp([region.y0, region.y1], pars.adj);
@@ -4226,11 +4677,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
                 .copied()
                 .filter(|value| value.is_finite())
                 .unwrap_or(pars.adj);
-            let mut yadj = adj
-                .get(1)
-                .copied()
-                .filter(|value| value.is_finite())
-                .unwrap_or(0.5);
+            let mut yadj = adj.get(1).copied().unwrap_or(f64::NAN);
             let mut anchor = point;
             let position = real_at(pos, index, f64::NAN);
             if position.is_finite() {
@@ -4374,16 +4821,7 @@ unsafe fn do_rect(call: &NativeCall<'_>) -> R<Sexp> {
                 line_type_at(lty, index, pars.lty)?,
                 real_at(lwd, index, pars.lwd),
             );
-            push_shape(
-                device,
-                clip,
-                Shape::Path {
-                    points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                    closed: true,
-                    fill,
-                    stroke: Some(stroke),
-                },
-            )?;
+            push_rect(device, clip, [x0, y0, x1, y1], fill, &stroke)?;
         }
         Ok(())
     })?;
@@ -4834,7 +5272,7 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                     push_line(device, clip, points, stroke)?;
                     continue;
                 };
-                let width = text_inches(&pars, label, labcex, 1);
+                let width = text_inches(device, label, labcex, 1)?;
                 let height = HELVETICA_CAP_HEIGHT / 1000.0 * text_points(&pars, labcex) / 72.0;
                 match flattest_window(&points, width, height, &placed) {
                     Some(window) => {

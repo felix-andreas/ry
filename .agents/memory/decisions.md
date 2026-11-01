@@ -1989,9 +1989,9 @@ primitives, and nothing built or installed packages.
   while it has one, so no address is reused under a stale value. `SETLENGTH` makes the vector
   resizable. `FRAME` returns a snapshot pairlist (frames are hashed). `R_PPStack` is a real array
   that a root source scans up to `R_PPStackTop`, for code compiled with R's internal macros.
-- **The graphics engine is exported and errors when used.** Device packages (ragg, systemfonts)
-  must load and register; the colour and text helpers work. Implementing devices stays the open
-  question it was.
+- **The graphics engine C API is real** (`crates/libr/src/graphics.rs` over
+  `crates/interp/src/graphics_engine.rs`); see "One graphics engine for base graphics, grid and
+  device packages" below.
 - **`.C` and `.Fortran` copy their arguments** and pass data pointers through the same
   dispatcher as `.Call` (all arguments are pointers), returning the copies as a named list.
   `.Call` accepts `NativeSymbolInfo` objects, which packages that call `R_forceSymbols` require.
@@ -2197,35 +2197,46 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices record pages of shapes and render them when they close.** Every file device (pdf,
-  postscript, xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device`
-  holding its size, point size, the base graphics parameters and the pages drawn so far. A page is
-  a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
-  each with the clip rectangle in force, so the drawing routines know nothing about file formats
-  and each format is one writer over the same pages. `plot.new` starts a page when the layout's
-  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
-  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
-  system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
-  than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
-  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
-  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
-  R: vector devices create their file at open (so a bad path fails there), a pdf without pages
-  is still a valid document, and bitmap devices with no page write nothing.
-- **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is
-  1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline offset by
-  `ylbias`, symbols are sized from half the character height, font sizes round to whole points,
-  and text widths come from Helvetica's AFM metrics, the same table `strwidth` uses. Rendering a
-  plot through both engines' pdf devices and rasterizing them is how to check a change: plot,
-  hist, barplot and `par(mfrow)` layouts differ in a handful of pixels. Contour labels use a
-  clean-room "flattest window" placement, so they can sit in a different spot than GNU R's.
-- **Display lists and snapshots stay empty.** `dev.control` and
-  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
-  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
-  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
-  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
-  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
-  and that belongs with recording the display list, which would also let devices replay a
-  plot onto a resized or copied device.
+- **One graphics engine for base graphics, grid and device packages.** GNU R's split is kept:
+  graphics systems (base graphics, grid) call the engine (`graphics_engine.rs`), and the engine
+  calls a device through the C callbacks of a `DevDesc`. `GEDevDesc`, `DevDesc`, `GEContext` and
+  `GESystemDesc` are `#[repr(C)]` copies of R_GE_version 17's headers, because grid and ragg read
+  and write their fields directly; a built-in device is a `DevDesc` whose callbacks are Rust
+  (`graphics_render.rs`), so a ragg device and `pdf()` take exactly the same path. Previously base
+  graphics drew straight into the built-in devices' shape lists and the GE entry points errored, so
+  grid and ragg could not run and two drawing paths would have had to agree.
+  - The display list is struct-of-arrays inside the engine's own `EngineDevice` (parallel `ops`
+    and `args` vectors of the primitive and its argument pairlist), and `GEDevDesc.displayList`
+    stays `NULL` because no package reads it. A pairlist is built only where GNU R exposes one:
+    `recordPlot` snapshots and `dev.copy`. Recording a call is two pushes, not a cons chain.
+  - `R_GE_checkVersionOrDie` accepts engine versions 14 to 17 rather than GNU R's exact match,
+    because the struct prefixes packages touch are unchanged across them and installed binaries
+    such as ragg were built against 16. The engine reports 17.
+  - `GEregisterSystem` hands the caller its index (through a claim callback) before it calls the
+    system on the open devices, because grid's `InitState` reads its own index on that call.
+  - Built-in devices install no-op pattern, clip-path and mask callbacks, because grid's
+    `newpage` calls `releasePattern` unconditionally; `patternFill` defaults to `R_NilValue`,
+    which ragg reads.
+  - `fromDeviceHeight` in inches is `value * ipr` without a sign, as in GNU R; a y-down device
+    (every bitmap device) otherwise gets negative string heights, which shifted rotated grid text.
+  - Base text hands both adjustments to `GEText`, so an unspecified vertical adjustment centres
+    the label on its glyphs' extent from the device's metric callback, as GNU R does.
+  - Text widths are Helvetica's AFM widths plus its ASCII kerning pairs (tables generated from
+    GNU R's `afm/Helvetica*.afm`), which makes `strwidth` on pdf match GNU R exactly. Bitmap
+    devices in GNU R measure with cairo's font instead, so their widths differ slightly.
+- **Built-in devices record pages of shapes and render them when they close.** Each built-in
+  device's callbacks append `graphics_render::Shape`s (paths, circles, text) in inches with the
+  clip in force to the current page, and each file format is one writer over the same pages: PDF,
+  SVG and PostScript as vectors, PNG, JPEG, BMP and TIFF rasterized with tiny-skia, text outlined
+  with ab_glyph from the system's Helvetica-compatible fonts. Rendering at close keeps devices free
+  of file handles and makes a multi-page bitmap device one file per page, as GNU R's `%d` names
+  expect. Vector devices create their file at open, so a bad path fails there.
+- **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
+  `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
+  offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
+  whole points. Base graphics computes positions in inches rather than through GNU R's NDC
+  pipeline, so the last bit of a coordinate can differ. Contour labels use a clean-room
+  "flattest window" placement, so they can sit in a different spot than GNU R's.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but

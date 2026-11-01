@@ -38,6 +38,10 @@ pub const BUILTINS: &[BuiltinDef] = &[internal("recordGraphics", 3, |call| unsaf
 /// `R_GE_version`: the graphics engine version ry presents, R 4.6's.
 pub const ENGINE_VERSION: c_int = 17;
 
+/// Degrees to radians as GNU R's engine converts them, which can differ from `to_radians` in
+/// the last bit and so move an antialiased pixel.
+pub const DEG2RAD: f64 = 0.017_453_292_519_943_295;
+
 /// The oldest engine version a package may be compiled against. Every version from here on
 /// shares the `DevDesc` layout, which grew only at its end and in its reserved space.
 pub const OLDEST_ENGINE_VERSION: c_int = 14;
@@ -960,14 +964,15 @@ unsafe fn to_device_position(value: f64, from: Unit, dd: *mut GEDevDesc, vertica
     low + ndc * (high - low)
 }
 
+/// Unlike its inverse, this keeps a size's sign on a device whose y axis runs down: GNU R
+/// scales by the inches per device unit alone, and grid relies on heights staying positive.
 unsafe fn from_device_size(value: f64, to: Unit, dd: *mut GEDevDesc, vertical: bool) -> f64 {
     let (low, high, ipr) = extent(dd, vertical);
-    let ndc = value / (high - low);
     match to {
         Unit::Device => value,
-        Unit::Ndc => ndc,
-        Unit::Inches => ndc * (high - low).abs() * ipr,
-        Unit::Cm => ndc * (high - low).abs() * ipr * 2.54,
+        Unit::Ndc => value / (high - low),
+        Unit::Inches => value * ipr,
+        Unit::Cm => value * ipr * 2.54,
     }
 }
 
@@ -2139,7 +2144,8 @@ pub unsafe fn text(
     let y = from_device_y(y, Unit::Inches, dd);
     let lines: Vec<&str> = text.split('\n').collect();
     let count = lines.len();
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let radians = rotation * DEG2RAD;
+    let (sin, cos) = (radians.sin(), radians.cos());
     let mut no_metrics = None;
     for (index, line) in lines.iter().enumerate() {
         let mut width_device = f64::NAN;
@@ -2265,7 +2271,7 @@ unsafe fn clip_text(
     };
     let width = from_device_width(width, Unit::Inches, dd);
     let height = from_device_height(height, Unit::Inches, dd);
-    let angle = rotation.to_radians();
+    let angle = rotation * DEG2RAD;
     let theta1 = std::f64::consts::FRAC_PI_2 - angle;
     let diagonal = width.hypot(height);
     let theta2 = angle + height.atan2(width);

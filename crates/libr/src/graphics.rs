@@ -1497,7 +1497,12 @@ pub unsafe extern "C" fn Rf_CreateAtVector(
 ) -> Sexp {
     enter(|| {
         let axp = [*axp, *axp.add(1), *axp.add(2)];
-        let usr = [*usr, *usr.add(1)];
+        // Only a log axis reads `usr`, so grid passes NULL for its linear axes.
+        let usr = if usr.is_null() {
+            [axp[0], axp[1]]
+        } else {
+            [*usr, *usr.add(1)]
+        };
         values::real_vector(&graphics::at_vector(axp, usr, intervals, log != 0))
     })
 }
