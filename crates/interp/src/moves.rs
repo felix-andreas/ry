@@ -65,6 +65,9 @@ struct Move {
     replaced: Vec<(usize, Sexp)>,
     /// Whether the move ended early and the caller's binding holds the original again.
     ended: bool,
+    /// Whether the caller's binding kept the value because something else references it too.
+    /// Nothing is updated in place then, so ending or failing restores nothing.
+    shared: bool,
 }
 
 impl State {
@@ -102,7 +105,6 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
             records::native_kind(value),
             NativeKind::Dict | NativeKind::Set
         )
-        || value.refcount() != 1
         || !eval::reuse_permitted(env, value)
         || !movable(call, function, target, env)
     {
@@ -127,7 +129,13 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         });
         rest = rest.cdr();
     }
-    heap.set_binding_value(cell, nil())?;
+    // A shared value cannot move, but the call still runs tracked, so that the finished frame
+    // can be released and the result, which no one else holds, moves on the next call. The
+    // previous top-level value, `.Last.value`, shares a loop's first value this way.
+    let shared = value.refcount() != 1;
+    if !shared {
+        heap.set_binding_value(cell, nil())?;
+    }
     interp().moves.moves.push(Move {
         value,
         cell,
@@ -138,12 +146,13 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         entries: standard_library::entry_count(value),
         replaced: Vec::new(),
         ended: false,
+        shared,
     });
     let result = eval::apply_closure_moved(call, function, &args, env);
     let Some(finished) = interp().moves.moves.pop() else {
         panic!("a moved argument's record disappeared during the call");
     };
-    if result.is_err() && !finished.ended {
+    if result.is_err() && !finished.ended && !finished.shared {
         let original = original(&finished)?;
         heap.set_binding_value(finished.cell, original)?;
     }
@@ -268,6 +277,12 @@ unsafe fn end_all() -> R<()> {
             break;
         };
         if entry.ended {
+            continue;
+        }
+        if entry.shared {
+            if let Some(entry) = interp().moves.moves.get_mut(index) {
+                entry.ended = true;
+            }
             continue;
         }
         let original = original(entry)?;
