@@ -76,7 +76,6 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): verify the #125 merge, run unchanged data.table code on the engine with identical output, remove the subset := overhead. PR #125 (frames in the runtime) merged as ed69655.
 - Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
-- Simulated-user testing round 2: developer workflow (ry load, LSP, check/fmt, REPL) (session_0111kWqBrKf593Cdj9soupRR, Sonnet). PR #126 (docs user pass) merged as 1a2e950.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
