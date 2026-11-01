@@ -701,7 +701,7 @@ describe <- function(name, punct) {
   paste0(name, punct)
 }
 #++++
-describe: <T> fn(name: T, [punct]: character) -> character
+describe: <T, U> fn(name: T, [punct]: U) -> character
 
 #---- the_else_branch_reads_the_supplied_formal
 describe <- function(name, punct) {

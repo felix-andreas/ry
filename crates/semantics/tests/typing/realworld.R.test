@@ -170,7 +170,7 @@ use_all <- function() {
   paste(fill_default("a"), require_x(1L), pick(), sep = " ")
 }
 #++++
-fill_default: <T> fn(name: T, [punct]: character) -> character
+fill_default: <T, U> fn(name: T, [punct]: U) -> character
 require_x: <T: numeric> fn([x]: T) -> T
 pick: <T: numeric> fn([x]: T) -> T | integer
 use_all: fn() -> character

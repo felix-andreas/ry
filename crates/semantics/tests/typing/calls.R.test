@@ -440,7 +440,7 @@ helper <- function(r) {
 }
 #++++
 user: <T> fn(w: T) -> Unknown
-helper: fn(r: Unknown) -> Unknown
+helper: <T> fn(r: T) -> Unknown
 
 #---- walrus_outside_masked_brackets_is_an_operator_call
 f <- function(a, b) quo(a := b)

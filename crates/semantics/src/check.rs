@@ -8816,7 +8816,7 @@ impl<'db> Checker<'db, '_> {
             }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
-                    Some(EnvEntry::Mono(self.join_types(a, b)))
+                    Some(EnvEntry::Mono(self.join_branch_values(a, b)))
                 }
                 (None, Some(entry)) => Some(entry),
                 // Keeping identical entries as-is preserves a function slot's polymorphism.

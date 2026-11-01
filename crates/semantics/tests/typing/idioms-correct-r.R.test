@@ -238,3 +238,17 @@ sa(1, "names", NULL)
 nm: <T, U> fn(x: T, v: U) -> T
 sa: <T, U, V> fn(x: T, name: U, value: V) -> T
 double
+
+#---- a_branch_that_rebinds_a_parameter_does_not_pin_its_type
+lookup <- function(repo = NULL) {
+  if (is.null(repo) || identical(repo, ".")) {
+    repo <- getwd()
+  } else if (inherits(repo, "git_repository")) {
+    return(repo)
+  }
+  structure(list(path = repo), class = "git_repository")
+}
+lookup(lookup("."))
+#++++
+lookup: <T> fn([repo]: T) -> T | list{path: Unknown}
+character | list{path: Unknown}
