@@ -41,7 +41,7 @@ The alternative, a namespace value that holds the functions, was declined for th
 ## Where the names live
 
 The functions live in the `ry` namespace, which is attached at startup as `package:ry` in front of
-the default packages, beside the frame functions (`frame`, `setkey` and the rest), so `search()`
+the default packages, beside the DataFrame API (`DataFrame`, `col`, `setkey` and the rest), so `search()`
 starts with `".GlobalEnv"`, `"tools:ry"`, `"package:ry"`, `"package:stats"`. `ry::List.map` spells
 the same function after something else masks the bare name. (Without base R, as in the
 interpreter's own tests, the builtins bind them in a `package:ry` just above `package:base`.)

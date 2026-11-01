@@ -95,7 +95,7 @@ cancel(user)`,
     {
         key: "records",
         label: "Records",
-        code: `alias Person = record{name: character, age: integer}
+        code: `alias Person = Record{name: character, age: integer}
 
 greet <- function(person: Person) -> character paste("hi", person$name)
 

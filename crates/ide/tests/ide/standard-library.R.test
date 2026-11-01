@@ -74,7 +74,7 @@ signature: none
 completion (1): Result
 
 #---- hint_drops_an_impossible_vector_member
-type Position = record{x: double, y: double}
+type Position = Record{x: double, y: double}
 #: fn(p: Position) -> double
 position_value <- function(p) p$x
 summa$0rise <- function(positions) vapply(positions, position_value, numeric(1))

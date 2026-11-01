@@ -237,14 +237,14 @@ fn the_schema_prints_and_parses_in_the_checkers_notation() {
     let schema = table.schema();
     assert_eq!(
         schema.to_string(),
-        "frame{id: integer[], price: double[], ticker: character[]}"
+        "DataFrame{id: integer[], price: double[], ticker: character[]}"
     );
     assert_eq!(
         Schema::parse(&schema.to_string()).ok(),
         Some(schema.clone())
     );
     assert!(schema.check(&table).is_ok());
-    let wrong = Schema::parse("frame{id: integer[], price: integer[], ticker: character[]}")
+    let wrong = Schema::parse("DataFrame{id: integer[], price: integer[], ticker: character[]}")
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         wrong.check(&table).map_err(|error| error.to_string()),
@@ -264,7 +264,7 @@ fn polars_dtypes_without_an_r_type_are_normalized() {
     let table = Table::new(input).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         table.schema().to_string(),
-        "frame{small: integer[], wide: double[], single: double[]}"
+        "DataFrame{small: integer[], wide: double[], single: double[]}"
     );
 }
 
@@ -324,7 +324,7 @@ fn by_keeps_first_appearance_and_na_propagates_unless_removed() {
     assert_eq!(read(&mut result, "n"), ints(&[2, 2, 1]));
     assert_eq!(
         result.schema().to_string(),
-        "frame{g: character[], s: integer[], n: integer[]}"
+        "DataFrame{g: character[], s: integer[], n: integer[]}"
     );
 }
 
@@ -3071,7 +3071,7 @@ fn a_csv_file_reads_into_the_column_types_fread_gives() {
         read_text("id,price,flag,name,empty\n1,1.5,TRUE,x,NA\n2, 3,FALSE,,\n NA,NA,,\"y, z\",\n");
     assert_eq!(
         table.schema().to_string(),
-        "frame{id: integer[], price: double[], flag: logical[], name: character[], empty: logical[]}"
+        "DataFrame{id: integer[], price: double[], flag: logical[], name: character[], empty: logical[]}"
     );
     assert_eq!(get(&mut table, "id"), ints(&[1, 2, NA_INTEGER]));
     assert_eq!(
@@ -3095,13 +3095,13 @@ fn a_first_row_that_fits_the_columns_is_data() {
     let table = read_text("1,2\n3,4\n");
     assert_eq!(
         table.schema().to_string(),
-        "frame{V1: integer[], V2: integer[]}"
+        "DataFrame{V1: integer[], V2: integer[]}"
     );
     assert_eq!(table.height(), 2);
     let table = read_text("a,a,\n1,2,3\n");
     assert_eq!(
         table.schema().to_string(),
-        "frame{a: integer[], a.1: integer[], V3: integer[]}"
+        "DataFrame{a: integer[], a.1: integer[], V3: integer[]}"
     );
 }
 
@@ -3134,7 +3134,7 @@ fn a_value_the_sample_missed_rereads_the_column_from_all_its_values() {
         let table = read_text(&text);
         assert_eq!(
             table.schema().to_string(),
-            format!("frame{{id: integer[], value: {expected}, flag: logical[]}}"),
+            format!("DataFrame{{id: integer[], value: {expected}, flag: logical[]}}"),
             "{odd:?}"
         );
         assert_eq!(table.height(), rows);
@@ -3195,7 +3195,7 @@ fn files_read_and_write_through_the_file_system() {
     std::fs::remove_file(&path).unwrap_or_else(|error| panic!("cannot remove: {error}"));
     assert_eq!(get(&mut back, "v"), ints(&[1, 2]));
     io::strings_as_factors(&mut back).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(back.schema().to_string(), "frame{k: factor, v: integer[]}");
+    assert_eq!(back.schema().to_string(), "DataFrame{k: factor, v: integer[]}");
 }
 
 fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {
@@ -3241,7 +3241,7 @@ fn setnames_and_setcolorder_rename_and_reorder_in_place() {
     ops::set_column_order(&mut x, &["c"]).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         x.schema().to_string(),
-        "frame{c: integer[], id: integer[], b: integer[]}"
+        "DataFrame{c: integer[], id: integer[], b: integer[]}"
     );
     assert!(ops::set_names(&mut x, &[("b", "c")]).is_err());
     assert!(ops::set_names(&mut x, &[("nope", "d")]).is_err());
@@ -3255,7 +3255,7 @@ fn rbindlist_widens_types_and_fills_by_name() {
         ops::rbind_list(&[&a, &b], ops::Bind::Position).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         stacked.schema().to_string(),
-        "frame{a: double[], b: character[]}"
+        "DataFrame{a: double[], b: character[]}"
     );
     assert_eq!(Read(get(&mut stacked, "a")), doubles(&[1.0, 2.5]));
 
@@ -3269,7 +3269,7 @@ fn rbindlist_widens_types_and_fills_by_name() {
         ops::rbind_list(&[&c, &d], ops::Bind::Fill).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         filled.schema().to_string(),
-        "frame{a: integer[], b: factor, c: logical[]}"
+        "DataFrame{a: integer[], b: factor, c: logical[]}"
     );
     assert_eq!(get(&mut filled, "a"), ints(&[1, NA_INTEGER]));
     assert_eq!(
@@ -3311,7 +3311,7 @@ fn melt_stacks_measures_under_a_factor_of_their_names() {
     let mut long = output_table(executed);
     assert_eq!(
         long.schema().to_string(),
-        "frame{id: integer[], variable: factor, value: double[]}"
+        "DataFrame{id: integer[], variable: factor, value: double[]}"
     );
     assert_eq!(get(&mut long, "id"), ints(&[1, 2, 1, 2]));
     assert_eq!(
@@ -3340,7 +3340,7 @@ fn dcast_spreads_sorted_values_into_sorted_columns() {
     let mut summed = output_table(cast(Some(Aggregate::Sum)));
     assert_eq!(
         summed.schema().to_string(),
-        "frame{r: character[], x: integer[], y: integer[], z: integer[]}"
+        "DataFrame{r: character[], x: integer[], y: integer[], z: integer[]}"
     );
     assert_eq!(summed.key(), ["r"]);
     assert_eq!(get(&mut summed, "r"), strings(&["a", "b"]));
@@ -3381,7 +3381,7 @@ fn dcast_names_columns_as_r_spells_the_values() {
         ops::dcast(&numbers, &["r"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         output_table(cast).schema().to_string(),
-        "frame{r: character[], 0.5: integer[], 1: integer[]}"
+        "DataFrame{r: character[], 0.5: integer[], 1: integer[]}"
     );
 }
 

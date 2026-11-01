@@ -1711,7 +1711,10 @@ fn annotation_space_between(previous: &AnnotationToken, current: AnnotationToken
         OpenBracket if matches!(previous.kind, Word | CloseAngle | CloseBracket) => return false,
         OpenBrace
             if previous.kind == Word
-                && matches!(previous.text.as_str(), "list" | "record" | "tuple") =>
+                && matches!(
+                    previous.text.as_str(),
+                    "list" | "Record" | "Tuple" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy" | "data.table"
+                ) =>
         {
             return false;
         }

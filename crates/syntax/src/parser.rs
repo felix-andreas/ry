@@ -735,12 +735,26 @@ impl Parser<'_, '_> {
             Some(COLON) if self.next_token_is(IDENT) => self.ann_tag(end),
             Some(IDENT) if self.token_str(self.pos) == ".." => self.wrap(TYPE_OTHER_TAGS),
             Some(IDENT | NULL_KW) => match self.token_str(self.pos) {
+                old @ ("frame" | "record" | "tuple") if self.ann_next_significant(end) == Some(L_BRACE) => {
+                    let new = match old {
+                        "frame" => "DataFrame",
+                        "record" => "Record",
+                        _ => "Tuple",
+                    };
+                    self.error_here(format!("ry's own types are capitalized: write `{new}{{...}}`, not `{old}{{...}}`"));
+                    // Inside `ERROR`, lowering reads the type as unknown, so the one finding is not
+                    // followed by mismatches against a type the user did not mean.
+                    self.start(ERROR);
+                    self.ann_list_braces(end);
+                    self.finish();
+                }
                 "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
                     self.ann_list_brackets(end);
                 }
                 // Inline, a body may follow a return type, so `list {` and `fn (` with a
                 // space start the body; only the hugging spelling is the type.
-                "list" | "frame" | "record" | "tuple"
+                "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy" | "data.table"
+                | "Record" | "Tuple"
                     if self.ann_next_significant(end) == Some(L_BRACE)
                         && (!self.inline_type || self.next_token_is(L_BRACE)) =>
                 {
@@ -901,9 +915,12 @@ impl Parser<'_, '_> {
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
         let noun = match self.token_str(self.pos) {
-            "frame" => "frame type",
-            "record" => "record type",
-            "tuple" => "tuple type",
+            "DataFrame" => "DataFrame type",
+            "LazyFrame" => "LazyFrame type",
+            "GroupBy" | "LazyGroupBy" => "GroupBy type",
+            "data.table" => "data.table type",
+            "Record" => "Record type",
+            "Tuple" => "Tuple type",
             _ => "list type",
         };
         self.wrap(NAME);
@@ -940,7 +957,8 @@ impl Parser<'_, '_> {
                 self.ann_type(end, false);
             }
             self.ann_trivia(end);
-            if self.ann_at(COMMA, end) {
+            // `GroupBy{g: character[]; x: double[]}` lists the group keys before the `;`.
+            if self.ann_at(COMMA, end) || (noun == "GroupBy type" && self.ann_at(SEMICOLON, end)) {
                 self.bump();
             } else if self.ann_at(R_BRACE, end) {
                 self.bump();
