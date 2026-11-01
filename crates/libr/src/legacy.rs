@@ -199,6 +199,62 @@ pub unsafe extern "C" fn HASHTAB(env: Sexp) -> Sexp {
     })
 }
 
+/// `SET_FRAME(env, frame)`: replaces every binding of `env` with the pairlist's, keeping each
+/// node's active-binding mark.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_FRAME(env: Sexp, frame: Sexp) {
+    enter(|| {
+        let env = checked(env, SexpType::Environment, "SET_FRAME")?;
+        replace_bindings(env, &[frame])
+    })
+}
+
+/// `SET_HASHTAB(env, table)`: `HASHTAB` always reads `NULL` here, so a `NULL` table, which is
+/// what code copying one environment's table into another passes, leaves the frame alone. A
+/// list is a table built by hand, each element one bucket's pairlist of bindings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_HASHTAB(env: Sexp, table: Sexp) {
+    enter(|| {
+        let env = checked(env, SexpType::Environment, "SET_HASHTAB")?;
+        match table.kind() {
+            SexpType::Nil => Ok(()),
+            SexpType::List => {
+                let buckets: Vec<Sexp> = (0..table.length())
+                    .map(|index| table.element(index as usize))
+                    .collect();
+                replace_bindings(env, &buckets)
+            }
+            other => Err(error(format!(
+                "SET_HASHTAB() takes a list or NULL, not a '{}'",
+                other.name()
+            ))),
+        }
+    })
+}
+
+unsafe fn replace_bindings(env: Sexp, chains: &[Sexp]) -> ApiResult<()> {
+    let runtime = runtime();
+    for symbol in runtime.heap.frame_symbols(env) {
+        runtime.heap.remove_binding(env, symbol)?;
+    }
+    for &chain in chains {
+        let mut node = chain;
+        while node.kind() == SexpType::Pairlist {
+            let symbol = node.tag();
+            if symbol.kind() == SexpType::Symbol {
+                runtime.heap.define(env, symbol, node.car())?;
+                if node.has_gp(heap::object::gp::ACTIVE_BINDING)
+                    && let Some(cell) = runtime.heap.frame_cell(env, symbol)
+                {
+                    cell.set_gp_bits(heap::object::gp::ACTIVE_BINDING, true);
+                }
+            }
+            node = node.cdr();
+        }
+    }
+    Ok(())
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_ENCLOS(env: Sexp, enclosure: Sexp) {
     enter(|| {

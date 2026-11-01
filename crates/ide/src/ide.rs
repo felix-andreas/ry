@@ -2703,6 +2703,68 @@ fn string_argument_content(node: Option<SyntaxNode>) -> Option<(String, TextRang
     ))
 }
 
+/// An action an editor shows above a line. A reference count is only a place here: counting
+/// searches the project, so the server resolves it when the editor shows the lens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeLens {
+    pub kind: CodeLensKind,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeLensKind {
+    RunFile,
+    Test { name: String },
+    References,
+}
+
+/// "Run file" sits on the first top-level statement, so a file of definitions alone (a package's
+/// `R/` file, say) has nothing to run and no lens. A test is a top-level `test_that` call whose
+/// description is a plain string, which is what an editor can pass on to select it.
+pub fn code_lenses(db: &dyn Db, file: SourceFile) -> Vec<CodeLens> {
+    let mut lenses = Vec::new();
+    let mut run_file = false;
+    for &item in item_tree(db, file) {
+        match *item.kind(db) {
+            ItemKind::Function => {
+                if let Some(range) = item_name_range(db, item) {
+                    lenses.push(CodeLens {
+                        kind: CodeLensKind::References,
+                        range,
+                    });
+                }
+            }
+            ItemKind::Value => {}
+            ItemKind::Statement => {
+                let Some(node) = item_node(db, item) else {
+                    continue;
+                };
+                if !run_file {
+                    run_file = true;
+                    lenses.push(CodeLens {
+                        kind: CodeLensKind::RunFile,
+                        range: node.text_range(),
+                    });
+                }
+                if node.kind() == CALL_EXPR
+                    && s4_callee_name(&node).as_deref() == Some("test_that")
+                    && let Some((name, _)) = child_node(&node, ARGUMENT_LIST)
+                        .and_then(|arguments| {
+                            string_argument_content(s4_argument(&arguments, "desc", 0))
+                        })
+                        .filter(|(name, _)| !name.contains('\\'))
+                {
+                    lenses.push(CodeLens {
+                        kind: CodeLensKind::Test { name },
+                        range: node.text_range(),
+                    });
+                }
+            }
+        }
+    }
+    lenses
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSymbol {
     pub name: String,

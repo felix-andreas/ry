@@ -51,7 +51,7 @@ file failing.R
 
 debug start failing.R
 expect stopped exception at 2
-expect stack "ratio(1, 0)@2"
+expect stack "ratio@2"
 debug continue
 expect exited 1
 expect debug-output "b must not be zero"

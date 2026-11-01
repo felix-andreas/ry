@@ -18,7 +18,7 @@ use {
     interp::{
         builtins::{BuiltinDef, Call, internal, internal_function},
         eval::{define, eval, make_promise},
-        lower::{lower_node, parse_text},
+        lower::{file_srcfile, lower_node, lower_node_in_file, parse_text},
         scope,
         unwind::{R, error},
         values::{self, install, length, nil},
@@ -184,7 +184,8 @@ unsafe fn do_bind(call: &Call<'_>) -> R<Sexp> {
                     let tree = trees
                         .get(&code.path)
                         .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-                    let handle = tree_handle(tree.clone())?;
+                    let handle =
+                        tree_handle(tree.clone(), debug_srcfile(&root, &code.path, tree)?)?;
                     handles.insert(&code.path, handle);
                     handle
                 }
@@ -222,7 +223,10 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
         (code.clone(), tree.clone())
     };
-    let expression = scope(|| lower_range(&tree, code.source_start, code.source_end))?;
+    let expression = scope(|| {
+        let srcfile = debug_srcfile(&root, &code.path, &tree)?;
+        lower_range(&tree, code.source_start, code.source_end, srcfile)
+    })?;
     eval(expression, namespace)?;
     Ok(nil())
 }
@@ -245,12 +249,13 @@ unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
     let (Some(start), Some(end)) = (offset(call.arg(1)), offset(call.arg(2))) else {
         return Err(error("ryLoaderForce needs two byte offsets"));
     };
-    let function = lower_range(tree, start, end)?;
+    let function = lower_range(tree, start, end, handle.external_protected())?;
     eval(function, call.env)
 }
 
-/// Lowers the outermost node spanning exactly `start..end` of `tree`.
-unsafe fn lower_range(tree: &Parse, start: u32, end: u32) -> R<Sexp> {
+/// Lowers the outermost node spanning exactly `start..end` of `tree`, with source references
+/// when `srcfile` is a srcfile environment.
+unsafe fn lower_range(tree: &Parse, start: u32, end: u32, srcfile: Sexp) -> R<Sexp> {
     let root = SyntaxNode::new_root(tree.green().clone());
     if start > end
         || !root
@@ -276,14 +281,32 @@ unsafe fn lower_range(tree: &Parse, start: u32, end: u32) -> R<Sexp> {
     if node == root || node.text_range() != range {
         return Err(error("a definition's code is not in its syntax tree"));
     }
-    lower_node(&node)
+    match srcfile.kind() {
+        SexpType::Environment => lower_node_in_file(&node, &root.text().to_string(), srcfile),
+        _ => lower_node(&node),
+    }
 }
 
-/// An external pointer owning `tree`, freed by the collector once no promise references it.
-unsafe fn tree_handle(tree: Parse) -> R<Sexp> {
+/// A debugger can stop only where code has source references, so while one is attached the
+/// loader keeps them, against a srcfile naming the file's absolute path. Otherwise it skips them,
+/// as they cost memory on every statement of every loaded function.
+unsafe fn debug_srcfile(root: &str, path: &str, tree: &Parse) -> R<Sexp> {
+    if interp::interp().debugger.is_none() {
+        return Ok(nil());
+    }
+    let file = Path::new(root).join(path);
+    let text = SyntaxNode::new_root(tree.green().clone())
+        .text()
+        .to_string();
+    file_srcfile(&file.to_string_lossy(), &text)
+}
+
+/// An external pointer owning `tree`, freed by the collector once no promise references it. It
+/// protects `srcfile`, which the definitions lowered from the tree keep source references against.
+unsafe fn tree_handle(tree: Parse, srcfile: Sexp) -> R<Sexp> {
     let heap = interp::heap();
     let address = Box::into_raw(Box::new(tree)) as *mut c_void;
-    let handle = heap.alloc_external_ptr(address, tree_tag()?, nil());
+    let handle = heap.alloc_external_ptr(address, tree_tag()?, srcfile);
     let handle = match handle {
         Ok(handle) => handle,
         Err(failure) => {

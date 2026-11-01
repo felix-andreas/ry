@@ -208,7 +208,25 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
                     return Some(format!("ry's runtime is missing: {error}"));
                 }
             }
-            other => return Some(format!("unknown requirement `{other}`")),
+            other => {
+                let Some(package) = other.strip_prefix("r-package:") else {
+                    return Some(format!("unknown requirement `{other}`"));
+                };
+                let installed = which("Rscript").is_some_and(|rscript| {
+                    Command::new(rscript)
+                        .args([
+                            "-e",
+                            &format!(
+                                "quit(status = !requireNamespace('{package}', quietly = TRUE))"
+                            ),
+                        ])
+                        .output()
+                        .is_ok_and(|output| output.status.success())
+                });
+                if !installed {
+                    return Some(format!("the R package {package} is not installed"));
+                }
+            }
         }
     }
     None
@@ -603,6 +621,41 @@ impl Journey {
                     Err(format!("no fold from `{from}` to `{to}`: {folds}"))
                 }
             }
+            ["expect", "lens", path, anchor, title] => {
+                let lenses = self.request_at(RequestKind::CodeLens, path, "", "")?;
+                let text = self.text_of(path)?;
+                let line = text[..self.find(path, anchor)?].matches('\n').count() as u32;
+                let mut titles = Vec::new();
+                for lens in lenses.as_array().into_iter().flatten() {
+                    let start: lsp_types::Position =
+                        serde_json::from_value(lens["range"]["start"].clone())
+                            .map_err(|error| error.to_string())?;
+                    if start.line != line {
+                        continue;
+                    }
+                    let lens = match lens.get("command") {
+                        Some(command) if !command.is_null() => lens.clone(),
+                        _ => {
+                            let offset = offset_of(&text, start, self.options.utf8);
+                            self.request_offset(RequestKind::CodeLensResolve, path, offset, "")?
+                        }
+                    };
+                    titles.push(
+                        lens["command"]["title"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
+                if titles.iter().any(|candidate| candidate == title) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "no lens titled `{title}` on line {}: {titles:?}",
+                        line + 1
+                    ))
+                }
+            }
             ["expect", "selection", path, anchor, expected] => {
                 let response = self.request_at(RequestKind::SelectionRange, path, anchor, "")?;
                 let text = self.text_of(path)?;
@@ -717,31 +770,47 @@ impl Journey {
             ["debug", "start", path, options @ ..] => {
                 let mut session = DebugSession::start(&self.root)?;
                 let program = self.root.join(path);
-                let mut stop_on_entry = false;
-                let mut lines = Vec::new();
+                let mut launch = json!({ "program": program });
+                let mut breakpoints: BTreeMap<PathBuf, Vec<Value>> = BTreeMap::new();
+                breakpoints.insert(program.clone(), Vec::new());
                 let mut options = options.iter();
                 while let Some(option) = options.next() {
+                    let mut value = |what: &str| {
+                        options
+                            .next()
+                            .copied()
+                            .ok_or(format!("`{option}` needs {what}"))
+                    };
                     match *option {
-                        "entry" => stop_on_entry = true,
+                        "entry" => launch["stopOnEntry"] = json!(true),
+                        "prelude" => launch["prelude"] = json!(value("R code")?),
+                        "test" => launch["testName"] = json!(value("a test name")?),
+                        // `break 3` is a line of the program, `break R/file.R:3` one of another file.
                         "break" => {
-                            let line: u64 = options
-                                .next()
-                                .and_then(|line| line.parse().ok())
-                                .ok_or("`break` needs a line number")?;
-                            lines.push(json!({ "line": line }));
+                            let place = value("a line")?;
+                            let (file, line) = match place.rsplit_once(':') {
+                                Some((file, line)) => (self.root.join(file), line),
+                                None => (program.clone(), place),
+                            };
+                            let line: u64 = line
+                                .parse()
+                                .map_err(|_| format!("`{place}` names no line"))?;
+                            breakpoints
+                                .entry(file)
+                                .or_default()
+                                .push(json!({ "line": line }));
                         }
                         other => return Err(format!("unknown debug option `{other}`")),
                     }
                 }
                 session.request("initialize", json!({ "adapterID": "ry" }))?;
-                session.request(
-                    "launch",
-                    json!({ "program": program, "stopOnEntry": stop_on_entry }),
-                )?;
-                session.request(
-                    "setBreakpoints",
-                    json!({ "source": { "path": program }, "breakpoints": lines }),
-                )?;
+                session.request("launch", launch)?;
+                for (file, lines) in breakpoints {
+                    session.request(
+                        "setBreakpoints",
+                        json!({ "source": { "path": file }, "breakpoints": lines }),
+                    )?;
+                }
                 session.request("setExceptionBreakpoints", json!({ "filters": ["error"] }))?;
                 session.request("configurationDone", json!({}))?;
                 self.debugger = Some(session);

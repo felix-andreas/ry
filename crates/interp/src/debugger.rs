@@ -714,25 +714,7 @@ unsafe fn is_other_test(expression: Sexp, name: &str) -> bool {
 /// The program parsed against a srcfile that names it, so every srcref carries its path and the
 /// file's own line numbers.
 unsafe fn program_expressions(text: &str, path: &str) -> R<Sexp> {
-    let heap = crate::heap();
-    let srcfile = values::new_env(values::empty_env())?;
-    heap.root(srcfile);
-    let lines: Vec<&str> = text.lines().collect();
-    heap.define(
-        srcfile,
-        values::install("filename")?,
-        values::scalar_string(path)?,
-    )?;
-    heap.define(
-        srcfile,
-        values::install("lines")?,
-        values::string_vector(&lines)?,
-    )?;
-    values::set_attr(
-        srcfile,
-        symbols().class,
-        values::string_vector(&["srcfilecopy", "srcfile"])?,
-    )?;
+    let srcfile = lower::file_srcfile(path, text)?;
     lower::parse_with_srcfile(text, path, srcfile)
 }
 
