@@ -86,10 +86,13 @@ A load parses a function only when something first calls it, and a reload touche
 definitions you changed. On a generated package of 500 files, against `devtools::load_all()` and
 [loadfast](https://github.com/finccam/loadfast):
 
-| 326,000 lines | `load_all()` | `load_fast()` | `ry R` | `ry run`, `ry load` |
+| 326,000 lines | `load_all()` | `load_fast()` | `ry R` | `ry load` |
 | --- | --- | --- | --- | --- |
 | cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
 | reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |
+
+In the `ry run` console, a command after a body edit takes 57 to 86 ms including the reload, and
+the console takes 2.9 s to start on this package.
 
 These are medians of five runs of `tools/loader-bench` (`load_all()` is `pkgload::load_all()`, which
 `devtools::load_all()` calls). The machine was shared and ry was built without link-time

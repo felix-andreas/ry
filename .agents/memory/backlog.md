@@ -35,6 +35,11 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
+- **A console does not watch a package whose first load failed**: `Loader::changed_roots` skips
+  packages with no committed state, so after `ry run` starts on a package with a syntax error,
+  fixing the file reloads nothing until `load_all()`. Fix: record the fingerprint on a failed
+  plan too, and let `.ry_autoreload()` learn the root from the loader rather than `.ry_packages`.
+
 - **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run`,
   `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
   GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the

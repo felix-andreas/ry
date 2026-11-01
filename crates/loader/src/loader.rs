@@ -285,7 +285,10 @@ impl Loader {
                 .get(path)
                 .map_or("", |&file| file_load_index(db, file).text.as_str())
         });
-        self.packages[position].pending = Some(next);
+        let package = &mut self.packages[position];
+        package.pending = Some(next);
+        // Only `plan` knows what the caller's sources were read from, and it sets this after.
+        package.pending_fingerprint = None;
         Ok(plan)
     }
 
@@ -527,11 +530,7 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
     for entry in entries {
         let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let is_code = Path::new(&name)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"));
-        if is_code && entry.path().is_file() {
+        if is_r_code(&name) && entry.path().is_file() {
             names.push(name);
         }
     }
@@ -551,6 +550,14 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
         .into_iter()
         .map(|name| format!("R/{name}"))
         .collect())
+}
+
+/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides.
+fn is_r_code(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
 }
 
 /// The plan that turns `previous` (nothing, for a full load) into `next`. It looks inside only
@@ -1183,8 +1190,10 @@ impl Plan {
     }
 }
 
-/// Of the names, sizes and modification times of everything a load reads, so a change is
-/// noticed without reading a file.
+/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE` and the code
+/// files in `R/`, so a change is noticed without reading a file. `src/` is left out: hashing it
+/// would cost a walk of the compiled sources before every command, and a rebuild is slow enough
+/// that it is asked for with `load_all()`.
 fn source_fingerprint(root: &Path) -> Option<u64> {
     let mut records = Vec::new();
     let mut record = |path: &Path| {
@@ -1204,8 +1213,12 @@ fn source_fingerprint(root: &Path) -> Option<u64> {
     record(&root.join("DESCRIPTION"));
     record(&root.join("NAMESPACE"));
     let entries = fs::read_dir(root.join("R")).ok()?;
+    // An editor's swap and backup files (`.a.R.swp`, `a.R~`) are not code, so saving one
+    // reloads nothing.
     for entry in entries.flatten() {
-        record(&entry.path());
+        if is_r_code(&entry.file_name().to_string_lossy()) {
+            record(&entry.path());
+        }
     }
     records.sort();
     Some(fnv1a(records.join("\n").as_bytes()))

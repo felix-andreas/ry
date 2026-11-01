@@ -319,7 +319,8 @@ fn find_r_home() -> Result<String, String> {
     let usable = |home: &str| Path::new(home).join("library/base/R/base").exists();
     let fix = "install GNU R, or set R_HOME to the directory `R RHOME` prints; \
                see https://ry-lang.org/installation/";
-    if let Ok(home) = std::env::var("R_HOME") {
+    // An exported but empty R_HOME, as some env files leave it, names no directory.
+    if let Some(home) = std::env::var("R_HOME").ok().filter(|home| !home.is_empty()) {
         if usable(&home) {
             return Ok(home);
         }

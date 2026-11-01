@@ -170,14 +170,27 @@ pub fn run_console_on_ry_runtime(
     type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
     let changed = runtime_entry::<unsafe extern "C" fn() -> c_int>(library, "ry_loader_changed")?;
-    let startup = CString::new(options.startup.join("\n"))
-        .map_err(|_| ReplError("the startup code contains a NUL byte".into()))?;
+    let startup = match options.startup.is_empty() {
+        true => None,
+        false => Some(
+            CString::new(options.startup.join("\n"))
+                .map_err(|_| ReplError("the startup code contains a NUL byte".into()))?,
+        ),
+    };
     options.hooks = Some(Box::new(RuntimeReloadWatcher { changed }));
     let banner = std::io::stdin()
         .is_terminal()
         .then(|| "ry console on ry's runtime. Type q() or Ctrl-D to quit.".to_owned());
     console::install_for_ry_runtime(options, banner)?;
-    Ok(unsafe { repl(console::ry_read_console, startup.as_ptr(), flags.bits()) })
+    Ok(unsafe {
+        repl(
+            console::ry_read_console,
+            startup
+                .as_ref()
+                .map_or(std::ptr::null(), |startup| startup.as_ptr()),
+            flags.bits(),
+        )
+    })
 }
 
 /// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.
