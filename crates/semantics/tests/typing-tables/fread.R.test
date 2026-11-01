@@ -1,0 +1,154 @@
+#==== fread
+#---- a_project_csv_types_with_its_columns
+#~~~~ data/prices.csv
+id,ticker,price,listed
+1,AAA,10.5,TRUE
+2,BBB,11,FALSE
+#~~~~ main.R
+library(data.table)
+prices <- fread("data/prices.csv")
+total <- sum(prices$price)
+#++++
+Any
+prices: frame{id: integer[], ticker: character[], price: double[], listed: logical[]}
+total: double
+55..60 warning[unused] `total` is assigned but never used.
+
+#---- a_dot_slash_path_finds_the_same_file
+#~~~~ data/prices.csv
+id,price
+1,10.5
+#~~~~ main.R
+library(data.table)
+prices <- fread("./data/prices.csv")
+#++++
+Any
+prices: frame{id: integer[], price: double[]}
+20..26 warning[unused] `prices` is assigned but never used.
+
+#---- the_file_argument_reads_a_path
+#~~~~ prices.tsv
+id	price
+1	10.5
+#~~~~ main.R
+library(data.table)
+prices <- fread(file = "prices.tsv")
+#++++
+Any
+prices: frame{id: integer[], price: double[]}
+20..26 warning[unused] `prices` is assigned but never used.
+
+#---- a_file_the_project_lacks_has_unknown_columns
+library(data.table)
+prices <- fread("elsewhere/prices.csv")
+#++++
+Any
+prices: frame
+20..26 warning[unused] `prices` is assigned but never used.
+
+#---- a_computed_path_has_unknown_columns
+library(data.table)
+path <- file.path("data", "prices.csv")
+prices <- fread(path)
+#++++
+Any
+path: character
+prices: frame
+60..66 warning[unused] `prices` is assigned but never used.
+
+#---- text_is_sniffed_directly
+library(data.table)
+small <- fread(text = "a,b,c\n1,x,2.5\n2,y,NA")
+#++++
+Any
+small: frame{a: integer[], b: character[], c: double[]}
+20..25 warning[unused] `small` is assigned but never used.
+
+#---- an_input_with_a_line_break_is_text
+library(data.table)
+small <- fread("a,b\n1,TRUE\n")
+#++++
+Any
+small: frame{a: integer[], b: logical[]}
+20..25 warning[unused] `small` is assigned but never used.
+
+#---- a_headerless_text_names_columns_v1_v2
+library(data.table)
+small <- fread(text = "1,x\n2,y")
+#++++
+Any
+small: frame{V1: integer[], V2: character[]}
+20..25 warning[unused] `small` is assigned but never used.
+
+#---- a_misspelled_column_of_a_read_file_is_reported
+#~~~~ data/prices.csv
+id,price
+1,10.5
+#~~~~ main.R
+library(data.table)
+prices <- fread("data/prices.csv")
+cheap <- prices[prce < 10]
+#++++
+Any
+prices: frame{id: integer[], price: double[]}
+cheap: frame{id: integer[], price: double[]}
+55..60 warning[unused] `cheap` is assigned but never used.
+71..75 warning[unresolved] the frame `prices` has no column `prce`, and nothing else defines that name. Did you mean `price`?
+
+#---- select_and_col_names_pick_and_rename
+#~~~~ data/prices.csv
+id,ticker,price
+1,AAA,10.5
+#~~~~ main.R
+library(data.table)
+picked <- fread("data/prices.csv", select = c("price", "id"))
+renamed <- fread("data/prices.csv", col.names = c("key", "symbol", "close"))
+#++++
+Any
+picked: frame{price: double[], id: integer[]}
+renamed: frame{key: integer[], symbol: character[], close: double[]}
+20..26 warning[unused] `picked` is assigned but never used.
+82..89 warning[unused] `renamed` is assigned but never used.
+
+#---- strings_as_factors_reads_text_as_factors
+library(data.table)
+labelled <- fread(text = "id,label\n1,a\n2,b", stringsAsFactors = TRUE)
+#++++
+Any
+labelled: frame{id: integer[], label: factor}
+20..28 warning[unused] `labelled` is assigned but never used.
+
+#---- column_classes_leave_the_columns_unknown
+#~~~~ data/prices.csv
+id,price
+1,10.5
+#~~~~ main.R
+library(data.table)
+prices <- fread("data/prices.csv", colClasses = c("character", "double"))
+#++++
+Any
+prices: frame
+20..26 warning[unused] `prices` is assigned but never used.
+
+#---- a_read_frame_satisfies_a_data_table_parameter
+#~~~~ data/prices.csv
+id,price
+1,10.5
+#~~~~ main.R
+library(data.table)
+#: fn(table: data.table) -> integer
+count_rows <- function(table) nrow(table)
+rows <- count_rows(fread("data/prices.csv"))
+#++++
+Any
+count_rows: fn(table: data.table) -> integer
+rows: integer
+98..102 warning[unused] `rows` is assigned but never used.
+
+#---- a_project_fread_is_an_ordinary_function
+fread <- function(path) 1L
+value <- fread("data/prices.csv")
+#++++
+fread: <T> fn([path]: T) -> integer
+value: integer
+27..32 warning[unused] `value` is assigned but never used.

@@ -105,18 +105,22 @@ further declaration appending a candidate:
 
 ```
 sum : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
-sum : fn(...: double[], [na.rm]: logical) -> double
-sum : fn(...: Any, [na.rm]: logical) -> Any
+sum : fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
+sum : fn(...: difftime, [na.rm]: logical) -> difftime
+sum : fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 ```
 
-A call commits to the first candidate that accepts its arguments, so `sum(1L, 2L)` is `integer` and
-`sum(1.5, 2.5)` is `double`. The typing reference specifies the selection rules under
-[overload sets](/reference/type-system#overload-sets).
+A call commits to the first candidate that accepts its arguments, so `sum(1L, 2L)` is `integer`,
+`sum(1L, 2.5)` is `double`, and `sum("a")` is an error, as it is in R. The typing reference
+specifies the selection rules under [overload sets](/reference/type-system#overload-sets).
 
 Order each set from most specific to most general, and end it with the most general candidate,
-conventionally an `Any` fallback. The fallback keeps a mixture the other candidates cannot express,
-such as `sum(TRUE, 1L)`, from erroring, and it is also what the name resolves to when it is used
-without being called, so a value never carries a narrower contract than the calls the name accepts.
+because that is also what the name resolves to when it is used without being called. Write the
+candidates so that together they accept exactly what R accepts. An `Any` fallback is the escape hatch
+for a function whose accepted inputs no candidate list can describe, but it also accepts every input
+R rejects, so `sum` and the other numeric reductions do without one. A wrapper such as
+`function(x) sum(x)` then leaves its parameter `Unknown`, which is unchecked, rather than generic.
 A project override that redeclares a name replaces the whole set, so an override that wants
 overloads must declare all of them itself.
 

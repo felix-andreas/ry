@@ -22,6 +22,7 @@ miette = { version = "7.6.0", default-features = false, features = [
     "fancy-no-backtrace",
 ] }
 rustc-hash = "2.1.1"
+foldhash = "0.2"
 serde = "1.0.219"
 serde_json = "1.0.140"
 similar = { version = "2.7.0", features = ["inline"] }
@@ -56,7 +57,10 @@ regex = "1.11.1"
 
 tokio-util = { version = "0.7.15", features = ["compat"] }
 
+# Dependency debug info, mostly Polars, runs to tens of gigabytes per build and
+# slows every link, while backtraces through workspace code stay intact without it.
 [profile.dev.package]
+"*".debug = false
 similar.opt-level = 3
 tree-sitter.opt-level = 3
 tree-sitter-r.opt-level = 3

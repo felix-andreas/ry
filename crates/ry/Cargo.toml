@@ -47,6 +47,7 @@ ide = { path = "../ide" }
 loader = { path = "../loader" }
 repl = { path = "../repl" }
 semantics = { path = "../semantics" }
+sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
 
 # async-lsp

@@ -30,6 +30,7 @@ pub mod bytecode;
 pub mod coerce;
 pub mod conditions;
 pub mod connections;
+pub mod data_table;
 pub mod deparse;
 pub mod distributions;
 pub mod dispatch;
@@ -39,11 +40,14 @@ pub mod format;
 pub mod frame;
 pub mod linalg;
 pub mod graphics;
+pub mod graphics_render;
 pub mod lower;
 pub mod methods;
 pub mod native;
 pub mod print;
 pub mod random;
+pub mod rd;
+pub mod rmath;
 pub mod records;
 pub mod serialize;
 pub mod session;
@@ -55,7 +59,9 @@ pub mod stats_cluster;
 pub mod stats_deriv;
 pub mod stats_lbfgsb;
 pub mod stats_models;
+pub mod stats_nlm;
 pub mod stats_optimize;
+pub mod stats_port;
 pub mod stats_tests;
 pub mod strings;
 pub mod subset;
@@ -185,6 +191,9 @@ pub struct Interp {
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
+    /// off when the project sets `[check] object-systems = false`.
+    pub object_systems: bool,
 }
 
 struct InterpState {
@@ -282,6 +291,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
+        object_systems: true,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

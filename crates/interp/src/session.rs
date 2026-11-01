@@ -271,6 +271,14 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
     }
 }
 
+/// Ends a session as GNU R does before it exits: closes every graphics device, which writes
+/// the files they were drawing.
+pub unsafe fn finish() {
+    if let Err(unwind) = crate::graphics::close_all_devices() {
+        report_toplevel(unwind);
+    }
+}
+
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.
 /// Returns whether it succeeded.
 pub unsafe fn run_toplevel(expression: Sexp) -> bool {

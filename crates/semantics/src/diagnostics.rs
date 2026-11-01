@@ -2448,6 +2448,22 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             format!("{subject} has no column `{column}`{hint}")
         }
+        TypeErrorKind::BranchTypesDiffer {
+            function,
+            first,
+            first_ty,
+            second,
+            second_ty,
+        } => format!(
+            "`{function}` needs `{first}` and `{second}` of one type, but `{first}` is `{}` and `{second}` is `{}`",
+            renderer.render(db, *first_ty),
+            renderer.render(db, *second_ty)
+        ),
+        TypeErrorKind::ColumnNameCount { names, columns } => format!(
+            "this frame has {columns} {}, but {names} {} given",
+            if *columns == 1 { "column" } else { "columns" },
+            if *names == 1 { "name is" } else { "names are" }
+        ),
         TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
             "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.",
             renderer.render(db, *x),
@@ -2484,6 +2500,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 column_element(db, *column_ty).kind(db),
                 column_element(db, *found).kind(db),
             ) {
+                (TyKind::Named(..), _) => {
+                    "is read as a level's position rather than a label, and a number that is not one becomes `NA`"
+                }
                 (TyKind::Scalar(Atomic::Logical), TyKind::Scalar(Atomic::Character)) => {
                     "is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`"
                 }

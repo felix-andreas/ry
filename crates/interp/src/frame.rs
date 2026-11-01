@@ -155,6 +155,17 @@ local({
   setHook(packageEvent("data.table", "onLoad"), function(...) {
     registerS3method("as.data.table", "frame", to_data_table, envir = asNamespace("data.table"))
   })
+  # `package:ry` binds these names so that they also take frames. Binding the same functions in
+  # `package:data.table` keeps them working on frames once data.table is attached above ry, and
+  # keeps `library(data.table)` from reporting that it masks them, which GNU R never prints.
+  setHook(packageEvent("data.table", "attach"), function(...) {
+    attached <- as.environment("package:data.table")
+    for (name in c("setkey", "setkeyv", "key", "copy")) {
+      unlockBinding(name, attached)
+      assign(name, get(name, envir = as.environment("package:ry")), envir = attached)
+      lockBinding(name, attached)
+    }
+  })
 })
 "#;
 
@@ -168,6 +179,7 @@ pub fn package_functions() -> impl Iterator<Item = &'static str> {
 pub unsafe fn attach_package() -> R<()> {
     let namespace = crate::session::eval_text(NAMESPACE, values::global_env())?;
     crate::session::eval_text(PACKAGE, namespace)?;
+    crate::data_table::attach(namespace)?;
     crate::session::eval_text(ATTACH, values::global_env())?;
     crate::session::eval_text(METHODS, values::global_env())?;
     Ok(())
@@ -952,7 +964,7 @@ unsafe fn format_cells(column: &Column, kind: ColumnType) -> R<Vec<String>> {
 
 /// One argument of a query call, unevaluated: its expression and the environment to evaluate it
 /// in, or a value already forced (a promise from `...` that something else forced).
-struct Piece {
+pub(crate) struct Piece {
     tag: Option<String>,
     source: Source,
 }
@@ -975,7 +987,7 @@ impl Piece {
         }
     }
 
-    fn expression(&self) -> Option<Sexp> {
+    pub(crate) fn expression(&self) -> Option<Sexp> {
         match self.source {
             Source::Expression(expression, _) => Some(expression),
             Source::Promise(promise) => Some(unsafe { promise.cdr() }),
@@ -985,6 +997,16 @@ impl Piece {
 
     fn is_missing(&self) -> bool {
         matches!(self.source, Source::Missing)
+    }
+
+    /// The expression [`Piece::value`] would evaluate and its environment, when it has not been
+    /// evaluated yet.
+    fn unevaluated(&self) -> Option<(Sexp, Sexp)> {
+        match self.source {
+            Source::Expression(expression, env) => Some((expression, env)),
+            Source::Promise(promise) => Some(unsafe { (promise.cdr(), promise.tag()) }),
+            _ => None,
+        }
     }
 }
 
@@ -1054,23 +1076,74 @@ pub unsafe fn run(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The parts of a `[` call on a frame.
 #[derive(Default)]
-struct Parts {
-    i: Option<Piece>,
-    j: Option<Piece>,
-    by: Option<Piece>,
-    keyed: bool,
-    on: Option<Piece>,
-    nomatch: Option<Piece>,
-    roll: Option<Piece>,
-    mult: Option<Piece>,
-    sdcols: Option<Piece>,
-    with: Option<Piece>,
+pub(crate) struct Parts {
+    pub(crate) i: Option<Piece>,
+    pub(crate) j: Option<Piece>,
+    pub(crate) by: Option<Piece>,
+    pub(crate) keyed: bool,
+    pub(crate) on: Option<Piece>,
+    pub(crate) nomatch: Option<Piece>,
+    pub(crate) roll: Option<Piece>,
+    pub(crate) mult: Option<Piece>,
+    pub(crate) sdcols: Option<Piece>,
+    pub(crate) with: Option<Piece>,
     /// `by = .EACHI`, which belongs to the join rather than to `by`.
-    each_i: bool,
+    pub(crate) each_i: bool,
 }
 
 /// Runs `subject[i, j, by]`, where `call` is the whole `[` call as written.
 pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
+    let parts = parse_parts(call, env, false)?;
+    let table = table_of(subject)?;
+    let schema = table.schema();
+    let lowering = Lowering {
+        schema: &schema,
+        height: table.height(),
+        env,
+        call,
+        strict: false,
+    };
+    let (parts, plan) = plan(parts, &lowering)?;
+    let assigns = plan.assigns;
+    let result = match plan {
+        Plan {
+            rows: Some(rows),
+            select: Some(select),
+            by: Some(by),
+            ..
+        } if !assigns || matches!(rows, Rows::All | Rows::Filter(_)) => {
+            let query = Query {
+                rows,
+                select,
+                by,
+                keyed: parts.keyed,
+            };
+            if assigns {
+                assign(subject, table, call, env, |table| {
+                    execute(table, query, call).map(|_| ())
+                })?
+            } else {
+                finish(table, query, call)?
+            }
+        }
+        Plan { rows, select, by, .. } => fallback(subject, table, &parts, rows, select, by, &lowering)?,
+    };
+    interp().visible = !assigns;
+    Ok(result)
+}
+
+/// A query's lowered parts, each `None` when the IR cannot express it.
+pub(crate) struct Plan {
+    pub(crate) rows: Option<Rows>,
+    pub(crate) select: Option<Select>,
+    pub(crate) by: Option<Vec<(PlSmallStr, Expr)>>,
+    /// Whether `j` is a `:=`. The engine runs one only through a logical filter or on every row.
+    pub(crate) assigns: bool,
+}
+
+/// Sorts the arguments of a `[` call into their parts. In `strict` mode, an argument a frame
+/// query ignores (`drop`, `verbose`, `allow.cartesian`) is an error too.
+pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts> {
     let args: Vec<Arg> = values::pairlist_items(call.cdr().cdr())
         .into_iter()
         .map(|(tag, value)| Arg { tag, value })
@@ -1107,7 +1180,7 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
                     "mult" => &mut parts.mult,
                     ".SDcols" => &mut parts.sdcols,
                     "with" => &mut parts.with,
-                    "drop" | "verbose" | "allow.cartesian" => continue,
+                    "drop" | "verbose" | "allow.cartesian" if !strict => continue,
                     other => {
                         return Err(error_in(call, format!("frame queries do not support `{other} =`")));
                     }
@@ -1118,14 +1191,11 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
             }
         }
     }
-    let table = table_of(subject)?;
-    let schema = table.schema();
-    let lowering = Lowering {
-        schema: &schema,
-        height: table.height(),
-        env,
-        call,
-    };
+    Ok(parts)
+}
+
+/// Lowers the parts of a query.
+pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts, Plan)> {
     if let Some(expression) = parts.by.as_ref().and_then(Piece::expression)
         && expression.kind() == SexpType::Symbol
         && symbol_name(expression) == ".EACHI"
@@ -1151,29 +1221,15 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
             .as_ref()
             .and_then(Piece::expression)
             .is_some_and(|expression| is_call_to(expression, ":="));
-    // The engine updates through a logical filter or every row; any other row selection under
-    // `:=` (positions, an order, a join) takes the R path.
-    let lowered_update = !assigns || matches!(rows, Some(Rows::All | Rows::Filter(_)));
-    let result = match (rows, select, by) {
-        (Some(rows), Some(select), Some(by)) if lowered_update => {
-            let query = Query {
-                rows,
-                select,
-                by,
-                keyed: parts.keyed,
-            };
-            if assigns {
-                assign(subject, table, call, env, |table| {
-                    execute(table, query, call).map(|_| ())
-                })?
-            } else {
-                finish(table, query, call)?
-            }
-        }
-        (rows, select, by) => fallback(subject, table, &parts, rows, select, by, &lowering)?,
-    };
-    interp().visible = !assigns;
-    Ok(result)
+    Ok((parts, Plan { rows, select, by, assigns }))
+}
+
+/// The column a bare symbol in `j` names: the symbol itself, except that `.N` names `N`.
+unsafe fn symbol_column_name(symbol: Sexp) -> String {
+    match symbol_name(symbol) {
+        name if name == ".N" => "N".to_string(),
+        name => name.into_owned(),
+    }
 }
 
 /// Runs a query that does not assign and wraps what it produced.
@@ -1242,12 +1298,16 @@ unsafe fn assign(
 
 /// Lowers R expressions into the query IR. Every method returns `None` for an expression the IR
 /// cannot express, which then runs as R code.
-struct Lowering<'a> {
-    schema: &'a table::Schema,
+pub(crate) struct Lowering<'a> {
+    pub(crate) schema: &'a table::Schema,
     /// The queried frame's height, which numeric and logical row indices resolve against.
-    height: usize,
-    env: Sexp,
-    call: Sexp,
+    pub(crate) height: usize,
+    pub(crate) env: Sexp,
+    pub(crate) call: Sexp,
+    /// Whether lowering may evaluate only expressions without side effects, failing on any
+    /// other. A data.table query lowers this way, because when it cannot lower, data.table runs
+    /// it from the start and would evaluate a second time whatever lowering already evaluated.
+    pub(crate) strict: bool,
 }
 
 impl Lowering<'_> {
@@ -1255,9 +1315,37 @@ impl Lowering<'_> {
         self.schema.column(name).is_some()
     }
 
+    unsafe fn evaluate(&self, expression: Sexp) -> R<Sexp> {
+        self.evaluate_in(expression, self.env)
+    }
+
+    unsafe fn evaluate_in(&self, expression: Sexp, env: Sexp) -> R<Sexp> {
+        if !self.strict {
+            return eval::eval(expression, env);
+        }
+        if !is_pure(expression, env)? {
+            return Err(error_in(self.call, "the query evaluates an expression that may have side effects"));
+        }
+        conditions::quietly(|| eval::eval(expression, env))?
+            .ok_or_else(|| error_in(self.call, "the query raised a condition"))
+    }
+
+    unsafe fn value(&self, piece: &Piece) -> R<Sexp> {
+        if self.strict
+            && let Some((expression, env)) = piece.unevaluated()
+            && !is_pure(expression, env)?
+        {
+            return Err(error_in(self.call, "the query evaluates an expression that may have side effects"));
+        }
+        if !self.strict {
+            return piece.value();
+        }
+        conditions::quietly(|| piece.value())?.ok_or_else(|| error_in(self.call, "the query raised a condition"))
+    }
+
     unsafe fn rows(&self, piece: &Piece, parts: &Parts) -> R<Option<Rows>> {
         let Some(expression) = piece.expression() else {
-            return self.rows_from_value(piece.value()?, parts).map(Some);
+            return self.rows_from_value(self.value(piece)?, parts).map(Some);
         };
         if is_call_to(expression, "order") {
             let mut keys = Vec::new();
@@ -1275,14 +1363,14 @@ impl Lowering<'_> {
             return Ok(Some(Rows::Order(keys)));
         }
         if !self.mentions_columns(expression) {
-            let value = eval::eval(expression, self.env)?;
+            let value = self.evaluate(expression)?;
             return self.rows_from_value(value, parts).map(Some);
         }
         if !self.mentions(expression, false) {
             // Only `.N` and its kin, as in `x[.N]` or `x[.N - 1]`: a row number, not a filter.
             let mask = values::new_env(self.env)?;
             eval::define(install(".N")?, scalar_integer(r_count(self.height)?)?, mask)?;
-            let value = eval::eval(expression, mask)?;
+            let value = self.evaluate_in(expression, mask)?;
             return self.rows_from_value(value, parts).map(Some);
         }
         Ok(self.expr(expression)?.map(Rows::Filter))
@@ -1310,17 +1398,17 @@ impl Lowering<'_> {
         };
         let drop_unmatched = match &parts.nomatch {
             Some(piece) => {
-                let value = piece.value()?;
+                let value = self.value(piece)?;
                 is_nil(value) || (length(value) == 1 && values::as_integer_scalar(value) == 0)
             }
             None => false,
         };
         let roll = match &parts.roll {
-            Some(piece) => roll(piece.value()?, self.call)?,
+            Some(piece) => roll(self.value(piece)?, self.call)?,
             None => Roll::None,
         };
         let mult = match &parts.mult {
-            Some(piece) => match values::first_string(piece.value()?).as_deref() {
+            Some(piece) => match values::first_string(self.value(piece)?).as_deref() {
                 Some("all") => Mult::All,
                 Some("first") => Mult::First,
                 Some("last") => Mult::Last,
@@ -1361,7 +1449,7 @@ impl Lowering<'_> {
             }
             return Ok(conditions);
         }
-        let value = piece.value()?;
+        let value = self.value(piece)?;
         if value.kind() != SexpType::String {
             return Err(error_in(self.call, "`on =` takes column names"));
         }
@@ -1411,14 +1499,14 @@ impl Lowering<'_> {
         by: &Option<Vec<(PlSmallStr, Expr)>>,
     ) -> R<Option<Select>> {
         let with = match &parts.with {
-            Some(piece) => values::as_logical_scalar(piece.value()?) != 0,
+            Some(piece) => values::as_logical_scalar(self.value(piece)?) != 0,
             None => true,
         };
         let Some(expression) = piece.expression() else {
-            return self.columns_from_value(piece.value()?).map(Some);
+            return self.columns_from_value(self.value(piece)?).map(Some);
         };
         if !with {
-            let value = eval::eval(expression, self.env)?;
+            let value = self.evaluate(expression)?;
             return self.columns_from_value(value).map(Some);
         }
         if is_call_to(expression, ":=") {
@@ -1429,9 +1517,7 @@ impl Lowering<'_> {
             for (position, (tag, item)) in values::pairlist_items(expression.cdr()).into_iter().enumerate() {
                 let name = match tag_name(tag) {
                     Some(name) => name,
-                    None if item.kind() == SexpType::Symbol && self.is_column(&symbol_name(item)) => {
-                        symbol_name(item).into_owned()
-                    }
+                    None if item.kind() == SexpType::Symbol => symbol_column_name(item),
                     None => format!("V{}", position + 1),
                 };
                 let Some(expr) = self.expr(item)? else {
@@ -1451,7 +1537,7 @@ impl Lowering<'_> {
                 let mut na_rm = false;
                 for (tag, value) in values::pairlist_items(expression.cdr().cdr().cdr()) {
                     if tag_name(tag).as_deref() == Some("na.rm") {
-                        na_rm = values::as_logical_scalar(eval::eval(value, self.env)?) == 1;
+                        na_rm = values::as_logical_scalar(self.evaluate(value)?) == 1;
                     } else {
                         return Ok(None);
                     }
@@ -1477,7 +1563,7 @@ impl Lowering<'_> {
                 && !rest.is_empty()
                 && !rest.starts_with('.')
             {
-                let value = eval::eval(install(rest)?, self.env)?;
+                let value = self.evaluate(install(rest)?)?;
                 return self.columns_from_value(value).map(Some);
             }
             if name == ".SD" {
@@ -1493,7 +1579,7 @@ impl Lowering<'_> {
             }
         }
         if !self.mentions_columns(expression) {
-            let value = eval::eval(expression, self.env)?;
+            let value = self.evaluate(expression)?;
             if matches!(value.kind(), SexpType::String | SexpType::Integer | SexpType::Real)
                 && !values::inherits(value, "factor")
             {
@@ -1501,7 +1587,15 @@ impl Lowering<'_> {
             }
             return Ok(literal(value).map(Select::Value));
         }
-        Ok(self.expr(expression)?.map(Select::Value))
+        let Some(expr) = self.expr(expression)? else {
+            return Ok(None);
+        };
+        // A grouped bare symbol names its column after itself, as data.table does, while every
+        // other grouped value is `V1`.
+        if expression.kind() == SexpType::Symbol && by.as_ref().is_some_and(|by| !by.is_empty()) {
+            return Ok(Some(Select::Columns(vec![(PlSmallStr::from(symbol_column_name(expression)), expr)])));
+        }
+        Ok(Some(Select::Value(expr)))
     }
 
     unsafe fn columns_from_value(&self, value: Sexp) -> R<Select> {
@@ -1544,7 +1638,7 @@ impl Lowering<'_> {
         {
             return Ok(range);
         }
-        match self.columns_from_value(piece.value()?)? {
+        match self.columns_from_value(self.value(piece)?)? {
             Select::Columns(columns) => Ok(columns.into_iter().map(|(name, _)| name).collect()),
             _ => Err(error_in(self.call, "`.SDcols` names columns")),
         }
@@ -1577,7 +1671,7 @@ impl Lowering<'_> {
             let names = match left.kind() {
                 SexpType::Symbol => vec![symbol_name(left).into_owned()],
                 _ => {
-                    let value = eval::eval(left, self.env)?;
+                    let value = self.evaluate(left)?;
                     if value.kind() != SexpType::String {
                         return Err(error_in(self.call, "the left side of `:=` names columns"));
                     }
@@ -1645,7 +1739,7 @@ impl Lowering<'_> {
                 return Ok(None);
             }
         }
-        let value = piece.value()?;
+        let value = self.value(piece)?;
         if value.kind() != SexpType::String {
             return Err(error_in(self.call, "`by` names columns"));
         }
@@ -1680,11 +1774,11 @@ impl Lowering<'_> {
                     Some(rest) if !rest.is_empty() && !rest.starts_with('.') => install(rest)?,
                     _ => expression,
                 };
-                Ok(literal(eval::eval(lookup, self.env)?))
+                Ok(literal(self.evaluate(lookup)?))
             }
             SexpType::Language => {
                 if !self.mentions_columns(expression) {
-                    return Ok(literal(eval::eval(expression, self.env)?));
+                    return Ok(literal(self.evaluate(expression)?));
                 }
                 self.call_expr(expression)
             }
@@ -1719,7 +1813,7 @@ impl Lowering<'_> {
                 Ok(Some(Expr::Binary(op, Box::new(left), Box::new(right))))
             }
             ("head", 2, 2) => {
-                let count = eval::eval(positional[1], self.env)?;
+                let count = self.evaluate(positional[1])?;
                 let count = values::as_integer_scalar(count);
                 let Ok(count) = usize::try_from(count) else {
                     return Ok(None);
@@ -1752,7 +1846,7 @@ impl Lowering<'_> {
                     if tag_name(*tag).as_deref() != Some("na.rm") {
                         return Ok(None);
                     }
-                    na_rm = values::as_logical_scalar(eval::eval(*value, self.env)?) == 1;
+                    na_rm = values::as_logical_scalar(self.evaluate(*value)?) == 1;
                 }
                 Ok(self.expr(positional[0])?.map(|arg| Expr::Aggregate {
                     function: aggregate,
@@ -1797,6 +1891,40 @@ impl Lowering<'_> {
             }
             _ => false,
         }
+    }
+}
+
+/// Functions whose call has no side effect and whose result depends only on their arguments, for
+/// [`is_pure`].
+const PURE_FUNCTIONS: &[&str] = &[
+    "(", "c", "list", ":", "-", "+", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "!",
+    "&", "|",
+];
+
+/// Whether evaluating `expression` in `env` has no side effect: a constant, a variable (forcing
+/// a promise is memoized, so a later evaluation sees the same value), or a call of base's
+/// [`PURE_FUNCTIONS`] on such arguments.
+unsafe fn is_pure(expression: Sexp, env: Sexp) -> R<bool> {
+    match expression.kind() {
+        SexpType::Symbol => Ok(expression != symbols().dots && eval::dot_dot_index(expression).is_none()),
+        SexpType::Language => {
+            let head = expression.car();
+            if head.kind() != SexpType::Symbol || !PURE_FUNCTIONS.contains(&symbol_name(head).as_ref()) {
+                return Ok(false);
+            }
+            let base = eval::find_fun(head, values::base_env())?;
+            if eval::find_fun(head, env)? != base {
+                return Ok(false);
+            }
+            for (_, argument) in values::pairlist_items(expression.cdr()) {
+                if argument == missing_arg() || !is_pure(argument, env)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        SexpType::Promise => Ok(false),
+        _ => Ok(true),
     }
 }
 
@@ -2017,7 +2145,7 @@ unsafe fn fallback(
 }
 
 /// The zero-based positions of the rows a lowered row selection keeps.
-unsafe fn selected_positions(table: &mut Table, rows: Rows, call: Sexp) -> R<Vec<u32>> {
+pub(crate) unsafe fn selected_positions(table: &mut Table, rows: Rows, call: Sexp) -> R<Vec<u32>> {
     let mut numbered = table.fork();
     let height = numbered.height() as i32;
     let index: Vec<i32> = (0..height).collect();

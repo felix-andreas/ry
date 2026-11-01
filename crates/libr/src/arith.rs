@@ -120,7 +120,7 @@ impl Rng {
         const BIG: f64 = 134217728.0;
         let mut u = self.unif_rand();
         u = (BIG * u).trunc() + self.unif_rand();
-        crate::rmath::qnorm(u / BIG, 0.0, 1.0, true, false)
+        interp::rmath::qnorm(u / BIG, 0.0, 1.0, true, false)
     }
 
     /// A standard exponential deviate by algorithm SA of Ahrens and Dieter (1972), "Computer

@@ -223,7 +223,7 @@ call_it: <T> fn(d: T) -> Unknown
 #description Imports: data.table
 load <- function(path) fread(path)
 #++++
-load: fn(path: character) -> data.table
+load: fn(path: character) -> frame
 
 #---- inactive_namespace_stays_dark
 load <- function(path) fread(path)
@@ -236,60 +236,60 @@ library(data.table)
 load <- function(path) fread(path)
 #++++
 Any
-load: fn(path: character) -> data.table
+load: fn(path: character) -> frame
 
 #---- brackets_keep_the_class_through_chains
 #description Imports: data.table
 summarize <- function(path) {
-  dt <- fread(path)
+  dt <- as.data.table(read.csv(path))
   dt[speed > 20][, .(m = mean(speed)), by = cyl]
 }
 #++++
-summarize: fn(path: character) -> data.table
+summarize: fn(path: character | connection) -> data.table
 
 #---- walrus_assignment_returns_the_subject
 #description Imports: data.table
 add_ratio <- function(path) {
-  dt <- fread(path)
+  dt <- as.data.table(read.csv(path))
   dt[, ratio := speed / dist]
 }
 #++++
-add_ratio: fn(path: character) -> data.table
+add_ratio: fn(path: character | connection) -> data.table
 
 #---- grouped_j_always_returns_a_table
 #description Imports: data.table
 per_group <- function(path) {
-  dt <- fread(path)
+  dt <- as.data.table(read.csv(path))
   dt[, sum(speed), by = cyl]
 }
 #++++
-per_group: fn(path: character) -> data.table
+per_group: fn(path: character | connection) -> data.table
 
 #---- bare_column_j_is_refused_but_masked
 #description Imports: data.table
 pick <- function(path) {
-  dt <- fread(path)
+  dt <- as.data.table(read.csv(path))
   dt[, speed]
 }
 #++++
-pick: fn(path: character) -> Unknown
+pick: fn(path: character | connection) -> Unknown
 
 #---- computed_ungrouped_j_is_refused
 #description Imports: data.table
 total <- function(path) {
-  dt <- fread(path)
+  dt <- as.data.table(read.csv(path))
   dt[, sum(speed)]
 }
 #++++
-total: fn(path: character) -> Unknown
+total: fn(path: character | connection) -> Unknown
 
 #---- the_result_class_is_a_real_type
 #description Imports: data.table
 #: fn(path: character) -> integer
-wrong <- function(path) fread(path)[, .(m = 1)]
+wrong <- function(path) as.data.table(read.csv(path))[, .(m = 1)]
 #++++
 wrong: fn(path: character) -> integer
-91..114 error[type-mismatch] expected `integer`, found `data.table`
+91..132 error[type-mismatch] expected `integer`, found `data.table`
 
 #==== dplyr
 #---- verbs_mask_columns_and_preserve_the_class
@@ -302,9 +302,9 @@ report: <T> fn(df: T) -> T
 
 #---- verbs_keep_a_data_table_typed_subject
 #description Imports: data.table, dplyr
-enrich <- function(path) fread(path) |> mutate(r = a / b)
+enrich <- function(path) as.data.table(read.csv(path)) |> mutate(r = a / b)
 #++++
-enrich: fn(path: character) -> data.table
+enrich: fn(path: character | connection) -> data.table
 
 #---- join_by_masks_every_argument
 #description Imports: dplyr

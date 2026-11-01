@@ -1623,7 +1623,8 @@ check.
 
 `function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every
 other overload set. Wrapping a standard-library numeric function in one of your own throws the types
-away.
+away. `sum` no longer has an `Any` fallback (it rejects strings), so a `sum` wrapper gives `Unknown`
+rather than `Any`.
 
 The cause is the fact-beats-guess rule. The `Any` fallback fits while binding nothing, so it beats
 every candidate that would narrow `x`.
@@ -1836,10 +1837,11 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
-  "update subset", 1e6 rows: about 0.11 s for both). From R it takes 0.10 to 0.14 s against the
-  engine's 0.085 s from Rust, so the interpreter's per-query cost (schema clone, lowering, fork
-  checks) shows here and is worth profiling.
+- **A filtered `:=` loop is engine-bound** (`tools/bench/table/ry.R`, "update subset", 1e6 rows:
+  0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
+  5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
+  engine code in a different process (libR.so allocates with glibc malloc, the Rust bench with
+  mimalloc), which is the next thing to check.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.
@@ -1852,18 +1854,29 @@ The end-to-end guard rests on the corpus suites.
   and give plain subjects a fast path again if they regressed.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
-- **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
-  variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
-- **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
-  name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
-  instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
-- **Engine:** under `.EACHI`, `sum(.N)` reads the raw group row count rather than the matched
-  count (`single_value` does not rewrite the argument), and `parse_strings` uses Polars' string
-  cast, which is unverified against R for padded (`" 3"`) and hex (`"0x1A"`) strings.
-- **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
-  so `lapply(.SD, sum)` over a character column is silent.
-- **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
-  checked. The engine refuses a factor joined to a number and a number written into a factor.
+- **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
+  `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
+- **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
+  flagged although R allows it.
+- **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
+  `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
+  under ry's runtime an attached data.table still runs its own versions, which return a
+  `data.table` and reject a frame. The runtime needs these names routed to the engine
+  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
+  installs, before the checker's types are true at run time. The `[` bridge
+  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
+  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
+  and decline to data.table otherwise.
+- **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
+  `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
+  unknown columns (the spread columns are data values); a data path resolves against the project
+  root only, because `SourceFile` carries no path.
+- **`dcast` with an aggregate runs at data.table's speed, not faster** (`crates/table/benches/ops_benchmark.rs`
+  against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
+  through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
+  `ops::key_digits`, as `unique` does, would skip the general grouping.
+- **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
+  on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
   type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
@@ -1903,16 +1916,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).
-  - The graphics device keeps a display list but draws nothing.
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
-- **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
-  (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
-  optimum along a slightly different path, so values agree to about seven digits only.
-- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
-  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
-  daylight-saving changes differ from GNU R.
+- **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
+  `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
+  values agree to about seven digits only.
 - **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
   stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
@@ -1929,7 +1938,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
-  `file.copy`, `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
+  `format.Date`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -1937,10 +1946,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** `bzfile()` and `xzfile()` read all three formats but always write gzip,
-  because ry has no streaming bzip2 or xz encoder (readers detect the format, so the files still
-  load). `memCompress(type = "bzip2")`, `fifo()`, URL connections and sockets are not
-  implemented.
+- **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
+  negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -1964,21 +1971,24 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics devices draw nothing** (`decisions.md`, "the default packages' utils, tools,
-  grDevices and graphics routines"). Missing: rendering output files, GNU R's `R_pretty` warnings
-  on subnormal axis ranges, cairo font metrics for bitmap devices, plotmath sizes (an expression is
-  measured as its deparsed text), and `stem()` beyond the empty case.
-- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, 41 of 66 ending with
-  GNU R's exit status). First failures: precision in `polyroot` (complex), noncentral `qchisq`
-  and `dbeta` (d-p-q-r-tests, d-p-q-r-tst-2), complex `%*%` (reg-BLAS), `iconv` to ASCII,
-  `file.copy` (reg-packages), `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
-  `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
-  stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
-  (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
-  (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
-  (`RDX3`, where GNU R writes `RDA3`); `load()` reads it back the same, but the file differs.
-- **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
-  `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+- **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
+  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
+  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
+  (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
+  ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
+  layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
+  case, and contour label placement, which picks slightly different positions than GNU R.
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
+  GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
+  (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
+  `initialize` error (reg-S4-examples), `news()` timing out (reg-examples1), "Error: block"
+  (reg-examples2), Kendall `cor` on empty columns (reg-tests-1b), `kmeans` (reg-tests-1c),
+  `assertCondition` (reg-tests-1d), `env.profile` (reg-tests-1e), the rank in `summary.manova`
+  (reg-tests-2), `nchar` on invalid multibyte strings (reg-tests-3), the DESCRIPTION column
+  layout (reg-packages), URL connections (libcurl), utf8-regex, and a timeout in utf8.
+  reg-large writes temporary files of several gigabytes under ry, so run it with a file size
+  limit (`ulimit -f`).
+- **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
   context, so it prints `Calls: print -> .Call` where ry prints none.
@@ -2623,6 +2633,18 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   unresolved and the defining file reports it unused. Destructured names also lack declaration
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
+
+## Open: the data.table bridge
+
+`crates/interp/src/data_table.rs` declines these to data.table. Each one is a shape to accept once the engine can reproduce data.table's result exactly, checked by a new `datatable__*` oracle case.
+
+- Keyed subjects: accept them by carrying `sorted` through filters and selections the way data.table does, and binary-search `x[.("a")]` key joins.
+- Auto-indexing filters (`col == v`, `%in%`, `%chin%`): data.table adds an `index` attribute to the source on the first such filter. Accepting them means building that attribute (`setindexv`) after answering.
+- Reductions outside GForce form, and `:=` with `by` over doubles: base R sums in long double there. The engine would need a long double (or compensated, then verified) sum path.
+- `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
+- Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
+- Joins without `on =` (key joins) and `x[]`.
+- The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
 
 ## Open: findings from the records, library and frame round
 

@@ -1,5 +1,5 @@
-//! Facts about ry's own records, tuples, tags, dictionaries and sets that both the checker and the runtime need,
-//! kept here so the two cannot drift apart.
+//! Facts about ry's own records, tuples, tags, dictionaries and sets, and about the R object systems it
+//! discourages, that both the checker and the runtime need, kept here so the two cannot drift apart.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -105,4 +105,29 @@ pub fn accepts_native(name: &str) -> bool {
             .collect()
     });
     ACCEPTING.contains(name)
+}
+
+/// What a function that defines a class of an R object system is: the system's name, what one
+/// call defines, and the package that owns the function.
+pub fn object_system_function(
+    function: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match function {
+        "setClass" => ("S4 classes", "an S4 class", "methods"),
+        "setClassUnion" => ("S4 classes", "an S4 class union", "methods"),
+        "setGeneric" => ("S4 classes", "an S4 generic", "methods"),
+        "setMethod" => ("S4 classes", "an S4 method", "methods"),
+        "setValidity" => ("S4 classes", "an S4 validity check", "methods"),
+        "setRefClass" => ("Reference Classes", "a Reference Class", "methods"),
+        "R6Class" => ("R6 classes", "an R6 class", "R6"),
+        _ => return None,
+    })
+}
+
+/// The error for a definition while `[check] object-systems = false`, shared by the lint and the
+/// runtime.
+pub fn object_systems_disabled_message(system: &str, defines: &str, function: &str) -> String {
+    format!(
+        "{system} are turned off in this project (`[check] object-systems = false`), so `{function}` cannot define {defines}. Use a record or a tagged union instead"
+    )
 }

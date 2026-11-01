@@ -1755,10 +1755,10 @@ to such a name is resolved separately at each call site:
   `integer` and `sum(1.5, 2.5)` is `double`. Nothing a failed candidate bound leaks into the next
   candidate or into the result.
 - A candidate that leaves the caller's undetermined types as they were beats one that constrains
-  them, whatever the declaration order. A wrapper like `function(x) sum(x)` therefore keeps its
-  parameter open, because the `Any` fallback accepts it without constraining anything. Strict mode
-  reports a call that resolves to such a fallback. When only one candidate fits, it is selected and
-  whatever it determines stands.
+  them, whatever the declaration order. A wrapper like `function(x) cumsum(x)` therefore keeps its
+  parameter open, because `cumsum`'s `Any` fallback accepts it without constraining anything. Strict
+  mode reports a call that resolves to such a fallback. When only one candidate fits, it is selected
+  and whatever it determines stands.
 - When several candidates fit only by narrowing the caller's undetermined types, the call keeps that
   narrowing only if they all narrow the same way. Otherwise the type becomes `Unknown`, and so does
   the call: `function(xs) Filter(f, xs)` infers `fn(xs: Unknown) -> Unknown` and accepts both a vector
@@ -1775,6 +1775,12 @@ to such a name is resolved separately at each call site:
   argument list than all the others.
 - Passing an overloaded name as a value, or hovering over it, sees the *last* declaration, which by
   convention is the most general. Go-to-definition jumps to the *first* declaration.
+- The exception is an overloaded name passed by name to `lapply`, `sapply`, `vapply` or `Reduce`.
+  There the set is resolved once per element type, as R calls it once per element, so
+  `lapply(list(units = c(1L, 2L)), sum)` is `list[named: integer]` and `sapply(list(a = 1L), sum)`
+  is `integer[named]`. Each field of a record or frame is its own element type, and an element no
+  candidate accepts is an error. A class whose first argument declares a `sum.<class>` or
+  `Summary.<class>` method is dispatched to that method instead of the set, as R dispatches it.
 
 Only a declaration file can overload a name, because a name with several signatures has no single
 most general type and must be resolved by search rather than inferred. A `#:` annotation on your own
@@ -2615,8 +2621,20 @@ columns of one name, so such a result has unknown columns, as does any other `.S
 as `patterns()` or column positions.
 
 `c("a", "b") := lapply(.SD, g)` assigns the applied columns to the named ones in order, and
-`(c("a", "b")) := ...` does the same. A left side that is a variable, such as `(cols) := ...`,
-names columns ry cannot see, so the updated frame has unknown columns.
+`(c("a", "b")) := ...` does the same. Column names can also come from a variable, in `.SDcols = cols`
+and `(cols) := ...`, when the variable is assigned once, in the same function, to a string or a
+`c()` of strings:
+
+```r
+relabel <- function(sales) {
+  cols <- c("units", "price")
+  sales[, (cols) := lapply(.SD, as.character), .SDcols = cols]
+}
+```
+
+A misspelled name is then reported on its string in the assignment. A variable written more than
+once, changed in place (`cols[2] <- "team"`), or assigned in another top-level statement names
+columns ry cannot see, so the result has unknown columns.
 
 #### Column updates
 
@@ -2763,6 +2781,46 @@ type-mismatch
  7 | print(sales$amuont)
    |             ^^^^^^
 ```
+
+#### Reading files and data.table's functions
+
+ry's table replaces data.table, so `fread`, `rbindlist`, `melt` and `dcast` return frames, and a frame
+satisfies a `data.table` parameter. The checker sharpens their columns from the arguments it can see.
+
+`fread("data/prices.csv")` types with the columns the file has. ry sniffs the head of every `.csv` and
+`.tsv` file in the project (gitignored ones included) with the same rules as the runtime's reader,
+which follow `fread`: the header, the separator, and each column's type out of `logical`, `integer`,
+`double` and `character`. The path is relative to the project root. `fread(text = "...")`, and an input
+holding a line break, sniff the literal itself.
+
+```r
+prices <- fread("data/prices.csv")   # frame{id: integer[], ticker: character[], price: double[]}
+cheap <- prices[prce < 10]           # warning: the frame `prices` has no column `prce`, ... Did you mean `price`?
+```
+
+`select`, `col.names` and `stringsAsFactors = TRUE` are applied to the sniffed columns. A computed
+path, a file the project does not have, and any other argument that changes the columns (such as
+`colClasses` or `skip`) give a frame with unknown columns.
+
+The other functions follow data.table's rules:
+
+| Call | Type |
+| --- | --- |
+| `setnames(f, old, new)`, `setnames(f, new)` | renames the columns of `f` from here on; `old` must name columns of `f` unless `skip_absent = TRUE`, and `new` alone must name every column |
+| `setcolorder(f, c("b", "a"))` | moves the named columns of `f` to the front from here on |
+| `setkey(f, a, b)`, `setorder(f, a, -b)`, `setkeyv(f, cols)`, `setorderv(f, cols)` | `f` unchanged; each named column must exist |
+| `rbindlist(list(f, g))` | binds by position; each column takes the widest type of its pieces (`logical` < `integer` < `double` < `character`, and a factor with strings stays a factor) |
+| `rbindlist(..., use.names = TRUE)`, `rbindlist(..., fill = TRUE)` | binds by name; `fill` adds the columns only some pieces have |
+| `rbindlist(..., idcol = "source")` | adds a first column of each piece's name (`character[]`), or its position (`integer[]`) when the list is unnamed |
+| `melt(f, id.vars, measure.vars)` | the id columns, `variable: factor` (`character[]` with `variable.factor = FALSE`), and `value` of the measures' widest type; either list defaults to every other column |
+| `dcast(...)` | `frame` |
+| `fifelse(test, yes, no, na)` | a vector of the type `yes`, `no` and `na` share; integers and doubles widen to doubles, a bare `NA` fits any type, and any other mix is a type error |
+| `shift(x)`, `nafill(x)`, `fcoalesce(x, ...)` | the type of `x` |
+| `rleid(...)`, `x %chin% table`, `between(x, lower, upper)`, `uniqueN(x)` | `integer[]`, `logical[]`, `logical[]`, `integer` |
+| `tstrsplit(x, split)` | `list[character[]]` |
+
+`setnames` and `setcolorder` change their subject by reference, so ry treats them like `:=`: the name
+holds the new columns after the call.
 
 ### Conditional stub namespaces: data.table, dplyr, ggplot2 and testthat
 

@@ -2,12 +2,15 @@ use salsa::{Database, Durability, Setter};
 use semantics::diagnostics::{derive_from_syntax, file_diagnostics};
 use semantics::lints::{LintConfig, lint_file};
 use semantics::load_index::{PackageFile, PackageSources, package_index};
+use semantics::metadata::{PackageMetadata, attached_union};
+use semantics::stubs::install_shipped_stubs;
 use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
 use semantics::{
-    AnalysisSettings, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme, item_naming,
-    item_tree, limit_resident_trees, package_definitions,
+    AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme,
+    item_naming, item_tree, limit_resident_trees, package_definitions,
 };
+use std::collections::BTreeMap;
 use std::thread;
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
@@ -475,4 +478,50 @@ fn moving_a_statement_down_keeps_its_load_facts() {
 
 fn item_hash(text: &str) -> u64 {
     semantics::load_index::fnv1a(text.as_bytes())
+}
+
+#[test]
+fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
+    let mut db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let files = db.project(&[
+        "library(data.table)\n",
+        "prices <- fread(\"prices.csv\")\n",
+        "trades <- fread(\"trades.csv\")\n",
+    ]);
+    let attached = attached_union(&db, files.iter().copied());
+    PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        attached,
+        None,
+        Default::default(),
+    );
+    let layouts = |prices: &str| {
+        BTreeMap::from([
+            (
+                "prices.csv".to_owned(),
+                sniff::sniff_head(prices.as_bytes()),
+            ),
+            (
+                "trades.csv".to_owned(),
+                sniff::sniff_head(b"id,size\n1,2\n"),
+            ),
+        ])
+    };
+    let data_files = DataFiles::new(&db, layouts("id,price\n1,2.5\n"));
+    settle(&db, &files);
+    db.checked_since();
+
+    data_files
+        .set_layouts(&mut db)
+        .to(layouts("id,price,ticker\n1,2.5,a\n"));
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["prices"]);
+    let scheme = global_scheme(&db, definition(&db, "prices"));
+    assert_eq!(
+        semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
+        "frame{id: integer[], price: double[], ticker: character[]}"
+    );
 }

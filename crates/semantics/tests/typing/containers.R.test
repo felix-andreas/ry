@@ -413,4 +413,4 @@ g <- function() c(1L, 2L)[sum]
 f: Unknown
 g: Unknown
 16..34 error[type-mismatch] a vector cannot be indexed by `list{double}`. Expected a numeric, logical, or character index
-51..65 error[type-mismatch] a vector cannot be indexed by `fn(...: Any, [na.rm]: logical) -> Any`. Expected a numeric, logical, or character index
+51..65 error[type-mismatch] a vector cannot be indexed by `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`. Expected a numeric, logical, or character index
