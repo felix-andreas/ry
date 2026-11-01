@@ -13,16 +13,19 @@ pub mod stubs;
 pub mod testing;
 pub mod types;
 
-use crate::hir::Symbol;
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{OnceCell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use syntax::ast::is_expression_kind;
-use syntax::ast::{self, BinaryExpr};
-use syntax::{
-    GreenEvent, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, matching_nodes,
-    paired_comment_definition,
+use {
+    crate::hir::Symbol,
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{OnceCell, RefCell},
+        collections::{BTreeMap, BTreeSet},
+        sync::{Arc, Mutex},
+    },
+    syntax::{
+        GreenEvent, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ast::{self, BinaryExpr, is_expression_kind},
+        matching_nodes, paired_comment_definition,
+    },
 };
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
@@ -2140,8 +2143,7 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use salsa::Setter as _;
+    use {super::*, salsa::Setter as _};
 
     fn function_item<'db>(db: &'db RootDatabase, file: SourceFile, name: &str) -> Item<'db> {
         Item::new(db, file, ItemKind::Function, Some(name.to_owned()), None, 0)

@@ -16,24 +16,24 @@
 //! different: the string "NA" and a column of digit strings are unquoted, so they read back as
 //! `NA` and as numbers.
 
-use std::{
-    fs::File,
-    io::{BufWriter, Cursor, Write},
-    path::Path,
-    sync::Arc,
+use {
+    crate::{Error, Result, Table, convert::string_to_factor},
+    memmap2::Mmap,
+    polars::prelude::{
+        BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
+        Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
+        Schema as PolarsSchema, SerReader,
+    },
+    polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+    rayon::prelude::*,
+    sniff::{ColumnType as TextColumn, Guess, Layout},
+    std::{
+        fs::File,
+        io::{BufWriter, Cursor, Write},
+        path::Path,
+        sync::Arc,
+    },
 };
-
-use memmap2::Mmap;
-use polars::prelude::{
-    BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
-    Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
-    Schema as PolarsSchema, SerReader,
-};
-use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
-use rayon::prelude::*;
-use sniff::{ColumnType as TextColumn, Guess, Layout};
-
-use crate::{Error, Result, Table, convert::string_to_factor};
 
 /// Reads a delimited text file into a table, as `fread(path)` does.
 pub fn read_csv(path: &Path) -> Result<Table> {
@@ -89,9 +89,12 @@ fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> 
         return Ok(Table::default());
     }
     if let Some(columns) = &options.columns
-        && let Some(missing) = columns
-            .iter()
-            .find(|name| !layout.columns.iter().any(|column| column.name == name.as_str()))
+        && let Some(missing) = columns.iter().find(|name| {
+            !layout
+                .columns
+                .iter()
+                .any(|column| column.name == name.as_str())
+        })
     {
         return Err(Error::NoColumn(missing.to_string()));
     }
@@ -195,7 +198,12 @@ fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) ->
         .with_has_header(layout.header)
         .with_schema(Some(Arc::new(schema)))
         .with_rechunk(false)
-        .with_columns(options.columns.as_ref().map(|columns| columns.iter().cloned().collect()))
+        .with_columns(
+            options
+                .columns
+                .as_ref()
+                .map(|columns| columns.iter().cloned().collect()),
+        )
         .with_n_rows(options.rows)
         .map_parse_options(|options| {
             options
@@ -214,8 +222,15 @@ fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) ->
         .into_columns()
         .into_par_iter()
         .map(|column| {
-            let sniffed = layout.columns.iter().find(|sniffed| sniffed.name == column.name().as_str());
-            let declared = if as_text { None } else { sniffed.map(|sniffed| sniffed.kind) };
+            let sniffed = layout
+                .columns
+                .iter()
+                .find(|sniffed| sniffed.name == column.name().as_str());
+            let declared = if as_text {
+                None
+            } else {
+                sniffed.map(|sniffed| sniffed.kind)
+            };
             type_text_column(column, declared)
         })
         .collect::<Result<_>>()?;

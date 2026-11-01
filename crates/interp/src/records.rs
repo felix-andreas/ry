@@ -6,17 +6,19 @@
 //! written for them cannot mistake one for a list: a builtin that does not know them refuses them
 //! by name instead of reading garbage.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin, special},
-    deparse, eval, interp,
-    sort::IdenticalFlags,
-    standard_library,
-    unwind::{R, Unwind, error, error_in},
-    values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
-};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
-    records::{Fields, Layout, NativeKind},
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, builtin, special},
+        deparse, eval, interp,
+        sort::IdenticalFlags,
+        standard_library,
+        unwind::{R, Unwind, error, error_in},
+        values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
+        records::{Fields, Layout, NativeKind},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[

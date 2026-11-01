@@ -4,12 +4,13 @@
 //! stores its text plus the values it read, so a statement that should have rerun shows up as
 //! a stale value. `FUZZ_ITERS` scales the budget.
 
-use loader::{Loader, PackageInputs, Plan};
-use rustc_hash::{FxHashMap, FxHashSet};
-use semantics::load_index::{IndexedItem, PackageIndex, Registration};
-use std::collections::BTreeSet;
-use std::path::Path;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    loader::{Loader, PackageInputs, Plan},
+    rustc_hash::{FxHashMap, FxHashSet},
+    semantics::load_index::{IndexedItem, PackageIndex, Registration},
+    std::{collections::BTreeSet, path::Path},
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 #[test]
 fn a_reload_matches_a_fresh_load() {

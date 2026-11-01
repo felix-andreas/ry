@@ -1,11 +1,12 @@
 //! Replays the recorded cases under GNU R, and under the engine in `ORACLE_ENGINE` when set.
 //! `RY_BLESS=1` re-records the expectations. The test passes without R installed.
 
-use std::path::PathBuf;
-
-use oracle::{
-    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
-    gnu_r_available, parse, render,
+use {
+    oracle::{
+        Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path,
+        find_cases, gnu_r_available, parse, render,
+    },
+    std::path::PathBuf,
 };
 
 fn cases() -> Vec<PathBuf> {

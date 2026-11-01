@@ -1,17 +1,19 @@
-use salsa::{Database, Durability, Setter};
-use semantics::diagnostics::{derive_from_syntax, file_diagnostics};
-use semantics::lints::{LintConfig, lint_file};
-use semantics::load_index::{PackageFile, PackageSources, package_index};
-use semantics::metadata::{PackageMetadata, attached_union};
-use semantics::stubs::install_shipped_stubs;
-use semantics::testing::ProbeDatabase;
-use semantics::types::{Atomic, scalar, unknown};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme,
-    item_naming, item_tree, limit_resident_trees, package_definitions,
+use {
+    salsa::{Database, Durability, Setter},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile,
+        diagnostics::{derive_from_syntax, file_diagnostics},
+        global_scheme, item_naming, item_tree, limit_resident_trees,
+        lints::{LintConfig, lint_file},
+        load_index::{PackageFile, PackageSources, package_index},
+        metadata::{PackageMetadata, attached_union},
+        package_definitions,
+        stubs::install_shipped_stubs,
+        testing::ProbeDatabase,
+        types::{Atomic, scalar, unknown},
+    },
+    std::{collections::BTreeMap, thread},
 };
-use std::collections::BTreeMap;
-use std::thread;
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
     for &file in files {

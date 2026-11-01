@@ -6,14 +6,16 @@
 //! Normal quantiles, normal tail areas and hypergeometric densities come from stats' own R
 //! functions, so they agree with every other use of them in a session.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    eval, random,
-    stats::{integer_values, real_values},
-    unwind::R,
-    values,
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        eval, random,
+        stats::{integer_values, real_values},
+        unwind::R,
+        values,
+    },
+    heap::object::{NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_REAL, Sexp, SexpType};
 
 /// Calls the stats function `name` (as the calling R code sees it) on numeric arguments and
 /// returns its value as doubles.
@@ -70,11 +72,16 @@ pub unsafe fn swilk(call: &NativeCall<'_>) -> R<Sexp> {
         let a1 = polynomial(&C1, reciprocal) - a[1] / root;
         let (first, factor) = if n > 5 {
             let a2 = -a[2] / root + polynomial(&C2, reciprocal);
-            let factor = ((sum_squares - 2.0 * (a[1] * a[1]) - 2.0 * (a[2] * a[2])) / (1.0 - 2.0 * (a1 * a1) - 2.0 * (a2 * a2))).sqrt();
+            let factor = ((sum_squares - 2.0 * (a[1] * a[1]) - 2.0 * (a[2] * a[2]))
+                / (1.0 - 2.0 * (a1 * a1) - 2.0 * (a2 * a2)))
+                .sqrt();
             a[2] = a2;
             (3, factor)
         } else {
-            (2, ((sum_squares - 2.0 * (a[1] * a[1])) / (1.0 - 2.0 * (a1 * a1))).sqrt())
+            (
+                2,
+                ((sum_squares - 2.0 * (a[1] * a[1])) / (1.0 - 2.0 * (a1 * a1))).sqrt(),
+            )
         };
         a[1] = a1;
         for coefficient in a.iter_mut().take(half + 1).skip(first) {
@@ -106,7 +113,11 @@ pub unsafe fn swilk(call: &NativeCall<'_>) -> R<Sexp> {
     let (mut ssa, mut ssx, mut sax) = (0.0, 0.0, 0.0);
     for i in 0..n {
         let j = n - 1 - i;
-        let asa = if i != j { sign(i as i64 - j as i64) * a[1 + i.min(j)] - sum_a } else { -sum_a };
+        let asa = if i != j {
+            sign(i as i64 - j as i64) * a[1 + i.min(j)] - sum_a
+        } else {
+            -sum_a
+        };
         let xsx = x[i] / range - sum_x;
         ssa += asa * asa;
         ssx += xsx * xsx;
@@ -156,7 +167,11 @@ pub unsafe fn p_kolmogorov_2x(call: &NativeCall<'_>) -> R<Sexp> {
         matrix[i * m] -= h.powi(i as i32 + 1);
         matrix[(m - 1) * m + i] -= h.powi((m - i) as i32);
     }
-    matrix[(m - 1) * m] += if 2.0 * h - 1.0 > 0.0 { (2.0 * h - 1.0).powi(m as i32) } else { 0.0 };
+    matrix[(m - 1) * m] += if 2.0 * h - 1.0 > 0.0 {
+        (2.0 * h - 1.0).powi(m as i32)
+    } else {
+        0.0
+    };
     for i in 0..m {
         for j in 0..m {
             if i + 1 > j {
@@ -224,7 +239,8 @@ pub unsafe fn p_ks2(call: &NativeCall<'_>) -> R<Sexp> {
     let k_max = (2.0 - tolerance.ln()).sqrt() as i64;
     for value in x.iter_mut() {
         if *value < 1.0 {
-            let z = -(std::f64::consts::FRAC_PI_2 * std::f64::consts::FRAC_PI_4) / (*value * *value);
+            let z =
+                -(std::f64::consts::FRAC_PI_2 * std::f64::consts::FRAC_PI_4) / (*value * *value);
             let w = value.ln();
             let mut sum = 0.0;
             let mut k = 1;
@@ -259,9 +275,12 @@ pub unsafe fn psmirnov_exact(call: &NativeCall<'_>) -> R<Sexp> {
     let m = values::as_integer_scalar(call.arg(1)).max(0) as usize;
     let n = values::as_integer_scalar(call.arg(2)).max(0) as usize;
     let ties = call.arg(3);
-    let checks: Option<Vec<bool>> = (ties != values::nil()).then(|| {
-        crate::stats::integer_values(ties).map(|entries| entries.iter().map(|&entry| entry != 0).collect())
-    }).transpose()?;
+    let checks: Option<Vec<bool>> = (ties != values::nil())
+        .then(|| {
+            crate::stats::integer_values(ties)
+                .map(|entries| entries.iter().map(|&entry| entry != 0).collect())
+        })
+        .transpose()?;
     let two_sided = values::as_logical_scalar(call.arg(4)) == 1;
     let lower_tail = values::as_logical_scalar(call.arg(5)) == 1;
     let (md, nd) = (m as f64, n as f64);
@@ -270,10 +289,18 @@ pub unsafe fn psmirnov_exact(call: &NativeCall<'_>) -> R<Sexp> {
         // The statistic is a multiple of 1 / lcm(m, n); compare on the integer scale with a
         // little slack so that rounding in `statistic` does not move a path across the band.
         let bound = statistic * md * nd - 1e-7;
-        let check = |i: usize, j: usize| checks.as_ref().is_none_or(|flags| flags.get(i + j).copied().unwrap_or(true));
+        let check = |i: usize, j: usize| {
+            checks
+                .as_ref()
+                .is_none_or(|flags| flags.get(i + j).copied().unwrap_or(true))
+        };
         let outside = |i: usize, j: usize| -> bool {
             let difference = i as f64 * nd - j as f64 * md;
-            let difference = if two_sided { difference.abs() } else { difference };
+            let difference = if two_sided {
+                difference.abs()
+            } else {
+                difference
+            };
             check(i, j) && difference >= bound
         };
         // `u[j]` is the probability that a random path reaches (i, j) inside the band.
@@ -286,7 +313,11 @@ pub unsafe fn psmirnov_exact(call: &NativeCall<'_>) -> R<Sexp> {
             let w = i as f64 / (i + n) as f64;
             u[0] = if outside(i, 0) { 0.0 } else { w * u[0] };
             for j in 1..=n {
-                u[j] = if outside(i, j) { 0.0 } else { w * u[j] + u[j - 1] };
+                u[j] = if outside(i, j) {
+                    0.0
+                } else {
+                    w * u[j] + u[j - 1]
+                };
             }
         }
         let below = u[n];
@@ -302,7 +333,9 @@ struct Ansari {
 
 impl Ansari {
     fn new(m: usize, n: usize) -> Ansari {
-        Ansari { counts: vec![vec![None; n + 1]; m + 1] }
+        Ansari {
+            counts: vec![vec![None; n + 1]; m + 1],
+        }
     }
 
     fn count(&mut self, k: i64, m: usize, n: usize) -> f64 {
@@ -314,7 +347,9 @@ impl Ansari {
         if self.counts[m][n].is_none() {
             self.counts[m][n] = Some(vec![-1.0; high as usize + 1]);
         }
-        let cached = self.counts[m][n].as_ref().map_or(-1.0, |table| table[k as usize]);
+        let cached = self.counts[m][n]
+            .as_ref()
+            .map_or(-1.0, |table| table[k as usize]);
         if cached >= 0.0 {
             return cached;
         }
@@ -439,7 +474,10 @@ pub unsafe fn p_kendall(call: &NativeCall<'_>) -> R<Sexp> {
             } else if q > high {
                 1.0
             } else {
-                (0..=q as i64).map(|k| count(k, n, &mut tables)).sum::<f64>() / factorial
+                (0..=q as i64)
+                    .map(|k| count(k, n, &mut tables))
+                    .sum::<f64>()
+                    / factorial
             }
         })
         .collect();
@@ -480,10 +518,14 @@ unsafe fn prho(call: &NativeCall<'_>, n: i32, s: f64, lower_tail: bool) -> R<f64
         let mut at_least = 0u64;
         loop {
             total += 1;
-            let sum: f64 = permutation.iter().enumerate().map(|(i, &p)| {
-                let difference = (i + 1) as f64 - p as f64;
-                difference * difference
-            }).sum();
+            let sum: f64 = permutation
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| {
+                    let difference = (i + 1) as f64 - p as f64;
+                    difference * difference
+                })
+                .sum();
             if s <= sum {
                 at_least += 1;
             }
@@ -491,19 +533,32 @@ unsafe fn prho(call: &NativeCall<'_>, n: i32, s: f64, lower_tail: bool) -> R<f64
                 break;
             }
         }
-        let count = if lower_tail { total - at_least } else { at_least };
+        let count = if lower_tail {
+            total - at_least
+        } else {
+            at_least
+        };
         return Ok(count as f64 / total as f64);
     }
-    const C: [f64; 12] = [0.2274, 0.2531, 0.1745, 0.0758, 0.1033, 0.3932, 0.0879, 0.0151, 0.0072, 0.0831, 0.0131, 4.6e-4];
+    const C: [f64; 12] = [
+        0.2274, 0.2531, 0.1745, 0.0758, 0.1033, 0.3932, 0.0879, 0.0151, 0.0072, 0.0831, 0.0131,
+        4.6e-4,
+    ];
     let b = 1.0 / size;
     let x = (6.0 * (s - 1.0) * b / (size * size - 1.0) - 1.0) * (1.0 / b - 1.0).sqrt();
     let mut y = x * x;
     let u = x
         * b
-        * (C[0] + b * (C[1] + C[2] * b)
-            + y * (-C[3] + b * (C[4] + C[5] * b) - y * b * (C[6] + C[7] * b - y * (C[8] - C[9] * b + y * b * (C[10] - C[11] * y)))));
+        * (C[0]
+            + b * (C[1] + C[2] * b)
+            + y * (-C[3] + b * (C[4] + C[5] * b)
+                - y * b * (C[6] + C[7] * b - y * (C[8] - C[9] * b + y * b * (C[10] - C[11] * y)))));
     y = u / (y / 2.0).exp();
-    let tail = stats_function(call, "pnorm", &[&[x], &[0.0], &[1.0], &[if lower_tail { 1.0 } else { 0.0 }]])?[0];
+    let tail = stats_function(
+        call,
+        "pnorm",
+        &[&[x], &[0.0], &[1.0], &[if lower_tail { 1.0 } else { 0.0 }]],
+    )?[0];
     let p = if lower_tail { tail - y } else { y + tail };
     Ok(p.clamp(0.0, 1.0))
 }
@@ -543,7 +598,11 @@ pub unsafe fn d2x2xk(call: &NativeCall<'_>) -> R<Sexp> {
         let low = (t[stratum] - n[stratum]).max(0.0) as i64;
         let high = m[stratum].min(t[stratum]) as i64;
         let support: Vec<f64> = (low..=high).map(|value| value as f64).collect();
-        let weights = stats_function(call, "dhyper", &[&support, &[m[stratum]], &[n[stratum]], &[t[stratum]]])?;
+        let weights = stats_function(
+            call,
+            "dhyper",
+            &[&support, &[m[stratum]], &[n[stratum]], &[t[stratum]]],
+        )?;
         let mut next = vec![0.0; density.len() + support.len() - 1];
         for (j, &weight) in weights.iter().enumerate() {
             for (w, &value) in density.iter().enumerate() {
@@ -568,7 +627,12 @@ pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
     random::get_rng_state()?;
     for _ in 0..replicates {
         let table = random_table(call, &margins, &log_factorials)?;
-        statistics.push(-table.iter().map(|&cell| log_factorials[cell as usize]).sum::<f64>());
+        statistics.push(
+            -table
+                .iter()
+                .map(|&cell| log_factorials[cell as usize])
+                .sum::<f64>(),
+        );
     }
     random::put_rng_state()?;
     values::real_vector(&statistics)
@@ -613,7 +677,8 @@ pub unsafe fn r2dtable(call: &NativeCall<'_>) -> R<Sexp> {
     for index in 0..count as usize {
         let table = random_table(call, &margins, &log_factorials)?;
         let matrix = values::integer_vector(&table)?;
-        let dim = values::integer_vector(&[margins.rows.len() as i32, margins.columns.len() as i32])?;
+        let dim =
+            values::integer_vector(&[margins.rows.len() as i32, margins.columns.len() as i32])?;
         values::set_attr(matrix, values::symbols().dim, dim)?;
         values::set_elt(result, index, matrix);
     }
@@ -643,7 +708,11 @@ impl TableMargins {
         if total != columns.iter().map(|&count| i64::from(count)).sum::<i64>() {
             return Err(call.error("arguments 'r' and 'c' must have the same sums"));
         }
-        Ok(TableMargins { rows, columns, total: total as usize })
+        Ok(TableMargins {
+            rows,
+            columns,
+            total: total as usize,
+        })
     }
 }
 
@@ -663,11 +732,19 @@ fn log_factorials(n: usize) -> Vec<f64> {
 /// distribution given the cells already fixed. The search for the drawn value starts at the
 /// distribution's mode and widens one step up and one step down alternately, so a cell costs
 /// one uniform deviate unless rounding leaves the accumulated probability short of it.
-unsafe fn random_table(call: &NativeCall<'_>, margins: &TableMargins, log_factorials: &[f64]) -> R<Vec<i32>> {
+unsafe fn random_table(
+    call: &NativeCall<'_>,
+    margins: &TableMargins,
+    log_factorials: &[f64],
+) -> R<Vec<i32>> {
     let row_count = margins.rows.len();
     let column_count = margins.columns.len();
     let mut table = vec![0; row_count * column_count];
-    let mut columns_left: Vec<i64> = margins.columns.iter().map(|&count| i64::from(count)).collect();
+    let mut columns_left: Vec<i64> = margins
+        .columns
+        .iter()
+        .map(|&count| i64::from(count))
+        .collect();
     let mut rows_below = margins.total as i64;
     let factorial = |k: i64| log_factorials.get(k as usize).copied().unwrap_or(0.0);
     for row in 0..row_count - 1 {
@@ -684,15 +761,19 @@ unsafe fn random_table(call: &NativeCall<'_>, margins: &TableMargins, log_factor
                 break;
             }
             let probability = |value: i64| {
-                (factorial(row_left) + factorial(below) + factorial(block) + factorial(column_total)
+                (factorial(row_left)
+                    + factorial(below)
+                    + factorial(block)
+                    + factorial(column_total)
                     - factorial(remaining)
                     - factorial(value)
                     - factorial(column_total - value)
                     - factorial(row_left - value)
                     - factorial(corner + value))
-                    .exp()
+                .exp()
             };
-            let mode = (row_left as f64 * column_total as f64 / remaining as f64 + 0.5).floor() as i64;
+            let mode =
+                (row_left as f64 * column_total as f64 / remaining as f64 + 0.5).floor() as i64;
             let mut target = random::unif_rand()?;
             let value = loop {
                 let at_mode = probability(mode);
@@ -720,8 +801,8 @@ unsafe fn random_table(call: &NativeCall<'_>, margins: &TableMargins, log_factor
                     let down_factor = down * (corner + down);
                     if down_factor > 0 {
                         down -= 1;
-                        down_probability *=
-                            down_factor as f64 / ((column_total - down) as f64 * (row_left - down) as f64);
+                        down_probability *= down_factor as f64
+                            / ((column_total - down) as f64 * (row_left - down) as f64);
                         accumulated += down_probability;
                         if accumulated >= target {
                             drawn = Some(down);

@@ -1,14 +1,16 @@
-use hashbrown::HashTable;
-use rustc_hash::{FxBuildHasher, FxHashMap};
-use std::fmt;
-use std::hash::{BuildHasher, Hash, Hasher};
-use std::iter;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::{LazyLock, Mutex};
-
-use crate::Db;
-use crate::hir::Symbol;
+use {
+    crate::{Db, hir::Symbol},
+    hashbrown::HashTable,
+    rustc_hash::{FxBuildHasher, FxHashMap},
+    std::{
+        fmt,
+        hash::{BuildHasher, Hash, Hasher},
+        iter,
+        marker::PhantomData,
+        mem,
+        sync::{LazyLock, Mutex},
+    },
+};
 
 /// A name in a type (a type name, a field, a tag, a type parameter). It is a process-wide
 /// [`Symbol`], so equality is an index comparison and no database is consulted. The lifetime
@@ -162,7 +164,10 @@ pub enum FrameKind {
     LazyFrame,
     /// `DataFrame.group_by` or `LazyFrame.group_by`. The first `keys` columns are the group keys,
     /// rendered before a `;`, and the rest are the columns `GroupBy.agg` aggregates.
-    GroupBy { lazy: bool, keys: u32 },
+    GroupBy {
+        lazy: bool,
+        keys: u32,
+    },
     /// A data.table whose columns are known, from `fread` and the rest of data.table's readers.
     DataTable,
 }
@@ -183,8 +188,14 @@ impl FrameKind {
         Some(match head {
             "DataFrame" => FrameKind::DataFrame,
             "LazyFrame" => FrameKind::LazyFrame,
-            "GroupBy" => FrameKind::GroupBy { lazy: false, keys: 0 },
-            "LazyGroupBy" => FrameKind::GroupBy { lazy: true, keys: 0 },
+            "GroupBy" => FrameKind::GroupBy {
+                lazy: false,
+                keys: 0,
+            },
+            "LazyGroupBy" => FrameKind::GroupBy {
+                lazy: true,
+                keys: 0,
+            },
             "data.table" => FrameKind::DataTable,
             _ => return None,
         })
@@ -574,15 +585,18 @@ fn mapped_kind<'db>(
         )),
         TyKind::Tag(name, payload) => Some(TyKind::Tag(*name, payload.map(&mut *map))),
         TyKind::Frame(_, None) => None,
-        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(*kind, Some(
-            columns
-                .iter()
-                .map(|column| RecordField {
-                    ty: map(column.ty),
-                    ..column.clone()
-                })
-                .collect(),
-        ))),
+        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(
+            *kind,
+            Some(
+                columns
+                    .iter()
+                    .map(|column| RecordField {
+                        ty: map(column.ty),
+                        ..column.clone()
+                    })
+                    .collect(),
+            ),
+        )),
         TyKind::Function(function) => Some(TyKind::Function(FunctionType {
             positional: function.positional.iter().map(|&ty| map(ty)).collect(),
             named: function
@@ -738,8 +752,7 @@ fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
+    use {super::*, crate::RootDatabase};
 
     #[test]
     fn size_counts_the_tree_not_the_shared_graph() {
@@ -776,7 +789,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: scalar(&db, Atomic::Integer),
                     optional: true,
                     default: Some(var),

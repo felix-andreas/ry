@@ -10,29 +10,45 @@
 //! ships, so it is written here from its description: Householder QR whose column pivoting only
 //! moves a column to the end once its remaining norm falls below `tol` times its original norm.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
-    coerce::coerce_vector,
-    conditions,
-    unwind::{R, error},
-    values::{
-        self, alloc, complexes, complexes_mut, dims, get_attr, ints, ints_mut, length, nil, reals,
-        reals_mut, symbols,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
+        coerce::coerce_vector,
+        conditions,
+        unwind::{R, error},
+        values::{
+            self, alloc, complexes, complexes_mut, dims, get_attr, ints, ints_mut, length, nil,
+            reals, reals_mut, symbols,
+        },
     },
-};
-use heap::object::{Rcomplex, Sexp, SexpType, gp};
-use std::{
-    ffi::{CStr, c_char, c_void},
-    sync::OnceLock,
+    heap::object::{Rcomplex, Sexp, SexpType, gp},
+    std::{
+        ffi::{CStr, c_char, c_void},
+        sync::OnceLock,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("%*%", 2, |call| unsafe {
         // R 4.3's `%*%` dispatches S4 methods, positionally, when either operand is an S4
         // object, and never S3 ones.
-        if call.args.iter().take(2).any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
-            let positional: Vec<Arg> = call.args.iter().map(|arg| Arg { tag: nil(), value: arg.value }).collect();
-            if let Some(value) = crate::dispatch::s4_dispatch(call.op, call.call, &positional, call.env)? {
+        if call
+            .args
+            .iter()
+            .take(2)
+            .any(|arg| arg.value.has_gp(gp::S4_OBJECT))
+        {
+            let positional: Vec<Arg> = call
+                .args
+                .iter()
+                .map(|arg| Arg {
+                    tag: nil(),
+                    value: arg.value,
+                })
+                .collect();
+            if let Some(value) =
+                crate::dispatch::s4_dispatch(call.op, call.call, &positional, call.env)?
+            {
                 return Ok(value);
             }
         }
