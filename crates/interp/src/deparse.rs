@@ -321,11 +321,22 @@ impl Deparser {
             SexpType::Char => self.print(&format::encode_element(object, Some('"'))),
             SexpType::Language => self.language(object),
             SexpType::Pairlist | SexpType::Dots => {
-                self.print("pairlist(");
+                // `pairlist()` evaluates its arguments, so an empty one only survives `alist()`.
+                let mut has_missing = false;
+                let mut cell = object;
+                while matches!(cell.kind(), SexpType::Pairlist | SexpType::Dots) {
+                    has_missing |= cell.car() == values::missing_arg();
+                    cell = cell.cdr();
+                }
+                self.print(if has_missing {
+                    "as.pairlist(alist("
+                } else {
+                    "pairlist("
+                });
                 self.in_list += 1;
                 self.arguments(object, false);
                 self.in_list -= 1;
-                self.print(")");
+                self.print(if has_missing { "))" } else { ")" });
             }
             SexpType::List => self.list(object, "list("),
             SexpType::Expression => match self.expression_srcrefs(object) {
@@ -1135,18 +1146,7 @@ impl Deparser {
                 .all(|value| is_na_real(value.r)),
             _ => false,
         };
-        // Whole doubles keep their type through `as.double` only when some element shows it.
-        let surround_double = kind == SexpType::Real
-            && keep_integer
-            && !all_na
-            && values::reals(vector)
-                .iter()
-                .all(|&value| !value.is_finite() || (value.fract() == 0.0 && value.abs() < 1e15))
-            && false;
         let wrap = count > 1 || nice;
-        if surround_double {
-            self.print("as.double(");
-        }
         if wrap {
             self.print("c(");
         }
@@ -1188,16 +1188,10 @@ impl Deparser {
                             "NA".to_owned()
                         }
                     } else {
-                        let digits = if self.opts & options::DIGITS17 != 0 {
-                            17
+                        if self.opts & options::DIGITS17 != 0 {
+                            format::c_general(value, 17, false)
                         } else {
-                            15
-                        };
-                        let text = format::format_real_alone(value, digits);
-                        if keep_integer && kind == SexpType::Real && false {
-                            text
-                        } else {
-                            text
+                            format::format_real_alone(value, 15)
                         }
                     }
                 }
@@ -1222,6 +1216,14 @@ impl Deparser {
                             "complex(real={}, imaginary={})",
                             part(value.r),
                             part(value.i)
+                        )
+                    } else if self.opts & options::DIGITS17 != 0 {
+                        // GNU R writes each part with `%.17g`, so the value parses back exactly.
+                        let imaginary = format::c_general(value.i, 17, false);
+                        let sign = if imaginary.starts_with('-') { "" } else { "+" };
+                        format!(
+                            "{}{sign}{imaginary}i",
+                            format::c_general(value.r, 17, false)
                         )
                     } else {
                         format::format_complex_alone(value, 15)
@@ -1250,9 +1252,6 @@ impl Deparser {
             if self.length > self.cutoff {
                 self.write_line();
             }
-            self.print(")");
-        }
-        if surround_double {
             self.print(")");
         }
     }

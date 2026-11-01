@@ -4,7 +4,9 @@
 use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     coerce::{self, coerce_vector},
-    conditions, rmath,
+    conditions,
+    long_double::LongDouble,
+    rmath,
     unwind::{R, error},
     values::{
         self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -319,7 +321,7 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     let inner = if rows { col_count } else { row_count };
     let result = alloc(SexpType::Real, outer)?;
     for position in 0..outer {
-        let mut total = CompensatedSum::default();
+        let mut total = LongDouble::ZERO;
         let mut counted = 0usize;
         for along in 0..inner {
             let index = if rows {
@@ -331,11 +333,14 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             if value.is_nan() && na_rm {
                 continue;
             }
-            total.add(value);
+            total += value;
             counted += 1;
         }
-        let sum = total.total();
-        values::reals_mut(result)[position] = if mean { sum / counted as f64 } else { sum };
+        values::reals_mut(result)[position] = if mean {
+            (total / counted).to_f64()
+        } else {
+            total.to_f64()
+        };
     }
     Ok(result)
 }
@@ -373,8 +378,13 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
                 interval = 1;
             }
         }
-        if all_inside {
-            interval = interval.clamp(1, count as i32 - 1);
+        // An empty `vec` has no inside, so every point stays in interval 0.
+        if all_inside && count > 0 {
+            if interval == 0 {
+                interval = 1;
+            } else if interval == count as i32 {
+                interval = count as i32 - 1;
+            }
         }
         values::ints_mut(result)[index] = interval;
     }
@@ -668,7 +678,7 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
 /// operand as long as the result, and other attributes are copied from both, the first taking
 /// precedence.
 pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
-    check_conformable(left, right, call)?;
+    check_conformable(left, right, call, true)?;
     let result_length = length(result);
     let left_attributes = left.attrib() != nil();
     let right_attributes = right.attrib() != nil();
@@ -687,7 +697,7 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
 /// The attributes a comparison or a binary `&` and `|` keep, which GNU R limits to the
 /// operands' names, dimensions and dimension names, plus a time series' `tsp` and class.
 pub unsafe fn relational_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
-    check_conformable(left, right, call)?;
+    check_conformable(left, right, call, false)?;
     if left.attrib() == nil() && right.attrib() == nil() {
         return Ok(());
     }
@@ -703,7 +713,7 @@ pub unsafe fn relational_attributes(left: Sexp, right: Sexp, result: Sexp, call:
     Ok(())
 }
 
-unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
+unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp, arithmetic: bool) -> R<()> {
     let left_dims = get_attr(left, symbols().dim);
     let right_dims = get_attr(right, symbols().dim);
     if left_dims != nil() && right_dims != nil() {
@@ -720,7 +730,15 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
     for (array, dims, other) in [(left, left_dims, right), (right, right_dims, left)] {
         // A zero-length operand makes the result zero-length, so a zero-length array is never
         // too short.
-        if dims != nil() && length(array) > 1 && length(other) > length(array) {
+        // GNU R still recycles a one-element array in arithmetic, with a deprecation warning.
+        if dims != nil() && arithmetic && length(array) == 1 && length(other) > 1 {
+            crate::conditions::warning_call(
+                call,
+                "Recycling array of length 1 in array-vector arithmetic is deprecated.\n  Use c() or as.vector() instead.\n",
+            )?;
+            continue;
+        }
+        if dims != nil() && length(array) > 0 && length(other) > length(array) {
             return Err(crate::unwind::error_in(
                 call,
                 format!(
@@ -2055,33 +2073,6 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
     Ok((items, na_rm))
 }
 
-/// Neumaier's compensated sum, which tracks GNU R's extended-precision accumulator.
-#[derive(Default)]
-pub struct CompensatedSum {
-    sum: f64,
-    compensation: f64,
-}
-
-impl CompensatedSum {
-    pub fn add(&mut self, value: f64) {
-        let total = self.sum + value;
-        if self.sum.abs() >= value.abs() {
-            self.compensation += (self.sum - total) + value;
-        } else {
-            self.compensation += (value - total) + self.sum;
-        }
-        self.sum = total;
-    }
-
-    pub fn total(&self) -> f64 {
-        if self.sum.is_finite() {
-            self.sum + self.compensation
-        } else {
-            self.sum
-        }
-    }
-}
-
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
     let (mut items, na_rm) = summary_args(call)?;
     // NULL contributes no values, and the typed loops below read vectors' payloads directly.
@@ -2119,7 +2110,7 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 return values::scalar_complex(total);
             }
             if kind == SexpType::Real {
-                let mut total = CompensatedSum::default();
+                let mut total = LongDouble::ZERO;
                 let mut na = false;
                 for &item in &items {
                     for index in 0..length(item) {
@@ -2132,10 +2123,10 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                                 na = true;
                             }
                         }
-                        total.add(value);
+                        total += value;
                     }
                 }
-                return scalar_real(if na { NA_REAL } else { total.total() });
+                return scalar_real(if na { NA_REAL } else { total.to_f64() });
             }
             let mut total: i64 = 0;
             for &item in &items {
@@ -2173,6 +2164,12 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             if kind == SexpType::String {
                 let mut best: Option<String> = None;
                 for &item in &items {
+                    // GNU R turns a logical into a string through its integer value.
+                    let item = if item.kind() == SexpType::Logical {
+                        coerce_vector(item, SexpType::Integer)?
+                    } else {
+                        item
+                    };
                     let strings = coerce_vector(item, SexpType::String)?;
                     for index in 0..length(strings) {
                         match values::string_at(strings, index) {
@@ -2394,20 +2391,7 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             scalar_real(total / count as f64)
         }
         SexpType::Real => {
-            let data = values::reals(operand);
-            let mut total = CompensatedSum::default();
-            for &value in data {
-                total.add(value);
-            }
-            let mean = total.total() / count as f64;
-            if !mean.is_finite() {
-                return scalar_real(mean);
-            }
-            let mut correction = CompensatedSum::default();
-            for &value in data {
-                correction.add(value - mean);
-            }
-            scalar_real(mean + correction.total() / count as f64)
+            scalar_real(long_double_mean(values::reals(operand).iter().copied()).to_f64())
         }
         SexpType::Complex => {
             let mut total = Rcomplex { r: 0.0, i: 0.0 };
@@ -2425,6 +2409,26 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             operand.kind().name()
         ))),
     }
+}
+
+/// GNU R's mean of doubles: the `long double` sum divided by the count, refined by the mean of
+/// the deviations from it unless it overflowed.
+pub fn long_double_mean(data: impl Iterator<Item = f64> + Clone) -> LongDouble {
+    let mut count = 0;
+    let mut total = LongDouble::ZERO;
+    for value in data.clone() {
+        total += value;
+        count += 1;
+    }
+    let mean = total / count;
+    if !mean.is_finite() {
+        return mean;
+    }
+    let mut deviations = LongDouble::ZERO;
+    for value in data {
+        deviations = deviations + (LongDouble::from(value) - mean);
+    }
+    mean + deviations / count
 }
 
 // NA tests.
@@ -2820,7 +2824,13 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
     let object = present(matched[0]).unwrap_or(nil());
-    let times = present(matched[1]);
+    let times = match present(matched[1]) {
+        // A list of counts works like the vector of them, as in GNU R.
+        Some(times) if times.kind() == SexpType::List => {
+            Some(coerce_vector(times, SexpType::Real)?)
+        }
+        other => other,
+    };
     let length_out = present(matched[2])
         .map(|value| values::as_real_scalar(value))
         .filter(|value| !value.is_nan());
@@ -2902,7 +2912,7 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     let object = values::materialize(call.arg(0))?;
-    let times = call.arg(1);
+    let times = coerce_vector(call.arg(1), SexpType::Real)?;
     let count = length(object);
     let mut indices = Vec::new();
     if length(times) == 1 {

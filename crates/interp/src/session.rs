@@ -62,7 +62,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     eval_text(".OptRequireMethods()", global_env())?;
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;
-    conditions::print_warnings();
+    conditions::print_warnings()?;
     Ok(())
 }
 
@@ -410,7 +410,9 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();
-    conditions::print_warnings();
+    if let Err(unwind) = conditions::print_warnings() {
+        report_toplevel(unwind);
+    }
     // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
     let visible = interp().visible;
     if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
@@ -420,7 +422,9 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;
     }
-    conditions::print_warnings();
+    if let Err(unwind) = conditions::print_warnings() {
+        report_toplevel(unwind);
+    }
     crate::heap().release_handles(mark);
     succeeded
 }

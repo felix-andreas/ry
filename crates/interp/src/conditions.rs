@@ -192,7 +192,9 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
-            print_warnings();
+            if let Err(unwind) = print_warnings() {
+                return unwind;
+            }
         }
     }
     let mut outcome = jump(Jump::TopLevel);
@@ -370,10 +372,10 @@ unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
 }
 
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
-pub unsafe fn print_warnings() {
+pub unsafe fn print_warnings() -> R<()> {
     let warnings = std::mem::take(&mut interp().warnings);
     if warnings.is_empty() {
-        return;
+        return Ok(());
     }
     let mut text = String::new();
     if warnings.len() == 1 {
@@ -419,12 +421,14 @@ pub unsafe fn print_warnings() {
         }
     }
     write_console(text.as_bytes(), true);
-    let last = values::install("last.warning");
-    if let Ok(last) = last {
-        let items: Vec<(&str, Sexp)> = Vec::new();
-        drop(items);
-        drop(last);
-    }
+    // `warnings()` reads the printed warnings back from `last.warning` in the base environment.
+    let items: Vec<(&str, Sexp)> = warnings
+        .iter()
+        .map(|(call, message)| (message.as_str(), *call))
+        .collect();
+    let last = values::named_list(&items)?;
+    crate::heap().define(values::base_env(), values::install("last.warning")?, last)?;
+    Ok(())
 }
 
 // The internals.
@@ -445,7 +449,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".invokeRestart", 2, do_invoke_restart),
     internal(".addTryHandlers", 0, |_| unsafe { Ok(nil()) }).invisible(),
     internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
-    internal("warnings", 0, |_| unsafe { Ok(nil()) }),
     internal("interruptsSuspended", -1, |_| unsafe {
         values::scalar_bool(false)
     }),
@@ -620,7 +623,7 @@ unsafe fn do_seterrmessage(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_print_deferred_warnings(_call: &Call<'_>) -> R<Sexp> {
     if !interp().warnings.is_empty() {
         write_console(b"In addition: ", true);
-        print_warnings();
+        print_warnings()?;
     }
     Ok(nil())
 }

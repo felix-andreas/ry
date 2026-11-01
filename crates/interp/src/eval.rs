@@ -1947,8 +1947,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
             env = crate::envir::sys_frame(which, call.env)?;
         }
         _ => {
-            return Err(call
-                .error("invalid 'envir' argument of type '".to_string() + env.kind().name() + "'"));
+            return Err(call.error(
+                "invalid 'envir' argument of type '".to_string() + env.kind().name() + "'",
+            ));
         }
     }
     // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame

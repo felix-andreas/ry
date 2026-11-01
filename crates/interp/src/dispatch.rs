@@ -1048,8 +1048,21 @@ unsafe fn group_dispatch(
     }
     let (_, position) = match (found.first(), found.get(1)) {
         (Some(Some(left)), Some(Some(right))) => {
+            let left_name = symbol_name(left.method_name);
+            let right_name = symbol_name(right.method_name);
+            // GNU R lets date-time arithmetic win over `Ops.difftime`, so a date plus a
+            // difftime stays a date.
+            let date_arithmetic = |name: &str, minus: bool| {
+                name == "+.POSIXt"
+                    || name == "+.Date"
+                    || minus && (name == "-.POSIXt" || name == "-.Date")
+            };
             if left.method == right.method {
                 (0, 0)
+            } else if right_name == "Ops.difftime" && date_arithmetic(&left_name, true) {
+                (0, 0)
+            } else if left_name == "Ops.difftime" && date_arithmetic(&right_name, false) {
+                (1, 1)
             } else if choose_ops_method(call, args, left, right, false)? {
                 (0, 0)
             } else if choose_ops_method(call, args, right, left, true)? {

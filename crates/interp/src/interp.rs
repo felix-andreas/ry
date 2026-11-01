@@ -42,6 +42,7 @@ pub mod frame;
 pub mod graphics;
 pub mod graphics_render;
 pub mod linalg;
+pub mod long_double;
 pub mod lower;
 pub mod methods;
 pub mod native;

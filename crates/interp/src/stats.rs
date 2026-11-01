@@ -8,10 +8,13 @@
 //! GNU R to the last printed digit.
 
 use crate::{
+    arith,
     builtin_libraries::{NativeCall, NativeFn, c_result},
     coerce::coerce_vector,
-    linalg, stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize,
-    stats_port, stats_tests,
+    linalg,
+    long_double::LongDouble,
+    stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize, stats_port,
+    stats_tests,
     unwind::R,
     values::{self, length, symbols},
 };
@@ -73,6 +76,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pp_sum", pp_sum),
     ("TSconv", ts_conv),
     ("isoreg", isoreg),
+    ("tukeyline", tukeyline),
     ("cutree", stats_cluster::cutree),
     ("kmeans_Lloyd", stats_cluster::kmeans_lloyd),
     ("kmeans_MacQueen", stats_cluster::kmeans_macqueen),
@@ -466,7 +470,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             for j in 0..y_columns {
                 if !missing_x[i] && !missing_y[j] {
                     result[i + j * x_columns] =
-                        complete_covariance(&x_data[i], &y_data[j], &used, kendall);
+                        complete_covariance(&x_data[i], &y_data[j], &used, kendall).to_f64();
                 }
             }
         }
@@ -478,7 +482,9 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                         if absent {
                             NA_REAL
                         } else {
-                            complete_covariance(column, column, &used, kendall).sqrt()
+                            complete_covariance(column, column, &used, kendall)
+                                .sqrt()
+                                .to_f64()
                         }
                     })
                     .collect()
@@ -537,62 +543,13 @@ unsafe fn column_names(x: Sexp) -> Sexp {
     }
 }
 
-/// A sum accumulated with an error term, standing in for the 80-bit `long double` GNU R sums
-/// in, so that rounding agrees in the last digit.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Accumulator {
-    high: f64,
-    low: f64,
-}
-
-impl Accumulator {
-    pub(crate) fn add(&mut self, value: f64) {
-        let sum = self.high + value;
-        let error = if self.high.abs() >= value.abs() {
-            (self.high - sum) + value
-        } else {
-            (value - sum) + self.high
-        };
-        self.high = sum;
-        self.low += error;
-    }
-
-    pub(crate) fn value(self) -> f64 {
-        self.high + self.low
-    }
-
-    pub(crate) fn divided(self, divisor: f64) -> f64 {
-        let quotient = self.high / divisor;
-        let remainder = (-quotient).mul_add(divisor, self.high);
-        quotient + (remainder + self.low) / divisor
-    }
-}
-
-/// The mean of the used entries, refined by a second pass over the deviations.
-fn refined_mean(data: &[f64], used: &[bool]) -> f64 {
-    let count = used.iter().filter(|&&flag| flag).count() as f64;
-    let mut sum = Accumulator::default();
-    for (value, _) in data.iter().zip(used).filter(|(_, flag)| **flag) {
-        sum.add(*value);
-    }
-    let mean = sum.divided(count);
-    if !mean.is_finite() {
-        return mean;
-    }
-    let mut correction = Accumulator::default();
-    for (value, _) in data.iter().zip(used).filter(|(_, flag)| **flag) {
-        correction.add(value - mean);
-    }
-    mean + correction.divided(count)
-}
-
 /// The covariance of two columns over the used rows, or Kendall's sum of concordance signs.
-fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> f64 {
+fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> LongDouble {
     let count = used.iter().filter(|&&flag| flag).count();
     if count < 2 {
-        return NA_REAL;
+        return LongDouble::from(NA_REAL);
     }
-    let mut sum = Accumulator::default();
+    let mut sum = LongDouble::ZERO;
     if kendall {
         for k in 0..x.len() {
             if !used[k] {
@@ -600,20 +557,27 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> f6
             }
             for other in 0..x.len() {
                 if used[other] {
-                    sum.add(sign(x[k] - x[other]) * sign(y[k] - y[other]));
+                    sum += sign(x[k] - x[other]) * sign(y[k] - y[other]);
                 }
             }
         }
-        return sum.value();
+        return sum;
     }
-    let x_mean = refined_mean(x, used);
-    let y_mean = refined_mean(y, used);
+    let x_mean = arith::long_double_mean(used_values(x, used));
+    let y_mean = arith::long_double_mean(used_values(y, used));
     for k in 0..x.len() {
         if used[k] {
-            sum.add((x[k] - x_mean) * (y[k] - y_mean));
+            sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
         }
     }
-    sum.divided((count - 1) as f64)
+    sum / (count - 1)
+}
+
+fn used_values<'a>(data: &'a [f64], used: &'a [bool]) -> impl Iterator<Item = f64> + Clone + 'a {
+    data.iter()
+        .zip(used)
+        .filter(|(_, flag)| **flag)
+        .map(|(value, _)| *value)
 }
 
 /// One entry of a pairwise-complete `cov` or `cor`.
@@ -625,12 +589,12 @@ fn pair_statistic(
     kendall: bool,
     zero_deviation: &mut bool,
 ) -> f64 {
-    let covariance = complete_covariance(x, y, used, kendall);
+    let covariance = complete_covariance(x, y, used, kendall).to_f64();
     if !correlate || covariance.is_nan() {
         return covariance;
     }
-    let x_scale = complete_covariance(x, x, used, kendall).sqrt();
-    let y_scale = complete_covariance(y, y, used, kendall).sqrt();
+    let x_scale = complete_covariance(x, x, used, kendall).sqrt().to_f64();
+    let y_scale = complete_covariance(y, y, used, kendall).sqrt().to_f64();
     if x_scale == 0.0 || y_scale == 0.0 {
         *zero_deviation = true;
         return NA_REAL;
@@ -721,7 +685,7 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
                 }
                 3 => (a - b).abs(),
                 4 => {
-                    let sum = (a + b).abs();
+                    let sum = a.abs() + b.abs();
                     let difference = (a - b).abs();
                     if sum > f64::MIN_POSITIVE || difference > f64::MIN_POSITIVE {
                         let ratio = difference / sum;
@@ -2226,6 +2190,68 @@ unsafe fn isoreg(call: &NativeCall<'_>) -> R<Sexp> {
         ("yf", values::real_vector(&fitted)?),
         ("iKnots", values::integer_vector(&knots)?),
     ])
+}
+
+/// `tukeyline(x, y, iter, call)`: Tukey's resistant line. The outer thirds are the points at or
+/// beyond the 1/3 and 2/3 quantiles of `x`, each quantile the mean of the order statistics at
+/// the floor and ceiling of `p (n - 1)`. Each iteration adds the slope through the medians of
+/// the current residuals in the outer thirds, and the intercept is the residuals' median.
+unsafe fn tukeyline(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = values::reals(as_reals(call.arg(0))?).to_vec();
+    let y = values::reals(as_reals(call.arg(1))?).to_vec();
+    let iterations = values::as_integer_scalar(call.arg(2)).max(1);
+    let n = x.len().min(y.len());
+    let mut sorted = x[..n].to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let quantile = |probability: f64| {
+        let position = probability * n.saturating_sub(1) as f64;
+        let at = |index: f64| sorted.get(index as usize).copied().unwrap_or(f64::NAN);
+        (at(position.floor()) + at(position.ceil())) / 2.0
+    };
+    let (lower, upper) = (quantile(1.0 / 3.0), quantile(2.0 / 3.0));
+    let left: Vec<usize> = (0..n).filter(|&index| x[index] <= lower).collect();
+    let right: Vec<usize> = (0..n).filter(|&index| x[index] >= upper).collect();
+    let median_of = |values: &[f64], indices: &[usize]| {
+        median(
+            &mut indices
+                .iter()
+                .map(|&index| values[index])
+                .collect::<Vec<_>>(),
+        )
+    };
+    let x_spread = median_of(&x, &right) - median_of(&x, &left);
+    let mut slope = 0.0;
+    let mut residuals = y[..n].to_vec();
+    for _ in 0..iterations {
+        slope += (median_of(&residuals, &right) - median_of(&residuals, &left)) / x_spread;
+        for index in 0..n {
+            residuals[index] = y[index] - slope * x[index];
+        }
+    }
+    let intercept = median(&mut residuals.clone());
+    let fitted: Vec<f64> = x[..n]
+        .iter()
+        .map(|&value| intercept + slope * value)
+        .collect();
+    for index in 0..n {
+        residuals[index] = y[index] - fitted[index];
+    }
+    values::named_list(&[
+        ("call", call.arg(3)),
+        ("coefficients", values::real_vector(&[intercept, slope])?),
+        ("residuals", values::real_vector(&residuals)?),
+        ("fitted.values", values::real_vector(&fitted)?),
+    ])
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let count = values.len();
+    match count {
+        0 => f64::NAN,
+        _ if count % 2 == 1 => values[count / 2],
+        _ => (values[count / 2 - 1] + values[count / 2]) / 2.0,
+    }
 }
 
 /// `.C(HoltWinters, x, xl, alpha, beta, gamma, start.time, seasonal, period, dotrend,

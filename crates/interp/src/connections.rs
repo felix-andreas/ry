@@ -540,9 +540,21 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
     let open = values::require_string(call.arg(1), "open")?;
     let blocking = values::require_flag(call.arg(2), "blocking")?;
-    let raw = values::require_flag(call.arg(5), "raw")?;
+    let mut raw = values::require_flag(call.arg(5), "raw")?;
     if description.contains("://") {
         return Err(error("ry does not support URL connections yet"));
+    }
+    // A device or pipe is read as is, never sniffed for compression; GNU R says so for every
+    // special file except `/dev/null`.
+    if !raw && !description.is_empty() && description != "stdin" {
+        let path = expand_path(&description);
+        let special = std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file());
+        if special && path != "/dev/null" {
+            crate::conditions::warning(format!(
+                "'raw = FALSE' but '{description}' is not a regular file"
+            ))?;
+            raw = true;
+        }
     }
     let (path, temporary, open) = if description.is_empty() {
         let open = if open.is_empty() {
@@ -3081,7 +3093,15 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
                 // GNU R reports a plain file's close status, but not a compressed stream's.
                 Some(Stream::Plain(mut plain)) => {
                     (*con).status = 0;
-                    flush_writes(&mut plain)
+                    // A write that fails only when the buffer drains on close is a warning in
+                    // GNU R, which closes the file anyway.
+                    if let Err(failure) = flush_writes(&mut plain) {
+                        crate::conditions::warning(format!(
+                            "Problem closing connection:  {}",
+                            os_message(&failure)
+                        ))?;
+                    }
+                    Ok(())
                 }
                 Some(Stream::Deflate { encoder, .. }) => encoder.finish(),
                 Some(Stream::Inflate(_)) | None => Ok(()),
