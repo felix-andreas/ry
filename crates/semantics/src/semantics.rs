@@ -627,8 +627,10 @@ fn written_root_annotation<'db>(
     annotations::merge_annotations(db, comment, Some(inline), Some(&site))
 }
 
-/// R calls a package file's `.onLoad(libname, pkgname)` and its siblings itself, always with
-/// the same arguments, so an unannotated hook is typed as if it declared that signature.
+/// R calls a package file's `.onLoad` and `.onAttach` with two character arguments, and
+/// `.onUnload`, `.onDetach` and `.Last.lib` with one, so an unannotated hook is typed as if it
+/// declared that. R passes them by position, so the hook's own formal names are kept, `...`
+/// takes whatever is left, and a formal past the passed ones is optional.
 fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types::TypeScheme<'db>> {
     if *item.kind(db) != ItemKind::Function
         || item.parent(db).is_some()
@@ -636,12 +638,41 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
     {
         return None;
     }
-    let signature = match item.name(db).as_deref()? {
-        ".onLoad" | ".onAttach" => "fn(libname: character, pkgname: character) -> Any",
-        ".onUnload" | ".onDetach" | ".Last.lib" => "fn(libpath: character) -> Any",
+    let passed = match item.name(db).as_deref()? {
+        ".onLoad" | ".onAttach" => 2,
+        ".onUnload" | ".onDetach" | ".Last.lib" => 1,
         _ => return None,
     };
-    stubs::lower_type_text(db, signature)
+    let root = item_syntax(db, item)?.syntax_node();
+    let function = root
+        .descendants()
+        .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
+    let mut parameters = Vec::new();
+    let mut takes_rest = false;
+    for (position, formal) in annotations::formals(&function).iter().enumerate() {
+        if formal.name == "..." {
+            parameters.push("...: Any".to_owned());
+            takes_rest = true;
+            break;
+        }
+        let plain = formal
+            .name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_' || character == '.');
+        if !plain {
+            return None;
+        }
+        parameters.push(if position < passed {
+            format!("{}: character", formal.name)
+        } else {
+            format!("[{}]: Any", formal.name)
+        });
+    }
+    // A hook that cannot take the arguments R passes fails when R calls it, not when it is typed.
+    if !takes_rest && parameters.len() < passed {
+        return None;
+    }
+    stubs::lower_type_text(db, &format!("fn({}) -> Any", parameters.join(", ")))
 }
 
 fn expression_annotations<'db>(

@@ -1,6 +1,7 @@
 # esgtoolkit: economic scenario generation. `simdiff()` simulates a diffusion process and returns a
-# base R time series of class "ts" (one column per scenario). The shipped stats stubs have no `ts`
-# type yet, so it is declared here.
-
+# base R time series of class "ts" (one column per scenario). The shipped stats stubs leave `ts`
+# untyped, because an opaque `ts` would reject the arithmetic R allows on one, so it is declared here
+# for this package's own signatures.
+@type ts
 
 simdiff : fn(n: integer, horizon: integer, [frequency]: character, [model]: character, x0: double, [theta1]: double[] | ts | NULL, [theta2]: double[] | ts | NULL, [theta3]: double | NULL, [lambda]: double | NULL, [mu_z]: double | NULL, [sigma_z]: double | NULL, [p]: double | NULL, [eta_up]: double | NULL, [eta_down]: double | NULL, [eps]: matrix | ts | NULL, [start]: double | NULL, [seed]: double) -> ts

@@ -7,11 +7,11 @@ pluralize : fn(...: Any, [.envir]: environment, [.transformer]: Any) -> characte
 format_inline : fn(...: Any, [.envir]: environment, [collapse]: logical, [keep_whitespace]: logical) -> character
 format_message : fn(message: character[], [.envir]: environment) -> character
 cli_text : fn(...: Any, [.envir]: environment) -> NULL
-cli_alert : fn(text: character, [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
-cli_alert_info : fn(text: character, [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
-cli_alert_success : fn(text: character, [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
-cli_alert_warning : fn(text: character, [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
-cli_alert_danger : fn(text: character, [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
+cli_alert : fn(text: character[], [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
+cli_alert_info : fn(text: character[], [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
+cli_alert_success : fn(text: character[], [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
+cli_alert_warning : fn(text: character[], [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
+cli_alert_danger : fn(text: character[], [id]: character | NULL, [class]: character | NULL, [wrap]: logical, [.envir]: environment) -> character
 # `cli_abort()` never returns, so like `stop()` it is `Any`.
 cli_abort : fn(message: character[], ...: Any, [call]: Any, [.envir]: environment, [.frame]: environment) -> Any
 cli_warn : fn(message: character[], ...: Any, [.envir]: environment) -> character[]

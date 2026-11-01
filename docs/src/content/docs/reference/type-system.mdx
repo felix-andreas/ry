@@ -2022,9 +2022,10 @@ to such a name is resolved separately at each call site:
   among candidates whose results differ, and it is `Unknown`. So
   `function(w) sort(unique(unlist(w)))` is `<T> fn(w: T) -> Unknown` rather than taking `sort`'s
   `factor` candidate. A catch-all candidate, one whose results are all `Any`, is left out of that
-  comparison whenever a more specific candidate fits, because it describes no particular result. So
-  with `n` unknown, `rep(0, n)` is `double[]`: the vector candidates agree, and `rep`'s `Any`
-  fallback does not count against them.
+  comparison when a more specific candidate fits and every unknown argument lands on a parameter
+  that accepts any value there, because then the known arguments chose the candidate. So with `n`
+  unknown, `rep(0, n)` is `double[]`, since `n` is `rep`'s `times: Any`, while `rep(x, 2)` with `x`
+  unknown stays `Unknown`, since `x` is what `rep`'s vector candidate and its fallback differ on.
 - The [whole-number literal rule](#argument-compatibility) does not influence which candidate is
   selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the
   `double` candidate, matching what R computes. Only if no candidate accepts them is the set tried

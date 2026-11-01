@@ -4,8 +4,8 @@
 # one. Each function keeps the length of its input, so the results are vectors.
 str_trim : @pure fn(string: character[] | double[] | factor, [side]: character) -> character[]
 str_squish : @pure fn(string: character[] | double[] | factor) -> character[]
-str_replace : @pure fn(string: character[] | double[] | factor, pattern: character[], replacement: character[] | fn(character[]) -> character[]) -> character[]
-str_replace_all : @pure fn(string: character[] | double[] | factor, pattern: character[], replacement: character[] | fn(character[]) -> character[]) -> character[]
+str_replace : @pure fn(string: character[] | double[] | factor, pattern: character[], [replacement]: character[] | fn(character[]) -> character[]) -> character[]
+str_replace_all : @pure fn(string: character[] | double[] | factor, pattern: character[], [replacement]: character[] | fn(character[]) -> character[]) -> character[]
 str_remove : @pure fn(string: character[] | double[] | factor, pattern: character[]) -> character[]
 str_remove_all : @pure fn(string: character[] | double[] | factor, pattern: character[]) -> character[]
 str_to_lower : @pure fn(string: character[] | double[] | factor, [locale]: character) -> character[]

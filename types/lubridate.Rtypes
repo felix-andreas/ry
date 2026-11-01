@@ -94,18 +94,18 @@ today : fn([tzone]: character) -> Date
 now : fn([tzone]: character) -> POSIXct
 
 # Components. Each keeps the length of `x`.
-year : @pure fn(x: Date | POSIXct) -> double[]
-month : @pure fn(x: Date | POSIXct) -> double[]
-month : @pure fn(x: Date | POSIXct, [label]: logical, [abbr]: logical, [locale]: character) -> double[] | factor
-day : @pure fn(x: Date | POSIXct) -> integer[]
-mday : @pure fn(x: Date | POSIXct) -> integer[]
-yday : @pure fn(x: Date | POSIXct) -> double[]
-quarter : @pure fn(x: Date | POSIXct, [type]: character, [fiscal_start]: double, [with_year]: logical) -> double[]
-week : @pure fn(x: Date | POSIXct) -> double[]
-isoweek : @pure fn(x: Date | POSIXct) -> double[]
+year : @pure fn(x: Date | POSIXct | character[]) -> double[]
+month : @pure fn(x: Date | POSIXct | character[]) -> double[]
+month : @pure fn(x: Date | POSIXct | character[], [label]: logical, [abbr]: logical, [locale]: character) -> double[] | factor
+day : @pure fn(x: Date | POSIXct | character[]) -> integer[]
+mday : @pure fn(x: Date | POSIXct | character[]) -> integer[]
+yday : @pure fn(x: Date | POSIXct | character[]) -> double[]
+quarter : @pure fn(x: Date | POSIXct | character[], [type]: character, [fiscal_start]: double, [with_year]: logical) -> double[]
+week : @pure fn(x: Date | POSIXct | character[]) -> double[]
+isoweek : @pure fn(x: Date | POSIXct | character[]) -> double[]
 # Weekday numbers, or an ordered factor of names when `label` is passed.
-wday : @pure fn(x: Date | POSIXct, [abbr]: logical, [week_start]: double, [locale]: character) -> double[]
-wday : @pure fn(x: Date | POSIXct, [label]: logical, [abbr]: logical, [week_start]: double, [locale]: character) -> double[] | factor
+wday : @pure fn(x: Date | POSIXct | character[], [abbr]: logical, [week_start]: double, [locale]: character) -> double[]
+wday : @pure fn(x: Date | POSIXct | character[], [label]: logical, [abbr]: logical, [week_start]: double, [locale]: character) -> double[] | factor
 leap_year : @pure fn(date: Date | POSIXct | double[]) -> logical[]
 
 # Rounding keeps the class of `x`.

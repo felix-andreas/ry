@@ -155,7 +155,8 @@ seq : @pure fn(from: Date, [to]: Date, [by]: Any, [length.out]: Any, [along.with
 seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> POSIXct
 seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
 seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
-seq.int : @pure fn(x: Any) -> matrix
+seq : @pure fn(...: Any) -> Any
+seq.int : @pure Any
 rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
 rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any) -> Any
 rep_len : @pure fn(x: Any, length.out: Any) -> Any
@@ -295,7 +296,9 @@ stopifnot : fn(...: Any, [exprs]: Any, [exprObject]: Any, [local]: Any) -> NULL
 # Conditions and exits. `tryCatch` takes arbitrary condition-class names as named handlers, and its
 # value is the body's or a handler's. `withCallingHandlers` handlers run for effect and the value is
 # value-dependent, so it stays `Any`. `suppress*` pass the body's value through: genuine generics.
+tryCatch : <T> fn(expr: T, ...: fn(condition: Any) -> T, [finally]: Any) -> T
 tryCatch : <T, H> fn(expr: T, ...: fn(condition: Any) -> H, [finally]: Any) -> T | H
+tryCatch : fn(expr: Any, ...: Any, [finally]: Any) -> Any
 withCallingHandlers : Any
 try : fn(expr: Any, [silent]: logical, [outFile]: Any) -> Any
 conditionMessage : fn(c: Any) -> character
@@ -523,12 +526,14 @@ apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # `NULL` (`lapply(NULL, f)` is `list()`).
 lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 lapply : <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+lapply : <U> fn(X: data.frame, FUN: fn(Any) -> U, ...: Any) -> list[named: U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
 Filter : <T> fn(f: fn(T) -> Any, x: T[]) -> T[]
 Filter : <T> fn(f: fn(T) -> Any, x: list[named: T]) -> list[named: T]
 Filter : <T> fn(f: fn(T) -> Any, x: list[T]) -> list[T]
+Filter : fn(f: fn(Any) -> Any, x: data.frame) -> data.frame
 Find : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> T | NULL
 Position : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> integer | NULL
 Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical, [simplify]: logical) -> U
@@ -609,7 +614,7 @@ emptyenv : @pure fn() -> environment
 baseenv : @pure fn() -> environment
 topenv : @pure fn([envir]: environment, [matchThisEnv]: environment) -> environment
 new.env : @pure fn([hash]: logical, [parent]: environment, [size]: integer) -> environment
-parent.frame : fn([n]: integer) -> environment
+parent.frame : fn([n]: double) -> environment
 parent.env : fn(env: environment) -> environment
 sys.call : Any
 sys.function : Any

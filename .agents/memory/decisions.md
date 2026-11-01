@@ -3545,8 +3545,11 @@ explicit allocators".
 - With an unchecked (`Unknown` or `Any`) argument every candidate fits, and the call is `Unknown`
   unless the fits agree. A catch-all fallback such as `rep`'s `fn(...) -> Any` always disagreed, so
   every overloaded call with one unknown argument was `Unknown`, the largest strict friction in the
-  port. `overloaded_call` (`check.rs`) drops all-`Any` fits when a more specific fit exists, then
-  applies the agreement rule. Rejected: taking the union of the fits' results. It is sound, but it
+  port. `overloaded_call` (`check.rs`) drops all-`Any` fits when a more specific fit exists and
+  every specific fit still fits with each unchecked argument replaced by a witness type that only
+  `Any` or an unconstrained type parameter accepts (`unchecked_arguments_decide_nothing`), then
+  applies the agreement rule. Without the witness test, `levels(unknown)` became `character[]`
+  and `rep(unknown, 2)` a vector: the unknown argument was the one choosing the candidate. Rejected: taking the union of the fits' results. It is sound, but it
   turns silence into false operand errors downstream (operators do not dispatch per union member),
   against "the checker presumes R code is correct".
 
@@ -3554,5 +3557,5 @@ explicit allocators".
 
 - A stub or project method named `$.class`, `[.class` or `[[.class` types the access on a value of
   nominal type `class` (`subset_method_result` in `check.rs`), as R's S3 dispatch would run it. It
-  is consulted before the structural read, so an opaque type such as httr2's `request` gets typed
-  field reads without exposing a representation.
+  is consulted before the structural read, so an opaque type gets typed field reads without
+  exposing a representation (`nominals.R.test`, `a_dollar_method_types_field_reads_on_its_class`).

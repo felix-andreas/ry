@@ -166,10 +166,12 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
-- **`lapply` or `vapply` over a `data.frame`** (9; rprojroot, nlme, rmarkdown). The opaque
-  `data.frame` fits no `list` parameter. A `data.frame` overload of `lapply` fixes the call but makes
-  an untyped argument ambiguous and coarsens the `.SD` column error, so the fix is to give
-  `data.frame` its named-list representation rather than more overloads.
+- **`vapply` over a `data.frame`** (rprojroot, nlme, rmarkdown). The opaque `data.frame` fits no
+  `list` parameter, so `vapply(df, length, numeric(1))` reports "expected `list[T] | T[]`, found
+  `data.frame`". `lapply`, `Filter` and `mclapply` have a trailing `data.frame` overload, but the
+  same overload on `vapply` makes an untyped `X` narrow two ways and turns `vapply(xs, ...)` into
+  `Unknown`. The fix is to give `data.frame` its named-list representation, after which the extra
+  overloads go away.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
 - One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
@@ -362,7 +364,9 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **An overload set called with an `Any` argument is `Unknown`.** When no candidate is a catch-all, an `Any` argument (a forwarded `...` included) selects nothing, so the call is reported although every candidate accepts it. Select the first candidate whose shape fits, or join the candidates' results. This is most of what is left in the generated `R/dependencies.R` (`function(...) YieldCurve::Nelson.Siegel(...)`, `digest::digest(...)`, `utils::head(...)`), and it is why a callback parameter typed `Any` by its callee's stub poisons `sum(row)`.
+- **The loader never creates `PackageMetadata`** (`crates/loader/src/loader.rs`), so no namespace is active there and purity from conditional or qualified-only stubs (`tools::file_ext`) is invisible to load planning. Only an optimization is lost: such constants load eagerly.
+- **`seq(1, 10)` is typed `double[]`**, but R returns an integer vector when `by` is missing and the bounds are whole numbers. The stub cannot tell `1` from `1.5`, so a function declared `-> integer[]` returning it is refused.
+- **An overload set called with an `Any` argument is `Unknown`.** When no candidate is a catch-all, an `Any` argument (a forwarded `...` included) selects nothing, so the call is reported although every candidate accepts it. Joining the candidates' results was rejected (`decisions.md`, "An all-`Any` overload does not veto agreement among unchecked fits"); the open direction is a per-candidate result that does not depend on the unknown argument. The generator's `R/dependencies.R` registry avoids overloaded entry points for this reason (`function(...) YieldCurve::Nelson.Siegel(...)` and `digest::digest(...)` hit it), and it is why a callback parameter typed `Any` by its callee's stub poisons `sum(row)`.
   ```r
   #: fn(x: Any) -> double
   f <- function(x) sum(x)

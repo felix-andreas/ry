@@ -247,15 +247,21 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 library.masked.insert(name.to_owned(), leading);
             }
             namespace_exports.insert(name.to_owned());
-            // Purity belongs to the name within its namespace: any candidate's marker marks it.
-            if markers.pure {
-                library
-                    .pure_by_namespace
-                    .entry(namespace.clone())
-                    .or_default()
-                    .insert(name.to_owned());
+            let first_here = seen_here.insert(name);
+            // Purity belongs to the name within its namespace: any candidate's marker marks it,
+            // and a later source that redeclares the name decides afresh, so an override stub
+            // can take the marker away.
+            let pure = library
+                .pure_by_namespace
+                .entry(namespace.clone())
+                .or_default();
+            if first_here {
+                pure.remove(name);
             }
-            if seen_here.insert(name) {
+            if markers.pure {
+                pure.insert(name.to_owned());
+            }
+            if first_here {
                 if documentation.is_empty() {
                     library.documentation.remove(name);
                 } else {

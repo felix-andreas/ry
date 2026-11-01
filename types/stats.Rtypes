@@ -59,9 +59,7 @@ t.test : Any
 wilcox.test : Any
 chisq.test : Any
 cor.test : Any
-@type ts
-ts : @pure fn([data]: Any, [start]: double[], [end]: double[], [frequency]: double, [deltat]: double, [ts.eps]: double, [class]: character, [names]: character[]) -> ts
-lag : @pure fn(x: ts, [k]: integer) -> ts
+ts : @pure fn([data]: Any, [start]: double[], [end]: double[], [frequency]: double, [deltat]: double, [ts.eps]: double, [class]: character, [names]: character[]) -> Any
 approxfun : @pure fn(x: Any, [y]: Any, [method]: character, [yleft]: Any, [yright]: Any, [rule]: Any, [f]: double, [ties]: Any, [na.rm]: logical) -> fn(v: Any) -> double[]
 
 # Random generation: a double vector of `n` draws (`rbinom`/`rpois` genuinely return integer draws).

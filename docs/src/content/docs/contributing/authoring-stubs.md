@@ -12,7 +12,10 @@ Shipping a package's types means dropping `types/<namespace>.Rtypes` (and its ma
 directory and nothing else: `crates/semantics/build.rs` embeds every file it finds there. R's own
 packages load first, in search-path order, then the CRAN namespaces alphabetically, then ry's
 standard library. Every namespace that is not one of R's own packages or the standard library is
-[conditional](#conditional-namespaces), so its names exist only in projects that use the package. The typing rules the stubs feed are in the
+[conditional](#conditional-namespaces), so its names exist only in projects that use the package.
+The typed declarations of R's packages that R does not attach by default (`tools`, `parallel`,
+`compiler`, `grid`, `splines`, `stats4`, `tcltk`) are gated the same way, while their export
+manifests always answer `pkg::name`. The typing rules the stubs feed are in the
 [typing reference](/reference/type-system), and the user-facing introduction is
 [Stubs](/type-checking/stubs).
 
@@ -46,8 +49,9 @@ List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
 
 A declared `name` can be an R identifier, an infix operator such as `%in%` (or a project's own
 `%||%`), or an S3 operator method such as `+.Date`, `-.POSIXct`, `Arith.difftime`, `Compare.Date`,
-or `Ops.gg`, or a subset method such as `[.xts`, `[[.zoo`, or `$.request`, which types `x[i]`,
-`x[[i]]`, or `x$name` on that class. The operator spellings are how a stub gives a class arithmetic or comparison, and
+or `Ops.gg`, or a subset method such as `[.xts`, `[[.Date`, or `$.request`, which types `x[i]`,
+`x[[i]]`, or `x$name` on that class. The operator spellings are how a stub gives a class arithmetic
+or comparison, and
 [operator methods on a class](/reference/type-system#operator-methods-on-a-class) describes the
 dispatch order. The suffix is the nominal type's own name, so a project stub line
 `+.ggplot : fn(e1: ggplot, e2: Any) -> ggplot` is all a `+`-based DSL needs.
