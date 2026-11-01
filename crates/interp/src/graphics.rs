@@ -62,14 +62,19 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("X11", no_devices),
     ("savePlot", no_devices),
     ("devcap", no_devices),
-    ("devcapture", no_devices),
-    ("devcontrol", no_devices),
+    // A pdf device cannot be captured as a raster, which GNU R reports as `NULL`.
+    ("devcapture", |_| Ok(nil())),
+    ("devcontrol", do_dev_control),
     ("devcopy", no_devices),
-    ("devdisplaylist", no_devices),
-    ("devsize", no_devices),
-    ("devUp", no_devices),
-    ("getSnapshot", no_devices),
-    ("playSnapshot", no_devices),
+    ("devdisplaylist", |_| unsafe { scalar_bool(current_device(|device| device.display_list)) }),
+    ("devsize", |_| unsafe {
+        let (width, height) = current_device(|device| device.size);
+        // In device units, 1/72 inch for pdf; `dev.size` converts with `cin / cra`.
+        values::real_vector(&[width * 72.0, height * 72.0])
+    }),
+    ("devUp", |_| unsafe { scalar_bool(true) }),
+    ("getSnapshot", do_get_snapshot),
+    ("playSnapshot", do_play_snapshot),
     ("getGraphicsEvent", no_devices),
     ("setGraphicsEventEnv", no_devices),
     ("setPattern", no_devices),
@@ -81,6 +86,7 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
 
 pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     ("C_BinCount", do_bin_count),
+    ("C_par", do_par),
     ("C_StemLeaf", do_stem_leaf),
     // Whether contour labels follow the contour, which every device ry could open does.
     ("C_contourDef", |_| unsafe { scalar_bool(true) }),
@@ -103,11 +109,18 @@ struct DeviceTable {
 struct Device {
     /// Where closing the device writes its file, if anywhere.
     file: Option<String>,
+    /// Width and height in inches.
+    size: (f64, f64),
+    /// Whether the device records a display list (`dev.control`).
+    display_list: bool,
+    /// The graphical parameters `par` reads and sets, a named list kept alive with
+    /// `R_PreserveObject` until the device closes. The null device has none.
+    parameters: Option<Sexp>,
 }
 
 thread_local! {
     static DEVICES: RefCell<DeviceTable> = RefCell::new(DeviceTable {
-        slots: std::iter::once(Some(Device { file: None })).chain(std::iter::repeat_with(|| None).take(MAX_DEVICES - 1)).collect(),
+        slots: std::iter::once(Some(Device { file: None, size: (7.0, 7.0), display_list: false, parameters: None })).chain(std::iter::repeat_with(|| None).take(MAX_DEVICES - 1)).collect(),
         current: 0,
     });
 }
@@ -165,13 +178,15 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
     let Some(slot) = slot else {
         return Err(call.error("too many open devices"));
     };
+    let size = (values::as_real_scalar(call.arg(6)), values::as_real_scalar(call.arg(7)));
+    let parameters = default_parameters(size)?;
     let name = scalar_string("pdf")?;
     if let Some(file) = &file {
         values::set_attr(name, values::install("filepath")?, scalar_string(file)?)?;
     }
     set_device_name(slot, name)?;
     DEVICES.with_borrow_mut(|table| {
-        table.slots[slot] = Some(Device { file });
+        table.slots[slot] = Some(Device { file, size, display_list: false, parameters: Some(parameters) });
         table.current = slot;
     });
     crate::eval::define(symbols().dot_device, scalar_string("pdf")?, values::base_env())?;
@@ -227,6 +242,9 @@ unsafe fn do_dev_off(call: &NativeCall<'_>) -> R<Sexp> {
     let Some(device) = DEVICES.with_borrow_mut(|table| table.slots[slot].take()) else {
         return Ok(nil());
     };
+    if let Some(parameters) = device.parameters {
+        crate::heap().release(parameters);
+    }
     if let Some(file) = device.file {
         let path = page_file_name(&file);
         std::fs::write(&path, empty_pdf()).map_err(|failure| call.error(format!("cannot open file '{path}': {failure}")))?;
@@ -241,6 +259,206 @@ unsafe fn do_dev_off(call: &NativeCall<'_>) -> R<Sexp> {
     crate::eval::define(symbols().dot_device, plain_device_name(current)?, values::base_env())?;
     crate::interp().visible = false;
     Ok(nil())
+}
+
+/// Reads the current device, which is the null device when no other is open.
+fn current_device<T>(read: impl FnOnce(&Device) -> T) -> T {
+    DEVICES.with_borrow(|table| {
+        let slot = if table.is_open(table.current) { table.current } else { 0 };
+        let device = table.slots[slot].as_ref().or(table.slots[0].as_ref());
+        match device {
+            Some(device) => read(device),
+            None => read(&Device { file: None, size: (7.0, 7.0), display_list: false, parameters: None }),
+        }
+    })
+}
+
+/// `.External(C_devcontrol, enable)`: turns the current device's display list on or off.
+unsafe fn do_dev_control(call: &NativeCall<'_>) -> R<Sexp> {
+    let enable = values::as_logical_scalar(call.arg(0)) == 1;
+    DEVICES.with_borrow_mut(|table| {
+        let slot = table.current;
+        if let Some(device) = table.slots.get_mut(slot).and_then(Option::as_mut) {
+            device.display_list = enable;
+        }
+    });
+    scalar_bool(enable)
+}
+
+/// `.External2(C_getSnapshot)`: the current device's display list and graphics engine state,
+/// which `recordPlot` returns. Nothing can be drawn yet, so the display list is always empty;
+/// code such as evaluate's plot capture reads exactly that to decide no plot was made.
+unsafe fn do_get_snapshot(_: &NativeCall<'_>) -> R<Sexp> {
+    let snapshot = values::list_vector(&[nil(), alloc(SexpType::Raw, 0)?])?;
+    values::set_attr(snapshot, values::install("engineVersion")?, scalar_integer(GRAPHICS_ENGINE_VERSION)?)?;
+    Ok(snapshot)
+}
+
+/// `.External2(C_playSnapshot, snapshot)`: replays a recorded plot, which is a no-op for an
+/// empty display list.
+unsafe fn do_play_snapshot(call: &NativeCall<'_>) -> R<Sexp> {
+    let snapshot = call.arg(0);
+    if snapshot.kind() == SexpType::List && length(snapshot) > 0 && snapshot.element(0) == nil() {
+        return Ok(nil());
+    }
+    Err(call.error(NO_DEVICES))
+}
+
+/// GNU R 4.3's `R_GE_version`, which a recorded plot carries.
+const GRAPHICS_ENGINE_VERSION: i32 = 16;
+
+/// The parameters `par` reports and cannot set.
+const READ_ONLY_PARAMETERS: [&str; 6] = ["cin", "cra", "csi", "cxy", "din", "page"];
+
+/// The graphical parameters of a fresh pdf device as GNU R reports them with `par()`, for the
+/// default 7 by 7 inch page. A different page size changes `din` and `fin`; the derived plot
+/// region (`pin`, `plt`) keeps its 7-inch values, which only drawing would read.
+const DEFAULT_PARAMETERS: &str = "list(xlog = FALSE, ylog = FALSE, adj = 0.5, ann = TRUE, ask = FALSE,
+    bg = 'transparent', bty = 'o', cex = 1, cex.axis = 1, cex.lab = 1, cex.main = 1.2, cex.sub = 1,
+    cin = c(0.15, 0.2), col = 'black', col.axis = 'black', col.lab = 'black', col.main = 'black',
+    col.sub = 'black', cra = c(10.8, 14.4), crt = 0, csi = 0.2,
+    cxy = c(0.0260416666666667, 0.0387596899224806), din = c(7, 7), err = 0L, family = '',
+    fg = 'black', fig = c(0, 1, 0, 1), fin = c(7, 7), font = 1L, font.axis = 1L, font.lab = 1L,
+    font.main = 2L, font.sub = 1L, lab = c(5L, 5L, 7L), las = 0L, lend = 'round', lheight = 1,
+    ljoin = 'round', lmitre = 10, lty = 'solid', lwd = 1, mai = c(1.02, 0.82, 0.82, 0.42),
+    mar = c(5.1, 4.1, 4.1, 2.1), mex = 1, mfcol = c(1L, 1L), mfg = c(1L, 1L, 1L, 1L),
+    mfrow = c(1L, 1L), mgp = c(3, 1, 0), mkh = 0.001, new = FALSE, oma = c(0, 0, 0, 0),
+    omd = c(0, 1, 0, 1), omi = c(0, 0, 0, 0), page = TRUE, pch = 1L, pin = c(5.76, 5.16),
+    plt = c(0.117142857142857, 0.94, 0.145714285714286, 0.882857142857143), ps = 12L, pty = 'm',
+    smo = 1, srt = 0, tck = NA_real_, tcl = -0.5, usr = c(0, 1, 0, 1), xaxp = c(0, 1, 5),
+    xaxs = 'r', xaxt = 's', xpd = FALSE, yaxp = c(0, 1, 5), yaxs = 'r', yaxt = 's', ylbias = 0.2)";
+
+/// A new device's parameters, preserved until the device closes.
+unsafe fn default_parameters(size: (f64, f64)) -> R<Sexp> {
+    let expressions = crate::lower::parse_text(DEFAULT_PARAMETERS, "<par>")?;
+    crate::heap().root(expressions);
+    let parameters = crate::eval::eval(expressions.element(0), values::base_env())?;
+    crate::heap().preserve(parameters);
+    if size.0.is_finite() && size.1.is_finite() && size != (7.0, 7.0) {
+        for name in ["din", "fin"] {
+            set_parameter(parameters, name, values::real_vector(&[size.0, size.1])?)?;
+        }
+    }
+    Ok(parameters)
+}
+
+fn parameter_index(parameters: Sexp, name: &str) -> Option<usize> {
+    unsafe {
+        let names = values::names(parameters);
+        (0..length(names)).find(|&index| values::string_at(names, index).as_deref() == Some(name))
+    }
+}
+
+unsafe fn set_parameter(parameters: Sexp, name: &str, value: Sexp) -> R<()> {
+    if let Some(index) = parameter_index(parameters, name) {
+        crate::heap().set_element(parameters, index, value);
+    }
+    Ok(())
+}
+
+/// `.External2(C_par, args)`: queries and sets the current device's graphical parameters, as
+/// GNU R's `do_par`. A string element queries the parameter it names, and a named element sets
+/// the parameter to its value and reports the old one. Like GNU R, `par` on the null device
+/// first starts the default device.
+unsafe fn do_par(call: &NativeCall<'_>) -> R<Sexp> {
+    if DEVICES.with_borrow(|table| table.current) == 0 {
+        start_default_device()?;
+    }
+    let Some(parameters) = current_device(|device| device.parameters) else {
+        return Err(call.error(NO_DEVICES));
+    };
+    let args = call.arg(0);
+    let count = length(args);
+    let arg_names = values::names(args);
+    let result = alloc(SexpType::List, count)?;
+    let result_names = alloc(SexpType::String, count)?;
+    for index in 0..count {
+        let value = if args.kind() == SexpType::List { args.element(index) } else { nil() };
+        let tag = if arg_names == nil() {
+            String::new()
+        } else {
+            values::string_at(arg_names, index).map(|name| name.into_owned()).unwrap_or_default()
+        };
+        let (name, setting) = if !tag.is_empty() {
+            (tag, true)
+        } else if value.kind() == SexpType::String && length(value) > 0 {
+            (values::string_at(value, 0).map(|name| name.into_owned()).unwrap_or_default(), false)
+        } else {
+            values::set_elt(result_names, index, values::mkchar("")?);
+            continue;
+        };
+        values::set_elt(result_names, index, values::mkchar(&name)?);
+        let Some(position) = parameter_index(parameters, &name) else {
+            crate::conditions::warning_call(call.call, format!("\"{name}\" is not a graphical parameter"))?;
+            continue;
+        };
+        let old = parameters.element(position);
+        crate::heap().set_element(result, index, old);
+        if !setting {
+            continue;
+        }
+        if READ_ONLY_PARAMETERS.contains(&name.as_str()) {
+            crate::conditions::warning_call(call.call, format!("graphical parameter \"{name}\" cannot be set"))?;
+            continue;
+        }
+        set_graphical_parameter(parameters, &name, old, value)?;
+    }
+    values::set_attr(result, symbols().names, result_names)?;
+    Ok(result)
+}
+
+/// Stores `value` for the parameter `name`, in the type its current value has, and updates the
+/// parameters GNU R derives from it. Margins in lines (`mar`, `oma`) and in inches (`mai`, `omi`)
+/// convert at `0.2 * cex * mex` inches per line, recomputed when a margin, `mex` or the layout
+/// changes (a later `cex` alone does not). A layout of `mfrow` or `mfcol` also sets `mfcol` or
+/// `mfrow` and scales `cex` and `csi` by 0.83 for two by two and 0.66 for more than two rows or
+/// columns.
+unsafe fn set_graphical_parameter(parameters: Sexp, name: &str, old: Sexp, value: Sexp) -> R<()> {
+    let kind = old.kind();
+    let value = if kind != value.kind() && kind.is_atomic() && value.kind().is_atomic() {
+        coerce_vector(value, kind)?
+    } else {
+        value
+    };
+    set_parameter(parameters, name, value)?;
+    if matches!(name, "mfrow" | "mfcol") {
+        set_parameter(parameters, if name == "mfrow" { "mfcol" } else { "mfrow" }, value)?;
+        let dims = values::ints(value);
+        let (rows, columns) = (dims.first().copied().unwrap_or(1), dims.get(1).copied().unwrap_or(1));
+        let base = if rows > 2 || columns > 2 {
+            0.66
+        } else if rows == 2 && columns == 2 {
+            0.83
+        } else {
+            1.0
+        };
+        set_parameter(parameters, "cex", values::real_vector(&[base])?)?;
+        set_parameter(parameters, "csi", values::real_vector(&[0.2 * base])?)?;
+    }
+    let inches_per_line = 0.2 * parameter_number(parameters, "cex") * parameter_number(parameters, "mex");
+    let scaled = |from: &str, factor: f64| -> R<Sexp> {
+        let numbers = match parameter_index(parameters, from) {
+            Some(index) => coerce_vector(parameters.element(index), SexpType::Real)?,
+            None => values::real_vector(&[])?,
+        };
+        values::real_vector(&values::reals(numbers).iter().map(|number| number * factor).collect::<Vec<_>>())
+    };
+    match name {
+        "mai" => set_parameter(parameters, "mar", scaled("mai", 1.0 / inches_per_line)?)?,
+        "omi" => set_parameter(parameters, "oma", scaled("omi", 1.0 / inches_per_line)?)?,
+        "mar" | "oma" | "mex" | "mfrow" | "mfcol" => {
+            set_parameter(parameters, "mai", scaled("mar", inches_per_line)?)?;
+            set_parameter(parameters, "omi", scaled("oma", inches_per_line)?)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+unsafe fn parameter_number(parameters: Sexp, name: &str) -> f64 {
+    parameter_index(parameters, name)
+        .map(|index| values::as_real_scalar(parameters.element(index)))
+        .unwrap_or(1.0)
 }
 
 /// The name of the device in `slot`, without the attributes its `.Devices` entry carries, as

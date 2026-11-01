@@ -595,6 +595,9 @@ pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
 
 /// Element `index` of a character vector as text, or `None` for `NA`.
 pub unsafe fn string_at<'a>(object: Sexp, index: usize) -> Option<Cow<'a, str>> {
+    if object.kind() != SexpType::String || index >= length(object) {
+        return None;
+    }
     let charsxp = object.element(index);
     if charsxp == na_string() {
         None
