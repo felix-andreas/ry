@@ -2228,6 +2228,7 @@ impl<'db> Checker<'db, '_> {
                         named,
                         variadic,
                         ret: return_ty,
+                        inferred: true,
                     }),
                 )
             }
@@ -6341,6 +6342,7 @@ impl<'db> Checker<'db, '_> {
             named: Vec::new(),
             variadic: None,
             ret: declared.ret,
+            inferred: false,
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -9517,6 +9519,7 @@ impl<'db> Checker<'db, '_> {
                             preceding_named: 0,
                         }),
                         ret,
+                        inferred: false,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -9753,7 +9756,8 @@ impl<'db> Checker<'db, '_> {
             match target {
                 ArgumentTarget::Positional(slot) => {
                     if let Some(&expected) = function.positional.get(*slot)
-                        && let Some(ty) = self.argument_type_for(expected, argument)
+                        && let Some(ty) =
+                            self.argument_type_for(expected, argument, function.inferred)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -9767,7 +9771,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Named(formal) => {
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
-                        && let Some(ty) = self.argument_type_for(expected, argument)
+                        && let Some(ty) =
+                            self.argument_type_for(expected, argument, function.inferred)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -9788,7 +9793,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Rest => {
                     if let Some(element) = variadic_element
-                        && let Some(ty) = self.argument_type_for(element, argument)
+                        && let Some(ty) =
+                            self.argument_type_for(element, argument, function.inferred)
                         && let Err(error) = self.check_argument(
                             element,
                             ty,
@@ -9898,6 +9904,7 @@ impl<'db> Checker<'db, '_> {
         &self,
         expected: Ty<'db>,
         argument: &CallArgument<'db>,
+        inferred_signature: bool,
     ) -> Option<Ty<'db>> {
         if let Some(named) = argument.named_function
             && matches!(
@@ -9908,6 +9915,9 @@ impl<'db> Checker<'db, '_> {
             return Some(named);
         }
         let ty = argument.ty?;
+        if inferred_signature && self.fits_inferred_scalar(expected, ty) {
+            return Some(expected);
+        }
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
                 let ty = self.without_inferred_null(expected, ty);
@@ -9998,6 +10008,37 @@ impl<'db> Checker<'db, '_> {
             .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
             .collect();
         union_of(self.db, kept)
+    }
+
+    /// A scalar parameter type inferred from an unannotated body records how the body uses the
+    /// value, and a vector type carries no length, so zoo's `rlength <- function(x) if (all(!x))
+    /// ...` is called with the `logical[]` it was written for. A vector of the same atomic type
+    /// therefore passes. So does a number where the body only claimed `logical`, because that
+    /// claim comes from a condition or `!`, which coerce numbers as R does.
+    fn fits_inferred_scalar(&self, expected: Ty<'db>, ty: Ty<'db>) -> bool {
+        // Only a scalar the signature names: a type variable an earlier argument bound to a
+        // scalar still widens through unification (`cost(TRUE, 0.5)` binds `T := double`).
+        let TyKind::Scalar(atomic) = *expected.kind(self.db) else {
+            return false;
+        };
+        let fits = |member: Ty<'db>| {
+            let element = match member.kind(self.db) {
+                TyKind::Vector(element) => *element,
+                _ => member,
+            };
+            match *element.kind(self.db) {
+                TyKind::Scalar(other) => {
+                    other == atomic
+                        || (atomic == Atomic::Logical
+                            && matches!(other, Atomic::Integer | Atomic::Double))
+                }
+                _ => false,
+            }
+        };
+        match self.table.resolve(self.db, ty).kind(self.db) {
+            TyKind::Union(members) => members.iter().all(|&member| fits(member)),
+            _ => fits(self.table.resolve(self.db, ty)),
+        }
     }
 
     /// A variable the body computes as `character | character[]`, through a helper that returns

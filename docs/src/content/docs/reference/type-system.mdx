@@ -2053,6 +2053,15 @@ Arguments are checked for compatibility, not exact equality:
   the callee tolerates `NULL`, not that the caller's value may be `NULL`, so with
   `check <- function(x, allow_null = FALSE) if (allow_null && is.null(x)) ...`, a caller that runs
   `check(thing)` and then reads `thing$field` keeps `thing` open.
+- A scalar parameter type that ry inferred from an unannotated body records how the body uses the
+  value, not a length, because a vector type carries none. Such a parameter accepts a vector of the
+  same atomic type, so `rlength <- function(x) if (all(!x)) length(x) else min(which(x)) - 1L`
+  accepts `flags > 0`. An inferred `logical` parameter also accepts an `integer` or a `double`,
+  scalar or vector, because that claim comes from a condition or `!`, which coerce numbers, so
+  `skip <- function(line.id) if (!line.id) 0L else 1L` accepts `skip(0L)`. An annotated signature
+  keeps its scalars: under `#: fn(flag: logical) -> double`, `pick(c(1, 0, 2) > 0)` is a type
+  error. A type parameter bound by an earlier argument still widens as usual, and an inferred
+  `character` parameter still rejects a number.
 
 #### The native pipe
 

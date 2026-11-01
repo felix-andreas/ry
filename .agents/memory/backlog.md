@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 173 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 145 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -171,25 +171,15 @@ classes, largest first:
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it; settle which before the list grows.
-- **A declared vector into a scalar parameter is still reported** (`double[]` into ks
-  `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
-  variables pass by length (`without_inferred_length`), and only when their type is a union with
-  a scalar member: a computed plain `logical[]` into a parameter whose scalar claim was inferred
-  from the body (zoo `rlength(idx0)`, renv `unlink(recursive =)`, diffobj, ks, mgcv: about 13
-  corpus reports) is reported, because the call site cannot tell an inferred scalar parameter from
-  an annotated one (`pick(c(TRUE, FALSE))` against `fn(flag: logical)` is a real error). Exporting
-  whether each parameter type was declared with the item scheme would let only declared scalars
-  hold.
+- **A branch join pins a rebound formal to the other branch's type** (mgcv `Sl.fitChol`:
+  `rho <- if (is.null(L)) rho + rho0 else L %*% rho + rho0` exports `rho: matrix`, so
+  `rho = lsp[1:n.sp]` is reported). Joining the open `T` of `rho + rho0` with `matrix` unifies the
+  formal's variable instead of forming a union.
 - **Negating a parameter whose only type is a `NULL` default is reported** (pracma
   `quadprog(A = NULL, b = NULL)` negates `b` under `if (!is.null(A))`: 2 corpus reports). Dropping
   the `NULL` there constrains the parameter's variable to numeric, and the rendered scheme
   `fn([b]: U)` then no longer admits its `NULL` default, which fails the annotation round trip.
   A fix needs the scheme to keep `U | NULL` for a numeric-constrained defaulted parameter.
-- **A parameter used as a condition is pinned to `logical`.** `if (!line.id)` or `if (pagesize)`
-  infers `logical`, so a caller passing `0L` or a double is reported (diffobj `trim_hunk`, ff
-  `getalignedpagesize`, rmgarch, renv: about 12 corpus reports), though R coerces numbers in a
-  condition. Binding the condition's open variable to a logical-or-numeric bound instead of
-  `logical` needs a new constraint and changes many rendered signatures.
 - **A computed-key write into a record leaves the record unchanged** (highs `globals[[key]] <<-
   value` on `list(threads = NA_integer_)`), so a later computed read claims only the declared
   fields' types. Combined with a `missing(key)` path that returns the whole record, the result is

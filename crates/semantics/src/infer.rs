@@ -1740,6 +1740,7 @@ mod tests {
                 }],
                 variadic: None,
                 ret: int,
+                inferred: false,
             }),
         );
         let positional_interface = Ty::new(
@@ -1749,6 +1750,7 @@ mod tests {
                 named: Vec::new(),
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
+                inferred: false,
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));

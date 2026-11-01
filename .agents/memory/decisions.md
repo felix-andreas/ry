@@ -3098,6 +3098,13 @@ first lines R had already read, leaving R mid-command.
 - **Why.** The rule in "The checker presumes R code is correct": the `NULL` path of a computed function is one the code presumably rules out, and R fails only on that path.
 - **Impact.** Loses the true positive of a `switch` on an unvalidated value. Incremental analysis is unchanged: the rule reads the item's own naming.
 
+## A function type records whether its signature was inferred
+
+- **Previous shape.** An inferred `fn(flag: logical)` and an annotated one were the same type, so a call site could not tell a scalar claimed by `if (flag)`, `!x` or a stub the body forwards to from a declared scalar. Callers passing `logical[]`, `double[]` or `0L` (zoo `rlength`, diffobj `trim_hunk`, ks `kfe.1d`) were reported, about 28 corpus errors.
+- **Target shape.** `FunctionType::inferred` is set on the type a function literal infers and carried through generalization, instantiation and `map_child_types`; annotations, stubs and `check_declared_function` set it false. `match_arguments` lets a vector of the same atomic type, or a number for `logical`, pass a concrete scalar of an inferred signature (`fits_inferred_scalar`). A type variable is excluded, so `cost(TRUE, 0.5)` still widens `T`.
+- **Why on the type and not a side table.** The flag must follow the function through variables, local bindings and exported schemes; one bit on the type does that with no second source of truth.
+- **Impact.** Loses the true positive of an unannotated function called with a long vector where one value is meant; annotate to get it back. Two otherwise equal function types with different provenance intern apart, which only matters for union deduplication. Incremental analysis is unchanged.
+
 # Decision record: editor features for ry's own syntax
 
 - **The checker records pattern types.** `ItemCheck::pattern_types` maps each `match` pattern to

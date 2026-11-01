@@ -958,3 +958,34 @@ warn_twice <- function(header) {
 compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
 warn_twice: Unknown
 253..259 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 0
+
+#---- an_inferred_scalar_parameter_takes_a_vector_of_its_type
+rlength <- function(x) if (all(!x)) length(x) else min(which(x)) - 1L
+gaps <- rlength(c(1, 0, 2) > 0)
+#++++
+rlength: fn(x: logical) -> integer
+gaps: integer
+
+#---- a_condition_parameter_takes_a_number
+skip <- function(line.id) if (!line.id) 0L else 1L
+skipped <- skip(0L)
+#++++
+skip: fn(line.id: logical) -> integer
+skipped: integer
+
+#---- an_annotated_scalar_parameter_still_rejects_a_vector
+#: fn(flag: logical) -> double
+pick <- function(flag) if (flag) 1 else 2
+picked <- pick(c(1, 0, 2) > 0)
+#++++
+pick: fn(flag: logical) -> double
+picked: Unknown
+88..102 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- an_inferred_character_parameter_still_rejects_a_number
+matches <- function(pattern) grepl(pattern, "abc")
+matched <- matches(1)
+#++++
+matches: fn(pattern: character) -> logical
+matched: Unknown
+70..71 error[type-mismatch] expected `character`, found `double`
