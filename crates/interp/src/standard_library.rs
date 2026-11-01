@@ -21,7 +21,9 @@ use {
     crate::{
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
-        eval, records, scope,
+        eval,
+        long_double::LongDouble,
+        records, scope,
         sort::{IdenticalFlags, identical},
         unwind::{R, error},
         values::{
@@ -269,6 +271,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.reserve", set_reserve).reusing_first_argument(),
 ];
 
+thread_local! {
+    static BUILTINS_ENV: std::cell::Cell<Option<Sexp>> = const { std::cell::Cell::new(None) };
+}
+
+/// The environment the builtins of `package:ry` are bound in. S3 method lookup falls back to it,
+/// because lookup from the global environment skips the search path, and with base R loaded the
+/// environment is no longer on it.
+pub(crate) fn builtins_env() -> Option<Sexp> {
+    BUILTINS_ENV.with(std::cell::Cell::get)
+}
+
 /// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
 /// global environment's enclosure is the base environment, and `library()` attaches between the
 /// global environment and its enclosure, so `package:ry` stays the last entry before base.
@@ -280,6 +293,8 @@ pub(crate) unsafe fn attach() -> Sexp {
         .alloc_environment(base)
         .unwrap_or_else(|failure| panic!("cannot create `package:ry`: {failure}"));
     heap.set_enclosure(global, env);
+    heap.preserve(env);
+    BUILTINS_ENV.with(|cell| cell.set(Some(env)));
     let name = values::install("name")
         .and_then(|symbol| Ok((symbol, scalar_string("package:ry")?)))
         .and_then(|(symbol, value)| values::set_attr(env, symbol, value));
@@ -1564,48 +1579,61 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     Ok(numbers)
 }
 
-/// Folds the list's numbers with `integer` (checked) or `double`, starting at `start`.
+/// Folds the list's numbers with `integer` (checked), or totals them with `double` once any is a
+/// double, starting at `start`.
 unsafe fn fold_numbers(
     call: &Call<'_>,
     start: i32,
     integer: fn(i32, i32) -> Option<i32>,
-    double: fn(f64, f64) -> f64,
+    double: fn(f64, &[f64]) -> f64,
 ) -> R<Sexp> {
-    // A double Array folds straight over its storage, which skips building a million boxed
+    // A double Array is totaled straight from its storage, which skips building a million boxed
     // numbers for a million-item Array.
     let [list] = arguments(call, ["list"])?;
     if list.is_array() && list.kind() == SexpType::Real {
-        let total = values::reals(list)
-            .iter()
-            .fold(f64::from(start), |total, &item| double(total, item));
-        return scalar_real(total);
+        return scalar_real(double(f64::from(start), values::reals(list)));
     }
     let numbers = list_numbers(call)?;
-    let mut total = Number::Integer(start);
+    if numbers
+        .iter()
+        .any(|number| matches!(number, Number::Double(_)))
+    {
+        let doubles: Vec<f64> = numbers.iter().map(|number| number.as_double()).collect();
+        return scalar_real(double(f64::from(start), &doubles));
+    }
+    let mut total = start;
     for number in numbers {
-        total = match (total, number) {
-            (Number::Integer(left), Number::Integer(right)) => {
-                match integer(left, right).filter(|value| *value != NA_INTEGER) {
-                    Some(value) => Number::Integer(value),
-                    None => {
-                        return Err(call.error(
-                            "the integer result overflows; convert the elements to doubles first",
-                        ));
-                    }
-                }
+        let Number::Integer(item) = number else {
+            continue;
+        };
+        total = match integer(total, item).filter(|value| *value != NA_INTEGER) {
+            Some(value) => value,
+            None => {
+                return Err(call
+                    .error("the integer result overflows; convert the elements to doubles first"));
             }
-            (left, right) => Number::Double(double(left.as_double(), right.as_double())),
         };
     }
-    number_value(total)
+    number_value(Number::Integer(total))
 }
 
+// R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
+// with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
-    fold_numbers(call, 0, i32::checked_add, |left, right| left + right)
+    fold_numbers(call, 0, i32::checked_add, |start, items| {
+        let mut total = LongDouble::ZERO;
+        total += start;
+        for &item in items {
+            total += item;
+        }
+        total.to_f64()
+    })
 }
 
 unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
-    fold_numbers(call, 1, i32::checked_mul, |left, right| left * right)
+    fold_numbers(call, 1, i32::checked_mul, |start, items| {
+        items.iter().fold(start, |total, &item| total * item)
+    })
 }
 
 unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {

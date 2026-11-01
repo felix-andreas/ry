@@ -105,6 +105,9 @@ pub unsafe fn dot_dot_index(symbol: Sexp) -> Option<usize> {
 }
 
 unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
+    if index == 0 {
+        return Err(error("indexing '...' with non-positive index 0"));
+    }
     let dots = find_var(symbols().dots, env)?;
     if dots == unbound() {
         return Err(error(format!(
@@ -434,16 +437,23 @@ unsafe fn call_builtin_reusing(
     reusable: Option<Sexp>,
 ) -> R<Sexp> {
     if definition.arity >= 0
-        && matches!(definition.kind, Kind::Internal | Kind::InternalSpecial)
+        && matches!(
+            definition.kind,
+            Kind::Internal | Kind::InternalSpecial | Kind::Builtin
+        )
         && args.len() != definition.arity as usize
     {
+        let name = if matches!(definition.kind, Kind::Builtin) {
+            format!("'{}'", definition.name)
+        } else {
+            format!(".Internal({})", definition.name)
+        };
         return Err(error_in(
             call,
             format!(
-                "{} argument{} passed to .Internal({}) which requires {}",
+                "{} argument{} passed to {name} which requires {}",
                 args.len(),
                 if args.len() == 1 { "" } else { "s" },
-                definition.name,
                 definition.arity
             ),
         ));
@@ -456,6 +466,25 @@ unsafe fn call_builtin_reusing(
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(Some(definition.name))?;
     }
+    // A replacement primitive modifies its target in place when the target is referenced
+    // only by the variable a complex assignment rebinds. Called directly, as in
+    // `` `class<-`(x, "foo") ``, the same single reference is the caller's own binding, which
+    // must keep its value, so the target is copied first, as GNU R does.
+    let copied_target;
+    let args = match args.first() {
+        Some(target)
+            if definition.name.ends_with("<-")
+                && !matches!(definition.name, "<-" | "<<-")
+                && target.value.refcount() >= 1
+                && !is_assignment(call) =>
+        {
+            let mut copy = args.to_vec();
+            copy[0].value = values::shallow_duplicate(target.value)?;
+            copied_target = copy;
+            copied_target.as_slice()
+        }
+        _ => args,
+    };
     let function = definition.function;
     let visibility = definition.visibility;
     let context = Call {
@@ -498,6 +527,22 @@ unsafe fn call_builtin_reusing(
     }
 }
 
+/// Whether `call` is a complex assignment such as `x[1] <- 5`, or the replacement call one
+/// builds, whose replacement primitives may modify the target in place.
+pub unsafe fn is_assignment(call: Sexp) -> bool {
+    if interp()
+        .assignment_call
+        .is_some_and(|(setter, _, _)| setter == call)
+    {
+        return true;
+    }
+    call.kind() == SexpType::Language && {
+        let head = call.car();
+        let symbols = symbols();
+        head == symbols.assign || head == symbols.assign2 || head == symbols.assign_eq
+    }
+}
+
 /// GNU R rejects a named argument to a primitive that partially matches none of the formals
 /// `.ArgsEnv` or `.GenericArgsEnv` record for it.
 unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]) -> R<()> {
@@ -513,6 +558,17 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
             call,
             format!("supplied argument name '{name}' does not match 'x'"),
         ));
+    }
+    // GNU R's operators ignore argument names, and a wrong argument count is reported before a
+    // wrong name.
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "^", "%%", "%/%", "%*%", "==", "!=", "<", ">", "<=", ">=", "&", "|",
+        "!",
+    ];
+    if OPERATORS.contains(&definition.name)
+        || (definition.arity >= 0 && args.len() != definition.arity as usize)
+    {
+        return Ok(());
     }
     let state = interp();
     let formals = match state.primitive_formals.get(definition.name) {
@@ -530,6 +586,9 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     let Some(formals) = formals else {
         return Ok(());
     };
+    if formals.iter().any(|formal| formal == "...") {
+        return Ok(());
+    }
     for arg in args.iter().filter(|arg| arg.tag != nil()) {
         let name = values::symbol_name(arg.tag);
         if formals
@@ -1129,6 +1188,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     for &expression in &expressions {
         crate::heap().root(expression);
     }
+    interp().returned_values.push(result.as_ref().ok().copied());
     let mut outcome = result;
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
@@ -1142,6 +1202,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             Err(Unwind::Jump(jump)) if matches!(*jump, Jump::Return { env: target, .. } if target == env) => {
                 if let Jump::Return { value, .. } = *jump {
                     outcome = Ok(value);
+                    if let Some(top) = interp().returned_values.last_mut() {
+                        *top = Some(value);
+                    }
                 }
             }
             Err(unwind) => {
@@ -1151,6 +1214,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             Ok(_) => {}
         }
     }
+    interp().returned_values.pop();
     crate::heap().release_handles(mark);
     match &outcome {
         Ok(value) => crate::heap().root(*value),
@@ -1495,7 +1559,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("call", -1, do_call),
     special("expression", -1, do_expression),
     internal("all.names", 4, do_all_names),
-    internal("returnValue", 1, |call| Ok(call.arg(0))),
+    internal("returnValue", 1, |call| {
+        Ok(interp()
+            .returned_values
+            .last()
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| call.arg(0)))
+    }),
     internal("named", 1, |call| unsafe {
         values::scalar_integer(call.arg(0).refcount().min(2) as i32)
     }),
@@ -2837,13 +2908,26 @@ pub unsafe fn complex_assign(
         base = force_promise(base)?;
     }
     let heap = crate::heap();
-    let local_binding = heap.frame_cell(env, inner).is_some();
+    let local_cell = heap.frame_cell(env, inner);
+    // A locked binding rejects the final assignment, so the replacement must not have modified
+    // its value in place by then.
+    let locked = local_cell.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
+    // An index that assigns, as in `x[{x[2] <- 3; 1}] <- 2`, rebinds the variable while the
+    // replacement still holds the old value, which therefore must be a copy. The `*tmp*`
+    // promise deliberately counts no reference, so the inner assignment cannot see the share.
+    let index_assigns = getters.iter().any(|getter| {
+        values::pairlist_items(getter.cdr().cdr())
+            .into_iter()
+            .any(|(_, argument)| contains_assignment(argument, symbols))
+    });
     let mut binding_env = lookup_env;
     while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
         binding_env = binding_env.enclosure();
     }
     if values::maybe_shared(base)
-        || (!superassign && !local_binding)
+        || locked
+        || index_assigns
+        || (!superassign && local_cell.is_none())
         || !reuse_permitted(binding_env, base)
     {
         // A copy-on-write copy is the same value, so an Array stays an Array; the
@@ -2905,6 +2989,19 @@ pub unsafe fn complex_assign(
         replacement = result?;
     }
     assign_symbol(inner, replacement, env, superassign)
+}
+
+unsafe fn contains_assignment(expression: Sexp, symbols: &values::Symbols) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    head == symbols.assign
+        || head == symbols.assign2
+        || head == symbols.assign_eq
+        || values::pairlist_items(expression)
+            .into_iter()
+            .any(|(_, part)| contains_assignment(part, symbols))
 }
 
 /// Evaluates one replacement call of a complex assignment. A builtin replacement function

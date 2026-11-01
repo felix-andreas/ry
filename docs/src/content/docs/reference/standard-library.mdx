@@ -1270,6 +1270,8 @@ List.sort_desc(list(1.5, 3, 2))
 
 The sum of the elements; `0L` for an empty list. An `integer` sum that overflows is an error, so
 sum doubles, or fold with `Num.add_checked` to get `:Err(:Overflow)` instead.
+A `double` sum is accumulated like R's `sum()`, with more precision than a plain left-to-right
+fold, so `List.sum(xs)` and `sum(xs)` give the same number.
 
 ```r ry run runtime=ry dput
 List.sum(list(1L, 2L, 3L))

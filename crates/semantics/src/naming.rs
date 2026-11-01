@@ -78,6 +78,9 @@ pub struct ItemNaming {
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
     /// a new write of that slot, so later reads see the added or removed column.
     pub column_updates: SortedMap<ExprId, BindingId>,
+    /// `assign("name", v)` and `delayedAssign("name", v)` calls and the local slot each binds
+    /// to a value ry does not track.
+    pub run_time_writes: SortedMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
     /// Names R creates in the global environment as a side effect: `<<-` targets with no
@@ -122,6 +125,7 @@ struct NamingDraft {
     captured_slots: BTreeSet<BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
+    run_time_writes: BTreeMap<ExprId, BindingId>,
     namespace_reads: BTreeMap<ExprId, NamespaceRead>,
     super_globals: BTreeSet<Symbol>,
     invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
@@ -147,6 +151,7 @@ impl NamingDraft {
             captured_slots: self.captured_slots.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
+            run_time_writes: self.run_time_writes.into(),
             namespace_reads: self.namespace_reads.into(),
             super_globals: self.super_globals.into(),
             invalid_assignment_targets: ThinVec::from(self.invalid_assignment_targets),
@@ -468,6 +473,30 @@ impl Context<'_> {
                     self.naming.native_routine_reads.insert(routine);
                 }
                 match builtin_callee {
+                    // `assign("name", v)` and `delayedAssign("name", v)` bind `name` in the
+                    // calling frame, so a later read of `name` sees that binding and not an
+                    // outer one such as base's `length`. Its value is not tracked.
+                    Some("assign" | "delayedAssign")
+                        if self.current_function_depth() > 0
+                            && let [first, second] = &module[arguments][..]
+                            && module.argument_name(first).is_none_or(|name| name == "x")
+                            && module
+                                .argument_name(second)
+                                .is_none_or(|name| name == "value")
+                            && let Some(target) = first.value
+                            && let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(target) =>
+                    {
+                        self.resolve_arguments(&module[arguments]);
+                        let slot = self.frame_slot(
+                            Symbol::new(&module[text]),
+                            module.range(target),
+                            BindingKind::Local,
+                        );
+                        self.record_write(slot, Reach::Implicit);
+                        self.naming.run_time_writes.insert(id, slot);
+                        return;
+                    }
                     // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
                     // value and keep every write of those names alive.
                     Some("on.exit") => {

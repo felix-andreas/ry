@@ -636,6 +636,7 @@ pub fn check_item_with_annotation<'db>(
         string_values: FxHashMap::default(),
         value_read_slots: None,
         computed_slots: FxHashSet::default(),
+        lookup_slots: FxHashSet::default(),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -1094,6 +1095,9 @@ struct Checker<'db, 'a> {
     /// `NULL` is a placeholder default (NlcOptim's `solqp(H = NULL, ...)`) or the shape an
     /// `is.null()` test gave them (Rsolnp's `if (is.null(eqfun)) ...`).
     computed_slots: FxHashSet<BindingId>,
+    /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
+    /// so a call through them must suit every member the collection holds.
+    lookup_slots: FxHashSet<BindingId>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -1231,8 +1235,30 @@ enum ReplacementStep {
     Field(String),
     Position(usize),
     Element,
-    /// `x[i]`, `x@a`, or a replacement call such as `names(x)`: not modeled.
+    /// `x[i]` or `x[i, j]`, which coerces an atomic container to the wider atomic type.
+    Slice,
+    /// `x@a`, or a replacement call such as `names(x)`: not modeled.
     Other,
+    /// `formals(f) <- v` or `body(f) <- v` rewrites the function itself, so its prior
+    /// signature no longer describes it.
+    Rewrite,
+}
+
+/// Where a callee came from. A lookup in a collection (`handlers[[name]]`, `handlers$add`)
+/// may yield any member, so a call must suit them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalleeSource {
+    Lookup,
+    Value,
+}
+
+/// Which control-flow edge a join merges. A branch that writes an untyped value leaves the
+/// variable untyped, but a loop's back edge keeps the other side: a pass that recovered from
+/// an error with `Unknown` must not erase the type the error was reported against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinEdge {
+    Branch,
+    LoopBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1456,14 +1482,41 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 #[derive(Default)]
 struct FormalUses {
     missing_tested: FxHashSet<Symbol>,
-    /// Names read on every path where no write of them dominates the read.
+    /// Names read on every path before any write of them on that path.
     forced: FxHashSet<Symbol>,
+    /// Names some path wrote before forcing them. A later read does not force such a name,
+    /// because on that path the call never needed the argument.
     assigned: FxHashSet<Symbol>,
+    /// The names forced on every path that leaves through `return()`, or `None` when none
+    /// does. A formal read only after `if (fo == "A1") return("")` is not forced on the
+    /// path that returns.
+    returned: Option<FxHashSet<Symbol>>,
 }
 
 impl FormalUses {
     fn makes_optional(&self, name: Symbol) -> bool {
-        self.missing_tested.contains(&name) || !self.forced.contains(&name)
+        self.missing_tested.contains(&name) || !self.forces_on_every_path(name)
+    }
+
+    fn forces_on_every_path(&self, name: Symbol) -> bool {
+        self.forced.contains(&name)
+            && self
+                .returned
+                .as_ref()
+                .is_none_or(|returned| returned.contains(&name))
+    }
+
+    fn record_write(&mut self, name: Symbol) {
+        if !self.forced.contains(&name) {
+            self.assigned.insert(name);
+        }
+    }
+
+    fn record_return(&mut self) {
+        self.returned = Some(match self.returned.take() {
+            None => self.forced.clone(),
+            Some(returned) => returned.intersection(&self.forced).copied().collect(),
+        });
     }
 }
 
@@ -1479,8 +1532,8 @@ fn tests_missing_without_default(function: &str, parameter: &str) -> bool {
     )
 }
 
-/// The names every non-diverging branch assigned. When every branch diverges, the code after
-/// the join is unreachable and keeps `before`.
+/// The names any non-diverging branch assigned before forcing them. When every branch
+/// diverges, the code after the join is unreachable and keeps `before`.
 fn join_assigned(
     before: FxHashSet<Symbol>,
     branches: impl IntoIterator<Item = Option<FxHashSet<Symbol>>>,
@@ -1488,7 +1541,10 @@ fn join_assigned(
     branches
         .into_iter()
         .flatten()
-        .reduce(|joined, branch| joined.intersection(&branch).copied().collect())
+        .reduce(|mut joined, branch| {
+            joined.extend(branch);
+            joined
+        })
         .unwrap_or(before)
 }
 
@@ -1523,6 +1579,9 @@ pub enum ArgumentTarget {
     /// A name no formal declares on a non-variadic function, or a duplicate of one
     /// already supplied.
     UnmatchedName,
+    /// A name on a shape inferred from a call, which declared no names: it takes a positional
+    /// slot whose type is not checked.
+    UndeclaredName,
     Overflow,
 }
 
@@ -1576,7 +1635,39 @@ pub fn argument_targets(
         }
     }
 
+    // A shape inferred from an earlier call (`f(pars, arglist)` on a parameter `f`) has
+    // positional slots whose names nobody declared, so a later `f(pars = x, arglist)`
+    // names one of them. R matches names before positions, so such a name reserves the
+    // first free slot, unchecked because which slot it names is unknown. On a variadic
+    // shape (`f(x, ...)`) a name may also go to `...`, so it takes only the slots the
+    // positional arguments leave free, which keeps those arguments checked.
     let mut next_positional = 0usize;
+    if function.inferred {
+        let open_slots = match function.variadic {
+            None => function.positional.len(),
+            Some(_) => {
+                let positional_arguments = arguments
+                    .iter()
+                    .filter(|argument| !argument.forwards_dots && argument.name.is_none())
+                    .count();
+                function
+                    .positional
+                    .len()
+                    .saturating_sub(positional_arguments)
+            }
+        };
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument.forwards_dots
+                || targets[index].is_some()
+                || argument.name.is_none()
+                || next_positional >= open_slots
+            {
+                continue;
+            }
+            targets[index] = Some(ArgumentTarget::UndeclaredName);
+            next_positional += 1;
+        }
+    }
     let mut next_named = 0usize;
     for (index, argument) in arguments.iter().enumerate() {
         if argument.forwards_dots || targets[index].is_some() {
@@ -1616,7 +1707,27 @@ pub fn argument_targets(
             }
         });
     }
+    // Which slot such a name took is unknown, so the slot each positional argument fills is
+    // unknown too: `f(b = "x", 1)` after `f(1, "x")` puts the `1` first, not second.
+    if function.inferred
+        && function.variadic.is_none()
+        && targets.contains(&Some(ArgumentTarget::UndeclaredName))
+    {
+        for target in &mut targets {
+            if let Some(ArgumentTarget::Positional(_)) = target {
+                *target = Some(ArgumentTarget::UndeclaredName);
+            }
+        }
+    }
     targets
+}
+
+/// Where a value is read as a condition: `if` and `while` read a string through `as.logical`,
+/// while `&&`, `||` and a match guard reject one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionSite {
+    IfOrWhile,
+    Operand,
 }
 
 fn argument_shapes<'a>(arguments: &'a [CallArgument<'_>]) -> Vec<ArgumentShape<'a>> {
@@ -2136,6 +2247,10 @@ impl<'db> Checker<'db, '_> {
                         true => self.computed_slots.insert(slot),
                         false => self.computed_slots.remove(&slot),
                     };
+                    match self.is_lookup(value) {
+                        true => self.lookup_slots.insert(slot),
+                        false => self.lookup_slots.remove(&slot),
+                    };
                 }
                 self.write_target(spelling, target, value, value_ty);
                 value_ty
@@ -2156,9 +2271,29 @@ impl<'db> Checker<'db, '_> {
             }
             ExpressionKind::Call { callee, arguments } => {
                 let (callee, arguments) = (*callee, arguments.clone());
+                // A quoting form returns its arguments as code without running them, so
+                // `expression("density " * f[1] - f[2])` multiplies nothing. A project binding
+                // of the same name is an ordinary function.
+                if let ExpressionKind::NameRef(name) = module.kind(callee)
+                    && matches!(
+                        name.as_str(),
+                        "quote" | "bquote" | "substitute" | "expression"
+                    )
+                    && !self.naming.resolutions.contains_key(&callee)
+                    && !self
+                        .globals
+                        .is_some_and(|globals| globals.defined_in_project(name.as_str(), true))
+                {
+                    return any(self.db);
+                }
                 let first_call_error = self.errors.len();
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 self.check_native_arguments(range, callee, &module[arguments], first_call_error);
+                if let Some(&slot) = self.naming.run_time_writes.get(&id) {
+                    let written = unknown(self.db);
+                    self.environment.set(slot, EnvEntry::Mono(written));
+                    self.note_captured_write(slot, written);
+                }
                 ty
             }
             ExpressionKind::Index {
@@ -2351,6 +2486,7 @@ impl<'db> Checker<'db, '_> {
                         named,
                         variadic,
                         ret: return_ty,
+                        inferred: true,
                     }),
                 )
             }
@@ -3213,7 +3349,8 @@ impl<'db> Checker<'db, '_> {
     /// A nested write (`x[[1]]$a <- v`) rewrites each container on the way back up the
     /// spine: the innermost one takes the value, and each enclosing one takes the
     /// rewritten child. An intermediate container the spine cannot describe reads as
-    /// `Unknown`, and a step it cannot model (`x[i]`, `x@a`) leaves its container as it was.
+    /// `Unknown`, and a step it cannot model (`x@a`, `x[i]` on a list) leaves its container as
+    /// it was.
     fn replacement_written_type(
         &mut self,
         lhs: ExprId,
@@ -3268,13 +3405,31 @@ impl<'db> Checker<'db, '_> {
                     _ => ReplacementStep::Other,
                 },
             )),
-            ExpressionKind::Field { target, .. } | ExpressionKind::Index { target, .. } => {
-                Some((*target, ReplacementStep::Other))
+            ExpressionKind::Index {
+                double: false,
+                target,
+                ..
+            } => Some((*target, ReplacementStep::Slice)),
+            ExpressionKind::Field { target, .. } => Some((*target, ReplacementStep::Other)),
+            ExpressionKind::Call { callee, arguments } => {
+                let rewrites = match self.module.kind(*callee) {
+                    ExpressionKind::NameRef(name) => {
+                        matches!(name.as_str(), "formals" | "body")
+                    }
+                    _ => false,
+                };
+                self.module[arguments]
+                    .first()
+                    .and_then(|argument| argument.value)
+                    .map(|value| {
+                        let step = if rewrites {
+                            ReplacementStep::Rewrite
+                        } else {
+                            ReplacementStep::Other
+                        };
+                        (value, step)
+                    })
             }
-            ExpressionKind::Call { arguments, .. } => self.module[arguments]
-                .first()
-                .and_then(|argument| argument.value)
-                .map(|value| (value, ReplacementStep::Other)),
             _ => None,
         }
     }
@@ -3313,6 +3468,9 @@ impl<'db> Checker<'db, '_> {
         prior: Ty<'db>,
         value: Ty<'db>,
     ) -> Ty<'db> {
+        if matches!(step, ReplacementStep::Rewrite) {
+            return unknown(self.db);
+        }
         let module = self.module;
         let kind = module.kind(lhs);
         let field_name = match &step {
@@ -3440,6 +3598,23 @@ impl<'db> Checker<'db, '_> {
             items[*position] = value;
             return Ty::new(self.db, TyKind::Tuple(items));
         }
+        // R coerces the whole vector when the written value has a wider type, so
+        // `prob <- rep(NA, n); prob[i] <- 0.5` leaves `prob` a `double[]`.
+        if matches!(step, ReplacementStep::Slice) {
+            let (Some(container), Some(written)) = (
+                combine_operand_atomic(self.db, prior),
+                combine_operand_atomic(self.db, value),
+            ) else {
+                return prior;
+            };
+            let element = scalar(self.db, promote_combine_atomic(container, written));
+            // A type carries no length, so a scalar stays a scalar as it does after `x[1] <- 2L`.
+            return match prior.kind(self.db) {
+                TyKind::Scalar(_) => element,
+                TyKind::NamedVector(_) => Ty::new(self.db, TyKind::NamedVector(element)),
+                _ => Ty::new(self.db, TyKind::Vector(element)),
+            };
+        }
         if !matches!(
             step,
             ReplacementStep::Position(_) | ReplacementStep::Element
@@ -3468,7 +3643,7 @@ impl<'db> Checker<'db, '_> {
         else_branch: Option<ExprId>,
         discarded: bool,
     ) -> Ty<'db> {
-        self.expect_scalar_logical(condition);
+        self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
         let guard = self.recognize_guard(condition);
 
         let mark = self.environment.mark();
@@ -3534,7 +3709,7 @@ impl<'db> Checker<'db, '_> {
             // A value nobody reads must not relate its branches: unifying them would tie
             // `nm(x, value)` to `attr(x, name) <- value` and so `x` to `value`.
             (false, false) if discarded => {
-                self.join_writes(&then_writes);
+                self.join_writes(&then_writes, JoinEdge::Branch);
                 let then_ty = self.table.resolve(self.db, then_ty);
                 let else_ty = self.table.resolve(self.db, else_ty);
                 union_of(self.db, [then_ty, else_ty])
@@ -3564,7 +3739,7 @@ impl<'db> Checker<'db, '_> {
                     }
                     !normalizes
                 });
-                self.join_writes(&then_writes);
+                self.join_writes(&then_writes, JoinEdge::Branch);
                 let joined = self.join_branch_values(then_ty, else_ty);
                 let mut range = self.module.range(then_branch);
                 if let Some(else_branch) = else_branch {
@@ -3604,7 +3779,7 @@ impl<'db> Checker<'db, '_> {
                 self.note_captured_write(slot, ty);
             }
             if let Some(guard) = arm.guard {
-                self.expect_scalar_logical(guard);
+                self.expect_scalar_logical(guard, ConditionSite::Operand);
             }
             let value = self.infer(arm.body);
             all_values.push(value);
@@ -3645,7 +3820,7 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
             } else {
-                self.join_writes(&complete);
+                self.join_writes(&complete, JoinEdge::Branch);
             }
         }
         let joined_values = if values.is_empty() {
@@ -4233,7 +4408,7 @@ impl<'db> Checker<'db, '_> {
                 self.environment.set(slot, EnvEntry::Mono(element));
             }
             if let Some(condition) = condition {
-                self.expect_scalar_logical(condition);
+                self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
             }
             self.infer(body);
             let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
@@ -4250,7 +4425,7 @@ impl<'db> Checker<'db, '_> {
                     self.environment.set(slot, EnvEntry::Mono(ty));
                 }
             }
-            let changed = self.join_writes(&writes);
+            let changed = self.join_writes(&writes, JoinEdge::LoopBack);
             if changed.is_empty() {
                 if runs_at_least_once {
                     for (slot, entry) in writes {
@@ -4320,8 +4495,8 @@ impl<'db> Checker<'db, '_> {
                     ..FormalUses::default()
                 };
                 self.collect_formal_uses(*body, &mut nested);
-                for name in nested.forced {
-                    if !uses.assigned.contains(&name) {
+                for &name in &nested.forced {
+                    if nested.forces_on_every_path(name) && !uses.assigned.contains(&name) {
                         uses.forced.insert(name);
                     }
                 }
@@ -4355,7 +4530,7 @@ impl<'db> Checker<'db, '_> {
                         .filter_map(|argument| argument.value)
                     {
                         if let ExpressionKind::NameRef(name) = self.module.kind(value) {
-                            uses.assigned.insert(*name);
+                            uses.record_write(*name);
                         }
                     }
                 }
@@ -4365,7 +4540,7 @@ impl<'db> Checker<'db, '_> {
                 if let ExpressionKind::NameRef(name) = self.module.kind(*target) =>
             {
                 self.collect_formal_uses(*value, uses);
-                uses.assigned.insert(*name);
+                uses.record_write(*name);
                 return;
             }
             ExpressionKind::Assign { target, value, .. } => {
@@ -4373,9 +4548,9 @@ impl<'db> Checker<'db, '_> {
                 self.collect_formal_uses(*target, uses);
                 return;
             }
-            // A write assigns a formal only where it dominates the read: on both arms of a
-            // branch, never inside a loop body that may not run or an operand that may not
-            // be evaluated.
+            // A write on one arm of a branch, in a loop body, or in an operand that may not be
+            // evaluated covers only the paths that run it, so a later read still forces the
+            // formal on the others, and is forced on every path only when no path wrote it.
             ExpressionKind::If {
                 condition,
                 then_branch,
@@ -4383,8 +4558,13 @@ impl<'db> Checker<'db, '_> {
             } => {
                 self.collect_formal_uses(*condition, uses);
                 let before = uses.assigned.clone();
+                // The true edge of `a && b` has evaluated `b`, so the then branch has forced
+                // what `b` reads, as `if (allow_null && is.null(x)) return(NULL)` reads `x`.
+                let outer_forced = uses.forced.clone();
+                self.collect_true_edge_reads(*condition, uses);
                 let (then_assigned, then_forced) =
                     self.collect_branch_uses(*then_branch, uses, &before);
+                uses.forced = outer_forced;
                 let (else_assigned, else_forced) = match else_branch {
                     Some(else_branch) => self.collect_branch_uses(*else_branch, uses, &before),
                     None => (Some(before.clone()), FxHashSet::default()),
@@ -4393,23 +4573,26 @@ impl<'db> Checker<'db, '_> {
                 uses.forced.extend(join_forced([then_forced, else_forced]));
                 return;
             }
+            // `%||%` evaluates its right operand only when the left one is `NULL`.
             ExpressionKind::Binary {
-                operator: BinaryOperator::And2 | BinaryOperator::Or2,
+                operator,
+                special_name,
                 lhs,
                 rhs,
-                ..
-            } => {
+            } if matches!(operator, BinaryOperator::And2 | BinaryOperator::Or2)
+                || special_name.is_some_and(|name| name == "%||%") =>
+            {
                 self.collect_formal_uses(*lhs, uses);
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*rhs, uses, &before);
-                uses.assigned = before;
+                let (after, _) = self.collect_branch_uses(*rhs, uses, &before);
+                uses.assigned = after.unwrap_or(before);
                 return;
             }
             ExpressionKind::While { condition, body } => {
                 self.collect_formal_uses(*condition, uses);
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*body, uses, &before);
-                uses.assigned = before;
+                let (after, _) = self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = after.unwrap_or(before);
                 return;
             }
             ExpressionKind::For {
@@ -4419,11 +4602,12 @@ impl<'db> Checker<'db, '_> {
                 ..
             } => {
                 self.collect_formal_uses(*sequence, uses);
-                uses.assigned
-                    .extend(variable.map(|variable| self.module.name(variable)));
+                if let Some(variable) = variable {
+                    uses.record_write(self.module.name(*variable));
+                }
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*body, uses, &before);
-                uses.assigned = before;
+                let (after, _) = self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = after.unwrap_or(before);
                 return;
             }
             // `local()` evaluates in a new frame, so its writes bind nothing here.
@@ -4441,7 +4625,9 @@ impl<'db> Checker<'db, '_> {
                 for arm in &self.module[arms] {
                     let mut entry = before.clone();
                     for &binding in &self.module[arm.bindings] {
-                        if let ExpressionKind::NameRef(name) = self.module.kind(binding) {
+                        if let ExpressionKind::NameRef(name) = self.module.kind(binding)
+                            && !uses.forced.contains(name)
+                        {
                             entry.insert(*name);
                         }
                     }
@@ -4459,6 +4645,26 @@ impl<'db> Checker<'db, '_> {
                 return;
             }
             ExpressionKind::Call { callee, arguments } => {
+                // rlang's `is_missing()` tests a formal the way `missing()` does.
+                let tester = match self.module.kind(*callee) {
+                    ExpressionKind::NameRef(name) => Some(name.as_str()),
+                    ExpressionKind::Namespace {
+                        package: Some(package),
+                        name: Some(name),
+                        ..
+                    } if package == "base" || package == "rlang" => Some(name.as_str()),
+                    _ => None,
+                };
+                if matches!(tester, Some("missing" | "is_missing")) {
+                    if let [argument] = &self.module[arguments][..]
+                        && argument.name.is_none()
+                        && let Some(value) = argument.value
+                        && let ExpressionKind::NameRef(name) = self.module.kind(value)
+                    {
+                        uses.missing_tested.insert(*name);
+                    }
+                    return;
+                }
                 if let ExpressionKind::NameRef(callee_name) = self.module.kind(*callee) {
                     // Only the first argument always runs; one arm at most runs after it, and
                     // none when no arm matches and there is no unnamed default.
@@ -4482,14 +4688,14 @@ impl<'db> Checker<'db, '_> {
                         uses.forced.extend(join_forced(arm_forced));
                         return;
                     }
-                    if callee_name == "missing" {
-                        if let [argument] = &self.module[arguments][..]
-                            && argument.name.is_none()
-                            && let Some(value) = argument.value
-                            && let ExpressionKind::NameRef(name) = self.module.kind(value)
+                    if callee_name == "return" {
+                        for value in self.module[arguments]
+                            .iter()
+                            .filter_map(|argument| argument.value)
                         {
-                            uses.missing_tested.insert(*name);
+                            self.collect_formal_uses(value, uses);
                         }
+                        uses.record_return();
                         return;
                     }
                     // These read their argument's expression, never its value, so a missing
@@ -4626,11 +4832,38 @@ impl<'db> Checker<'db, '_> {
         before: &FxHashSet<Symbol>,
     ) -> (Option<FxHashSet<Symbol>>, FxHashSet<Symbol>) {
         uses.assigned = before.clone();
-        let outer_forced = mem::take(&mut uses.forced);
+        // The branch starts from the names already forced, so a `return()` inside it
+        // records every name its path has forced.
+        let outer_forced = uses.forced.clone();
         self.collect_formal_uses(id, uses);
         let forced = mem::replace(&mut uses.forced, outer_forced);
         let after = mem::take(&mut uses.assigned);
         ((!self.diverges(id)).then_some(after), forced)
+    }
+
+    /// Adds to `uses.forced` what the right operands of a condition's `&&` chain read, which
+    /// only the true edge has evaluated.
+    fn collect_true_edge_reads(&self, condition: ExprId, uses: &mut FormalUses) {
+        let mut condition = condition;
+        while let ExpressionKind::Paren(inner) = self.module.kind(condition) {
+            condition = *inner;
+        }
+        if let ExpressionKind::Binary {
+            operator: BinaryOperator::And2,
+            lhs,
+            rhs,
+            ..
+        } = self.module.kind(condition)
+        {
+            self.collect_true_edge_reads(*lhs, uses);
+            let mut right = FormalUses {
+                assigned: uses.assigned.clone(),
+                ..FormalUses::default()
+            };
+            self.collect_formal_uses(*rhs, &mut right);
+            self.collect_true_edge_reads(*rhs, &mut right);
+            uses.forced.extend(right.forced);
+        }
     }
 
     /// A forced formal that the call omits evaluates its default, so the default's reads
@@ -5391,7 +5624,7 @@ impl<'db> Checker<'db, '_> {
             // The right operand runs only on the left's true edge for `&&` (false for `||`), so
             // `is.numeric(x) && x > 0` narrows like the `if` it abbreviates.
             And2 | Or2 => {
-                self.expect_scalar_logical(lhs);
+                self.expect_scalar_logical(lhs, ConditionSite::Operand);
                 // `!is.null(x) && length(x)`: the right operand runs only on the left's true
                 // edge (`&&`) or false edge (`||`).
                 let guard = self.recognize_guard(lhs).unwrap_or_default();
@@ -5402,7 +5635,7 @@ impl<'db> Checker<'db, '_> {
                 };
                 let mark = self.environment.mark();
                 self.apply_refinements(&edge);
-                self.expect_scalar_logical(rhs);
+                self.expect_scalar_logical(rhs, ConditionSite::Operand);
                 // The right operand may not run, so its own assignments join with the state
                 // before it; the refinement itself ends with the operator.
                 let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
@@ -5424,7 +5657,7 @@ impl<'db> Checker<'db, '_> {
                     })
                     .collect();
                 self.environment.rollback(mark);
-                self.join_writes(&writes);
+                self.join_writes(&writes, JoinEdge::Branch);
                 scalar(self.db, Atomic::Logical)
             }
             // Opaque constructs: operands still infer for the IDE, but their diagnostics are
@@ -5669,6 +5902,43 @@ impl<'db> Checker<'db, '_> {
             };
         let left = nullable_union(left);
         let right = nullable_union(right);
+        // A union beside a class dispatches per member, as R does at run time, so the
+        // accumulator `acc <- 0; for (...) acc <- acc + m %*% m` (`double | matrix`) takes
+        // `Arith.matrix` for both members. Every member must dispatch to a method; otherwise
+        // the ordinary rules check the union.
+        for (index, operand) in [left, right].into_iter().enumerate() {
+            let TyKind::Union(members) = self.table.shallow_resolve(self.db, operand).kind(self.db)
+            else {
+                continue;
+            };
+            let members = members.clone();
+            let member_count = members.len();
+            let errors_before = self.errors.len();
+            let snapshot = self.table.snapshot();
+            let mut results = Vec::with_capacity(members.len());
+            for member in members {
+                let (member_left, member_right) = match index {
+                    0 => (member, right),
+                    _ => (left, member),
+                };
+                match self.operator_method_result(
+                    range,
+                    operator,
+                    lhs,
+                    rhs,
+                    member_left,
+                    member_right,
+                ) {
+                    Some(result) => results.push(result),
+                    None => break,
+                }
+            }
+            if results.len() == member_count {
+                return Some(union_of(self.db, results));
+            }
+            self.errors.truncate(errors_before);
+            self.table.rollback(snapshot);
+        }
         // A generic bounded `numeric` probes as the `double` it may be.
         let probe_operand =
             |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
@@ -5777,7 +6047,7 @@ impl<'db> Checker<'db, '_> {
         self.module.range(id)
     }
 
-    fn expect_scalar_logical(&mut self, condition: ExprId) {
+    fn expect_scalar_logical(&mut self, condition: ExprId, site: ConditionSite) {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
         let resolved = self.structural(inferred);
@@ -5785,6 +6055,27 @@ impl<'db> Checker<'db, '_> {
             || self.reads_open_defaulted_formal(condition, resolved)
         {
             return;
+        }
+        // `if` reads a string through `as.logical`, so `if (Sys.getenv("FLAG", unset = "TRUE"))`
+        // is ordinary R. Only a literal shows its text, and then only R's logical spellings pass.
+        // `&&`, `||` and a match guard reject any string, so they skip this.
+        if site == ConditionSite::IfOrWhile
+            && matches!(resolved.kind(self.db), TyKind::Scalar(Atomic::Character))
+        {
+            let mut operand = condition;
+            while let ExpressionKind::Paren(inner) = self.module.kind(operand) {
+                operand = *inner;
+            }
+            let reads_as_logical = match self.module.kind(operand) {
+                ExpressionKind::Literal(LiteralKind::String(text)) => matches!(
+                    &self.module[text],
+                    "TRUE" | "true" | "True" | "T" | "FALSE" | "false" | "False" | "F"
+                ),
+                _ => true,
+            };
+            if reads_as_logical {
+                return;
+            }
         }
         // A `NULL` member is the "not supplied" path of an optional value, and R code tests such
         // a value once it holds one, so a union is a condition when its other members are. Its
@@ -6397,6 +6688,7 @@ impl<'db> Checker<'db, '_> {
             named: Vec::new(),
             variadic: None,
             ret: declared.ret,
+            inferred: false,
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -6836,7 +7128,11 @@ impl<'db> Checker<'db, '_> {
         };
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &[callee_ty]);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        let source = match self.is_lookup(callee) {
+            true => CalleeSource::Lookup,
+            false => CalleeSource::Value,
+        };
+        let result = self.dispatch_call(range, callee_range, callee_ty, source, &call_arguments);
         if callback_outputs.is_empty() {
             return result;
         }
@@ -8723,7 +9019,7 @@ impl<'db> Checker<'db, '_> {
                 }
             }
             for writes in joined {
-                self.join_writes(writes);
+                self.join_writes(writes, JoinEdge::Branch);
             }
         }
         if !has_default {
@@ -9286,7 +9582,12 @@ impl<'db> Checker<'db, '_> {
         let whole_double = argument
             .value
             .is_some_and(|value| self.is_whole_double(value));
-        let forwards_dots = argument.name.is_none()
+        // R expands an argument whose value is `...` whatever its tag, so PerformanceAnalytics'
+        // `FUN(nx, ... = ...)` forwards the dots like `FUN(nx, ...)`.
+        let forwards_dots = self
+            .module
+            .argument_name(argument)
+            .is_none_or(|name| name == "...")
             && argument.value.is_some_and(|value| {
                 matches!(
                     &self.module.expression(value).kind,
@@ -9297,6 +9598,7 @@ impl<'db> Checker<'db, '_> {
             name: self
                 .module
                 .argument_name(argument)
+                .filter(|_| !forwards_dots)
                 .map(|name| name.to_string()),
             name_range: self.module.argument_name_range(argument),
             ty,
@@ -9560,6 +9862,28 @@ impl<'db> Checker<'db, '_> {
                 continue;
             };
             let resolved = self.table.resolve(self.db, ty);
+            // `match.fun` looks a bare name up with `mode = "function"`, past a binding that
+            // holds no function, so sessioninfo's mocking placeholder `getNamespaceVersion <-
+            // NULL` leaves `vapply(pkgs, getNamespaceVersion, "")` calling base's function.
+            if let ExpressionKind::NameRef(name) = self.module.kind(value)
+                && !self.naming.resolutions.contains_key(&value)
+                && !matches!(
+                    resolved.kind(self.db),
+                    TyKind::Function(_) | TyKind::Var(_) | TyKind::Any | TyKind::Unknown
+                )
+            {
+                // An export the stubs list without a type is still a function.
+                if let Some(mut candidates) = self
+                    .globals
+                    .and_then(|globals| globals.library_candidates(name.as_str()))
+                {
+                    argument.named_function = Some(match candidates.pop() {
+                        Some(scheme) => self.instantiate(&scheme),
+                        None => unknown(self.db),
+                    });
+                }
+                continue;
+            }
             if !is_character(self.db, resolved) {
                 continue;
             }
@@ -9588,6 +9912,7 @@ impl<'db> Checker<'db, '_> {
         range: TextRange,
         callee_range: TextRange,
         callee: Ty<'db>,
+        source: CalleeSource,
         arguments: &[CallArgument<'db>],
     ) -> Ty<'db> {
         let resolved = self.table.shallow_resolve(self.db, callee);
@@ -9637,6 +9962,7 @@ impl<'db> Checker<'db, '_> {
                             preceding_named: 0,
                         }),
                         ret,
+                        inferred: true,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -9667,7 +9993,7 @@ impl<'db> Checker<'db, '_> {
                     .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
                     .collect();
                 let without_null = union_of(self.db, callable);
-                self.dispatch_call(range, callee_range, without_null, arguments)
+                self.dispatch_call(range, callee_range, without_null, source, arguments)
             }
             // A function joined with an unbound variable or a generic parameter (`f <- function(source = NULL) {
             // if (is.null(source)) source <- function(x) x; source(1) }`): the variable is
@@ -9702,7 +10028,7 @@ impl<'db> Checker<'db, '_> {
                     })
                     .collect();
                 let functions = union_of(self.db, functions);
-                self.dispatch_call(range, callee_range, functions, arguments);
+                self.dispatch_call(range, callee_range, functions, source, arguments);
                 unknown(self.db)
             }
             // A union of functions (`handlers[[name]](...)`) must accept the call for every
@@ -9716,14 +10042,59 @@ impl<'db> Checker<'db, '_> {
                 }) =>
             {
                 let members = members.clone();
+                let functions: Vec<FunctionType<'db>> = members
+                    .iter()
+                    .filter_map(|&member| {
+                        match self.table.shallow_resolve(self.db, member).kind(self.db) {
+                            TyKind::Function(function) => Some(function.clone()),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                let shape = |function: &FunctionType<'db>| {
+                    (
+                        function.positional.len(),
+                        function
+                            .named
+                            .iter()
+                            .map(|parameter| (parameter.name, parameter.optional))
+                            .collect::<Vec<_>>(),
+                        function.variadic.is_some(),
+                    )
+                };
+                // A value (not a lookup in a collection) whose members take different
+                // parameters comes from code that picks a function by an argument value the
+                // checker does not follow, as rlang's `compat("warn")` returns either a one-message
+                // shim or `interactive`. Such a call presumes a member that accepts it.
+                let selected_by_value = source == CalleeSource::Value
+                    && functions.split_first().is_some_and(|(first, rest)| {
+                        rest.iter().any(|function| shape(function) != shape(first))
+                    });
+                if selected_by_value {
+                    let mut accepted = 0;
+                    let mut first_findings = Vec::new();
+                    for function in &functions {
+                        let snapshot = self.table.snapshot();
+                        let findings = self.match_arguments(callee_range, function, arguments);
+                        self.table.rollback(snapshot);
+                        if findings.is_empty() {
+                            accepted += 1;
+                        } else if first_findings.is_empty() {
+                            first_findings = findings;
+                        }
+                    }
+                    if accepted == 0 {
+                        self.errors.extend(first_findings);
+                        return unknown(self.db);
+                    }
+                    if accepted < functions.len() {
+                        return unknown(self.db);
+                    }
+                }
                 let caller_entries = self.caller_open_variables(arguments);
                 let mut narrowed = false;
-                let mut returns = Vec::with_capacity(members.len());
-                for member in members {
-                    let member = self.table.shallow_resolve(self.db, member);
-                    let TyKind::Function(function) = member.kind(self.db) else {
-                        continue;
-                    };
+                let mut returns = Vec::with_capacity(functions.len());
+                for function in &functions {
                     let snapshot = self.table.snapshot();
                     let findings = self.match_arguments(callee_range, function, arguments);
                     if findings.is_empty() {
@@ -9774,7 +10145,7 @@ impl<'db> Checker<'db, '_> {
                     })
                     .collect();
                 let functions = union_of(self.db, functions);
-                self.dispatch_call(range, callee_range, functions, arguments);
+                self.dispatch_call(range, callee_range, functions, source, arguments);
                 unknown(self.db)
             }
             _ => {
@@ -9799,12 +10170,6 @@ impl<'db> Checker<'db, '_> {
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
         let total = function.positional.len() + function.named.len();
-        let required = function.positional.len()
-            + function
-                .named
-                .iter()
-                .filter(|field| !field.optional)
-                .count();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let targets = argument_targets(self.db, function, &argument_shapes(arguments));
 
@@ -9828,7 +10193,8 @@ impl<'db> Checker<'db, '_> {
             match target {
                 ArgumentTarget::Positional(slot) => {
                     if let Some(&expected) = function.positional.get(*slot)
-                        && let Some(ty) = self.argument_type_for(expected, argument)
+                        && let Some(ty) =
+                            self.argument_type_for(expected, argument, function.inferred)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -9842,7 +10208,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Named(formal) => {
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
-                        && let Some(ty) = self.argument_type_for(expected, argument)
+                        && let Some(ty) =
+                            self.argument_type_for(expected, argument, function.inferred)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -9863,7 +10230,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Rest => {
                     if let Some(element) = variadic_element
-                        && let Some(ty) = self.argument_type_for(element, argument)
+                        && let Some(ty) =
+                            self.argument_type_for(element, argument, function.inferred)
                         && let Err(error) = self.check_argument(
                             element,
                             ty,
@@ -9875,6 +10243,7 @@ impl<'db> Checker<'db, '_> {
                         findings.push(error);
                     }
                 }
+                ArgumentTarget::UndeclaredName => {}
                 ArgumentTarget::UnmatchedName => {
                     if let Some(name) = &argument.name {
                         findings.push(TypeError {
@@ -9895,7 +10264,13 @@ impl<'db> Checker<'db, '_> {
                             .zip(arguments)
                             .filter(|(target, argument)| {
                                 argument.name.is_some()
-                                    && matches!(target, Some(ArgumentTarget::Named(_)))
+                                    && matches!(
+                                        target,
+                                        Some(
+                                            ArgumentTarget::Named(_)
+                                                | ArgumentTarget::UndeclaredName
+                                        )
+                                    )
                             })
                             .count();
                         return vec![TypeError {
@@ -9932,17 +10307,31 @@ impl<'db> Checker<'db, '_> {
 
         let positional_filled = targets
             .iter()
-            .filter(|target| matches!(target, Some(ArgumentTarget::Positional(_))))
+            .filter(|target| {
+                matches!(
+                    target,
+                    Some(ArgumentTarget::Positional(_) | ArgumentTarget::UndeclaredName)
+                )
+            })
+            .count();
+        let filled_by_name = targets
+            .iter()
+            .zip(arguments)
+            .filter(|(target, argument)| {
+                argument.name.is_some() && *target == &Some(ArgumentTarget::UndeclaredName)
+            })
             .count();
         if forwards_dots || unknown_name {
             return findings;
         }
+        // Overflow is reported above, so a mismatch here leaves a positional slot empty. A
+        // named argument that went to `...` fills none, so only the filled slots count.
         if positional_filled != function.positional.len() {
             return vec![TypeError {
                 range: callee_range,
                 kind: TypeErrorKind::ArityMismatch {
-                    expected: required,
-                    found: arguments.len(),
+                    expected: function.positional.len() - filled_by_name,
+                    found: positional_filled - filled_by_name,
                 },
             }];
         }
@@ -9973,6 +10362,7 @@ impl<'db> Checker<'db, '_> {
         &self,
         expected: Ty<'db>,
         argument: &CallArgument<'db>,
+        inferred_signature: bool,
     ) -> Option<Ty<'db>> {
         if let Some(named) = argument.named_function
             && matches!(
@@ -9983,6 +10373,9 @@ impl<'db> Checker<'db, '_> {
             return Some(named);
         }
         let ty = argument.ty?;
+        if inferred_signature && self.fits_inferred_scalar(expected, ty) {
+            return Some(expected);
+        }
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
                 let ty = self.without_inferred_null(expected, ty);
@@ -10004,6 +10397,19 @@ impl<'db> Checker<'db, '_> {
                 .resolutions
                 .get(&value)
                 .is_some_and(|slot| !self.computed_slots.contains(slot)))
+    }
+
+    /// An element read from a collection, directly or through a variable it was stored in.
+    fn is_lookup(&self, expression: ExprId) -> bool {
+        match self.module.kind(expression) {
+            ExpressionKind::Index { .. } | ExpressionKind::Field { .. } => true,
+            ExpressionKind::NameRef(_) => self
+                .naming
+                .resolutions
+                .get(&expression)
+                .is_some_and(|slot| self.lookup_slots.contains(slot)),
+            _ => false,
+        }
     }
 
     fn names_computed_value(&self, value: ExprId) -> bool {
@@ -10060,6 +10466,37 @@ impl<'db> Checker<'db, '_> {
             .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
             .collect();
         union_of(self.db, kept)
+    }
+
+    /// A scalar parameter type inferred from an unannotated body records how the body uses the
+    /// value, and a vector type carries no length, so zoo's `rlength <- function(x) if (all(!x))
+    /// ...` is called with the `logical[]` it was written for. A vector of the same atomic type
+    /// therefore passes. So does a number where the body only claimed `logical`, because that
+    /// claim comes from a condition or `!`, which coerce numbers as R does.
+    fn fits_inferred_scalar(&self, expected: Ty<'db>, ty: Ty<'db>) -> bool {
+        // Only a scalar the signature names: a type variable an earlier argument bound to a
+        // scalar still widens through unification (`cost(TRUE, 0.5)` binds `T := double`).
+        let TyKind::Scalar(atomic) = *expected.kind(self.db) else {
+            return false;
+        };
+        let fits = |member: Ty<'db>| {
+            let element = match member.kind(self.db) {
+                TyKind::Vector(element) => *element,
+                _ => member,
+            };
+            match *element.kind(self.db) {
+                TyKind::Scalar(other) => {
+                    other == atomic
+                        || (atomic == Atomic::Logical
+                            && matches!(other, Atomic::Integer | Atomic::Double))
+                }
+                _ => false,
+            }
+        };
+        match self.table.resolve(self.db, ty).kind(self.db) {
+            TyKind::Union(members) => members.iter().all(|&member| fits(member)),
+            _ => fits(self.table.resolve(self.db, ty)),
+        }
     }
 
     /// A variable the body computes as `character | character[]`, through a helper that returns
@@ -12445,8 +12882,16 @@ impl<'db> Checker<'db, '_> {
                 right_resolved
             };
             // Only an unconstrained variable is protected: pinning an already-restricted one
-            // adds no new requirement and lets recursion converge.
-            if self.table.open_constraint(self.db, open) == Some(Constraint::Unconstrained) {
+            // adds no new requirement and lets recursion converge. One nested in a list is
+            // protected too, so sessioninfo's `if (identical(dp, FALSE)) list(character(),
+            // character()) else list(dp, dp)` leaves `dp` open.
+            let mut vars = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, open, &mut vars);
+            if vars.into_iter().any(|var| {
+                self.table
+                    .open_constraint(self.db, Ty::new(self.db, TyKind::Var(var)))
+                    == Some(Constraint::Unconstrained)
+            }) {
                 return union_of(self.db, [left_resolved, right_resolved]);
             }
         }
@@ -12529,7 +12974,11 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// Returns the slots whose entries changed: the loop fixed point's stability signal.
-    fn join_writes(&mut self, writes: &[(BindingId, Option<EnvEntry<'db>>)]) -> Vec<BindingId> {
+    fn join_writes(
+        &mut self,
+        writes: &[(BindingId, Option<EnvEntry<'db>>)],
+        edge: JoinEdge,
+    ) -> Vec<BindingId> {
         let mut changed = Vec::new();
         for &(slot, branch_entry) in writes {
             // The missing-formal marker is branch-local: once joined it is the supplied type.
@@ -12545,7 +12994,19 @@ impl<'db> Checker<'db, '_> {
             }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
-                    Some(EnvEntry::Mono(self.join_written_values(a, b)))
+                    let unknown_side = [a, b].into_iter().any(|ty| {
+                        matches!(
+                            self.table.resolve(self.db, ty).kind(self.db),
+                            TyKind::Unknown
+                        )
+                    });
+                    Some(EnvEntry::Mono(
+                        if unknown_side && matches!(edge, JoinEdge::Branch) {
+                            unknown(self.db)
+                        } else {
+                            self.join_written_values(a, b)
+                        },
+                    ))
                 }
                 (None, Some(entry)) => Some(entry),
                 // Keeping identical entries as-is preserves a function slot's polymorphism.

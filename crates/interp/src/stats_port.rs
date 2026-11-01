@@ -64,6 +64,10 @@ pub unsafe fn port_nlminb(call: &NativeCall<'_>) -> R<Sexp> {
     let scale = scale_vector(call, call.arg(6), n)?;
     let (lower, upper) = bounds(call, call.arg(4), call.arg(5), n)?;
     let (iv, v) = work_vectors(call, call.arg(7), call.arg(8))?;
+    if let Some(position) = out_of_range_control(values::reals(v)) {
+        values::ints_mut(iv)[0] = position;
+        return Ok(values::nil());
+    }
     let controls = controls(values::ints(iv), values::reals(v));
     let gradient = call.arg(1);
     let hessian = call.arg(2);
@@ -111,11 +115,39 @@ pub unsafe fn port_nlsb(call: &NativeCall<'_>) -> R<Sexp> {
     let scale = scale_vector(call, call.arg(1), n)?;
     let (iv, v) = work_vectors(call, call.arg(3), call.arg(4))?;
     let (lower, upper) = bounds(call, call.arg(5), call.arg(6), n)?;
+    if let Some(position) = out_of_range_control(values::reals(v)) {
+        values::ints_mut(iv)[0] = position;
+        return Ok(values::nil());
+    }
     let controls = controls(values::ints(iv), values::reals(v));
     let outcome = minimize(&mut model, &start, &scale, &lower, &upper, &controls)?;
     model.set(&outcome.x)?;
     write_outcome(iv, v, &outcome);
     Ok(values::nil())
+}
+
+/// The 1-based position of the first tolerance in `v` outside the range PORT accepts, which
+/// the minimizers report in `iv[1]` instead of running; `nlminb` names the `control` entry.
+/// The ranges are PORT's: `rel.tol` between machine epsilon and 0.1, the step bounds positive
+/// normal numbers, the other tolerances in [0, 1] (`abs.tol` any finite nonnegative number).
+fn out_of_range_control(v: &[f64]) -> Option<i32> {
+    let checks: [(usize, fn(f64) -> bool); 7] = [
+        (31, |value| (0.0..f64::INFINITY).contains(&value)),
+        (32, |value| (f64::EPSILON..=0.1).contains(&value)),
+        (33, |value| (0.0..=1.0).contains(&value)),
+        (34, |value| (0.0..=1.0).contains(&value)),
+        (35, |value| {
+            (f64::MIN_POSITIVE..f64::INFINITY).contains(&value)
+        }),
+        (36, |value| {
+            (f64::MIN_POSITIVE..f64::INFINITY).contains(&value)
+        }),
+        (37, |value| (0.0..=1.0).contains(&value)),
+    ];
+    checks.into_iter().find_map(|(position, accepts)| {
+        let value = *v.get(position - 1)?;
+        (!accepts(value)).then_some(position as i32)
+    })
 }
 
 /// The `iv` defaults, by 1-based position. Positions past 41 are PORT's storage offsets,
