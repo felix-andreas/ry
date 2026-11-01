@@ -287,3 +287,45 @@ weird  <-  1
 #++++
 y = 6 # fmt: off
 weird <- 1
+
+#---- comment_between_argument_name_and_equals
+x <- list(ang
+# note
+ = 1L)
+#++++
+x <- list(ang
+# note
+  = 1L)
+
+#---- annotation_between_namespace_operator_and_name
+pkg::
+#: }
+x <- lis
+ fn(a, b = 2, ...)
+#++++
+pkg::
+  #: }
+  x <- lis
+fn(a, b = 2, ...)
+
+#---- namespace_comment
+pkg::
+# note
+name
+#++++
+pkg::
+  # note
+  name
+
+#---- annotation_inside_or_pattern
+match (s) {
+  (a, 'x') |
+#: @str(_, a) => a
+  _ => 0
+}
+#++++
+match (s) {
+  (a, 'x') |
+#: @str(_, a) => a
+  _ => 0
+}
