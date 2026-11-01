@@ -4,7 +4,7 @@
 
 # ry
 
-**A toolchain for R, written in Rust.**
+**One toolchain and a type system for R, written in Rust.**
 
 [**Docs**](https://ry-lang.org) ·
 [**Releases**](https://github.com/felix-andreas/ry/releases) ·
@@ -13,8 +13,11 @@
 
 </div>
 
-ry is a language server, checker, formatter, and console for R. It analyzes source code without
-running it, so it reports problems as you type and needs no R installation except for the console.
+ry checks, formats, loads and runs R from one tool configured by one `ry.toml`. Its type system
+sits on top of R and works on the code you already have. You can stop at checking plain R, add
+types as `#:` comments that keep the code plain R, switch to inline types, or move to ry's own
+records, tagged unions and typed table, and turn on strict mode to reject untyped code.
+[Why ry](https://ry-lang.org/why-ry) walks through the four steps.
 
 Its parser is written for tooling: it says what is missing and keeps analyzing the rest of the file.
 
@@ -46,7 +49,8 @@ ry repl     # an R console with typed completion (needs R)
 ## Type checking
 
 ry includes a static type checker for R. It infers types from how values are used, so existing code
-needs no annotations, and the ones you write are `#:` comments, so files stay plain R. It is opt-in:
+needs no annotations. The ones you write can be `#:` comments, which keep files plain R, or inline
+annotations, which need ry. It is opt-in:
 
 ```toml
 # ry.toml
