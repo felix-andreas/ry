@@ -13,6 +13,12 @@ is why inference is Hindley–Milner, why your own functions cannot be overloade
 subtyping between nominal types. The [overview](/type-checking/overview) introduces the same ideas
 through examples.
 
+`ry check` reports the type errors on this page only when typing is on, through `[check] typing = true`
+in `ry.toml` or a `# typing: on` comment at the top of the file (see
+[configuration](/reference/configuration)). Every output block here was produced that way. With
+typing off, the checker still reports unresolved names, such as a misspelled column in a data.table
+query's `i`, but no type errors.
+
 ## Typing comment syntax
 
 Annotations are written in two ways that share one type grammar: in `#:` comments, described here,
