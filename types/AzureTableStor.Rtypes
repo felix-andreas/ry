@@ -1,0 +1,8 @@
+# AzureTableStor: Azure table storage. `insert_table_entity()` returns the new entity's ETag.
+
+@type table_endpoint
+@type storage_table
+
+table_endpoint : @pure fn(endpoint: character, [key]: character | NULL, [token]: AzureToken | character | NULL, [sas]: character | NULL, [api_version]: character) -> table_endpoint
+storage_table : @pure fn(endpoint: table_endpoint, ...: Any) -> storage_table
+insert_table_entity : fn(table: storage_table, entity: Any) -> character | NULL

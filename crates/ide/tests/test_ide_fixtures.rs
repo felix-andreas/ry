@@ -78,19 +78,19 @@ fn render(source: &str) -> String {
     })
 }
 
-/// Renders the covered stub text instead of byte offsets, which shift whenever an unrelated stub
-/// is added.
+/// Renders the source's namespace and the covered stub text instead of an index and byte offsets,
+/// which shift whenever an unrelated stub is added.
 fn stub_text(db: &RootDatabase, source_index: usize, range: TextRange) -> String {
     let Some(sources) = StubSources::try_get(db) else {
         return "<no stub sources>".to_owned();
     };
-    let Some((_, text)) = sources.sources(db).get(source_index) else {
+    let Some((namespace, text)) = sources.sources(db).get(source_index) else {
         return "<no such stub source>".to_owned();
     };
     let start = usize::from(range.start());
     let end = usize::from(range.end());
     match text.get(start..end) {
-        Some(slice) => format!("`{slice}`"),
+        Some(slice) => format!("{namespace} at `{slice}`"),
         None => "<range outside the stub source>".to_owned(),
     }
 }
@@ -138,8 +138,7 @@ fn render_at(
                     let declared = declaration
                         .map(|target| {
                             format!(
-                                ", declared in stub source {} at {}",
-                                target.source_index,
+                                ", declared in stub source {}",
                                 stub_text(db, target.source_index, target.range),
                             )
                         })
@@ -161,8 +160,7 @@ fn render_at(
             format!("{label} {}\n", place(target.file, target.range))
         }
         Some(DefinitionTarget::Stub(target)) => format!(
-            "{label}: stub source {} at {}\n",
-            target.source_index,
+            "{label}: stub source {}\n",
             stub_text(db, target.source_index, target.range),
         ),
         None => format!("{label}: none\n"),

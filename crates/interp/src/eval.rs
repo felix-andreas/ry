@@ -15,7 +15,10 @@ use {
             triple, unbound,
         },
     },
-    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
+    heap::{
+        Formal,
+        object::{NA_INTEGER, Sexp, SexpType, gp},
+    },
     smallvec::{SmallVec, smallvec},
     std::sync::atomic::Ordering,
 };
@@ -893,6 +896,7 @@ pub unsafe fn apply_closure(
     let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
     heap.root(env);
     env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     if supplied.is_none() && positional(formals, args) {
         // Most calls pass every argument by position to a function without `...`, which needs no
         // matching table: argument `i` binds formal `i`, and the formals past the last argument
@@ -901,7 +905,7 @@ pub unsafe fn apply_closure(
         let mut index = 0;
         while formal.kind() == SexpType::Pairlist {
             let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-            bind_formal(env, formal, actual)?;
+            bindings.push(formal_binding(env, formal, actual)?);
             formal = formal.cdr();
             index += 1;
         }
@@ -909,10 +913,11 @@ pub unsafe fn apply_closure(
         let actuals = match_args(formals, args, call)?;
         let mut formal = formals;
         for &actual in &actuals {
-            bind_formal(env, formal, actual)?;
+            bindings.push(formal_binding(env, formal, actual)?);
             formal = formal.cdr();
         }
     }
+    heap.define_formals(env, &bindings)?;
     heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
@@ -939,13 +944,11 @@ unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
     args.len() <= count && args.iter().all(|arg| arg.tag == nil())
 }
 
-/// Binds the formal at the head of `formal` to its matched argument, or to a promise of its
-/// default when the argument is missing.
-unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
-    let heap = crate::heap();
+/// The binding of the formal at the head of `formal` to its matched argument, or to a promise of
+/// its default when the argument is missing.
+unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     let missing = missing_arg();
     let symbol = formal.tag();
-    // The environment is fresh and formals are distinct, so each binding is new.
     if actual == missing && formal.car() != missing {
         // A literal default evaluates to itself, so it is bound as is: the promise would cost
         // an allocation and a force on every call that omits it, for the same value.
@@ -955,12 +958,17 @@ unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
         } else {
             make_promise(default, env)?
         };
-        let cell = heap.define_fresh(env, symbol, value)?;
-        cell.set_gp_bits(gp::BINDING_MISSING, true);
-    } else {
-        heap.define_fresh(env, symbol, actual)?;
+        return Ok(Formal {
+            symbol,
+            value,
+            missing: true,
+        });
     }
-    Ok(())
+    Ok(Formal {
+        symbol,
+        value: actual,
+        missing: false,
+    })
 }
 
 /// The arguments as a pairlist of their values or promises, which a frame records.

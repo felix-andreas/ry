@@ -1,0 +1,2 @@
+# readxl: a tibble, which is a data.frame subclass; its columns come from the file.
+read_excel : fn(path: character, [sheet]: character | double | NULL, [range]: character | NULL, [col_names]: logical | character[], [col_types]: character[] | NULL, [na]: character[], [trim_ws]: logical, [skip]: double, [n_max]: double, [guess_max]: double, [progress]: logical, [.name_repair]: Any) -> data.frame

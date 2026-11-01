@@ -27,7 +27,12 @@ pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> V
         Some(TypingMode::Off) => (false, false),
         Some(TypingMode::On) => (true, false),
         Some(TypingMode::Strict) => (true, true),
-        None => (config.check.typing, config.check.strict),
+        // Strict mode rejects code it cannot type, which would mean little if it then hid the
+        // type errors in the code it can, so it implies typing like `# typing: strict` does.
+        None => (
+            config.check.typing || config.check.strict,
+            config.check.strict,
+        ),
     };
     let mut rendered: Vec<Diagnostic> = file_diagnostics(db, file)
         .into_iter()

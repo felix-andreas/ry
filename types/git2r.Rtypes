@@ -1,0 +1,14 @@
+# git2r: libgit2 bindings. Commits and signatures are S3-classed lists whose fields are read
+# directly, so they are declared as records.
+@type git_repository
+@type git_config
+@alias git_time {list{time: double, offset: double}}
+@alias git_signature {list{name: character, email: character, when: git_time}}
+@alias git_commit {list{sha: character, author: git_signature, committer: git_signature | NULL, summary: character, message: character, repo: git_repository}}
+
+init : fn([path]: character, [bare]: logical, [branch]: character | NULL) -> git_repository
+# Sets the named options and returns the resulting configuration invisibly.
+config : fn([repo]: git_repository | NULL, [global]: logical, [user.name]: character, [user.email]: character, ...: Any) -> git_config
+add : fn([repo]: git_repository | character, [path]: character[] | NULL, [force]: logical) -> NULL
+commit : fn([repo]: git_repository | character, [message]: character | NULL, [all]: logical, [session]: logical, [author]: git_signature | NULL, [committer]: git_signature | NULL) -> git_commit
+commits : fn([repo]: git_repository | character, [topological]: logical, [time]: logical, [reverse]: logical, [n]: double | NULL, [ref]: character | NULL, [path]: character | NULL) -> list[git_commit]

@@ -67,6 +67,19 @@ effect: names(settings) <- c("x", "y")
 24..39 error[strict] strict mode: this changes `settings` after its definition, every time the package loads. A file in `R/` may only define things at its top level: build the whole value where it is defined (`local()` can hold the steps), or move the change into a function, `.onLoad`, or the script `ry run` starts
 40..70 error[strict] strict mode: this changes `settings` after its definition, every time the package loads. A file in `R/` may only define things at its top level: build the whole value where it is defined (`local()` can hold the steps), or move the change into a function, `.onLoad`, or the script `ry run` starts
 
+#---- local_replacing_in_an_outer_environment_changes_it
+#~~~~ R/main.R
+registry <- new.env()
+filled <- local({
+  registry$a <- 1
+  registry
+})
+#++++
+== R/main.R
+constant: registry <- new.env()
+effect: filled <- local({
+42..57 error[strict] strict mode: this changes `registry` after its definition, every time the package loads. A file in `R/` may only define things at its top level: build the whole value where it is defined (`local()` can hold the steps), or move the change into a function, `.onLoad`, or the script `ry run` starts
+
 #---- super_and_nested_assignment
 #~~~~ R/main.R
 counter <<- 0

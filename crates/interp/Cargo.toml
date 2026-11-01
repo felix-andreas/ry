@@ -30,5 +30,5 @@ jiff = "0.2"
 zstd = "0.13"
 tiny-skia = "0.11"
 ab_glyph = "0.2"
-jpeg-encoder = "0.6"
+jpeg-encoder = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }

@@ -448,7 +448,7 @@ pub unsafe fn run_console(
 /// Ends a session as GNU R does before it exits: closes every graphics device, which writes
 /// the files they were drawing.
 pub unsafe fn finish() {
-    if let Err(unwind) = crate::graphics::close_all_devices() {
+    if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_profiler() {
