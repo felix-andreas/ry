@@ -2552,6 +2552,10 @@ upper_names <- function(x) {
   itself, so past it only the library remains. A test file's top level encloses in the helpers'
   bindings and then the package namespace, and a script's in the namespace, so
   `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
+- A top-level `setGeneric("f", ...)` binds `f` as a function, and so does one inside a top-level
+  `if` with no `else`, such as `if (!isGeneric("type")) setGeneric("type", fun)`: whichever branch
+  runs, `type` is a function afterwards. So a `type` parameter holding a string still leaves
+  `type(object)` calling the generic.
 - A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
 - A binding whose type joins functions with `NULL` is called as the functions when the body
   computed it, such as `handler <- switch(kind, ...)` without a default, because the code presumably

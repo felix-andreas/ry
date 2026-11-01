@@ -2365,6 +2365,24 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
 /// registration that creates a bare-name binding (`setClass`/`setMethod` bind nothing).
 fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
     use syntax::SyntaxKind;
+    // `if (!isGeneric("f")) { ...; setGeneric("f", fun) }` makes the generic only when no
+    // package made it first, so either way `f` is a function once the statement has run
+    // (kernlab's `type`).
+    if node.kind() == SyntaxKind::IF_EXPR {
+        if node
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::ELSE_KW)
+        {
+            return None;
+        }
+        let body = node.children().nth(1)?;
+        if body.kind() != SyntaxKind::BRACE_EXPR {
+            return set_generic_target(&body);
+        }
+        return body
+            .children()
+            .find_map(|statement| set_generic_target(&statement));
+    }
     if node.kind() != SyntaxKind::CALL_EXPR {
         return None;
     }

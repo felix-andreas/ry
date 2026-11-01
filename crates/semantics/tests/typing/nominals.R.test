@@ -213,6 +213,28 @@ character
 character
 use: <T> fn(account: T) -> Unknown
 
+#---- a_guarded_set_generic_defines_the_name
+# kernlab guards `setGeneric("type")` with `if (!isGeneric("type"))` and has a `type` argument.
+if (!isGeneric("kind")) {
+  setGeneric("kind", function(object) standardGeneric("kind"))
+}
+use <- function(object, kind = "response") {
+  kind <- match.arg(kind, c("response", "probabilities"))
+  if (kind(object) == "number") 1 else 2
+}
+#++++
+character | NULL
+use: <T, U> fn(object: T, [kind]: U) -> double
+
+#---- a_local_string_with_no_generic_behind_it_is_not_callable
+use <- function(object, kind = "response") {
+  kind <- match.arg(kind, c("response", "probabilities"))
+  if (kind(object) == "number") 1 else 2
+}
+#++++
+use: Unknown
+109..113 error[type-mismatch] this has type `character`, which is not a function, so it cannot be called
+
 #==== nominal_field_writes
 #---- a_write_the_representation_admits_keeps_the_nominal
 #: @type Person {list{name: character, age: integer}}
