@@ -5,6 +5,7 @@
 #ifndef R_EMBEDDED_H_
 #define R_EMBEDDED_H_
 
+#include <Rversion.h>
 #include <R_ext/Boolean.h>
 
 #ifdef __cplusplus
@@ -15,7 +16,9 @@ int Rf_initEmbeddedR(int argc, char *argv[]);
 void Rf_endEmbeddedR(int fatal);
 int Rf_initialize_R(int argc, char *argv[]);
 void setup_Rmainloop(void);
+#if R_VERSION >= R_Version(4, 6, 0)
 void run_Rmainloop(void);
+#endif
 void R_ReplDLLinit(void);
 int R_ReplDLLdo1(void);
 void R_setStartTime(void);

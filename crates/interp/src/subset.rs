@@ -2181,7 +2181,9 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
             );
         }
         padded
-    } else if names.attrib() != nil() {
+    } else if names.attrib() != nil() || names == object {
+        // `names(x) <- x` must not make the names attribute the vector itself, which would be a
+        // cycle that `serialize` recurses into forever (GNU R's `R_FixupRHS`).
         let copy = values::shallow_duplicate(names)?;
         values::clear_attributes(copy);
         copy

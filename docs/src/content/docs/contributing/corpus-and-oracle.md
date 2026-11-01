@@ -131,6 +131,10 @@ with `.corpus/ry-library` ahead of `.corpus/library` (which still supplies the `
 records results under `ry-installed`, beside the `ry` results of `ry run --runtime ry`, with the
 table in `.corpus/tests/summary-installed.md`.
 
+GNU R's binaries of graphics devices refuse ry's graphics engine, which is one version newer than
+the one R 4.3.3 built them against, so a package whose tests plot through svglite needs svglite
+installed on ry: `just corpus-ry-install svglite` builds it from source.
+
 ## Running against another GNU R
 
 The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,

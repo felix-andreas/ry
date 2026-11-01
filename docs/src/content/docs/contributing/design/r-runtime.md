@@ -975,9 +975,13 @@ Each step ends with something real running, and each one is a large, whole chang
    installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
-   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
-   `rcmd` does not run yet, although the interpreter now exists.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. `rcmd`
+   also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
+   on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
+   packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
+   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
+   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
