@@ -74,7 +74,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
-- Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
+- Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
 - Docs pass and simulated-user testing of the new features (session_0111kWqBrKf593Cdj9soupRR, Sonnet).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
