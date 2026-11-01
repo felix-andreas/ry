@@ -77,7 +77,6 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
 - Standard library in the style of Roc (session_0111kWqD1BjWFRsQLrnpUHXu, Opus).
-- Inline syntax for type definitions: inline forms of `@type`, `@alias`, `@new`, `@trust`, `@if-unknown` (session_0111kWqBAhfBuJKm2r4beMZm, Opus).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
