@@ -43,8 +43,7 @@ x + 1L
 #++++
 flag: logical
 x: integer | NULL
-Unknown
-41..42 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
+integer
 
 #---- unary_minus_preserves_union
 flag <- TRUE

@@ -3844,8 +3844,8 @@ impl<'db> Checker<'db, '_> {
     ) -> Ty<'db> {
         let lhs_range = self.blame_range(lhs);
         let rhs_range = self.blame_range(rhs);
-        let resolved_left = self.structural(lhs_ty);
-        let resolved_right = self.structural(rhs_ty);
+        let resolved_left = self.operand_view(lhs_ty);
+        let resolved_right = self.operand_view(rhs_ty);
         let left = self.classify_numeric_operand(resolved_left);
         let right = self.classify_numeric_operand(resolved_right);
 
@@ -4050,6 +4050,35 @@ impl<'db> Checker<'db, '_> {
         Ty::new(self.db, TyKind::Vector(scalar(self.db, result_atomic)))
     }
 
+    /// An operand as arithmetic and comparison see it. R computes `NULL + 1` and `NULL == 1`
+    /// as empty vectors rather than failing, so a `NULL` member drops out. A bare `NULL`, and a
+    /// union of several members one of which is still a type variable, are left unchecked.
+    fn operand_view(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        let resolved = self.structural(ty);
+        match resolved.kind(self.db) {
+            TyKind::Null => unknown(self.db),
+            TyKind::Union(members) => {
+                let kept: Vec<Ty<'db>> = members
+                    .iter()
+                    .copied()
+                    .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+                    .collect();
+                if let [only] = kept.as_slice() {
+                    return *only;
+                }
+                if kept.is_empty()
+                    || kept.iter().any(|member| {
+                        matches!(member.kind(self.db), TyKind::Var(_) | TyKind::Rigid(_))
+                    })
+                {
+                    return unknown(self.db);
+                }
+                union_of(self.db, kept)
+            }
+            _ => resolved,
+        }
+    }
+
     fn infer_compare(
         &mut self,
         lhs: ExprId,
@@ -4059,8 +4088,8 @@ impl<'db> Checker<'db, '_> {
     ) -> Ty<'db> {
         let lhs_range = self.blame_range(lhs);
         let rhs_range = self.blame_range(rhs);
-        let resolved_left = self.structural(lhs_ty);
-        let resolved_right = self.structural(rhs_ty);
+        let resolved_left = self.operand_view(lhs_ty);
+        let resolved_right = self.operand_view(rhs_ty);
         if matches!(resolved_left.kind(self.db), TyKind::Any | TyKind::Unknown)
             || matches!(resolved_right.kind(self.db), TyKind::Any | TyKind::Unknown)
         {

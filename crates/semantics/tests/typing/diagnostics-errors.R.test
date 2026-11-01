@@ -256,7 +256,6 @@ integer
 NULL + 1L
 #++++
 Unknown
-0..4 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
 
 #---- boolean_null_operand
 NULL && TRUE
@@ -279,7 +278,6 @@ Unknown
 NULL == 1L
 #++++
 Unknown
-0..4 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `NULL`
 
 #---- nested_list_field_mismatch
 #: list{ owner: list{ name: character } }

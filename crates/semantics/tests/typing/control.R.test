@@ -239,7 +239,7 @@ f <- function(record) {
 #++++
 f: <T> fn(record: T) -> integer
 
-#---- null_test_makes_unguarded_use_a_finding
+#---- arithmetic_on_a_null_tested_value_follows_r
 f <- function(x) {
   if (is.null(x)) {
     print("missing")
@@ -247,8 +247,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: Unknown
-66..67 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T | NULL`
+f: <T: numeric> fn(x: T | NULL) -> T
 
 #==== loops
 #---- accumulator_is_stable

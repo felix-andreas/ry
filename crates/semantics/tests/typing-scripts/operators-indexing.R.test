@@ -39,7 +39,6 @@ Unknown
 1L == NULL
 #++++
 Unknown
-6..10 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `NULL`
 
 #---- and_chained
 TRUE && FALSE && TRUE

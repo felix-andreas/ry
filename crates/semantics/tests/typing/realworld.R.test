@@ -45,7 +45,6 @@ increment <- function(x) {
 }
 #++++
 increment: fn(x: integer | NULL) -> integer
-65..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
 
 #---- calling_a_non_function
 broken <- function() {
@@ -801,8 +800,8 @@ sum_leaves <- function(node) {
 
 run <- function() sum_leaves(list(1, list(2, 3), list(list(4, 5), 6)))
 #++++
-sum_leaves: Unknown
-run: fn() -> Unknown
+sum_leaves: <T> fn(node: T) -> T | double
+run: fn() -> list{double, list{double, double}, list{list{double, double}, double}} | double
 
 #==== accumulators
 #---- record_field_updates_are_clean
@@ -871,8 +870,7 @@ unguarded_total <- function(labels) {
   totals[["a"]] + 1L
 }
 #++++
-unguarded_total: Unknown
-115..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
+unguarded_total: <T> fn(labels: T) -> integer
 
 #==== clean_programs
 #---- monthly_sales_report
