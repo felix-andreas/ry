@@ -243,6 +243,8 @@ pub enum Intrinsic {
 pub enum Action {
     /// Nothing: the instruction is unreachable or folds away.
     Skip,
+    /// Stores `NULL` into registers whose values are dead, so the collector can reclaim them.
+    Clear { registers: Vec<usize> },
     Constant { dst: usize, value: Sexp, ty: Ty },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
     /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
@@ -783,9 +785,18 @@ impl Builder<'_> {
             }
             // The interpreter's own step sets the current srcref; it touches no register.
             Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
-            // Compiled code keeps its values in its own frame rather than the register file, so
-            // there is nothing for it to clear.
-            Op::EndStatement => Action::Skip,
+            // Compiled code keeps boxed values in the same register window as tier 0, so it
+            // clears the finished statement's registers too, or they would keep its temporaries
+            // alive until the function returns.
+            Op::EndStatement => {
+                let registers: Vec<usize> = std::iter::once(operand(0)).chain(operand(1)..operand(2)).collect();
+                for &register in &registers {
+                    if let Some(ty) = state.registers.get_mut(register) {
+                        *ty = Ty::Boxed;
+                    }
+                }
+                Action::Clear { registers }
+            }
             Op::Closure => {
                 state.visible = Some(true);
                 state.registers[operand(0)] = Ty::Boxed;
@@ -1059,7 +1070,13 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref | Op::EndStatement => {}
+        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
+        Op::EndStatement => {
+            kill(operand(0), live);
+            for register in operand(1)..operand(2) {
+                kill(register, live);
+            }
+        }
         Op::JumpUnless | Op::Return => gen_(operand(0), live),
         Op::Arithmetic => {
             kill(operand(1), live);

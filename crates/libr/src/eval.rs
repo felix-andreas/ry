@@ -22,12 +22,14 @@ use interp::{
     TaskCallbackRoutine, builtin_libraries,
     builtins::{Arg, BuiltinDef, Call, builtin, internal},
     native::Interface,
+    unwind::park,
 };
 use std::ffi::{c_char, c_int, c_void};
 
 /// An ALTREP string or list element for [`heap::object::Sexp::element`], rooted because a class
 /// may build it fresh on every call (nanoarrow's strings do). The accessor cannot fail, so an
-/// `Elt` error is reported and reads as `NA` (or `NULL` in a list).
+/// `Elt` error is parked for the evaluator to raise at its next poll, and the read meanwhile
+/// gives `NA` (or `NULL` in a list).
 unsafe fn read_altrep_element(object: Sexp, index: usize) -> Sexp {
     let runtime = runtime();
     match crate::altrep::sexp_elt(object, index as crate::R_xlen_t) {
@@ -36,7 +38,7 @@ unsafe fn read_altrep_element(object: Sexp, index: usize) -> Sexp {
             element
         }
         Err(unwind) => {
-            report(&unwind, "Error");
+            park(unwind);
             if object.kind() == SexpType::String {
                 runtime.heap.known().na_string
             } else {
@@ -47,10 +49,10 @@ unsafe fn read_altrep_element(object: Sexp, index: usize) -> Sexp {
 }
 
 /// Stores an ALTREP string or list element through the class's `Set_elt` method; an error is
-/// reported, as for [`read_altrep_element`].
+/// parked, as for [`read_altrep_element`].
 unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
     if let Err(unwind) = crate::altrep::set_sexp_elt(object, index as crate::R_xlen_t, value) {
-        report(&unwind, "Error");
+        park(unwind);
     }
 }
 

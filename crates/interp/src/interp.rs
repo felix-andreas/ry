@@ -76,7 +76,7 @@ pub mod values;
 use crate::{
     builtins::{BuiltinDef, Kind},
     conditions::{HandlerStack, RestartStack},
-    unwind::R,
+    unwind::{R, Unwind},
 };
 use heap::{Heap, Marker, RootSource, object::Sexp};
 use rustc_hash::FxHashMap;
@@ -198,6 +198,9 @@ pub struct Interp {
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
+    /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
+    pub parked_unwind: Option<Unwind>,
 }
 
 struct InterpState {
@@ -297,6 +300,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         object_systems: true,
+        parked_unwind: None,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -408,6 +412,9 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            if let Some(unwind) = &interp.parked_unwind {
+                crate::unwind::trace_unwind(unwind, marker);
+            }
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);

@@ -80,7 +80,8 @@ pub mod outcome {
 }
 
 /// A compiled body. Owned by an external pointer in the code's `TIER1` constant, whose
-/// protected list keeps every object the machine code embeds alive.
+/// protected weak reference, keyed on the enclosure, keeps every object the machine code embeds
+/// alive while the enclosure lives.
 pub struct Compiled {
     pub entry: unsafe extern "C" fn(*mut Activation) -> *mut Header,
     pub enclosure: Sexp,

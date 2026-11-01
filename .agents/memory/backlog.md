@@ -1983,9 +1983,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     that hard-codes an id would differ (none in the corpus does).
   - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
     ry's environments and bytecode have their own layout. Only relative comparisons are portable.
-  - The JIT treats `Op::EndStatement` as a no-op, so a body hot enough to compile may keep a
-    statement's dropped values until it returns (`decisions.md`, "What keeps a dropped object
-    alive"). Unchecked: no corpus test has shown it yet.
+  - Each ALTREP string or list element read through `Sexp::element` pushes a handle that lives
+    until the enclosing scope ends, so a builtin walking a 10M-element nanoarrow column pushes 10M
+    handles. Materialize once in bulk paths, or root only where the element survives an
+    allocation.
+  - The TRE matcher now compiles three regexes per pattern, which costs `grepl` in a loop with no
+    matcher cache.
   - Two unserializers: `interp::serialize`'s reader and libr's `R_Unserialize`. The writer is
     already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
     same way.

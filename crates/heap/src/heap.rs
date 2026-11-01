@@ -1255,6 +1255,7 @@ impl Heap {
                     && tag.kind() == SexpType::List
                 {
                     for index in 0..tag.length() as usize {
+                        tag.element(index).decrement_refcount();
                         tag.set_element_unbarriered(index, self.known.nil);
                     }
                 }
@@ -1311,10 +1312,9 @@ impl Heap {
                 self.clear_weak_ref(weak);
             }
         }
+        // Every reference still registered has a key the first fixpoint marked, so marking what
+        // the dying finalizers reach cannot revive another value: it only keeps those objects.
         self.drain();
-        // What a finalizer reaches can be the key of a weak reference that stays registered,
-        // and that reference's value and finalizer must then survive too.
-        self.mark_live_weak_values();
     }
 
     unsafe fn mark_live_weak_values(&mut self) {

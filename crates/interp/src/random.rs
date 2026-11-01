@@ -1020,7 +1020,7 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
 /// Kinderman and Ramage's (1976) normal generator with Josef Leydold's correction, as GNU R's
 /// `norm_rand` runs it. `buggy` keeps the uncorrected version R used before 1.7.0, which
 /// `RNGversion` still selects: a mistyped constant in the main region and a first region that
-/// accepts every candidate.
+/// accepts a candidate without the density test whenever max(u2, u3) <= 0.8056.
 #[allow(clippy::excessive_precision)]
 fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
     const A: f64 = 2.216035867166471;
