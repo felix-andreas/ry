@@ -735,7 +735,6 @@ const year = new Date().getFullYear();
                         migrationTabs.map((tab, index) => (
                             <div
                                 class="stage split"
-                                style="--split: 0.8fr"
                                 role="tabpanel"
                                 id={`panel-${tab.key}`}
                                 aria-labelledby={`tab-${tab.key}`}
@@ -4031,10 +4030,11 @@ ry check .</code></pre>
                 }
             }
 
-            /* The typing path: the diagram and the steps share a row, so the marker moves beside the tab you click. */
+            /* The typing path: steps and their code on the left, the diagram beside them, so the marker moves next to the tab you click. */
             .path > .venn {
                 margin: 0;
                 max-width: none;
+                container-type: inline-size;
             }
             .path > .seg-steps {
                 flex-direction: column;
@@ -4079,21 +4079,42 @@ ry check .</code></pre>
             }
             @media (min-width: 900px) {
                 .path {
-                    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-                    column-gap: clamp(1.5rem, 4vw, 3.5rem);
-                    row-gap: 1.6rem;
-                }
-                .path > .venn {
-                    grid-row: 1;
-                    grid-column: 1;
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                    column-gap: clamp(1.5rem, 3.5vw, 3rem);
+                    row-gap: 1rem;
                 }
                 .path > .seg-steps {
                     grid-row: 1;
-                    grid-column: 2;
-                    align-self: center;
+                    grid-column: 1;
+                }
+                .path .seg-steps [role="tab"] {
+                    padding: 0.8rem 1rem;
                 }
                 .showcase.path > .stage {
-                    grid-column: 1 / -1;
+                    grid-row: 2;
+                    grid-column: 1;
+                }
+                .path > .venn {
+                    grid-row: 1 / 3;
+                    grid-column: 2;
+                    align-self: start;
+                    position: sticky;
+                    top: 6rem;
+                }
+                /* Half the frame is too narrow for code beside output, so the output sits below the code. */
+                .path > .stage .stage-body {
+                    grid-template-columns: minmax(0, 1fr);
+                    grid-template-rows: auto 1fr;
+                }
+                .path > .stage .pane + .pane {
+                    border-left: 0;
+                    border-top: 1px solid var(--border);
+                }
+            }
+            @media (max-width: 420px) {
+                .seg-steps [role="tab"] {
+                    font-size: 14px;
+                    gap: 0.6rem;
                 }
             }
             @media (max-width: 899px) {

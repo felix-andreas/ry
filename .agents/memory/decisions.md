@@ -3065,7 +3065,9 @@ first lines R had already read, leaving R mid-command.
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
   then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
-  purple one") beside the four steps as tabs. A reader has to want the features before a path to
+  purple one"). On wide screens the four steps and the selected step's code fill the left column
+  and the diagram sits on the right, so the code stays directly under the step that chose it while
+  the diagram follows along; on phones the diagram comes first. A reader has to want the features before a path to
   them matters, which is why the migration is the last part of the sell and not the opening.
 - **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
