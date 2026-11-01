@@ -215,8 +215,8 @@ f <- function(omega, v) {
 }
 f(c(1, 2), c(1, 2))
 #++++
-f: <T: numeric, U> fn(omega: T, v: U) -> Unknown
-Unknown
+f: <T: numeric, U> fn(omega: T, v: U) -> Any
+Any
 
 #---- a_matrix_negates_to_a_matrix
 neg <- function(m) -(m %*% m)
@@ -524,7 +524,7 @@ smooth <- function(x, previous) {
   (current + 2) / 2
 }
 #++++
-smooth: <T, U> fn([x]: T, previous: U | NULL) -> Unknown
+smooth: <T, U> fn([x]: T, previous: U | NULL) -> double | matrix
 
 #---- arithmetic_accepts_an_open_parameter_or_a_vector
 drop_rows <- function(x, drop) {

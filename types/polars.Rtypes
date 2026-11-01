@@ -1,10 +1,90 @@
 # polars (r-polars 1.x). Frames, expressions and the `pl` namespace are environments whose
-# methods are reached with `$`; the stub grammar has no `$` method declarations yet, so those
-# calls stay untyped and need a binding annotation at the call site.
+# members are reached with `$`, so each `Class$member` line types one of them: a method as the
+# function it reads, a property (`$height`) as its value. Arguments are column expressions or
+# names, which R passes through `...`, so they stay `Any`.
 @type polars_data_frame
+@type polars_lazy_frame
+@type polars_group_by
+@type polars_expr
+@type polars_series
+@type polars_namespace
 
 #' Converts a data frame, list or vector to a polars DataFrame.
 as_polars_df : fn(x: Any, ...: Any) -> polars_data_frame
+#' Converts a vector to a polars Series.
+as_polars_series : fn(x: Any, [name]: character, ...: Any) -> polars_series
 
 #' The polars namespace object (`pl$col()`, `pl$lit()` and so on).
-pl : environment
+pl : polars_namespace
+
+polars_namespace$col : fn(...: Any) -> polars_expr
+polars_namespace$lit : fn(value: Any, ...: Any) -> polars_expr
+polars_namespace$len : fn() -> polars_expr
+polars_namespace$all : fn() -> polars_expr
+polars_namespace$sum : fn(...: Any) -> polars_expr
+polars_namespace$mean : fn(...: Any) -> polars_expr
+polars_namespace$min : fn(...: Any) -> polars_expr
+polars_namespace$max : fn(...: Any) -> polars_expr
+polars_namespace$when : fn(...: Any) -> Any
+polars_namespace$DataFrame : fn(...: Any) -> polars_data_frame
+polars_namespace$LazyFrame : fn(...: Any) -> polars_lazy_frame
+polars_namespace$Series : fn(...: Any) -> polars_series
+
+polars_data_frame$select : fn(...: Any) -> polars_data_frame
+polars_data_frame$with_columns : fn(...: Any) -> polars_data_frame
+polars_data_frame$filter : fn(...: Any) -> polars_data_frame
+polars_data_frame$sort : fn(...: Any) -> polars_data_frame
+polars_data_frame$join : fn(other: polars_data_frame, ...: Any) -> polars_data_frame
+polars_data_frame$head : fn([n]: integer | double) -> polars_data_frame
+polars_data_frame$tail : fn([n]: integer | double) -> polars_data_frame
+polars_data_frame$slice : fn(offset: integer | double, [length]: integer | double) -> polars_data_frame
+polars_data_frame$unique : fn(...: Any) -> polars_data_frame
+polars_data_frame$drop : fn(...: Any) -> polars_data_frame
+polars_data_frame$rename : fn(...: Any) -> polars_data_frame
+polars_data_frame$describe : fn(...: Any) -> polars_data_frame
+polars_data_frame$group_by : fn(...: Any) -> polars_group_by
+polars_data_frame$lazy : fn() -> polars_lazy_frame
+polars_data_frame$get_column : fn(name: character) -> polars_series
+polars_data_frame$to_series : fn([index]: integer | double) -> polars_series
+polars_data_frame$height : integer
+polars_data_frame$width : integer
+polars_data_frame$columns : character[]
+polars_data_frame$shape : integer[]
+
+polars_lazy_frame$select : fn(...: Any) -> polars_lazy_frame
+polars_lazy_frame$with_columns : fn(...: Any) -> polars_lazy_frame
+polars_lazy_frame$filter : fn(...: Any) -> polars_lazy_frame
+polars_lazy_frame$sort : fn(...: Any) -> polars_lazy_frame
+polars_lazy_frame$join : fn(other: polars_lazy_frame, ...: Any) -> polars_lazy_frame
+polars_lazy_frame$group_by : fn(...: Any) -> polars_group_by
+polars_lazy_frame$collect : fn(...: Any) -> polars_data_frame
+
+polars_group_by$agg : fn(...: Any) -> polars_data_frame
+
+polars_expr$alias : fn(name: character) -> polars_expr
+polars_expr$sum : fn() -> polars_expr
+polars_expr$mean : fn() -> polars_expr
+polars_expr$median : fn() -> polars_expr
+polars_expr$min : fn() -> polars_expr
+polars_expr$max : fn() -> polars_expr
+polars_expr$std : fn(...: Any) -> polars_expr
+polars_expr$var : fn(...: Any) -> polars_expr
+polars_expr$count : fn() -> polars_expr
+polars_expr$n_unique : fn() -> polars_expr
+polars_expr$first : fn() -> polars_expr
+polars_expr$last : fn() -> polars_expr
+polars_expr$cum_sum : fn(...: Any) -> polars_expr
+polars_expr$is_null : fn() -> polars_expr
+polars_expr$is_not_null : fn() -> polars_expr
+polars_expr$cast : fn(dtype: Any, ...: Any) -> polars_expr
+polars_expr$over : fn(...: Any) -> polars_expr
+polars_expr$filter : fn(...: Any) -> polars_expr
+polars_expr$sort : fn(...: Any) -> polars_expr
+# An expression supports R's arithmetic and comparison operators, against another expression
+# or a literal value, and builds a new expression.
+Ops.polars_expr : fn(e1: polars_expr, e2: Any) -> polars_expr
+Ops.polars_expr : fn(e1: Any, e2: polars_expr) -> polars_expr
+
+polars_series$to_r : fn(...: Any) -> Any
+polars_series$len : fn() -> integer
+polars_series$name : character

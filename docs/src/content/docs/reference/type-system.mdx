@@ -1691,9 +1691,15 @@ indices, as in `function(m, i, j) m[i, j]`. Ordinary R reads fields and slices o
 nobody wrote down, so refusing here would report correct code. Like access on an opaque nominal, such
 an access is an unsupported construct under [strict mode](#strict-mode).
 
-Indexing with several indices, which is matrix and data frame selection, or with a named argument
-such as `drop = FALSE`, is not modelled on any subject. It gives `Unknown` without a report, so
-`c(1L, 2L)[1L, 2L]` passes, and strict mode reports it as an undetermined type. An empty index is
+Indexing a `matrix` follows R's `drop` rule. A matrix does not record its element type, so the
+elements are `Any`. When both indices are empty or vectors, as in `m[1:2, 1:2]` or `m[, ]`, the result
+is a `matrix`; a scalar index drops that dimension, so `m[i, j]` and `m[i, ]` are `Any`; and
+`drop = FALSE` keeps the `matrix` whatever the indices are. A single index, `m[i]`, reads elements and
+is `Any`.
+
+Any other indexing with several indices, which is data frame selection, or with a named argument, is
+not modelled. It gives `Unknown` without a report, so `c(1L, 2L)[1L, 2L]` passes, and strict mode
+reports it as an undetermined type. An empty index is
 the subject itself, so `x[]` on `list{integer, integer}` is `list{integer, integer}`.
 
 ### Arithmetic operators
@@ -1780,8 +1786,10 @@ with two plain vectors is accepted.
 A union operand beside a class dispatches member by member, and the result is the union of the
 members' results. So the accumulator `total <- if (first) 0 else m %*% m; total + m %*% m` takes
 `Arith.matrix` for both `double` and `matrix` and is a `matrix`, while a `character` member is
-reported as `` `+` is not defined between `character` and `matrix` ``. When some member has no
-method to dispatch to, the union is checked by the ordinary operator rules instead.
+reported as `` `+` is not defined between `character` and `matrix` ``. A member with no class takes
+the ordinary operator rules, so `x >= 0` on `matrix | double` is `logical`. When some member is
+rejected that way, or no member is a class, the union is checked by the ordinary operator rules as a
+whole.
 
 Your own classes count. A method declared anywhere the global scope reaches, which includes a
 package's `R/` sources and a script's own top level, makes its class support that operator exactly as
@@ -2145,7 +2153,10 @@ to such a name is resolved separately at each call site:
   such a function keeps its record type although `Filter` or `head` may drop fields; that misses an
   error rather than reporting a false one.
 - A function literal among the arguments does not belong to the caller, so narrowing its
-  parameters is no guess: that is how `lapply(xs, function(v) v + 1L)` gives `v` a type.
+  parameters is no guess: that is how `lapply(xs, function(v) v + 1L)` gives `v` a type. When the
+  parameter is a function type with a `...: Any` rest, such as plumber's `handler: fn(...: Any) ->
+  Any`, the literal's formals past the declared ones are `Any`, so `function(req) req$postBody` reads
+  `req` without a strict finding.
 - An argument whose type is not known statically fits every candidate, so the call does not guess
   among candidates whose results differ, and it is `Unknown`. So
   `function(w) sort(unique(unlist(w)))` is `<T> fn(w: T) -> Unknown` rather than taking `sort`'s
@@ -3698,7 +3709,10 @@ A reference to a binding defined in this project is not an origin; the binding's
 reported instead, so one undetermined value does not produce a finding in every file that reads it.
 An unresolved bare name is not an origin either, because naming already reports it. An unresolved
 `pkg::name` is currently reported both ways. A value under any `#:` annotation (checked, `@trust`,
-`@if-unknown`, or `@new`) is not an origin, because the annotation gives it a type.
+`@if-unknown`, or `@new`) is not an origin, because the annotation gives it a type, and neither is
+anything inside that value: `#: double[]` above `x <- as.numeric(df$age)` covers `df$age`. A function
+literal or a braced block inside the value keeps its own origins, because its statements can be
+annotated where they are.
 
 ### Diagnostics
 

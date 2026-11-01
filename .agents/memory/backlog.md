@@ -431,7 +431,6 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **Operators do not dispatch per member of a union.** `m >= 0` works through `Compare.matrix` and `x >= 0` works for a double, but a `matrix | double` operand is refused, which matters because `PerformanceAnalytics::maxDrawdown` truly returns that union. `#: fn(x: matrix | double) -> logical` over `f <- function(x) x >= 0` gives `` expected a comparable value (numeric, `character`, or `logical`), found `matrix | double` ``.
 - **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
   ```r
   #: fn() -> double
@@ -489,12 +488,8 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **S4 slots and generics are untyped.** A slot read is `Unknown` even on `Any` (`out <- b@v` with `b: Any` gives `` could not determine the type of `out` ``), slots of a class with a `representation` are not typed, and a generic made by `setGeneric("scale_by", ...)` is silently `Any` at its call sites (`out <- scale_by(q, 2)` returned as `double` checks clean).
 - **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
 - **The summary counts checked files, not files with problems.** A project with one finding in `R/a.R` and two clean files prints `1 problem in 3 files`.
-- **Vectorised and matrix math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, `[.matrix` is undeclared, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``, and `current <- rates[t, ]` gives `` could not determine the type of `current` ``.
+- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``.
 
-- **A function literal passed to a parameter typed `fn(...: Any) -> Any` leaves its own parameters `Unknown`.** `plumber::pr_post(router, "/p", function(req) handle(card, req$postBody))` reports `Unknown` on `req$postBody`; a `...: Any` context should type the literal's parameters `Any`. The typed data science bench binds the closure to an annotated local instead.
-- **The polars stubs cannot declare `$` methods**, so `frame$select(...)` is `Unknown`; the typed data science bench binds each method to an `@if-unknown` local. `$.class` dispatch (`decisions.md`, "`$`, `[` and `[[` dispatch to a class's subset method") could carry them.
-- **An operator mismatch prints an uninstantiated type variable.** With a scalar `+.Date`, `start + sample(0:90, n, replace = TRUE)` printed `` `+` is not defined between `Date` and `T[]` `` instead of `integer[]`.
-- **An annotation absorbs an `Unknown` only as the whole right-hand side.** `#: double[]` above `x <- as.numeric(d$age)` still reports `d$age`, so typed benches split such reads into their own annotated locals.
 
 ## Open: the JIT
 

@@ -402,3 +402,16 @@ Any
 total: Any
 integer[]
 safe_log: fn(...: Any) -> list{result: Any, error: Any}
+
+#---- polars_members_are_typed
+library(polars)
+frame <- as_polars_df(data.frame(x = c(1, 2)))
+doubled <- frame$with_columns((pl$col("x") * 2)$alias("y"))
+summary <- doubled$select(pl$col("y")$mean())
+rows <- doubled$height
+#++++
+Any
+frame: polars_data_frame
+doubled: polars_data_frame
+summary: polars_data_frame
+rows: integer

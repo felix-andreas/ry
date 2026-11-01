@@ -186,7 +186,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (32): Str.caseless_ascii_equals, Str.concat, Str.contains, Str.count_utf8_bytes, Str.drop_prefix, Str.drop_suffix, Str.ends_with, Str.from_utf8
+completion (38): Str.caseless_ascii_equals, Str.concat, Str.contains, Str.count_utf8_bytes, Str.drop_prefix, Str.drop_suffix, Str.ends_with, Str.from_utf16
 
 #---- completion_ranks_locals_before_keywords
 f <- function(value) {

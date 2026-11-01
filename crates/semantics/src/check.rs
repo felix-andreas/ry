@@ -2808,10 +2808,30 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Annotating is exactly what a strict finding asks for, so it clears the origin.
+    /// Annotating is exactly what a strict finding asks for, so it clears the origins inside
+    /// the value it types: `#: double[]` over `as.numeric(d$age)` covers `d$age`. A function
+    /// literal or braced block inside keeps its findings, because its own statements can be
+    /// annotated where they are.
     fn annotation_covers(&mut self, value: ExprId) {
+        if self.strict_origins.is_empty() {
+            return;
+        }
+        let mut covered = FxHashSet::default();
+        let mut pending = vec![value];
+        while let Some(id) = pending.pop() {
+            covered.insert(id);
+            if id != value
+                && matches!(
+                    self.module.kind(id),
+                    ExpressionKind::Function { .. } | ExpressionKind::Block { .. }
+                )
+            {
+                continue;
+            }
+            self.module.for_each_child(id, |child| pending.push(child));
+        }
         self.strict_origins
-            .retain(|origin| origin.expression != value);
+            .retain(|origin| !covered.contains(&origin.expression));
     }
 
     fn literal_ty(&mut self, literal: &LiteralKind) -> Ty<'db> {
@@ -5648,15 +5668,8 @@ impl<'db> Checker<'db, '_> {
                     return result;
                 }
                 self.operator_method_result(range, operator, lhs, rhs, left, right)
-                    .unwrap_or_else(|| match operator {
-                        Less | Greater | LessEq | GreaterEq | Equal | NotEqual => {
-                            self.infer_compare(lhs, rhs, left, right)
-                        }
-                        // `/` and `^` always produce doubles.
-                        Divide | Power => {
-                            self.infer_binary_numeric(range, lhs, rhs, left, right, true)
-                        }
-                        _ => self.infer_binary_numeric(range, lhs, rhs, left, right, false),
+                    .unwrap_or_else(|| {
+                        self.ordinary_operator_result(range, operator, lhs, rhs, left, right)
                     })
             }
             Sequence => self.infer_colon(lhs, rhs),
@@ -5908,6 +5921,27 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// An arithmetic or comparison operator on operands no class method claims.
+    fn ordinary_operator_result(
+        &mut self,
+        range: TextRange,
+        operator: BinaryOperator,
+        lhs: ExprId,
+        rhs: ExprId,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    ) -> Ty<'db> {
+        use BinaryOperator::*;
+        match operator {
+            Less | Greater | LessEq | GreaterEq | Equal | NotEqual => {
+                self.infer_compare(lhs, rhs, left, right)
+            }
+            // `/` and `^` always produce doubles.
+            Divide | Power => self.infer_binary_numeric(range, lhs, rhs, left, right, true),
+            _ => self.infer_binary_numeric(range, lhs, rhs, left, right, false),
+        }
+    }
+
     /// Dispatches as R does: `+.Date`, then the group generic (`Arith.Date`), then
     /// `Ops.Date`, left operand's class first. `None` when no nominal operand declares
     /// anything, so the ordinary operator rules apply.
@@ -5944,16 +5978,21 @@ impl<'db> Checker<'db, '_> {
         let right = nullable_union(right);
         // A union beside a class dispatches per member, as R does at run time, so the
         // accumulator `acc <- 0; for (...) acc <- acc + m %*% m` (`double | matrix`) takes
-        // `Arith.matrix` for both members. Every member must dispatch to a method; otherwise
-        // the ordinary rules check the union.
+        // `Arith.matrix` for both members. A member no method claims takes the ordinary rules,
+        // so `x >= 0` on `matrix | double` is `logical`, but only when some member is a class
+        // (a plain union stays with the ordinary rules) and every member types without error.
         for (index, operand) in [left, right].into_iter().enumerate() {
             let TyKind::Union(members) = self.table.shallow_resolve(self.db, operand).kind(self.db)
             else {
                 continue;
             };
             let members = members.clone();
+            let has_class = members
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Named(..)));
             let member_count = members.len();
             let errors_before = self.errors.len();
+            let origins_before = self.strict_origins.len();
             let snapshot = self.table.snapshot();
             let mut results = Vec::with_capacity(members.len());
             for member in members {
@@ -5970,6 +6009,24 @@ impl<'db> Checker<'db, '_> {
                     member_right,
                 ) {
                     Some(result) => results.push(result),
+                    None if has_class && !matches!(member.kind(self.db), TyKind::Named(..)) => {
+                        let result = self
+                            .infer_array_operator(range, operator, member_left, member_right)
+                            .unwrap_or_else(|| {
+                                self.ordinary_operator_result(
+                                    range,
+                                    operator,
+                                    lhs,
+                                    rhs,
+                                    member_left,
+                                    member_right,
+                                )
+                            });
+                        if self.errors.len() > errors_before {
+                            break;
+                        }
+                        results.push(result);
+                    }
                     None => break,
                 }
             }
@@ -5977,6 +6034,7 @@ impl<'db> Checker<'db, '_> {
                 return Some(union_of(self.db, results));
             }
             self.errors.truncate(errors_before);
+            self.strict_origins.truncate(origins_before);
             self.table.rollback(snapshot);
         }
         // A generic bounded `numeric` probes as the `double` it may be.
@@ -6067,6 +6125,8 @@ impl<'db> Checker<'db, '_> {
         // A class that declares the operator but fits no candidate is a real contract
         // mismatch (`Date + Date` errors in R too).
         if declared_any {
+            let left = self.table.resolve(self.db, left);
+            let right = self.table.resolve(self.db, right);
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::UnsupportedOperandPair {
@@ -10029,7 +10089,8 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .zip(deferred)
                 .zip(&accumulators)
-                .map(|((target, &deferred), accumulators)| {
+                .zip(arguments)
+                .map(|(((target, &deferred), accumulators), argument)| {
                     if !deferred || !accepts {
                         return None;
                     }
@@ -10042,17 +10103,43 @@ impl<'db> Checker<'db, '_> {
                         .iter()
                         .copied()
                         .chain(expected.named.iter().map(|parameter| parameter.ty));
+                    // A context that passes `...: Any` gives every formal past its own an `Any`
+                    // argument, as the author declared, so `pr_post(router, "/p",
+                    // function(req) req$body)` reads `req` as `Any`.
+                    let declared_count = expected.positional.len() + expected.named.len();
+                    let rest_any = expected.variadic.as_ref().is_some_and(|rest| {
+                        matches!(
+                            self.table.resolve(self.db, rest.element).kind(self.db),
+                            TyKind::Any
+                        )
+                    });
+                    let literal_count = argument.value.map_or(0, |value| {
+                        match &self.module.expression(value).kind {
+                            ExpressionKind::Function { parameters, .. } => self.module[parameters]
+                                .iter()
+                                .filter(|parameter| parameter.name != "...")
+                                .count(),
+                            _ => 0,
+                        }
+                    });
+                    let padding = if rest_any {
+                        literal_count.saturating_sub(declared_count)
+                    } else {
+                        0
+                    };
                     Some(
                         formals
+                            .chain(std::iter::repeat_n(any(self.db), padding))
                             .enumerate()
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
                                 (!accumulators.get(index).copied().unwrap_or(false)
                                     && !self.table.contains_unbound_var(self.db, formal)
-                                    && !matches!(
-                                        formal.kind(self.db),
-                                        TyKind::Any | TyKind::Unknown
-                                    ))
+                                    && (index >= declared_count
+                                        || !matches!(
+                                            formal.kind(self.db),
+                                            TyKind::Any | TyKind::Unknown
+                                        )))
                                 .then_some(formal)
                             })
                             .collect(),
@@ -11096,6 +11183,65 @@ impl<'db> Checker<'db, '_> {
     /// The return type a stub declares for `[.class` or `[[.class`. The index arguments are
     /// not checked against it: the stubs declare these methods only to say which class the
     /// subset keeps.
+    /// `m[i, j]` on a `matrix`, whose element type is not tracked, so elements are `Any`. R
+    /// drops a dimension indexed by one position, so a scalar index gives elements, while empty
+    /// and vector indexes, or `drop = FALSE`, keep the matrix. `None` leaves other forms to the
+    /// general rules.
+    fn matrix_index(
+        &mut self,
+        double: bool,
+        arguments: &[Argument],
+        index_types: &[Ty<'db>],
+    ) -> Option<Ty<'db>> {
+        let mut values = index_types.iter();
+        let mut slots = 0;
+        let mut any_scalar = false;
+        let mut all_vectors = true;
+        let mut keep_dimensions = false;
+        for argument in arguments {
+            let ty = argument.value.and_then(|_| values.next().copied());
+            if let Some(name) = argument.name {
+                if self.module.name(name).as_str() != "drop" {
+                    return None;
+                }
+                let value = argument.value?;
+                keep_dimensions = matches!(
+                    self.module.expression(value).kind,
+                    ExpressionKind::Literal(LiteralKind::Logical(false))
+                );
+                if !keep_dimensions {
+                    all_vectors = false;
+                }
+                continue;
+            }
+            slots += 1;
+            let Some(ty) = ty else {
+                continue;
+            };
+            match self.table.resolve(self.db, ty).kind(self.db) {
+                TyKind::Scalar(_) => any_scalar = true,
+                TyKind::Vector(_) | TyKind::NamedVector(_) => {}
+                TyKind::Named(name, _) if name.text(self.db) == "matrix" => {}
+                _ => all_vectors = false,
+            }
+        }
+        if double || slots != 2 {
+            return (slots >= 1).then(|| any(self.db));
+        }
+        let matrix = Ty::new(
+            self.db,
+            TyKind::Named(Name::new(self.db, "matrix"), Vec::new()),
+        );
+        if keep_dimensions {
+            return Some(matrix);
+        }
+        Some(if !any_scalar && all_vectors {
+            matrix
+        } else {
+            any(self.db)
+        })
+    }
+
     fn index_method_result(&mut self, class: &str, double: bool) -> Option<Ty<'db>> {
         self.subset_method_result(if double { "[[" } else { "[" }, class)
     }
@@ -11153,6 +11299,12 @@ impl<'db> Checker<'db, '_> {
         // rule covers: silent `Unknown`.
         if self.naming.masked_subsets.contains(&id) {
             return unknown(self.db);
+        }
+        if let TyKind::Named(name, _) = subject.kind(self.db)
+            && name.text(self.db) == "matrix"
+            && let Some(ty) = self.matrix_index(double, arguments, &index_types)
+        {
+            return ty;
         }
         // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
         // `[.factor` or `[[.Date` gives the result type.
@@ -12911,6 +13063,16 @@ impl<'db> Checker<'db, '_> {
         let Some(name) = name else {
             return unknown(self.db);
         };
+        // A `Class$method` stub types that member of an object whose members are reached with
+        // `$`, such as a polars frame's `$select`.
+        if let TyKind::Named(class, _) =
+            self.table.shallow_resolve(self.db, target_ty).kind(self.db)
+            && let Some(scheme) = self.globals.and_then(|globals| {
+                globals.scheme(&format!("{}${}", class.text(self.db), name.as_str()), false)
+            })
+        {
+            return self.instantiate(&scheme);
+        }
         // R dispatches `$` on a classed value to its `$.class` method before the representation
         // is ever read, so the method decides the result even for a transparent nominal.
         if let TyKind::Named(class, _) =

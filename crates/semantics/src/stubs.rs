@@ -625,6 +625,11 @@ fn is_stub_name(name: &str) -> bool {
         .chain(&SUBSET_METHOD_PREFIXES)
         .filter_map(|operator| name.strip_prefix(operator))
         .any(|suffix| suffix.strip_prefix('.').is_some_and(is_nominal_name))
+        // `Class$member` declares what `$member` reads on a value of that class, as for an
+        // environment-backed object such as a polars frame.
+        || name
+            .split_once('$')
+            .is_some_and(|(class, member)| is_nominal_name(class) && is_nominal_name(member))
 }
 
 /// A nominal's name is a plain R identifier. The operator spellings a method

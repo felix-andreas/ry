@@ -4662,6 +4662,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `menu`'s `choices` is one union including `list[Any]`, because a list and a character overload disagree and would make an untyped caller `Unknown`.
 - The cost of the second `grepl` candidate: `grepl(1L, x)` now reports "no overload matches" over the whole call instead of the argument.
 
+## Strict-friction rules for matrices, unions, `...: Any` and `$` members
+
+- `m[i, j]` on a `matrix` types in `matrix_index` (`check.rs`): elements are `Any` because a matrix carries no element type, two vector or empty slots give `matrix`, a scalar slot gives `Any` (R drops dimensions), and `drop = FALSE` keeps `matrix`. Any other named argument falls back to the general rules rather than guessing.
+- An operator on a union beside a class dispatches per member, and a member with no class takes the ordinary operator rules (`ordinary_operator_result`). The per-member path applies only when some member is a class and commits only if it adds no error, so plain unions keep their old messages.
+- An expected `fn(...: Any)` pads a lambda's parameter hints with `Any` past the declared formals: R would forward any arguments through `...`, so `Any` is the honest type, and `Unknown` would make every callback in plumber or shiny a strict report.
+- An annotation covers strict origins anywhere inside its value except inside a nested function literal or braced block (`annotation_covers`), because those have their own bindings to annotate. Before, only an `Unknown` right-hand side as a whole was covered.
+- A stub declares an environment member as `Class$member : T` (`is_stub_name`, `infer_field`). This is how polars types `frame$select(...)`; it is looked up before `$.class` dispatch and keyed by the class name, so no new table exists beside the global scheme map.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a

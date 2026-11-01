@@ -10,12 +10,9 @@ frame_backend_@ID@ <- function() {
 summarise_column_@ID@ <- function(values) {
   if (identical(frame_backend_@ID@(), "polars")) {
     frame <- polars::as_polars_df(data.frame(x = values))
-    #: @if-unknown fn(...: Any) -> polars_data_frame
-    select <- frame$select
-    #: @if-unknown fn(...: character) -> list{mean: fn() -> list{alias: fn(name: character) -> Any}}
-    col <- polars::pl$col
+    summary <- frame$select(polars::pl$col("x")$mean()$alias("mean"))
     #: double
-    mean_value <- as.data.frame(select(col("x")$mean()$alias("mean")))$mean
+    mean_value <- as.data.frame(summary)$mean
     mean_value
   } else {
     mean(values)

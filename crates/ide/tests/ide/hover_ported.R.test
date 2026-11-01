@@ -378,7 +378,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (87): trusted, TRUE, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (95): trusted, TRUE, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -603,7 +603,7 @@ calls mirror: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-completion (65): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
+completion (72): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
 hint @6: <T> fn(x: T) -> T
 
 #---- two_type_variables
@@ -635,7 +635,7 @@ calls add_one: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
-completion (67): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
+completion (68): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
 hint @7: <T: numeric> fn(x: T) -> T
 
 #---- partially_inferred_function
@@ -691,7 +691,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (21): undebug, undebugcall, packageNotFoundError, unique.data.frame, unique.default, units.difftime, unloadNamespace, unRematchDefinition
+completion (22): undebug, undebugcall, packageNotFoundError, unique.data.frame, unique.default, units.difftime, unloadNamespace, unRematchDefinition
 
 #==== hover_stubs
 #---- overloaded_stub_name

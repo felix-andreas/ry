@@ -163,3 +163,67 @@ first: fn(df: data.frame) -> double
 58..67 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 123..142 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 127..141 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#==== strict_friction
+#---- matrix_indexing_follows_drop
+# A matrix's element type is not tracked, so elements are `Any`; vector and empty indexes keep the
+# matrix, and `drop = FALSE` keeps it whatever the indexes are.
+#~~~~ R/main.R
+#: fn(m: matrix, t: integer) -> Any
+row_of <- function(m, t) m[t, ]
+#: fn(m: matrix) -> Any
+cell <- function(m) m[1, 2]
+#: fn(m: matrix) -> matrix
+block <- function(m) m[1:2, 1:2]
+#: fn(m: matrix) -> matrix
+kept <- function(m) m[1, , drop = FALSE]
+#: fn(m: matrix) -> matrix
+whole <- function(m) m[, ]
+#++++
+== R/main.R
+row_of: fn(m: matrix, t: integer) -> Any
+cell: fn(m: matrix) -> Any
+block: fn(m: matrix) -> matrix
+kept: fn(m: matrix) -> matrix
+whole: fn(m: matrix) -> matrix
+
+#---- a_union_beside_a_class_compares_per_member
+#~~~~ R/main.R
+#: fn(x: matrix | double) -> logical
+at_least_zero <- function(x) x >= 0
+#++++
+== R/main.R
+at_least_zero: fn(x: matrix | double) -> logical
+
+#---- a_lambda_passed_to_dots_any_takes_any
+#~~~~ R/main.R
+#: fn(handler: fn(...: Any) -> Any) -> Any
+register <- function(handler) handler
+#: fn() -> Any
+route <- function() register(function(req) nchar(req$postBody))
+#++++
+== R/main.R
+register: fn(handler: fn(...: Any) -> Any) -> Any
+route: fn() -> Any
+
+#---- an_annotation_covers_origins_inside_its_value
+# `df$age` is undetermined, but the annotation types the value it feeds. A function literal inside
+# the value keeps its own findings.
+#~~~~ R/main.R
+#: fn(df: data.frame) -> double[]
+ages <- function(df) {
+  #: double[]
+  covered <- as.numeric(df$age)
+  #: fn() -> Any
+  later <- function() as.numeric(df$age)
+  uncovered <- as.numeric(df$age)
+  covered
+}
+#++++
+== R/main.R
+ages: fn(df: data.frame) -> double[]
+122..127 warning[unused] `later` is assigned but never used.
+163..172 warning[unused] `uncovered` is assigned but never used.
+153..159 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+187..193 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
