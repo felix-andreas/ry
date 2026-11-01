@@ -272,7 +272,6 @@ logical[]
 NULL()
 #++++
 Unknown
-0..4 error[type-mismatch] this has type `NULL`, which is not a function, so it cannot be called
 
 #---- comparison_null_operand
 NULL == 1L

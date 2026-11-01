@@ -90,3 +90,113 @@ g <- function(x) head(x, n = 2, keepnums = FALSE)
 #++++
 f: <T> fn(x: T) -> Any
 g: <T> fn(x: T) -> Any
+
+#---- a_parameter_shadowing_an_unstubbed_base_function
+draw <- function(range, pretty = TRUE) {
+  if (pretty) pretty(range) else range
+}
+#++++
+draw: <T> fn(range: T, [pretty]: logical) -> Unknown
+
+#---- a_null_field_reads_as_null
+retries <- function(config = NULL) {
+  n <- config$retries
+  if (is.null(n)) 3L else n
+}
+second <- function(config = NULL) config[["name"]]
+#++++
+retries: <T> fn([config]: T) -> integer
+second: <T> fn([config]: T) -> Unknown
+
+#---- a_name_missing_from_an_array_like_list_reads_as_null
+f <- function(items) {
+  xs <- as.list(items)
+  xs$name
+}
+#++++
+f: <T> fn(items: T) -> Any
+
+#---- list_of_dots_has_an_unknown_shape
+f <- function(...) {
+  dots <- list(...)
+  if (is.null(dots$main)) "untitled" else dots$main
+}
+#++++
+f: fn(...: Any) -> character
+
+#---- matrix_indexing_is_unchecked
+cell <- function(m) {
+  x <- list(1L, 2L)
+  x[1L, 2L]
+}
+#++++
+cell: <T> fn(m: T) -> Unknown
+
+#---- a_returning_tail_adds_no_null
+is_even <- function(x) {
+  return(x %% 2L == 0L)
+}
+#++++
+is_even: <T: numeric> fn(x: T) -> logical
+
+#---- arithmetic_takes_logicals_and_complex_numbers
+double_it <- function(x) x * 2
+a <- double_it(TRUE)
+z <- 1i + 2
+#++++
+double_it: <T: numeric> fn(x: T) -> double
+a: double
+z: complex
+
+#---- a_numeric_value_is_a_condition
+odd <- function(n) if (n %% 2L) "odd" else "even"
+#++++
+odd: <T: numeric> fn(n: T) -> character
+
+#---- a_vector_is_a_condition_but_a_long_literal_is_not
+check <- function(x) if (x >= 1) "big" else "small"
+check(c(1, 2))
+bad <- if (c(TRUE, FALSE)) 1L
+#++++
+check: <T: numeric> fn(x: T) -> character
+character
+bad: Unknown
+78..92 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- arithmetic_on_a_value_that_may_be_null
+f <- function(x = NULL) {
+  y <- if (is.null(x)) NULL else x * 2
+  y + 1
+}
+#++++
+f: <T: numeric> fn([x]: T | NULL) -> double
+
+#---- negating_a_value_that_may_be_null
+f <- function(flag = NULL) {
+  value <- if (is.null(flag)) NULL else TRUE
+  !value
+}
+#++++
+f: <T> fn([flag]: T | NULL) -> logical[]
+
+#---- combine_accepts_every_value
+mixed <- c(as.raw(1L), 2L)
+wrapped <- function(n) c(sample(n, 2L), NA)
+#++++
+mixed: Unknown
+wrapped: <T> fn(n: T) -> Unknown
+
+#---- a_range_takes_a_union_endpoint
+f <- function(flag) {
+  n <- if (flag) 2L else 3.5
+  1:n
+}
+#++++
+f: fn(flag: logical) -> double[]
+
+#---- calling_a_null_placeholder_field_is_unchecked
+registry <- NULL
+run <- function() registry$invoke()
+#++++
+registry: NULL
+run: fn() -> Unknown

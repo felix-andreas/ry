@@ -874,6 +874,17 @@ struct CallArgument<'db> {
     forwards_dots: bool,
 }
 
+/// The packages R attaches in every session, whose exports a call can reach without `library()`.
+const DEFAULT_SEARCH_PATH: &[&str] = &[
+    "base",
+    "methods",
+    "datasets",
+    "utils",
+    "grDevices",
+    "graphics",
+    "stats",
+];
+
 enum CalleeLookup<'db> {
     Binding,
     Skipped(TypeScheme<'db>),
@@ -3790,12 +3801,15 @@ impl<'db> Checker<'db, '_> {
         }
         // A value already required to be numeric (`if (n %% 2L)`) coerces like a number, so the
         // condition must not pin it to `logical`.
-        if matches!(resolved.kind(self.db), TyKind::Var(_))
-            && matches!(
-                self.table.open_constraint(self.db, resolved),
-                Some(Constraint::Numeric | Constraint::ScalarNumeric)
-            )
-        {
+        let constraint = match resolved.kind(self.db) {
+            TyKind::Var(_) => self.table.open_constraint(self.db, resolved),
+            TyKind::Rigid(name) => self.table.rigid_constraints.get(name).copied(),
+            _ => None,
+        };
+        if matches!(
+            constraint,
+            Some(Constraint::Numeric | Constraint::ScalarNumeric)
+        ) {
             return;
         }
         self.unify_or_report(condition_range, scalar(self.db, Atomic::Logical), resolved);
@@ -5647,21 +5661,23 @@ impl<'db> Checker<'db, '_> {
     /// function, such as an unconstrained parameter that shares its name with one, cannot be
     /// decided statically.
     fn callee_lookup(&mut self, callee: ExprId, callee_ty: Ty<'db>) -> CalleeLookup<'db> {
+        let resolved = self.table.resolve(self.db, callee_ty);
         let ExpressionKind::NameRef(name) = &self.module.expression(callee).kind else {
-            return CalleeLookup::Binding;
+            return if self.is_null_placeholder(resolved) {
+                CalleeLookup::Undetermined
+            } else {
+                CalleeLookup::Binding
+            };
         };
         let local = self.naming.resolutions.contains_key(&callee);
-        let resolved = self.table.resolve(self.db, callee_ty);
         let callable = match resolved.kind(self.db) {
             TyKind::Var(_) if local => None,
-            TyKind::Union(members) => {
-                if members
-                    .iter()
-                    .any(|member| !matches!(member.kind(self.db), TyKind::Null))
-                {
-                    return CalleeLookup::Binding;
-                }
-                Some(false)
+            TyKind::Union(_) => {
+                return if self.is_null_placeholder(resolved) {
+                    CalleeLookup::Undetermined
+                } else {
+                    CalleeLookup::Binding
+                };
             }
             TyKind::Null => Some(false),
             TyKind::Scalar(_)
@@ -5695,12 +5711,32 @@ impl<'db> Checker<'db, '_> {
             (None, Some(_)) => CalleeLookup::Undetermined,
             (None, None) => CalleeLookup::Binding,
             (Some(_), Some(scheme)) => CalleeLookup::Skipped(scheme),
-            // A non-local `NULL` with nothing behind it is the placeholder a package fills in
-            // from `.onLoad` (`f <- NULL`, then `f <<- function(...)`), so the call is unchecked.
-            (Some(_), None) if !local && matches!(resolved.kind(self.db), TyKind::Null) => {
+            // R would find a function a default package exports that ry has no type for
+            // (`pretty`).
+            (Some(_), None)
+                if DEFAULT_SEARCH_PATH
+                    .iter()
+                    .any(|package| namespace_exports(self.db, package, name)) =>
+            {
+                CalleeLookup::Undetermined
+            }
+            (Some(_), None) if matches!(resolved.kind(self.db), TyKind::Null) => {
                 CalleeLookup::Undetermined
             }
             (Some(_), None) => CalleeLookup::Binding,
+        }
+    }
+
+    /// A `NULL` callee is a placeholder filled in later (`.onLoad`, `<<-`, or a field of an
+    /// object ry does not model), so a call on it, or on `T | NULL`, is unchecked.
+    fn is_null_placeholder(&self, resolved: Ty<'db>) -> bool {
+        match resolved.kind(self.db) {
+            TyKind::Null => true,
+            TyKind::Union(members) => members
+                .iter()
+                .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+                .all(|member| matches!(member.kind(self.db), TyKind::Var(_))),
+            _ => false,
         }
     }
 
