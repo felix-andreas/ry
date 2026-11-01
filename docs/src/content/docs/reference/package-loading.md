@@ -21,10 +21,15 @@ This page is the exact behavior.
   [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
 - **A syntax error stops the load before anything runs**, and names the file and line. A statement
   that fails at load time is reported with its file and line too.
+- **With [strict mode](/type-checking/strict-mode) on**, in `ry.toml` or in a file's
+  `# typing: strict` comment, `ry load` checks the package's `R/` files first, on either runtime.
+  If any has a strict-mode error, it prints the errors and exits with status 1 without loading
+  anything. The `R/` files are checked together, so a name one file defines resolves in the others.
+  A later `load_all()` in the same session, and the load `ry repl` makes, do not check.
 
-Functions keep their source references, so `print()`, tracebacks, and the debugger point into your
-files, as long as `options(keep.source = TRUE)` is set, which is the default in an interactive
-session.
+On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
+into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an
+interactive session.
 
 ## A reload
 
@@ -49,5 +54,8 @@ A reload works out which top-level items changed and touches only those:
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
+- On ry's own runtime (the default for `ry load`), functions carry no source references, and a
+  package with `src/` does not load yet, because pkgbuild cannot find its build tools there. Use
+  `ry load --runtime gnu-r` for either.
 - A top-level statement that reads a name before the statement defining it runs sees, on a reload,
   the value from the previous load. A fresh load would fail on such code anyway.

@@ -147,6 +147,7 @@ unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
                 "call"
             }
         }
+        SexpType::Record => crate::records::native_kind(object).class_name(),
         kind => kind.name(),
     }
 }

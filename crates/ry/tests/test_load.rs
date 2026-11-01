@@ -1,5 +1,6 @@
-//! `ry load`, `load_all()` and the plain-R entry point against a real GNU R. They need a
-//! local R and skip (loudly, but green) without one; CI has no R, so run them locally:
+//! `ry load`, `load_all()` and the plain-R entry point, on ry's runtime (the default, which
+//! reads base R from a GNU R installation) and on GNU R. They need a local R and skip (loudly,
+//! but green) without one; CI has no R, so run them locally:
 //! `cargo test -p ry-lang --test test_load -- --nocapture`.
 
 #![cfg(unix)]
@@ -31,9 +32,16 @@ fn package(files: &[(&str, &str)]) -> TempDir {
     directory
 }
 
+/// The runtimes a test that names them runs on, by their `--runtime` names.
+const RUNTIMES: &[&str] = &["ry", "gnu-r"];
+
 fn ry_load(root: &Path, code: &[&str]) -> Output {
+    ry_load_on("ry", root, code)
+}
+
+fn ry_load_on(runtime: &str, root: &Path, code: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
-    command.arg("load").arg(root);
+    command.arg("load").arg("--runtime").arg(runtime).arg(root);
     for expression in code {
         command.arg("-e").arg(expression);
     }
@@ -80,27 +88,30 @@ fn a_package_loads_with_collate_imports_s3_and_s4() {
         return;
     }
     let root = package(DEMO);
-    let output = ry_load(
-        root.path(),
-        &[
-            "cat(greet('ry'), '\\n')",
-            "print(money(5))",
-            "cat(doubled, middle(c(1, 9, 3)), norm1(new('Point', x = -4)), '\\n')",
-            "cat(environmentName(environment(greet)), isNamespaceLoaded('demo'), '\\n')",
-            "cat('suffix' %in% ls('package:demo'), demo::greet('pkg'), '\\n')",
-        ],
-    );
-    let printed = text(&output);
-    assert!(output.status.success(), "{printed}");
-    assert!(
-        printed.contains("Loaded demo: 5 functions bound lazily, 5 top-level statements run"),
-        "{printed}"
-    );
-    assert!(printed.contains("hello ry !"), "{printed}");
-    assert!(printed.contains("$5"), "{printed}");
-    assert!(printed.contains("42 3 4"), "{printed}");
-    assert!(printed.contains("demo TRUE"), "{printed}");
-    assert!(printed.contains("TRUE hello pkg !"), "{printed}");
+    for runtime in RUNTIMES {
+        let output = ry_load_on(
+            runtime,
+            root.path(),
+            &[
+                "cat(greet('ry'), '\\n')",
+                "print(money(5))",
+                "cat(doubled, middle(c(1, 9, 3)), norm1(new('Point', x = -4)), '\\n')",
+                "cat(environmentName(environment(greet)), isNamespaceLoaded('demo'), '\\n')",
+                "cat('suffix' %in% ls('package:demo'), demo::greet('pkg'), '\\n')",
+            ],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{printed}");
+        assert!(
+            printed.contains("Loaded demo: 5 functions bound lazily, 5 top-level statements run"),
+            "{printed}"
+        );
+        assert!(printed.contains("hello ry !"), "{printed}");
+        assert!(printed.contains("$5"), "{printed}");
+        assert!(printed.contains("42 3 4"), "{printed}");
+        assert!(printed.contains("demo TRUE"), "{printed}");
+        assert!(printed.contains("TRUE hello pkg !"), "{printed}");
+    }
 }
 
 #[test]
@@ -108,30 +119,32 @@ fn a_reload_replaces_changed_items_and_removes_deleted_ones() {
     if !r_available() {
         return;
     }
-    let root = package(DEMO);
-    let first = root.path().join("R/first.R");
-    let edited = fs::read_to_string(&first)
-        .expect("read")
-        .replace("\"hello\"", "\"howdy\"")
-        .replace(
-            "middle <- function(x) median(x)\n",
-            "added <- function() 42\n",
-        );
-    let script = format!(
-        "writeLines({edited:?}, {path:?})\n\
+    for runtime in RUNTIMES {
+        let root = package(DEMO);
+        let first = root.path().join("R/first.R");
+        let edited = fs::read_to_string(&first)
+            .expect("read")
+            .replace("\"hello\"", "\"howdy\"")
+            .replace(
+                "middle <- function(x) median(x)\n",
+                "added <- function() 42\n",
+            );
+        let script = format!(
+            "writeLines({edited:?}, {path:?})\n\
          load_all({root:?})\n\
          cat(greet('ry'), added(), exists('middle', envir = asNamespace('demo')), '\\n')\n\
          load_all({root:?})\n",
-        path = first.display().to_string(),
-        root = root.path().display().to_string(),
-    );
-    let output = ry_load(root.path(), &[&script]);
-    let printed = text(&output);
-    assert!(output.status.success(), "{printed}");
-    assert!(printed.contains("Reloaded demo:"), "{printed}");
-    assert!(printed.contains("howdy ry ! 42 FALSE"), "{printed}");
-    assert!(printed.contains("binding removed"), "{printed}");
-    assert!(printed.contains("demo is up to date."), "{printed}");
+            path = first.display().to_string(),
+            root = root.path().display().to_string(),
+        );
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{printed}");
+        assert!(printed.contains("Reloaded demo:"), "{printed}");
+        assert!(printed.contains("howdy ry ! 42 FALSE"), "{printed}");
+        assert!(printed.contains("binding removed"), "{printed}");
+        assert!(printed.contains("demo is up to date."), "{printed}");
+    }
 }
 
 #[test]
@@ -173,6 +186,43 @@ fn a_syntax_error_refuses_the_load_with_its_location() {
     let printed = text(&output);
     assert!(!output.status.success(), "{printed}");
     assert!(printed.contains("R/a.R:2:"), "{printed}");
+}
+
+#[test]
+fn strict_mode_refuses_an_untyped_package_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: strictpkg\nVersion: 1.0\n"),
+        ("ry.toml", "[check]\ntyping = true\nstrict = true\n"),
+        ("R/a.R", "describe <- function(x) cat(\"a value\\n\")\n"),
+        // A name another file defines resolves, so only `describe` is reported.
+        ("R/b.R", "helper <- function(x: double) -> double x + 1\n"),
+        ("R/c.R", "uses <- function(y: double) -> double helper(y)\n"),
+    ]);
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &["cat(\"ran\\n\")"]);
+        let printed = text(&output);
+        assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
+        assert!(printed.contains("R/a.R:1:22"), "{runtime}: {printed}");
+        assert!(
+            printed.contains("strict mode found 1 error, so this code does not run"),
+            "{runtime}: {printed}"
+        );
+        assert!(!printed.contains("ran"), "{runtime}: {printed}");
+    }
+    fs::write(
+        root.path().join("R/a.R"),
+        "describe <- function(x: double) cat(\"a value\\n\")\n",
+    )
+    .expect("write file");
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &["describe(1)"]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("a value"), "{runtime}: {printed}");
+    }
 }
 
 #[test]
@@ -303,7 +353,8 @@ fn source_references_point_into_the_file() {
          cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n",
         root = root.path().display().to_string(),
     );
-    let output = ry_load(root.path(), &[&script]);
+    // ry's interpreter keeps no source references yet.
+    let output = ry_load_on("gnu-r", root.path(), &[&script]);
     let printed = text(&output);
     assert!(output.status.success(), "{printed}");
     assert!(printed.contains("at 4 a.R"), "{printed}");

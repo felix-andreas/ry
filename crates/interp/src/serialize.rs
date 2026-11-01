@@ -208,7 +208,12 @@ impl Reader<'_> {
                 let value = if self.hook == nil() {
                     return Err(error("no restore method available"));
                 } else {
-                    eval::apply(nil(), self.hook, &eval::value_args(&[names]), values::global_env())?
+                    eval::apply(
+                        nil(),
+                        self.hook,
+                        &eval::value_args(&[names]),
+                        values::global_env(),
+                    )?
                 };
                 self.add_reference(value);
                 return Ok(value);
@@ -221,14 +226,21 @@ impl Reader<'_> {
             }
             PACKAGESXP => {
                 let names = self.string_vector()?;
-                let function = eval::find_fun(values::install("findPackageEnv")?, values::base_env())?;
-                let env = eval::apply(nil(), function, &eval::value_args(&[names]), values::global_env())?;
+                let function =
+                    eval::find_fun(values::install("findPackageEnv")?, values::base_env())?;
+                let env = eval::apply(
+                    nil(),
+                    function,
+                    &eval::value_args(&[names]),
+                    values::global_env(),
+                )?;
                 self.add_reference(env);
                 return Ok(env);
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function = eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                let function =
+                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
                 let env = eval::apply(
                     nil(),
                     function,
@@ -296,7 +308,8 @@ impl Reader<'_> {
                 return Ok(object);
             }
             22 => {
-                let pointer = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
+                let pointer =
+                    crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
                 self.add_reference(pointer);
                 let protected = self.item()?;
                 let tag = self.item()?;
@@ -320,7 +333,9 @@ impl Reader<'_> {
                         let symbol = values::install(&name).ok()?;
                         crate::builtins::internal_function(symbol)
                     })
-                    .ok_or_else(|| error(format!("unrecognized internal function name \"{name}\"")))?;
+                    .ok_or_else(|| {
+                        error(format!("unrecognized internal function name \"{name}\""))
+                    })?;
                 return Ok(primitive);
             }
             9 => {
@@ -365,7 +380,14 @@ impl Reader<'_> {
         let object = match kind {
             10 | 13 => {
                 let count = self.length()?;
-                let vector = alloc(if kind == 10 { SexpType::Logical } else { SexpType::Integer }, count)?;
+                let vector = alloc(
+                    if kind == 10 {
+                        SexpType::Logical
+                    } else {
+                        SexpType::Integer
+                    },
+                    count,
+                )?;
                 let data = values::ints_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 4)?;
@@ -418,7 +440,14 @@ impl Reader<'_> {
             }
             19 | 20 => {
                 let count = self.length()?;
-                let vector = alloc(if kind == 19 { SexpType::List } else { SexpType::Expression }, count)?;
+                let vector = alloc(
+                    if kind == 19 {
+                        SexpType::List
+                    } else {
+                        SexpType::Expression
+                    },
+                    count,
+                )?;
                 for index in 0..count {
                     let element = self.item()?;
                     values::set_elt(vector, index, element);
@@ -431,7 +460,8 @@ impl Reader<'_> {
                 if self.format == Format::Ascii {
                     for index in 0..count {
                         let word = self.ascii_word()?;
-                        values::raws_mut(vector)[index] = u8::from_str_radix(&word, 16).unwrap_or(0);
+                        values::raws_mut(vector)[index] =
+                            u8::from_str_radix(&word, 16).unwrap_or(0);
                     }
                 } else {
                     let bytes = self.take(count)?.to_vec();
@@ -450,7 +480,13 @@ impl Reader<'_> {
         Ok(object)
     }
 
-    unsafe fn finish(&mut self, object: Sexp, is_object: bool, levels: u16, has_attributes: bool) -> R<()> {
+    unsafe fn finish(
+        &mut self,
+        object: Sexp,
+        is_object: bool,
+        levels: u16,
+        has_attributes: bool,
+    ) -> R<()> {
         object.set_gp(levels);
         object.set_object(is_object);
         if has_attributes {
@@ -470,13 +506,19 @@ impl Reader<'_> {
             let kind = self.integer()? as u32;
             let value = match kind {
                 21 => self.bytecode(reps)?,
-                6 | 2 | BCREPDEF | BCREPREF | ATTRLANGSXP | ATTRLISTSXP => self.bytecode_language(kind, reps)?,
+                6 | 2 | BCREPDEF | BCREPREF | ATTRLANGSXP | ATTRLISTSXP => {
+                    self.bytecode_language(kind, reps)?
+                }
                 _ => self.item()?,
             };
             values::set_elt(constants, index, value);
         }
         // A byte-code object reads as its source expression.
-        let expression = if count > 0 { constants.element(0) } else { nil() };
+        let expression = if count > 0 {
+            constants.element(0)
+        } else {
+            nil()
+        };
         Ok(expression)
     }
 
@@ -587,7 +629,11 @@ unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
             Ok(result)
         }
         "deferred_string" => {
-            let argument = if state.kind() == SexpType::Pairlist { state.car() } else { state };
+            let argument = if state.kind() == SexpType::Pairlist {
+                state.car()
+            } else {
+                state
+            };
             crate::coerce::coerce_vector(argument, SexpType::String)
         }
         name if name.starts_with("wrap_") => {
@@ -597,7 +643,9 @@ unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
                 Ok(state)
             }
         }
-        _ => Err(error(format!("cannot unserialize ALTVEC object of class '{class}'"))),
+        _ => Err(error(format!(
+            "cannot unserialize ALTVEC object of class '{class}'"
+        ))),
     }
 }
 
@@ -605,7 +653,14 @@ unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
 pub unsafe fn unserialize(bytes: &[u8], hook: Sexp) -> R<Sexp> {
     let mut bytes = bytes;
     // `save()` files carry an extra magic line.
-    for magic in [&b"RDX2\n"[..], b"RDX3\n", b"RDA2\n", b"RDA3\n", b"RDB2\n", b"RDB3\n"] {
+    for magic in [
+        &b"RDX2\n"[..],
+        b"RDX3\n",
+        b"RDA2\n",
+        b"RDA3\n",
+        b"RDB2\n",
+        b"RDB3\n",
+    ] {
         if let Some(rest) = bytes.strip_prefix(magic) {
             bytes = rest;
         }
@@ -675,7 +730,14 @@ impl Writer {
         }
     }
 
-    unsafe fn flags(&mut self, kind: u32, levels: u16, is_object: bool, has_attributes: bool, has_tag: bool) {
+    unsafe fn flags(
+        &mut self,
+        kind: u32,
+        levels: u16,
+        is_object: bool,
+        has_attributes: bool,
+        has_tag: bool,
+    ) {
         let mut flags = kind | ((levels as u32) << 12);
         if is_object {
             flags |= IS_OBJECT;
@@ -708,6 +770,12 @@ impl Writer {
     }
 
     unsafe fn item(&mut self, object: Sexp) -> R<()> {
+        // A ry value has no R serialization, and writing one as something else would let it
+        // leave the session as a value it is not.
+        if object.kind() == SexpType::Record {
+            let kind = crate::records::native_kind(object);
+            return Err(error(crate::records::boundary_message("the value", kind)));
+        }
         let known = *crate::heap().known();
         if object == known.nil {
             self.integer(NILVALUE_SXP as i32);
@@ -739,13 +807,19 @@ impl Writer {
         }
         let object = values::materialize(object)?;
         let kind = object.kind();
-        if matches!(kind, SexpType::Symbol | SexpType::Environment | SexpType::ExternalPtr | SexpType::WeakRef)
-            && self.reference(object)
+        if matches!(
+            kind,
+            SexpType::Symbol | SexpType::Environment | SexpType::ExternalPtr | SexpType::WeakRef
+        ) && self.reference(object)
         {
             return Ok(());
         }
         let has_attributes = object.attrib() != known.nil && kind != SexpType::Char;
-        let levels = if kind == SexpType::Char { object.gp() & (gp::UTF8 | gp::LATIN1 | gp::BYTES | gp::ASCII) } else { object.gp() & gp::S4_OBJECT };
+        let levels = if kind == SexpType::Char {
+            object.gp() & (gp::UTF8 | gp::LATIN1 | gp::BYTES | gp::ASCII)
+        } else {
+            object.gp() & gp::S4_OBJECT
+        };
         match kind {
             SexpType::Symbol => {
                 self.add_reference(object);
@@ -778,7 +852,11 @@ impl Writer {
                 self.item(nil())?;
                 self.item(object.attrib())?;
             }
-            SexpType::Pairlist | SexpType::Language | SexpType::Closure | SexpType::Promise | SexpType::Dots => {
+            SexpType::Pairlist
+            | SexpType::Language
+            | SexpType::Closure
+            | SexpType::Promise
+            | SexpType::Dots => {
                 let code = match kind {
                     SexpType::Pairlist => 2,
                     SexpType::Language => 6,
@@ -787,7 +865,13 @@ impl Writer {
                     _ => 17,
                 };
                 let tag = object.tag();
-                self.flags(code, levels, object.is_object(), has_attributes, tag != known.nil);
+                self.flags(
+                    code,
+                    levels,
+                    object.is_object(),
+                    has_attributes,
+                    tag != known.nil,
+                );
                 if has_attributes {
                     self.item(object.attrib())?;
                 }
@@ -837,7 +921,13 @@ impl Writer {
                 }
             }
             SexpType::Logical | SexpType::Integer => {
-                self.flags(kind.code(), levels, object.is_object(), has_attributes, false);
+                self.flags(
+                    kind.code(),
+                    levels,
+                    object.is_object(),
+                    has_attributes,
+                    false,
+                );
                 self.length(length(object));
                 for &value in values::ints(object) {
                     self.integer(value);
@@ -868,7 +958,13 @@ impl Writer {
                 }
             }
             SexpType::String | SexpType::List | SexpType::Expression => {
-                self.flags(kind.code(), levels, object.is_object(), has_attributes, false);
+                self.flags(
+                    kind.code(),
+                    levels,
+                    object.is_object(),
+                    has_attributes,
+                    false,
+                );
                 self.length(length(object));
                 for index in 0..length(object) {
                     self.item(object.element(index))?;
@@ -938,23 +1034,35 @@ fn decompress(record: &[u8], kind: i32) -> R<Vec<u8>> {
     let expected = u32::from_be_bytes([record[0], record[1], record[2], record[3]]) as usize;
     let body = &record[4..];
     let (method, payload) = match kind {
-        2 | 3 => (body.first().copied().unwrap_or(b'1'), body.get(1..).unwrap_or(&[])),
+        2 | 3 => (
+            body.first().copied().unwrap_or(b'1'),
+            body.get(1..).unwrap_or(&[]),
+        ),
         _ => (b'1', body),
     };
     let mut output = Vec::with_capacity(expected);
-    let corrupt = |failure: &dyn std::fmt::Display| error(format!("lazy-load database is corrupt: {failure}"));
+    let corrupt = |failure: &dyn std::fmt::Display| {
+        error(format!("lazy-load database is corrupt: {failure}"))
+    };
     match method {
         b'1' => {
-            ZlibDecoder::new(payload).read_to_end(&mut output).map_err(|failure| corrupt(&failure))?;
+            ZlibDecoder::new(payload)
+                .read_to_end(&mut output)
+                .map_err(|failure| corrupt(&failure))?;
         }
         b'0' => output.extend_from_slice(payload),
         // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
         // with `--data-compress=xz` use.
         b'Z' => {
             let mut input = std::io::BufReader::new(payload);
-            lzma_rs::lzma2_decompress(&mut input, &mut output).map_err(|failure| corrupt(&failure))?;
+            lzma_rs::lzma2_decompress(&mut input, &mut output)
+                .map_err(|failure| corrupt(&failure))?;
         }
-        b'2' => return Err(error("bzip2-compressed lazy-load databases are not supported yet")),
+        b'2' => {
+            bzip2_rs::DecoderReader::new(payload)
+                .read_to_end(&mut output)
+                .map_err(|failure| corrupt(&failure))?;
+        }
         _ => {
             ZlibDecoder::new(body)
                 .read_to_end(&mut output)
@@ -983,7 +1091,11 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
         .get(offset..offset + size)
         .ok_or_else(|| error("lazy-load database is corrupt"))?
         .to_vec();
-    let data = if compressed != 0 { decompress(&record, compressed)? } else { record };
+    let data = if compressed != 0 {
+        decompress(&record, compressed)?
+    } else {
+        record
+    };
     let value = unserialize(&data, hook)?;
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
@@ -996,60 +1108,72 @@ unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
     unserialize(&bytes, call.arg(1))
 }
 
+/// `load()`: binds every object of a workspace file (`save()`'s format: a magic number, then a
+/// serialized pairlist tagged with the names) in `envir`, returning the names.
+unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
+    let environment = call.arg(1);
+    if environment.kind() != SexpType::Environment {
+        return Err(call.error("invalid 'envir' argument"));
+    }
+    let bytes = crate::connections::read_binary(call.arg(0))?;
+    let body = match bytes.get(..5) {
+        Some(b"RDX2\n" | b"RDX3\n") => &bytes[5..],
+        Some(b"RDA2\n" | b"RDA3\n" | b"RDB2\n" | b"RDB3\n") => {
+            return Err(call.error("load() supports only the XDR workspace format save() writes by default"));
+        }
+        _ => return Err(call.error("the input does not start with a magic number compatible with loading from a connection")),
+    };
+    let mut cell = unserialize(body, nil())?;
+    let mut names = Vec::new();
+    while cell != nil() {
+        if cell.kind() != SexpType::Pairlist {
+            return Err(call.error("loaded data is not in pair list form"));
+        }
+        let tag = cell.tag();
+        eval::define(tag, cell.car(), environment)?;
+        names.push(values::symbol_name(tag).into_owned());
+        cell = cell.cdr();
+    }
+    values::string_vector(&names)
+}
+
+/// `save()`: writes the named objects of `envir` as a workspace, the XDR magic number followed
+/// by a serialized pairlist tagged with the names, which is what `load()` reads back.
+unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
+    if values::as_logical_scalar(call.arg(2)) == 1 {
+        return Err(call.error("save(ascii = TRUE) is not supported yet"));
+    }
+    let environment = call.arg(4);
+    if environment.kind() != SexpType::Environment {
+        return Err(call.error("invalid 'envir' argument"));
+    }
+    let force = values::as_logical_scalar(call.arg(5)) == 1;
+    let mut items = Vec::new();
+    for name in values::strings(call.arg(0)) {
+        let Some(name) = name else {
+            return Err(call.error("invalid 'list' argument"));
+        };
+        let symbol = values::install(&name)?;
+        let mut value = eval::find_var(symbol, environment)?;
+        if value == values::unbound() {
+            return Err(call.error(format!("object '{name}' not found")));
+        }
+        if force {
+            value = eval::value_of(value)?;
+        }
+        items.push((symbol, value));
+    }
+    let workspace = values::pairlist(&items, SexpType::Pairlist)?;
+    let mut bytes = b"RDX3\n".to_vec();
+    bytes.extend(serialize(workspace)?);
+    crate::connections::write_binary(call.arg(1), &bytes)?;
+    Ok(nil())
+}
+
 unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
     let bytes = serialize(call.arg(0))?;
     crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
-}
-
-/// `saveToConn(list, con, ascii, version, envir, eval.promises)`: writes the variables named
-/// by `list`, as found from `envir`, to `con` in the binary save format: the `RDX3` magic line
-/// and then one serialized pairlist tagged by the names.
-unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
-    if values::as_logical_scalar(call.arg(2)) == 1 {
-        return Err(call.error("ascii save files are not supported yet"));
-    }
-    let names = call.arg(0);
-    if names.kind() != SexpType::String {
-        return Err(call.error("first argument must be a character vector"));
-    }
-    let env = call.arg(4);
-    let force = values::as_logical_scalar(call.arg(5)) == 1;
-    let mut items = Vec::with_capacity(length(names));
-    for name in values::strings(names) {
-        let name = name.unwrap_or_default();
-        let symbol = values::install(&name)?;
-        let mut value = eval::find_var(symbol, env)?;
-        if value == values::unbound() {
-            return Err(call.error(format!("object '{name}' not found")));
-        }
-        if force && value.kind() == SexpType::Promise {
-            value = eval::force_promise(value)?;
-        }
-        items.push((symbol, value));
-    }
-    let list = values::pairlist(&items, SexpType::Pairlist)?;
-    let mut bytes = b"RDX3\n".to_vec();
-    bytes.extend(serialize(list)?);
-    crate::connections::write_binary(call.arg(1), &bytes)?;
-    Ok(nil())
-}
-
-/// `loadFromConn2(con, envir, verbose)`: defines in `envir` the variables of a binary save
-/// file and returns their names.
-unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
-    let bytes = crate::connections::read_binary(call.arg(0))?;
-    let Some(body) = bytes.strip_prefix(b"RDX3\n").or_else(|| bytes.strip_prefix(b"RDX2\n")) else {
-        return Err(call.error("the input does not start with a magic number compatible with loading from a connection"));
-    };
-    let list = unserialize(body, nil())?;
-    let env = call.arg(1);
-    let mut names = Vec::new();
-    for (tag, value) in values::pairlist_items(list) {
-        eval::define(tag, value, env)?;
-        names.push(values::symbol_name(tag).into_owned());
-    }
-    values::string_vector(&names)
 }
 
 unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {

@@ -5,6 +5,7 @@
 pub mod ast;
 pub mod kind;
 pub mod literate;
+pub mod native_values;
 pub mod testing;
 
 mod lexer;

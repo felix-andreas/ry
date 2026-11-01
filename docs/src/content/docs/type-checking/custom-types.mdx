@@ -1,0 +1,143 @@
+---
+title: Custom types
+description: Declaring your own types, so values with the same shape stay apart
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Every type so far is *structural*: two types are the same if they have the same shape. Any
+`list(name = "Ada")` is a `list{name: character}`, and every `double` is interchangeable with every
+other. That is the right default for R, where values are plain data, but it cannot tell Celsius from
+Fahrenheit, or a user ID from an email address.
+
+## Nominal types
+
+A *nominal* type is distinct by name, even from a type with the same shape. `@type` declares one,
+and `@new` marks the one place that creates its values. Both exist only as `#:` comments, because
+ry has no inline spelling for type definitions or for `@new`. Function signatures around them can
+still be written inline:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Money {list{amount: double, currency: character}}
+
+money <- function(amount: double, currency: character) -> Money {
+  if (amount < 0) stop("negative amount")
+  #: @new Money
+  structure(list(amount = amount, currency = currency), class = "Money")
+}
+
+amount_of <- function(m: Money) -> double m$amount
+
+amount_of(list(amount = 1, currency = "EUR"))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Money {list{amount: double, currency: character}}
+
+#: fn(amount: double, currency: character) -> Money
+money <- function(amount, currency) {
+  if (amount < 0) stop("negative amount")
+  #: @new Money
+  structure(list(amount = amount, currency = currency), class = "Money")
+}
+
+#: fn(m: Money) -> double
+amount_of <- function(m) m$amount
+
+amount_of(list(amount = 1, currency = "EUR"))
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `Money`, found `list{amount: double, currency: character}`
+```
+
+A list with the right fields is still not a `Money`. Put `@new` in one constructor and nowhere else,
+and every `Money` in the program has passed its checks: `@new` checks the shape when ry analyzes
+the code, and `stop()` checks the values when it runs.
+
+Scalars work the same way. With `@type UserId {character}` and `@type Email {character}`, passing an
+`Email` where a `UserId` is expected is an error, although both are strings at run time.
+
+## Operators
+
+A nominal value is still accepted where its representation is, so `nchar()` works on a `UserId`.
+Arithmetic gives the plain representation back: with `@type Celsius {double}`, the sum of two
+`Celsius` values is a `double`, because ry cannot assume that adding two temperatures gives a
+temperature. `Money` is a list, so `+` on it is an error until you declare the operator:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+`+.Money` <- function(a: Money, b: Money) -> Money {
+  money(a$amount + b$amount, a$currency)
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(a: Money, b: Money) -> Money
+`+.Money` <- function(a, b) money(a$amount + b$amount, a$currency)
+```
+
+</TabItem>
+</Tabs>
+
+Now `money(1, "EUR") + money(2, "EUR")` is a `Money`. R finds `+.Money` through the class attribute,
+which is why the constructor sets one; ry itself needs no class to check the type.
+
+## Parameters and aliases
+
+A type can take parameters: with `@type Page<T> {list{items: list[T], total: integer}}`, reading
+`items` from a `Page<integer>` gives a `list[integer]`.
+
+`@alias` names a type without making it nominal, so `@alias Row {list{id: integer}}` is a shorter
+way to write the shape. A `@type` or `@alias` line needs its own `#:` block, separated from other
+annotations by a blank line.
+
+## R6 and S4 objects
+
+For shared mutable state, inheritance, or method dispatch, R6 and S4 are still the tools, and their
+objects are `Unknown`. To check who receives one, give it a nominal type over `Any` and wrap its
+constructor:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Account {Any}
+
+new_account <- function() -> Account {
+  #: @new Account
+  AccountClass$new()
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Account {Any}
+
+#: fn() -> Account
+new_account <- function() {
+  #: @new Account
+  AccountClass$new()
+}
+```
+
+</TabItem>
+</Tabs>

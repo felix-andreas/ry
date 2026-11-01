@@ -71,23 +71,31 @@ one. GNU R then runs the script with its inline annotations erased.
 
 `ry run --runtime ry script.R` (or `RY_RUNTIME=ry`) runs the script on ry's own interpreter instead
 of GNU R. It still reads base R's R code and the default packages from the GNU R installation, so R
-must be installed, but no GNU R code runs. This runtime is under construction: a script that calls
+must be installed, but no GNU R code runs. Unlike on GNU R, it also turns [inline
+annotations](/type-checking/inline-annotations#running-annotated-code) into checks at function
+boundaries. This runtime is under construction: a script that calls
 something it lacks stops with an error naming it. That error can be a missing `.Internal`, a native
 routine of a default package, or a graphics device, since only the null device exists.
 
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
+Unlike `ry run`, it uses ry's own runtime by default, and `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`)
+loads on GNU R instead.
 `ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
 `source(pipe("ry load --r-entry"))`. `load_all()` is available in `ry repl` and `ry run` sessions
-too.
+on GNU R too, but not yet with `--runtime ry`.
+
+## debug
+
+`ry debug ast FILE` prints the syntax tree of a file, and `ry debug analysis-stats [PATH]` analyzes
+a workspace and reports where time and memory go. Both are developer aids for working on ry itself.
 
 ## Exit codes
 
 - **0**: nothing found, or nothing to reformat.
 - **1**: `check` counted a finding (warnings count, unless `--min-severity error`), `fmt --check` or
-  `--diff` found a file to change, `run` or `load` hit an error in the script or the package, `run` refused a script in strict
-  mode, or the
-  server stopped after an analysis panic.
+  `--diff` found a file to change, `run` or `load` hit an error in the script or the package, `run`
+  refused a script in strict mode, or the server stopped after an analysis panic.
 - **2**: ry could not do its job. That is a usage error, invalid TOML in `ry.toml`, a path that does
   not exist, a file or stub it cannot read, an invalid `exclude` pattern, for `load` a path inside
   no package, or, for `repl`, `run`, and `load`, no usable R. A `2` overrides a `1`, so a broken

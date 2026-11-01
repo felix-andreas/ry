@@ -677,13 +677,15 @@ impl Parser<'_, '_> {
                 }
                 self.finish();
             }
+            Some(COLON) if self.next_token_is(IDENT) => self.ann_tag(end),
+            Some(IDENT) if self.token_str(self.pos) == ".." => self.wrap(TYPE_OTHER_TAGS),
             Some(IDENT | NULL_KW) => match self.token_str(self.pos) {
                 "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
                     self.ann_list_brackets(end);
                 }
                 // Inline, a body may follow a return type, so `list {` and `fn (` with a
                 // space start the body; only the hugging spelling is the type.
-                "list" | "frame"
+                "list" | "frame" | "record" | "tuple"
                     if self.ann_next_significant(end) == Some(L_BRACE)
                         && (!self.inline_type || self.next_token_is(L_BRACE)) =>
                 {
@@ -828,10 +830,11 @@ impl Parser<'_, '_> {
 
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
-        let noun = if self.token_str(self.pos) == "frame" {
-            "frame type"
-        } else {
-            "list type"
+        let noun = match self.token_str(self.pos) {
+            "frame" => "frame type",
+            "record" => "record type",
+            "tuple" => "tuple type",
+            _ => "list type",
         };
         self.wrap(NAME);
         self.ann_trivia(end);
@@ -885,6 +888,65 @@ impl Parser<'_, '_> {
                 TYPE_TUPLE
             },
         );
+        self.finish();
+    }
+
+    /// `:Name` or `:Name(payload)`. The `(` must hug the name, so an inline return type `-> :A`
+    /// can be followed by a parenthesized body.
+    fn ann_tag(&mut self, end: usize) {
+        self.start(TYPE_TAG);
+        self.bump();
+        self.wrap(NAME);
+        if self.ann_at(L_PAREN, end) {
+            self.start(TYPE_TAG_PAYLOAD);
+            let open_range = self.token_range(self.pos);
+            self.bump();
+            let mut items = 0usize;
+            loop {
+                self.ann_trivia(end);
+                if self.ann_at(R_PAREN, end) {
+                    self.bump();
+                    break;
+                }
+                if self.pos >= end {
+                    self.error_unclosed(
+                        open_range,
+                        "unclosed `(` in this tag type; expected a matching `)`",
+                    );
+                    break;
+                }
+                items += 1;
+                if matches!(self.current(), Some(IDENT))
+                    && self.ann_next_significant(end) == Some(COLON)
+                {
+                    self.start(TYPE_FIELD);
+                    self.wrap(NAME);
+                    self.ann_trivia(end);
+                    self.bump();
+                    self.ann_trivia(end);
+                    self.ann_type(end, false);
+                    self.finish();
+                } else {
+                    self.ann_type(end, false);
+                }
+                self.ann_trivia(end);
+                if self.ann_at(COMMA, end) {
+                    self.bump();
+                } else if self.ann_at(R_PAREN, end) {
+                    self.bump();
+                    break;
+                } else {
+                    self.error_here("expected `,` or `)` in this tag type");
+                    break;
+                }
+            }
+            if items == 0 {
+                self.error_here(
+                    "a tag type without a payload is written without parentheses, as in `:None`",
+                );
+            }
+            self.finish();
+        }
         self.finish();
     }
 
@@ -1291,7 +1353,12 @@ impl Parser<'_, '_> {
             return false;
         };
         match kind {
+            IDENT if self.token_str(self.pos) == "match" && self.match_ahead() => {
+                self.match_expr();
+            }
             IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
+            COLON if self.next_token_is(IDENT) => self.tag_expr(),
+            L_PAREN if self.literal_ahead() => self.collection_literal(),
             ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
                 self.wrap(ERROR);
@@ -1340,7 +1407,7 @@ impl Parser<'_, '_> {
                 self.start(REPEAT_EXPR);
                 self.bump();
                 self.eat_trivia(true);
-                if !self.expression(0) {
+                if !self.statement() {
                     self.error_here("expected a body after `repeat`");
                 }
                 self.finish();
@@ -1375,7 +1442,7 @@ impl Parser<'_, '_> {
         self.eat_trivia(true);
         self.condition_parens("if");
         self.eat_trivia(true);
-        if !self.expression(0) {
+        if !self.statement() {
             self.error_expected("a branch after the `if` condition");
         }
         let across = self.else_allowed_across_newline();
@@ -1384,7 +1451,7 @@ impl Parser<'_, '_> {
             debug_assert!(self.at(ELSE_KW));
             self.bump();
             self.eat_trivia(true);
-            if !self.expression(0) {
+            if !self.statement() {
                 self.error_expected("an expression after `else`");
             }
         }
@@ -1429,7 +1496,7 @@ impl Parser<'_, '_> {
             self.error_expected("`(` after `for`");
         }
         self.eat_trivia(true);
-        if !self.expression(0) {
+        if !self.statement() {
             self.error_here("expected a body for the `for` loop");
         }
         self.finish();
@@ -1441,7 +1508,7 @@ impl Parser<'_, '_> {
         self.eat_trivia(true);
         self.condition_parens("while");
         self.eat_trivia(true);
-        if !self.expression(0) {
+        if !self.statement() {
             self.error_here("expected a body for the `while` loop");
         }
         self.finish();
@@ -1493,7 +1560,7 @@ impl Parser<'_, '_> {
             self.finish();
             self.eat_trivia(true);
         }
-        if !self.expression(0) && !self.statement_left_group_open {
+        if !self.statement() && !self.statement_left_group_open {
             // Blamed on the keyword: where the body search stopped can be a
             // zero-width spot past the last statement.
             self.error_at(keyword_range, "expected a function body");
@@ -1574,6 +1641,11 @@ impl Parser<'_, '_> {
     }
 
     fn argument_list(&mut self, open: SyntaxKind) {
+        self.argument_list_items(open, None);
+    }
+
+    /// `items`, when given, receives the shape of every argument, which ry's literals validate.
+    fn argument_list_items(&mut self, open: SyntaxKind, mut items: Option<&mut Vec<Item>>) {
         self.start(ARGUMENT_LIST);
         let open_range = self.token_range(self.pos);
         self.open_group();
@@ -1592,6 +1664,12 @@ impl Parser<'_, '_> {
                     if expect_argument {
                         self.start(ARGUMENT);
                         self.finish();
+                        if let Some(items) = items.as_deref_mut() {
+                            items.push(Item {
+                                kind: ItemKind::Empty,
+                                range: TextRange::empty(self.token_range(self.pos).start()),
+                            });
+                        }
                     }
                     self.bump();
                     expect_argument = true;
@@ -1608,7 +1686,7 @@ impl Parser<'_, '_> {
                                 self.separator_gap(),
                                 "missing `,` between these arguments",
                             );
-                            self.argument(closer);
+                            self.collected_argument(closer, items.as_deref_mut());
                             continue;
                         }
                         self.error_expected(&format!(
@@ -1618,7 +1696,7 @@ impl Parser<'_, '_> {
                         self.recover_argument(closer);
                         continue;
                     }
-                    self.argument(closer);
+                    self.collected_argument(closer, items.as_deref_mut());
                     expect_argument = false;
                 }
             }
@@ -1646,6 +1724,53 @@ impl Parser<'_, '_> {
             self.statement_left_group_open = true;
         }
         self.finish();
+    }
+
+    fn collected_argument(&mut self, closer: SyntaxKind, items: Option<&mut Vec<Item>>) {
+        let Some(items) = items else {
+            self.argument(closer);
+            return;
+        };
+        let start = self.pos;
+        let named = matches!(
+            self.current(),
+            Some(IDENT | STRING | DOTS | DOTDOTI | NULL_KW)
+        ) && self
+            .peek_significant(self.pos + 1, true)
+            .is_some_and(|(kind, _)| kind == EQ);
+        let dots = self.at(DOTS)
+            && self
+                .peek_significant(self.pos + 1, true)
+                .is_none_or(|(kind, _)| matches!(kind, COMMA | R_PAREN));
+        self.argument(closer);
+        let kind = if named {
+            ItemKind::Named(unquoted(self.token_str(start)).to_owned())
+        } else if dots {
+            ItemKind::Dots
+        } else {
+            ItemKind::Positional
+        };
+        let range = if named {
+            self.token_range(start)
+        } else {
+            self.range_from(start)
+        };
+        items.push(Item { kind, range });
+    }
+
+    /// The range from the token at `start` to the last significant token before the current one.
+    fn range_from(&self, start: usize) -> TextRange {
+        let end = (start..self.pos)
+            .rev()
+            .find(|&index| !matches!(self.tokens[index].kind, WHITESPACE | COMMENT | NEWLINE))
+            .map_or_else(
+                || self.token_range(start).end(),
+                |index| self.token_range(index).end(),
+            );
+        TextRange::new(
+            self.token_range(start).start(),
+            end.max(self.token_range(start).start()),
+        )
     }
 
     fn argument(&mut self, closer: SyntaxKind) {
@@ -1719,6 +1844,488 @@ impl Parser<'_, '_> {
                 _ => self.bump(),
             }
         }
+    }
+
+    /// `(` starts a tuple or record literal when it is empty or holds a comma at its own
+    /// depth. R rejects both, so every parenthesized R expression keeps its meaning.
+    fn literal_ahead(&self) -> bool {
+        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        if self
+            .peek_significant(self.pos + 1, true)
+            .is_some_and(|(kind, _)| kind == R_PAREN)
+        {
+            return true;
+        }
+        let mut depth = 0u32;
+        let mut pos = self.pos + 1;
+        while let Some(kind) = kind_at(pos) {
+            match kind {
+                ANNOTATION_MARKER => {
+                    pos = self.annotation_region_end(pos);
+                    continue;
+                }
+                COMMA if depth == 0 => return true,
+                R_PAREN if depth == 0 => return false,
+                L_PAREN | L_BRACKET | L_BRACE => depth += 1,
+                L_BRACKET2 => depth += 2,
+                R_PAREN | R_BRACKET | R_BRACE => match depth.checked_sub(1) {
+                    Some(lower) => depth = lower,
+                    None => return false,
+                },
+                _ => {}
+            }
+            pos += 1;
+        }
+        false
+    }
+
+    /// `match (value) {` with the `{` on the line of the closing `)`. R reads `match(value)` as a
+    /// call to `base::match`, which a `{` on the same line cannot follow.
+    fn match_ahead(&self) -> bool {
+        let Some((L_PAREN, open)) = self.peek_significant(self.pos + 1, false) else {
+            return false;
+        };
+        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let mut depth = 0u32;
+        let mut pos = open;
+        loop {
+            let Some(kind) = kind_at(pos) else {
+                return false;
+            };
+            match kind {
+                ANNOTATION_MARKER => {
+                    pos = self.annotation_region_end(pos);
+                    continue;
+                }
+                L_PAREN | L_BRACKET | L_BRACE => depth += 1,
+                L_BRACKET2 => depth += 2,
+                R_PAREN | R_BRACKET | R_BRACE => {
+                    depth = match depth.checked_sub(1) {
+                        Some(lower) => lower,
+                        None => return false,
+                    };
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            pos += 1;
+        }
+        matches!(self.peek_significant(pos + 1, false), Some((L_BRACE, _)))
+    }
+
+    fn collection_literal(&mut self) {
+        let checkpoint = self.checkpoint();
+        let mut items = Vec::new();
+        self.argument_list_items(L_PAREN, Some(&mut items));
+        let named = self.validate_items(&items, "literal");
+        self.start_at(checkpoint, if named { RECORD_EXPR } else { TUPLE_EXPR });
+        self.finish();
+    }
+
+    fn tag_expr(&mut self) {
+        self.start(TAG_EXPR);
+        self.bump();
+        self.wrap(NAME);
+        if self.at(L_PAREN) {
+            let open = self.pos;
+            let mut items = Vec::new();
+            self.argument_list_items(L_PAREN, Some(&mut items));
+            if items.is_empty() {
+                let range = self.range_from(open);
+                self.error_at(
+                    range,
+                    "a tag without a payload is written without parentheses, as in `:None`",
+                );
+            }
+            self.validate_items(&items, "tag payload");
+        }
+        self.finish();
+    }
+
+    /// Reports mixed, repeated, empty and spliced items, and returns whether the items are named
+    /// fields rather than positional items.
+    fn validate_items(&mut self, items: &[Item], what: &str) -> bool {
+        let named = matches!(
+            items.iter().find(|item| item.kind != ItemKind::Empty),
+            Some(Item {
+                kind: ItemKind::Named(_),
+                ..
+            })
+        );
+        let mut seen: Vec<&str> = Vec::new();
+        for item in items {
+            match &item.kind {
+                ItemKind::Empty => {
+                    self.error_at(item.range, format!("expected an item in this {what}"));
+                }
+                ItemKind::Dots => {
+                    self.error_at(item.range, format!("`...` cannot be spliced into a {what}"));
+                }
+                ItemKind::Positional if named => self.error_at(
+                    item.range,
+                    format!("this item needs a name: every field of a record is named, so a {what} cannot mix named and unnamed items"),
+                ),
+                ItemKind::Named(_) if !named => self.error_at(
+                    item.range,
+                    format!("this item cannot have a name: no item of a tuple is named, so a {what} cannot mix named and unnamed items"),
+                ),
+                ItemKind::Named(name) => {
+                    if seen.contains(&name.as_str()) {
+                        self.error_at(item.range, format!("the field `{name}` appears twice"));
+                    } else {
+                        seen.push(name);
+                    }
+                }
+                ItemKind::Positional => {}
+            }
+        }
+        named
+    }
+
+    fn match_expr(&mut self) {
+        self.start(MATCH_EXPR);
+        self.bump();
+        self.eat_trivia(false);
+        debug_assert!(self.at(L_PAREN));
+        if self.literal_ahead() {
+            self.collection_literal();
+        } else {
+            self.start(PAREN_EXPR);
+            let open_range = self.token_range(self.pos);
+            self.open_group();
+            self.bump();
+            self.eat_trivia(true);
+            if !self.expression(0) {
+                self.error_expected("a value to match inside `match (…)`");
+            }
+            self.eat_trivia(true);
+            self.end_group();
+            if self.at(R_PAREN) {
+                self.bump();
+            } else {
+                self.error_unclosed(open_range, "unclosed `(`; expected a matching `)`");
+            }
+            self.finish();
+        }
+        self.eat_trivia(false);
+        debug_assert!(self.at(L_BRACE));
+        let open_range = self.token_range(self.pos);
+        self.groups.push(0);
+        self.bump();
+        loop {
+            self.eat_trivia(true);
+            match self.current() {
+                None | Some(R_BRACE) => break,
+                Some(SEMICOLON | COMMA) => {
+                    self.bump();
+                    continue;
+                }
+                _ => {}
+            }
+            self.match_arm();
+            self.eat_trivia(false);
+            match self.current() {
+                None | Some(NEWLINE | SEMICOLON | COMMA | R_BRACE) => {}
+                Some(_) => {
+                    let found = self.describe_current();
+                    self.error_here(format!(
+                        "unexpected {found} after this arm; expected a newline, `;` or `,`"
+                    ));
+                    self.start(ERROR);
+                    while !matches!(
+                        self.current(),
+                        None | Some(NEWLINE | SEMICOLON | COMMA | R_BRACE)
+                    ) {
+                        self.bump();
+                    }
+                    self.finish();
+                }
+            }
+        }
+        self.groups.pop();
+        if self.at(R_BRACE) {
+            self.bump();
+        } else {
+            self.error_unclosed(
+                open_range,
+                "unclosed `{` in this `match`; expected a matching `}`",
+            );
+        }
+        self.finish();
+    }
+
+    fn match_arm(&mut self) {
+        self.start(MATCH_ARM);
+        if !self.pattern() {
+            self.start(ERROR);
+            while !matches!(
+                self.current(),
+                None | Some(NEWLINE | SEMICOLON | COMMA | R_BRACE | FAT_ARROW | IF_KW)
+            ) {
+                self.bump();
+            }
+            self.finish();
+        }
+        self.eat_trivia(false);
+        if self.at(IF_KW) {
+            self.start(MATCH_GUARD);
+            self.bump();
+            self.eat_trivia(false);
+            self.condition_parens("if");
+            self.finish();
+            self.eat_trivia(false);
+        }
+        if self.at(FAT_ARROW) {
+            let arrow_range = self.token_range(self.pos);
+            self.bump();
+            self.eat_trivia(true);
+            if !self.expression(0) {
+                self.error_at(arrow_range, "expected an expression after `=>`");
+            }
+        } else {
+            self.error_expected("`=>` after this pattern");
+            self.start(ERROR);
+            while !matches!(
+                self.current(),
+                None | Some(NEWLINE | SEMICOLON | COMMA | R_BRACE)
+            ) {
+                self.bump();
+            }
+            self.finish();
+        }
+        self.finish();
+    }
+
+    /// Returns false, consuming nothing, when no pattern starts here; the error is reported.
+    fn pattern(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            self.error_here("pattern nesting is too deep");
+            return false;
+        }
+        self.depth += 1;
+        let checkpoint = self.checkpoint();
+        let mut produced = self.pattern_primary();
+        if produced {
+            let mut alternatives = 1usize;
+            loop {
+                let across_newlines = !self.newlines_significant();
+                if !matches!(
+                    self.peek_significant(self.pos, across_newlines),
+                    Some((PIPE, _))
+                ) {
+                    break;
+                }
+                self.eat_trivia(false);
+                if alternatives == 1 {
+                    self.start_at(checkpoint, PATTERN_OR);
+                }
+                alternatives += 1;
+                self.bump();
+                self.eat_trivia(true);
+                if !self.pattern_primary() {
+                    produced = true;
+                    break;
+                }
+            }
+            if alternatives > 1 {
+                self.finish();
+            }
+        }
+        self.depth -= 1;
+        produced
+    }
+
+    fn pattern_primary(&mut self) -> bool {
+        let Some(kind) = self.current() else {
+            self.error_expected("a pattern");
+            return false;
+        };
+        match kind {
+            UNDERSCORE => self.wrap(PATTERN_WILDCARD),
+            IDENT if self.token_str(self.pos) == ".." => {
+                self.error_here("`..` may only end a record pattern or stand for a tag's payload");
+                self.wrap(PATTERN_REST);
+            }
+            IDENT => {
+                if matches!(self.token_str(self.pos), "T" | "F") {
+                    let suggestion = if self.token_str(self.pos) == "T" {
+                        "TRUE"
+                    } else {
+                        "FALSE"
+                    };
+                    self.error_here(format!(
+                        "`{}` in a pattern would bind any value to a variable; write `{suggestion}` to match the logical value",
+                        self.token_str(self.pos)
+                    ));
+                }
+                self.start(PATTERN_BIND);
+                self.wrap(NAME);
+                self.finish();
+            }
+            INTEGER | DOUBLE | COMPLEX | STRING | RAW_STRING => {
+                self.start(PATTERN_LITERAL);
+                self.wrap(LITERAL);
+                self.finish();
+            }
+            _ if (TRUE_KW..=NA_CHARACTER_KW).contains(&kind) => {
+                self.start(PATTERN_LITERAL);
+                self.wrap(LITERAL);
+                self.finish();
+            }
+            MINUS
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|token| token.kind),
+                    Some(INTEGER | DOUBLE | COMPLEX | INF_KW)
+                ) =>
+            {
+                self.start(PATTERN_LITERAL);
+                self.bump();
+                self.wrap(LITERAL);
+                self.finish();
+            }
+            COLON if self.next_token_is(IDENT) => {
+                self.start(PATTERN_TAG);
+                self.bump();
+                self.wrap(NAME);
+                if self.at(L_PAREN) {
+                    let checkpoint = self.checkpoint();
+                    let shape = self.pattern_list(true);
+                    if shape.items == 0 && !shape.rest {
+                        self.error_at(
+                            shape.range,
+                            "a tag without a payload is matched without parentheses, as in `:None`",
+                        );
+                    }
+                    self.start_at(checkpoint, PATTERN_LIST);
+                    self.finish();
+                }
+                self.finish();
+            }
+            L_PAREN => {
+                let checkpoint = self.checkpoint();
+                let shape = self.pattern_list(false);
+                let grouping =
+                    shape.items == 1 && !shape.trailing_comma && !shape.named && !shape.rest;
+                if shape.items == 1 && !shape.trailing_comma && shape.named && !shape.rest {
+                    self.error_at(
+                        shape.range,
+                        "a one-field record pattern needs a trailing comma, as in `(name = p,)`",
+                    );
+                }
+                self.start_at(
+                    checkpoint,
+                    if grouping {
+                        PATTERN_PAREN
+                    } else {
+                        PATTERN_LIST
+                    },
+                );
+                self.finish();
+            }
+            _ => {
+                self.error_expected("a pattern");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The parenthesized items of a tuple, record or payload pattern, without the wrapping node.
+    fn pattern_list(&mut self, payload: bool) -> PatternListShape {
+        let open = self.pos;
+        let open_range = self.token_range(self.pos);
+        self.open_group();
+        self.bump();
+        let mut shape = PatternListShape::default();
+        let mut positional = 0usize;
+        let mut names: Vec<String> = Vec::new();
+        loop {
+            self.eat_trivia(true);
+            match self.current() {
+                None | Some(R_PAREN) => break,
+                _ => {}
+            }
+            let item_start = self.pos;
+            if shape.rest {
+                self.error_here("`..` must be the last item of a pattern");
+            }
+            if self.at(IDENT) && self.token_str(self.pos) == ".." {
+                self.wrap(PATTERN_REST);
+                shape.rest = true;
+            } else if self.at(IDENT)
+                && self
+                    .peek_significant(self.pos + 1, true)
+                    .is_some_and(|(kind, _)| kind == EQ)
+            {
+                let name = self.token_str(self.pos).to_owned();
+                if names.contains(&name) {
+                    self.error_here(format!("the field `{name}` appears twice"));
+                }
+                names.push(name);
+                self.start(PATTERN_FIELD);
+                self.wrap(NAME);
+                self.eat_trivia(true);
+                self.bump();
+                self.eat_trivia(true);
+                if !self.pattern() {
+                    self.recover_in_list(R_PAREN);
+                }
+                self.finish();
+                shape.named = true;
+                shape.items += 1;
+            } else {
+                if !self.pattern() {
+                    self.recover_in_list(R_PAREN);
+                }
+                positional += 1;
+                shape.items += 1;
+            }
+            if shape.named && positional > 0 {
+                let range = self.range_from(item_start);
+                self.error_at(range, "a pattern cannot mix named fields and unnamed items");
+                positional = 0;
+            }
+            self.eat_trivia(true);
+            shape.trailing_comma = false;
+            match self.current() {
+                Some(COMMA) => {
+                    self.bump();
+                    shape.trailing_comma = true;
+                }
+                Some(R_PAREN) | None => break,
+                Some(_) => {
+                    self.error_expected("`,` or `)` in this pattern");
+                    let before = self.pos;
+                    self.recover_in_list(R_PAREN);
+                    match self.current() {
+                        Some(COMMA) => self.bump(),
+                        Some(R_PAREN) => {}
+                        // A stray closer belongs to an enclosing construct.
+                        _ if self.pos == before => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.end_group();
+        if self.at(R_PAREN) {
+            self.bump();
+        } else {
+            self.error_unclosed(
+                open_range,
+                "unclosed `(` in this pattern; expected a matching `)`",
+            );
+        }
+        shape.range = self.range_from(open);
+        if shape.rest && !shape.named && !(payload && shape.items == 0) {
+            self.error_at(
+                shape.range,
+                "`..` ignores the remaining fields of a record pattern, so it needs named fields before it",
+            );
+        }
+        shape
     }
 
     fn open_group(&mut self) {
@@ -1796,4 +2403,37 @@ fn starts_expression(kind: SyntaxKind) -> bool {
                 | L_BRACE
                 | BACKSLASH
         )
+}
+
+struct Item {
+    kind: ItemKind,
+    range: TextRange,
+}
+
+#[derive(PartialEq, Eq)]
+enum ItemKind {
+    Empty,
+    Positional,
+    Dots,
+    Named(String),
+}
+
+#[derive(Default)]
+struct PatternListShape {
+    items: usize,
+    named: bool,
+    rest: bool,
+    trailing_comma: bool,
+    range: TextRange,
+}
+
+/// A field name written as a string or in backticks names the same field as a bare name.
+fn unquoted(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    match (bytes.first(), bytes.last()) {
+        (Some(b'"' | b'\'' | b'`'), Some(last)) if bytes.len() >= 2 && last == &bytes[0] => {
+            &text[1..text.len() - 1]
+        }
+        _ => text,
+    }
 }

@@ -7,13 +7,19 @@ publish = false
 [lib]
 path = "src/loader.rs"
 
+[features]
+# The backend for ry's own runtime, which links the interpreter.
+runtime = ["dep:heap", "dep:interp"]
+
 [dependencies]
+heap = { path = "../heap", optional = true }
+interp = { path = "../interp", optional = true }
 rustc-hash.workspace = true
 salsa.workspace = true
 semantics = { path = "../semantics" }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
+syntax = { path = "../syntax" }
 
 [dev-dependencies]
-syntax = { path = "../syntax" }
 tempfile = "3"

@@ -87,7 +87,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
         let source = values::raws(raw);
         let result = alloc(SexpType::Raw, source.len())?;
         for (index, value) in source.iter().enumerate() {
-            values::raws_mut(result)[index] = if shift >= 0 { ((*value as u32) << shift) as u8 } else { value >> -shift };
+            values::raws_mut(result)[index] = if shift >= 0 {
+                ((*value as u32) << shift) as u8
+            } else {
+                value >> -shift
+            };
         }
         Ok(result)
     }),
@@ -97,13 +101,31 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("/", 2, |call| unsafe { arithmetic(call, Op::Divide) }).generic(Generic::Ops),
     builtin("^", 2, |call| unsafe { arithmetic(call, Op::Power) }).generic(Generic::Ops),
     builtin("%%", 2, |call| unsafe { arithmetic(call, Op::Modulo) }).generic(Generic::Ops),
-    builtin("%/%", 2, |call| unsafe { arithmetic(call, Op::IntegerDivide) }).generic(Generic::Ops),
-    builtin("==", 2, |call| unsafe { comparison(call, Comparison::Equal) }).generic(Generic::Ops),
-    builtin("!=", 2, |call| unsafe { comparison(call, Comparison::NotEqual) }).generic(Generic::Ops),
+    builtin("%/%", 2, |call| unsafe {
+        arithmetic(call, Op::IntegerDivide)
+    })
+    .generic(Generic::Ops),
+    builtin("==", 2, |call| unsafe {
+        comparison(call, Comparison::Equal)
+    })
+    .generic(Generic::Ops),
+    builtin("!=", 2, |call| unsafe {
+        comparison(call, Comparison::NotEqual)
+    })
+    .generic(Generic::Ops),
     builtin("<", 2, |call| unsafe { comparison(call, Comparison::Less) }).generic(Generic::Ops),
-    builtin(">", 2, |call| unsafe { comparison(call, Comparison::Greater) }).generic(Generic::Ops),
-    builtin("<=", 2, |call| unsafe { comparison(call, Comparison::LessEqual) }).generic(Generic::Ops),
-    builtin(">=", 2, |call| unsafe { comparison(call, Comparison::GreaterEqual) }).generic(Generic::Ops),
+    builtin(">", 2, |call| unsafe {
+        comparison(call, Comparison::Greater)
+    })
+    .generic(Generic::Ops),
+    builtin("<=", 2, |call| unsafe {
+        comparison(call, Comparison::LessEqual)
+    })
+    .generic(Generic::Ops),
+    builtin(">=", 2, |call| unsafe {
+        comparison(call, Comparison::GreaterEqual)
+    })
+    .generic(Generic::Ops),
     builtin("&", 2, |call| unsafe { logic(call, true) }).generic(Generic::Ops),
     builtin("|", 2, |call| unsafe { logic(call, false) }).generic(Generic::Ops),
     builtin("!", 1, do_not).generic(Generic::Ops),
@@ -140,12 +162,27 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("log", -1, do_log).generic(Generic::Math),
     builtin("round", -1, |call| unsafe { round_like(call, false) }).generic(Generic::Math),
     builtin("signif", -1, |call| unsafe { round_like(call, true) }).generic(Generic::Math),
-    builtin("cumsum", 1, |call| unsafe { cumulative(call, Cumulative::Sum) }).generic(Generic::Math),
-    builtin("cumprod", 1, |call| unsafe { cumulative(call, Cumulative::Product) }).generic(Generic::Math),
-    builtin("cummax", 1, |call| unsafe { cumulative(call, Cumulative::Max) }).generic(Generic::Math),
-    builtin("cummin", 1, |call| unsafe { cumulative(call, Cumulative::Min) }).generic(Generic::Math),
+    builtin("cumsum", 1, |call| unsafe {
+        cumulative(call, Cumulative::Sum)
+    })
+    .generic(Generic::Math),
+    builtin("cumprod", 1, |call| unsafe {
+        cumulative(call, Cumulative::Product)
+    })
+    .generic(Generic::Math),
+    builtin("cummax", 1, |call| unsafe {
+        cumulative(call, Cumulative::Max)
+    })
+    .generic(Generic::Math),
+    builtin("cummin", 1, |call| unsafe {
+        cumulative(call, Cumulative::Min)
+    })
+    .generic(Generic::Math),
     builtin("sum", -1, |call| unsafe { summary(call, Summary::Sum) }).generic(Generic::Summary),
-    builtin("prod", -1, |call| unsafe { summary(call, Summary::Product) }).generic(Generic::Summary),
+    builtin("prod", -1, |call| unsafe {
+        summary(call, Summary::Product)
+    })
+    .generic(Generic::Summary),
     builtin("max", -1, |call| unsafe { summary(call, Summary::Max) }).generic(Generic::Summary),
     builtin("min", -1, |call| unsafe { summary(call, Summary::Min) }).generic(Generic::Summary),
     builtin("range", -1, do_range).generic(Generic::Summary),
@@ -154,8 +191,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mean", 1, do_mean),
     builtin("is.na", 1, |call| unsafe { na_test(call, NaTest::Na) }).generic(Generic::Internal),
     builtin("is.nan", 1, |call| unsafe { na_test(call, NaTest::NaN) }).generic(Generic::Internal),
-    builtin("is.finite", 1, |call| unsafe { na_test(call, NaTest::Finite) }).generic(Generic::Internal),
-    builtin("is.infinite", 1, |call| unsafe { na_test(call, NaTest::Infinite) }).generic(Generic::Internal),
+    builtin("is.finite", 1, |call| unsafe {
+        na_test(call, NaTest::Finite)
+    })
+    .generic(Generic::Internal),
+    builtin("is.infinite", 1, |call| unsafe {
+        na_test(call, NaTest::Infinite)
+    })
+    .generic(Generic::Internal),
     builtin("anyNA", -1, do_any_na).generic(Generic::Internal),
     builtin(":", 2, do_colon),
     builtin("seq_len", 1, do_seq_len),
@@ -173,8 +216,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bitwiseOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
     internal("bitwiseXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
     internal("bitwiseNot", 1, do_bitw_not),
-    internal("bitwiseShiftL", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32) }),
-    internal("bitwiseShiftR", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32) }),
+    internal("bitwiseShiftL", 2, |call| unsafe {
+        bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32)
+    }),
+    internal("bitwiseShiftR", 2, |call| unsafe {
+        bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32)
+    }),
     builtin("xtfrm", 1, |call| unsafe { Ok(call.arg(0)) }).generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
     builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
@@ -193,10 +240,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }),
     internal("is.unsorted", 3, do_is_unsorted),
     internal("compareNumericVersion", 2, do_compare_numeric_version),
-    internal("colSums", 4, |call| unsafe { margin_sums(call, false, false) }),
-    internal("colMeans", 4, |call| unsafe { margin_sums(call, false, true) }),
-    internal("rowSums", 4, |call| unsafe { margin_sums(call, true, false) }),
-    internal("rowMeans", 4, |call| unsafe { margin_sums(call, true, true) }),
+    internal("colSums", 4, |call| unsafe {
+        margin_sums(call, false, false)
+    }),
+    internal("colMeans", 4, |call| unsafe {
+        margin_sums(call, false, true)
+    }),
+    internal("rowSums", 4, |call| unsafe {
+        margin_sums(call, true, false)
+    }),
+    internal("rowMeans", 4, |call| unsafe {
+        margin_sums(call, true, true)
+    }),
     internal("findInterval", 5, do_find_interval),
     internal("pretty", 8, do_pretty),
     internal("sequence", 3, do_sequence),
@@ -209,7 +264,11 @@ unsafe fn do_compare_numeric_version(call: &Call<'_>) -> R<Sexp> {
     let right = call.arg(1);
     let left_count = length(left);
     let right_count = length(right);
-    let count = if left_count == 0 || right_count == 0 { 0 } else { left_count.max(right_count) };
+    let count = if left_count == 0 || right_count == 0 {
+        0
+    } else {
+        left_count.max(right_count)
+    };
     let result = alloc(SexpType::Integer, count)?;
     for index in 0..count {
         let a = coerce_vector(left.element(index % left_count), SexpType::Integer)?;
@@ -234,7 +293,10 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     let row_count = values::as_integer_scalar(call.arg(1)).max(0) as usize;
     let col_count = values::as_integer_scalar(call.arg(2)).max(0) as usize;
     let na_rm = values::as_logical_scalar(call.arg(3)) == 1;
-    if !matches!(matrix.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real) {
+    if !matches!(
+        matrix.kind(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) {
         return Err(call.error("'x' must be numeric"));
     }
     let outer = if rows { row_count } else { col_count };
@@ -244,7 +306,11 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
         let mut total = CompensatedSum::default();
         let mut counted = 0usize;
         for along in 0..inner {
-            let index = if rows { position + along * row_count } else { along + position * row_count };
+            let index = if rows {
+                position + along * row_count
+            } else {
+                along + position * row_count
+            };
             let value = real_at(matrix, index);
             if value.is_nan() && na_rm {
                 continue;
@@ -274,9 +340,15 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let mut interval = if left_open {
-            breaks.iter().filter(|&&breakpoint| breakpoint < value).count()
+            breaks
+                .iter()
+                .filter(|&&breakpoint| breakpoint < value)
+                .count()
         } else {
-            breaks.iter().filter(|&&breakpoint| breakpoint <= value).count()
+            breaks
+                .iter()
+                .filter(|&&breakpoint| breakpoint <= value)
+                .count()
         } as i32;
         if rightmost_closed && count > 0 {
             if !left_open && value == breaks[count - 1] {
@@ -298,7 +370,11 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
     let biases = call.arg(5);
     let high_bias = crate::subset::numeric_element(biases, 0);
-    let five_bias = if length(biases) > 1 { crate::subset::numeric_element(biases, 1) } else { 0.5 + 1.5 * high_bias };
+    let five_bias = if length(biases) > 1 {
+        crate::subset::numeric_element(biases, 1)
+    } else {
+        0.5 + 1.5 * high_bias
+    };
     let result = pretty(
         values::as_real_scalar(call.arg(0)),
         values::as_real_scalar(call.arg(1)),
@@ -387,8 +463,16 @@ pub fn pretty(
     let mut start = (low / unit + 1e-10).floor();
     let mut end = (high / unit - 1e-10).ceil();
     if eps_correction != 0 && (eps_correction > 1 || !small) {
-        if low != 0.0 { low *= 1.0 - f64::EPSILON } else { low = -f64::MIN_POSITIVE }
-        if high != 0.0 { high *= 1.0 + f64::EPSILON } else { high = f64::MIN_POSITIVE }
+        if low != 0.0 {
+            low *= 1.0 - f64::EPSILON
+        } else {
+            low = -f64::MIN_POSITIVE
+        }
+        if high != 0.0 {
+            high *= 1.0 + f64::EPSILON
+        } else {
+            high = f64::MIN_POSITIVE
+        }
     }
     while start * unit > low + 1e-10 * unit {
         start -= 1.0;
@@ -420,7 +504,12 @@ pub fn pretty(
         low = start;
         high = end;
     }
-    Pretty { low, high, count: steps, unit }
+    Pretty {
+        low,
+        high,
+        count: steps,
+        unit,
+    }
 }
 
 /// `sequence(nvec, from, by)`.
@@ -456,7 +545,8 @@ unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
                 let inside = if right {
                     (value > lower || (lowest && bin == 0 && value == lower)) && value <= upper
                 } else {
-                    value >= lower && (value < upper || (lowest && bin == count - 2 && value == upper))
+                    value >= lower
+                        && (value < upper || (lowest && bin == count - 2 && value == upper))
                 };
                 if inside {
                     code = bin as i32 + 1;
@@ -500,9 +590,7 @@ unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
     match call.args {
         [single] => unary_arithmetic(call, op, single.value),
         [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
-        _ => Err(call.error(format!(
-            "operator needs one or two arguments"
-        ))),
+        _ => Err(call.error(format!("operator needs one or two arguments"))),
     }
 }
 
@@ -560,20 +648,46 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     Ok(result)
 }
 
-/// Which attributes a binary operation's result takes from its operands.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Keep {
-    /// Arithmetic copies every attribute.
-    All,
-    /// Comparisons and `&`/`|` keep only dim, dimnames and names, and a time series' `tsp`
-    /// and class.
-    Structure,
+/// The result attributes of a binary operation: dims must agree, names come from the operand
+/// as long as the result, and other attributes are copied from both, the first taking
+/// precedence.
+pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
+    check_conformable(left, right, call)?;
+    let result_length = length(result);
+    let left_attributes = left.attrib() != nil();
+    let right_attributes = right.attrib() != nil();
+    if !left_attributes && !right_attributes {
+        return Ok(());
+    }
+    if right_attributes && length(right) == result_length {
+        values::copy_most_attributes(right, result, false)?;
+    }
+    if left_attributes && length(left) == result_length {
+        values::copy_most_attributes(left, result, false)?;
+    }
+    copy_array_structure(left, right, result)
 }
 
-/// The result attributes of a binary operation: dims must agree, a result that is no array
-/// takes names from the operand as long as itself, and with `Keep::All` other attributes are copied from both, the
-/// first taking precedence.
-pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp, keep: Keep) -> R<()> {
+/// The attributes a comparison or a binary `&` and `|` keep, which GNU R limits to the
+/// operands' names, dimensions and dimension names, plus a time series' `tsp` and class.
+pub unsafe fn relational_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
+    check_conformable(left, right, call)?;
+    if left.attrib() == nil() && right.attrib() == nil() {
+        return Ok(());
+    }
+    copy_array_structure(left, right, result)?;
+    let result_length = length(result);
+    for operand in [right, left] {
+        let tsp = get_attr(operand, symbols().tsp);
+        if tsp != nil() && length(operand) == result_length {
+            values::set_attr(result, symbols().tsp, tsp)?;
+            values::set_attr(result, symbols().class, get_attr(operand, symbols().class))?;
+        }
+    }
+    Ok(())
+}
+
+unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
     let left_dims = get_attr(left, symbols().dim);
     let right_dims = get_attr(right, symbols().dim);
     if left_dims != nil() && right_dims != nil() {
@@ -585,30 +699,27 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
         if !equal {
             return Err(crate::unwind::error_in(call, "non-conformable arrays"));
         }
-    }
-    let result_length = length(result);
-    let left_attributes = left.attrib() != nil();
-    let right_attributes = right.attrib() != nil();
-    if !left_attributes && !right_attributes {
         return Ok(());
     }
-    if keep == Keep::All {
-        if right_attributes && length(right) == result_length {
-            values::copy_most_attributes(right, result, false)?;
-        }
-        if left_attributes && length(left) == result_length {
-            values::copy_most_attributes(left, result, false)?;
-        }
-    } else {
-        let tsp = values::install("tsp")?;
-        for operand in [right, left] {
-            let operand_tsp = get_attr(operand, tsp);
-            if operand_tsp != nil() && length(operand) == result_length {
-                values::set_attr(result, tsp, operand_tsp)?;
-                values::set_attr(result, symbols().class, get_attr(operand, symbols().class))?;
-            }
+    for (array, dims, other) in [(left, left_dims, right), (right, right_dims, left)] {
+        if dims != nil() && length(array) != 1 && length(other) > length(array) {
+            return Err(crate::unwind::error_in(
+                call,
+                format!(
+                    "dims [product {}] do not match the length of object [{}]",
+                    length(array),
+                    length(other)
+                ),
+            ));
         }
     }
+    Ok(())
+}
+
+/// Dimensions, dimension names and names from the operand of the result's length, the left
+/// one first.
+unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp) -> R<()> {
+    let result_length = length(result);
     for symbol in [symbols().dim, symbols().dimnames] {
         let from_left = get_attr(left, symbol);
         let from_right = get_attr(right, symbol);
@@ -618,7 +729,8 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
             values::set_attr(result, symbol, from_right)?;
         }
     }
-    // An array result is named by its dimnames, never by the other operand's names.
+    // An array result takes no names, as in GNU R, which copies names only when neither
+    // operand is an array.
     if get_attr(result, symbols().dim) != nil() {
         return Ok(());
     }
@@ -656,10 +768,21 @@ fn is_arithmetic_type(kind: SexpType) -> bool {
 pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> R<Sexp> {
     let left = values::materialize(left)?;
     let right = values::materialize(right)?;
-    let left_kind = if left == nil() { SexpType::Integer } else { left.kind() };
-    let right_kind = if right == nil() { SexpType::Integer } else { right.kind() };
+    let left_kind = if left == nil() {
+        SexpType::Integer
+    } else {
+        left.kind()
+    };
+    let right_kind = if right == nil() {
+        SexpType::Integer
+    } else {
+        right.kind()
+    };
     if !is_arithmetic_type(left_kind) || !is_arithmetic_type(right_kind) {
-        return Err(crate::unwind::error_in(call, "non-numeric argument to binary operator"));
+        return Err(crate::unwind::error_in(
+            call,
+            "non-numeric argument to binary operator",
+        ));
     }
     let left_length = length(left);
     let right_length = length(right);
@@ -674,7 +797,7 @@ pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> 
     } else {
         integer_arithmetic(call, op, left, right, count)?
     };
-    binary_attributes(left, right, result, call, Keep::All)?;
+    binary_attributes(left, right, result, call)?;
     Ok(result)
 }
 
@@ -685,7 +808,11 @@ pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
         SexpType::Real => values::reals(vector)[index],
         SexpType::Integer | SexpType::Logical => {
             let value = values::ints(vector)[index];
-            if value == NA_INTEGER { NA_REAL } else { value as f64 }
+            if value == NA_INTEGER {
+                NA_REAL
+            } else {
+                value as f64
+            }
         }
         _ => NA_REAL,
     }
@@ -846,16 +973,25 @@ fn complex_divide(a: Rcomplex, b: Rcomplex) -> Rcomplex {
     if b.r.abs() >= b.i.abs() {
         let ratio = b.i / b.r;
         let denominator = b.r + ratio * b.i;
-        Rcomplex { r: (a.r + a.i * ratio) / denominator, i: (a.i - a.r * ratio) / denominator }
+        Rcomplex {
+            r: (a.r + a.i * ratio) / denominator,
+            i: (a.i - a.r * ratio) / denominator,
+        }
     } else {
         let ratio = b.r / b.i;
         let denominator = b.i + ratio * b.r;
-        Rcomplex { r: (a.r * ratio + a.i) / denominator, i: (a.i * ratio - a.r) / denominator }
+        Rcomplex {
+            r: (a.r * ratio + a.i) / denominator,
+            i: (a.i * ratio - a.r) / denominator,
+        }
     }
 }
 
 fn complex_multiply(a: Rcomplex, b: Rcomplex) -> Rcomplex {
-    Rcomplex { r: a.r * b.r - a.i * b.i, i: a.r * b.i + a.i * b.r }
+    Rcomplex {
+        r: a.r * b.r - a.i * b.i,
+        i: a.r * b.i + a.i * b.r,
+    }
 }
 
 /// `x ^ y` with GNU R's special cases: real powers of zero and of non-negative reals stay real,
@@ -866,7 +1002,10 @@ fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     }
     if y.i == 0.0 {
         if x.i == 0.0 && (x.r == 0.0 || x.r >= 0.0) {
-            return Rcomplex { r: power(x.r, y.r), i: 0.0 };
+            return Rcomplex {
+                r: power(x.r, y.r),
+                i: 0.0,
+            };
         }
         if y.r == y.r.trunc() && y.r.abs() <= 65536.0 {
             let mut exponent = y.r.abs() as u32;
@@ -881,7 +1020,11 @@ fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
                     base = complex_multiply(base, base);
                 }
             }
-            return if y.r < 0.0 { complex_divide(Rcomplex { r: 1.0, i: 0.0 }, result) } else { result };
+            return if y.r < 0.0 {
+                complex_divide(Rcomplex { r: 1.0, i: 0.0 }, result)
+            } else {
+                result
+            };
         }
     }
     let log_modulus = x.r.hypot(x.i).ln();
@@ -889,7 +1032,10 @@ fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     let real = y.r * log_modulus - y.i * argument;
     let imaginary = y.i * log_modulus + y.r * argument;
     let scale = real.exp();
-    Rcomplex { r: scale * imaginary.cos(), i: scale * imaginary.sin() }
+    Rcomplex {
+        r: scale * imaginary.cos(),
+        i: scale * imaginary.sin(),
+    }
 }
 
 unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
@@ -898,7 +1044,10 @@ unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
         _ => {
             let value = real_at(vector, index);
             if is_na_real(value) {
-                Rcomplex { r: NA_REAL, i: NA_REAL }
+                Rcomplex {
+                    r: NA_REAL,
+                    i: NA_REAL,
+                }
             } else {
                 Rcomplex { r: value, i: 0.0 }
             }
@@ -914,8 +1063,14 @@ unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R
         let a = complex_at(left, index % left_length);
         let b = complex_at(right, index % right_length);
         let value = match op {
-            Op::Add => Rcomplex { r: a.r + b.r, i: a.i + b.i },
-            Op::Subtract => Rcomplex { r: a.r - b.r, i: a.i - b.i },
+            Op::Add => Rcomplex {
+                r: a.r + b.r,
+                i: a.i + b.i,
+            },
+            Op::Subtract => Rcomplex {
+                r: a.r - b.r,
+                i: a.i - b.i,
+            },
             Op::Multiply => Rcomplex {
                 r: a.r * b.r - a.i * b.i,
                 i: a.r * b.i + a.i * b.r,
@@ -988,8 +1143,16 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let count = recycled_length(call.call, left_length, right_length)?;
     let result = alloc(SexpType::Logical, count)?;
     let kind = coerce::higher_type(
-        if left == nil() { SexpType::Logical } else { left.kind() },
-        if right == nil() { SexpType::Logical } else { right.kind() },
+        if left == nil() {
+            SexpType::Logical
+        } else {
+            left.kind()
+        },
+        if right == nil() {
+            SexpType::Logical
+        } else {
+            right.kind()
+        },
     );
     match kind {
         SexpType::String => {
@@ -998,10 +1161,16 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             for index in 0..count {
                 let a = left.element(index % left_length);
                 let b = right.element(index % right_length);
-                values::ints_mut(result)[index] = if a == values::na_string() || b == values::na_string() {
+                values::ints_mut(result)[index] = if a == values::na_string()
+                    || b == values::na_string()
+                {
                     NA_LOGICAL
                 } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
-                    comparison.holds(if a == b { std::cmp::Ordering::Equal } else { std::cmp::Ordering::Less }) as i32
+                    comparison.holds(if a == b {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        std::cmp::Ordering::Less
+                    }) as i32
                 } else {
                     let ordering = crate::sort::collate(&values::char_str(a), &values::char_str(b));
                     comparison.holds(ordering) as i32
@@ -1015,12 +1184,13 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             for index in 0..count {
                 let a = complex_at(left, index % left_length);
                 let b = complex_at(right, index % right_length);
-                values::ints_mut(result)[index] = if a.r.is_nan() || a.i.is_nan() || b.r.is_nan() || b.i.is_nan() {
-                    NA_LOGICAL
-                } else {
-                    let equal = a.r == b.r && a.i == b.i;
-                    (equal == (comparison == Comparison::Equal)) as i32
-                };
+                values::ints_mut(result)[index] =
+                    if a.r.is_nan() || a.i.is_nan() || b.r.is_nan() || b.i.is_nan() {
+                        NA_LOGICAL
+                    } else {
+                        let equal = a.r == b.r && a.i == b.i;
+                        (equal == (comparison == Comparison::Equal)) as i32
+                    };
             }
         }
         SexpType::Raw if left.kind() == SexpType::Raw && right.kind() == SexpType::Raw => {
@@ -1063,7 +1233,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             }
         }
     }
-    binary_attributes(call.arg(0), call.arg(1), result, call.call, Keep::Structure)?;
+    relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
     Ok(result)
 }
 
@@ -1074,15 +1244,27 @@ unsafe fn logical_at(vector: Sexp, index: usize) -> i32 {
         SexpType::Logical => values::ints(vector)[index],
         SexpType::Integer => {
             let value = values::ints(vector)[index];
-            if value == NA_INTEGER { NA_LOGICAL } else { (value != 0) as i32 }
+            if value == NA_INTEGER {
+                NA_LOGICAL
+            } else {
+                (value != 0) as i32
+            }
         }
         SexpType::Real => {
             let value = values::reals(vector)[index];
-            if value.is_nan() { NA_LOGICAL } else { (value != 0.0) as i32 }
+            if value.is_nan() {
+                NA_LOGICAL
+            } else {
+                (value != 0.0) as i32
+            }
         }
         SexpType::Complex => {
             let value = values::complexes(vector)[index];
-            if value.r.is_nan() { NA_LOGICAL } else { (value.r != 0.0 || value.i != 0.0) as i32 }
+            if value.r.is_nan() {
+                NA_LOGICAL
+            } else {
+                (value.r != 0.0 || value.i != 0.0) as i32
+            }
         }
         _ => NA_LOGICAL,
     }
@@ -1138,7 +1320,7 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
             0
         };
     }
-    binary_attributes(left, right, result, call.call, Keep::Structure)?;
+    relational_attributes(left, right, result, call.call)?;
     Ok(result)
 }
 
@@ -1154,11 +1336,19 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
-        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Nil => {
+        SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::Complex
+        | SexpType::Nil => {
             let result = alloc(SexpType::Logical, count)?;
             for index in 0..count {
                 let value = logical_at(operand, index);
-                values::ints_mut(result)[index] = if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value };
+                values::ints_mut(result)[index] = if value == NA_LOGICAL {
+                    NA_LOGICAL
+                } else {
+                    1 - value
+                };
             }
             for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
                 let value = get_attr(operand, symbol);
@@ -1224,6 +1414,55 @@ pub fn gamma_fn(value: f64) -> f64 {
     unsafe { tgamma(value) }
 }
 
+fn digamma(mut x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let mut result = 0.0;
+    if x <= 0.0 && x == x.floor() {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        // Reflection.
+        return digamma(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
+    }
+    while x < 6.0 {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    let inverse = 1.0 / x;
+    let inverse2 = inverse * inverse;
+    result + x.ln()
+        - 0.5 * inverse
+        - inverse2
+            * (1.0 / 12.0
+                - inverse2
+                    * (1.0 / 120.0
+                        - inverse2 * (1.0 / 252.0 - inverse2 * (1.0 / 240.0 - inverse2 / 132.0))))
+}
+
+fn trigamma(mut x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let mut result = 0.0;
+    if x <= 0.0 && x == x.floor() {
+        return f64::INFINITY;
+    }
+    while x < 6.0 {
+        result += 1.0 / (x * x);
+        x += 1.0;
+    }
+    let inverse = 1.0 / x;
+    let inverse2 = inverse * inverse;
+    result
+        + inverse
+        + inverse2 / 2.0
+        + inverse
+            * inverse2
+            * (1.0 / 6.0 - inverse2 * (1.0 / 30.0 - inverse2 * (1.0 / 42.0 - inverse2 / 30.0)))
+}
+
 fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
     match function {
@@ -1282,19 +1521,9 @@ fn math_value(function: Math, x: f64) -> f64 {
             }
         }
         Math::Tanpi => {
-            // Reducing into (-1/2, 1/2] is exact, so values one period apart agree exactly.
-            let mut reduced = x % 1.0;
-            if reduced > 0.5 {
-                reduced -= 1.0;
-            } else if reduced <= -0.5 {
-                reduced += 1.0;
-            }
+            let reduced = x % 1.0;
             if reduced == 0.0 {
                 0.0
-            } else if reduced == 0.5 {
-                f64::NAN
-            } else if reduced == 0.25 || reduced == -0.25 {
-                reduced * 4.0
             } else {
                 (PI * reduced).tan()
             }
@@ -1325,7 +1554,11 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
             let result = alloc(SexpType::Integer, count)?;
             for index in 0..count {
                 let value = values::ints(operand)[index];
-                values::ints_mut(result)[index] = if value == NA_INTEGER { value } else { value.abs() };
+                values::ints_mut(result)[index] = if value == NA_INTEGER {
+                    value
+                } else {
+                    value.abs()
+                };
             }
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
@@ -1335,7 +1568,11 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
             let mut produced_nan = false;
             for index in 0..count {
                 let x = real_at(operand, index);
-                let value = if is_na_real(x) { NA_REAL } else { math_value(function, x) };
+                let value = if is_na_real(x) {
+                    NA_REAL
+                } else {
+                    math_value(function, x)
+                };
                 if value.is_nan() && !x.is_nan() {
                     produced_nan = true;
                 }
@@ -1370,11 +1607,17 @@ unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp
                 let modulus = z.r.hypot(z.i);
                 let real = ((modulus + z.r) / 2.0).sqrt();
                 let imaginary = ((modulus - z.r) / 2.0).sqrt().copysign(z.i);
-                Rcomplex { r: real, i: imaginary }
+                Rcomplex {
+                    r: real,
+                    i: imaginary,
+                }
             }
             Math::Exp => {
                 let scale = z.r.exp();
-                Rcomplex { r: scale * z.i.cos(), i: scale * z.i.sin() }
+                Rcomplex {
+                    r: scale * z.i.cos(),
+                    i: scale * z.i.sin(),
+                }
             }
             _ => return Err(call.error("unimplemented complex function")),
         };
@@ -1386,7 +1629,8 @@ unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp
 
 unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "base"])?;
-    let operand = present(matched[0]).ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let operand = present(matched[0])
+        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
     let base = present(matched[1]).map(|base| values::as_real_scalar(base));
     let operand = values::materialize(operand)?;
     match operand.kind() {
@@ -1486,7 +1730,8 @@ pub fn signif_digits(x: f64, digits: i32) -> f64 {
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "digits"])?;
-    let operand = present(matched[0]).ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let operand = present(matched[0])
+        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
     let digits = match present(matched[1]) {
         Some(digits) => {
             let value = values::as_real_scalar(digits);
@@ -1539,9 +1784,15 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             for index in 0..count {
                 let z = values::complexes(operand)[index];
                 values::complexes_mut(result)[index] = if significant {
-                    Rcomplex { r: signif_digits(z.r, digits), i: signif_digits(z.i, digits) }
+                    Rcomplex {
+                        r: signif_digits(z.r, digits),
+                        i: signif_digits(z.i, digits),
+                    }
                 } else {
-                    Rcomplex { r: round_digits(z.r, digits), i: round_digits(z.i, digits) }
+                    Rcomplex {
+                        r: round_digits(z.r, digits),
+                        i: round_digits(z.i, digits),
+                    }
                 };
             }
             Ok(result)
@@ -1563,7 +1814,10 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
     let count = length(operand);
     let names = values::names(operand);
     let result = match (operand.kind(), kind) {
-        (SexpType::Integer | SexpType::Logical, Cumulative::Sum | Cumulative::Max | Cumulative::Min) => {
+        (
+            SexpType::Integer | SexpType::Logical,
+            Cumulative::Sum | Cumulative::Max | Cumulative::Min,
+        ) => {
             let result = alloc(SexpType::Integer, count)?;
             let mut accumulator: Option<i64> = None;
             let mut overflow = false;
@@ -1613,7 +1867,8 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                 }
                 if matches!(kind, Cumulative::Max | Cumulative::Min) && value.is_nan() {
                     na = true;
-                    values::reals_mut(result)[index] = if is_na_real(value) { NA_REAL } else { f64::NAN };
+                    values::reals_mut(result)[index] =
+                        if is_na_real(value) { NA_REAL } else { f64::NAN };
                     continue;
                 }
                 accumulator = match kind {
@@ -1635,7 +1890,10 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             for index in 0..count {
                 let z = values::complexes(operand)[index];
                 accumulator = match kind {
-                    Cumulative::Sum => Rcomplex { r: accumulator.r + z.r, i: accumulator.i + z.i },
+                    Cumulative::Sum => Rcomplex {
+                        r: accumulator.r + z.r,
+                        i: accumulator.i + z.i,
+                    },
                     _ => Rcomplex {
                         r: accumulator.r * z.r - accumulator.i * z.i,
                         i: accumulator.r * z.i + accumulator.i * z.r,
@@ -1647,12 +1905,26 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
         }
         (SexpType::String, _) => {
             let converted = coerce_vector(operand, SexpType::Real)?;
-            let args = [Arg { tag: nil(), value: converted }];
-            let inner = Call { call: call.call, op: call.op, args: &args, env: call.env };
+            let args = [Arg {
+                tag: nil(),
+                value: converted,
+            }];
+            let inner = Call {
+                call: call.call,
+                op: call.op,
+                args: &args,
+                env: call.env,
+            };
             return cumulative(&inner, kind);
         }
         (SexpType::Nil, _) => return alloc(SexpType::Real, 0),
-        _ => return Err(call.error(format!("'{}' not defined for \"{}\" objects", call.name(), operand.kind().name()))),
+        _ => {
+            return Err(call.error(format!(
+                "'{}' not defined for \"{}\" objects",
+                call.name(),
+                operand.kind().name()
+            )));
+        }
     };
     if names != nil() {
         values::set_attr(result, symbols().names, names)?;
@@ -1717,18 +1989,23 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
     // NULL contributes no values, and the typed loops below read vectors' payloads directly.
     items.retain(|item| *item != nil());
     for item in &items {
-        if !(item.kind().is_atomic() || *item == nil()) || (item.kind() == SexpType::String && matches!(function, Summary::Sum | Summary::Product)) {
+        if !(item.kind().is_atomic() || *item == nil())
+            || (item.kind() == SexpType::String
+                && matches!(function, Summary::Sum | Summary::Product))
+        {
             return Err(call.error(format!(
                 "invalid 'type' ({}) of argument",
                 item.kind().name()
             )));
         }
     }
-    let kind = items
-        .iter()
-        .fold(SexpType::Logical, |kind, item| {
-            if *item == nil() { kind } else { coerce::higher_type(kind, item.kind()) }
-        });
+    let kind = items.iter().fold(SexpType::Logical, |kind, item| {
+        if *item == nil() {
+            kind
+        } else {
+            coerce::higher_type(kind, item.kind())
+        }
+    });
     match function {
         Summary::Sum => {
             if kind == SexpType::Complex {
@@ -1813,7 +2090,11 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                                     None => true,
                                     Some(current) => {
                                         let ordering = crate::sort::collate(&text, current);
-                                        if is_max { ordering.is_gt() } else { ordering.is_lt() }
+                                        if is_max {
+                                            ordering.is_gt()
+                                        } else {
+                                            ordering.is_lt()
+                                        }
                                     }
                                 };
                                 if better {
@@ -1843,7 +2124,13 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                         }
                         best = Some(match best {
                             None => value,
-                            Some(current) => if is_max { current.max(value) } else { current.min(value) },
+                            Some(current) => {
+                                if is_max {
+                                    current.max(value)
+                                } else {
+                                    current.min(value)
+                                }
+                            }
                         });
                     }
                 }
@@ -1851,7 +2138,11 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                     return scalar_integer(best);
                 }
             }
-            let mut best = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+            let mut best = if is_max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
             let mut any = false;
             let mut saw_nan = false;
             for &item in &items {
@@ -1868,7 +2159,11 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                         continue;
                     }
                     any = true;
-                    best = if is_max { best.max(value) } else { best.min(value) };
+                    best = if is_max {
+                        best.max(value)
+                    } else {
+                        best.min(value)
+                    };
                 }
             }
             if saw_nan {
@@ -1907,16 +2202,31 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
             }
             let value = values::materialize(arg.value)?;
             if matches!(value.kind(), SexpType::Real) {
-                let kept: Vec<f64> = values::reals(value).iter().copied().filter(|value| value.is_finite()).collect();
-                filtered.push(Arg { tag: nil(), value: values::real_vector(&kept)? });
+                let kept: Vec<f64> = values::reals(value)
+                    .iter()
+                    .copied()
+                    .filter(|value| value.is_finite())
+                    .collect();
+                filtered.push(Arg {
+                    tag: nil(),
+                    value: values::real_vector(&kept)?,
+                });
             } else {
                 filtered.push(*arg);
             }
         }
-        filtered.push(Arg { tag: symbols().na_rm, value: values::scalar_bool(true)? });
+        filtered.push(Arg {
+            tag: symbols().na_rm,
+            value: values::scalar_bool(true)?,
+        });
         args = filtered;
     }
-    let inner = Call { call: call.call, op: call.op, args: &args, env: call.env };
+    let inner = Call {
+        call: call.call,
+        op: call.op,
+        args: &args,
+        env: call.env,
+    };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
     crate::subset::combine(&[minimum, maximum])
@@ -1929,7 +2239,15 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
         if item == nil() {
             continue;
         }
-        if !matches!(item.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw | SexpType::String) {
+        if !matches!(
+            item.kind(),
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::Raw
+                | SexpType::String
+        ) {
             return Err(call.error(format!(
                 "invalid 'type' ({}) of argument",
                 item.kind().name()
@@ -1941,7 +2259,10 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
         if !matches!(item.kind(), SexpType::Logical | SexpType::Integer) && length(item) > 0 {
             conditions::warning_call(
                 call.call,
-                format!("coercing argument of type '{}' to logical", item.kind().name()),
+                format!(
+                    "coercing argument of type '{}' to logical",
+                    item.kind().name()
+                ),
             )?;
         }
         for index in 0..length(item) {
@@ -1997,9 +2318,15 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
                 total.r += value.r;
                 total.i += value.i;
             }
-            values::scalar_complex(Rcomplex { r: total.r / count as f64, i: total.i / count as f64 })
+            values::scalar_complex(Rcomplex {
+                r: total.r / count as f64,
+                i: total.i / count as f64,
+            })
         }
-        _ => Err(call.error(format!("invalid 'type' ({}) of argument", operand.kind().name()))),
+        _ => Err(call.error(format!(
+            "invalid 'type' ({}) of argument",
+            operand.kind().name()
+        ))),
     }
 }
 
@@ -2044,7 +2371,10 @@ unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
                 let z = values::complexes(operand)[index];
                 values::ints_mut(result)[index] = match test {
                     NaTest::Na => (z.r.is_nan() || z.i.is_nan()) as i32,
-                    NaTest::NaN => ((z.r.is_nan() && !is_na_real(z.r)) || (z.i.is_nan() && !is_na_real(z.i))) as i32,
+                    NaTest::NaN => {
+                        ((z.r.is_nan() && !is_na_real(z.r)) || (z.i.is_nan() && !is_na_real(z.i)))
+                            as i32
+                    }
                     NaTest::Finite => (z.r.is_finite() && z.i.is_finite()) as i32,
                     NaTest::Infinite => (z.r.is_infinite() || z.i.is_infinite()) as i32,
                 };
@@ -2062,10 +2392,12 @@ unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
             for index in 0..count {
                 let element = operand.element(index);
                 values::ints_mut(result)[index] = match test {
-                    NaTest::Na => (element.kind().is_atomic()
-                        && length(element) == 1
-                        && values::as_logical_scalar(is_na_scalar(element)?) == 1)
-                        as i32,
+                    NaTest::Na => {
+                        (element.kind().is_atomic()
+                            && length(element) == 1
+                            && values::as_logical_scalar(is_na_scalar(element)?) == 1)
+                            as i32
+                    }
                     _ => 0,
                 };
             }
@@ -2110,7 +2442,10 @@ unsafe fn is_na_scalar(value: Sexp) -> R<Sexp> {
 
 unsafe fn do_any_na(call: &Call<'_>) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
-    let recursive = call.args.get(1).is_some_and(|arg| values::as_logical_scalar(arg.value) == 1);
+    let recursive = call
+        .args
+        .get(1)
+        .is_some_and(|arg| values::as_logical_scalar(arg.value) == 1);
     scalar_bool(any_na(operand, recursive)?)
 }
 
@@ -2118,8 +2453,12 @@ unsafe fn any_na(operand: Sexp, recursive: bool) -> R<bool> {
     Ok(match operand.kind() {
         SexpType::Logical | SexpType::Integer => values::ints(operand).contains(&NA_INTEGER),
         SexpType::Real => values::reals(operand).iter().any(|value| value.is_nan()),
-        SexpType::Complex => values::complexes(operand).iter().any(|value| value.r.is_nan() || value.i.is_nan()),
-        SexpType::String => (0..length(operand)).any(|index| operand.element(index) == values::na_string()),
+        SexpType::Complex => values::complexes(operand)
+            .iter()
+            .any(|value| value.r.is_nan() || value.i.is_nan()),
+        SexpType::String => {
+            (0..length(operand)).any(|index| operand.element(index) == values::na_string())
+        }
         SexpType::List => {
             for index in 0..length(operand) {
                 let element = operand.element(index);
@@ -2149,13 +2488,19 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
     if length(from) > 1 {
         conditions::warning_call(
             call.call,
-            format!("numerical expression has {} elements: only the first used", length(from)),
+            format!(
+                "numerical expression has {} elements: only the first used",
+                length(from)
+            ),
         )?;
     }
     if length(to) > 1 {
         conditions::warning_call(
             call.call,
-            format!("numerical expression has {} elements: only the first used", length(to)),
+            format!(
+                "numerical expression has {} elements: only the first used",
+                length(to)
+            ),
         )?;
     }
     let start = values::as_real_scalar(from);
@@ -2171,7 +2516,8 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
     let count = ((end - start).abs() + 1e-10).floor() as usize + 1;
     let use_integer = start == start.floor()
         && start.abs() <= i32::MAX as f64
-        && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs() <= i32::MAX as f64;
+        && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
+            <= i32::MAX as f64;
     if use_integer {
         let result = alloc(SexpType::Integer, count)?;
         let start = start as i64;
@@ -2275,7 +2621,12 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             let n = values::as_real_scalar(value);
             return colon(1.0, n);
         }
-        return do_seq_along(&Call { call: call.call, op: call.op, args: &[Arg { tag: nil(), value }], env: call.env });
+        return do_seq_along(&Call {
+            call: call.call,
+            op: call.op,
+            args: &[Arg { tag: nil(), value }],
+            env: call.env,
+        });
     }
     let from_value = one(from, "from")?;
     let to_value = one(to, "to")?;
@@ -2286,7 +2637,11 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             let from = from.unwrap_or(1.0);
             let span = to - from;
             if span == 0.0 {
-                return if all_integer { values::integer_vector(&[from as i32]) } else { values::real_vector(&[from]) };
+                return if all_integer {
+                    values::integer_vector(&[from as i32])
+                } else {
+                    values::real_vector(&[from])
+                };
             }
             if by == 0.0 {
                 return Err(call.error("invalid '(to - from)/by' in seq(.)"));
@@ -2296,7 +2651,9 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             }
             let steps = (span / by + 1e-10).floor() as usize;
             if all_integer {
-                let values: Vec<i32> = (0..=steps).map(|index| (from + index as f64 * by) as i32).collect();
+                let values: Vec<i32> = (0..=steps)
+                    .map(|index| (from + index as f64 * by) as i32)
+                    .collect();
                 values::integer_vector(&values)
             } else {
                 let values: Vec<f64> = (0..=steps).map(|index| from + index as f64 * by).collect();
@@ -2312,7 +2669,13 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
                     }
                     let by = (to - from) / (count as f64 - 1.0);
                     let values: Vec<f64> = (0..count)
-                        .map(|index| if index == count - 1 { to } else { from + index as f64 * by })
+                        .map(|index| {
+                            if index == count - 1 {
+                                to
+                            } else {
+                                from + index as f64 * by
+                            }
+                        })
                         .collect();
                     if all_integer && values.iter().all(|value| value.fract() == 0.0) {
                         let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
@@ -2323,8 +2686,13 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
                 (from, None, by) => {
                     let from = from.unwrap_or(1.0);
                     let by = by.unwrap_or(1.0);
-                    let values: Vec<f64> = (0..count).map(|index| from + index as f64 * by).collect();
-                    if (from_value.is_none() || all_integer) && values.iter().all(|value| value.fract() == 0.0 && value.abs() < i32::MAX as f64) {
+                    let values: Vec<f64> =
+                        (0..count).map(|index| from + index as f64 * by).collect();
+                    if (from_value.is_none() || all_integer)
+                        && values
+                            .iter()
+                            .all(|value| value.fract() == 0.0 && value.abs() < i32::MAX as f64)
+                    {
                         let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
                         return values::integer_vector(&integers);
                     }
@@ -2333,7 +2701,8 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
                 (None, Some(to), by) => {
                     let by = by.unwrap_or(1.0);
                     let from = to - (count as f64 - 1.0) * by;
-                    let values: Vec<f64> = (0..count).map(|index| from + index as f64 * by).collect();
+                    let values: Vec<f64> =
+                        (0..count).map(|index| from + index as f64 * by).collect();
                     if all_integer && values.iter().all(|value| value.fract() == 0.0) {
                         let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
                         return values::integer_vector(&integers);
@@ -2372,7 +2741,13 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let base_count = indices.len();
     let indices: Vec<usize> = match (length_out, times) {
         (Some(out), _) => (0..out as usize)
-            .map(|position| if base_count == 0 { usize::MAX } else { indices[position % base_count] })
+            .map(|position| {
+                if base_count == 0 {
+                    usize::MAX
+                } else {
+                    indices[position % base_count]
+                }
+            })
             .collect(),
         (None, Some(times)) => {
             let times_count = length(times);
@@ -2447,7 +2822,13 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     }
     let count = length(object);
     let indices: Vec<usize> = (0..out as usize)
-        .map(|position| if count == 0 { usize::MAX } else { position % count })
+        .map(|position| {
+            if count == 0 {
+                usize::MAX
+            } else {
+                position % count
+            }
+        })
         .collect();
     crate::subset::select_elements(object, &indices)
 }
@@ -2457,9 +2838,13 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
 unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;
     let right = values::materialize(call.arg(1))?;
-    if !matches!(left.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
-        || !matches!(right.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
-    {
+    if !matches!(
+        left.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::Logical
+    ) || !matches!(
+        right.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::Logical
+    ) {
         return Err(call.error("non-numeric argument to mathematical function"));
     }
     let left_length = length(left);
@@ -2469,9 +2854,13 @@ unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     for index in 0..count {
         let a = real_at(left, index % left_length);
         let b = real_at(right, index % right_length);
-        values::reals_mut(result)[index] = if is_na_real(a) || is_na_real(b) { NA_REAL } else { function(a, b) };
+        values::reals_mut(result)[index] = if is_na_real(a) || is_na_real(b) {
+            NA_REAL
+        } else {
+            function(a, b)
+        };
     }
-    binary_attributes(left, right, result, call.call, Keep::All)?;
+    binary_attributes(left, right, result, call.call)?;
     Ok(result)
 }
 
@@ -2480,12 +2869,20 @@ unsafe fn bitwise(call: &Call<'_>, function: fn(i32, i32) -> i32) -> R<Sexp> {
     let right = coerce_vector(call.arg(1), SexpType::Integer)?;
     let left_length = length(left);
     let right_length = length(right);
-    let count = if left_length == 0 || right_length == 0 { 0 } else { left_length.max(right_length) };
+    let count = if left_length == 0 || right_length == 0 {
+        0
+    } else {
+        left_length.max(right_length)
+    };
     let result = alloc(SexpType::Integer, count)?;
     for index in 0..count {
         let a = values::ints(left)[index % left_length];
         let b = values::ints(right)[index % right_length];
-        values::ints_mut(result)[index] = if a == NA_INTEGER || b == NA_INTEGER { NA_INTEGER } else { function(a, b) };
+        values::ints_mut(result)[index] = if a == NA_INTEGER || b == NA_INTEGER {
+            NA_INTEGER
+        } else {
+            function(a, b)
+        };
     }
     Ok(result)
 }
@@ -2496,7 +2893,11 @@ unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::Integer, count)?;
     for index in 0..count {
         let value = values::ints(operand)[index];
-        values::ints_mut(result)[index] = if value == NA_INTEGER { NA_INTEGER } else { !value };
+        values::ints_mut(result)[index] = if value == NA_INTEGER {
+            NA_INTEGER
+        } else {
+            !value
+        };
     }
     Ok(result)
 }
@@ -2504,7 +2905,10 @@ unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
 unsafe fn complex_part(call: &Call<'_>, part: u8) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     let count = length(operand);
-    if !matches!(operand.kind(), SexpType::Complex | SexpType::Real | SexpType::Integer | SexpType::Logical) {
+    if !matches!(
+        operand.kind(),
+        SexpType::Complex | SexpType::Real | SexpType::Integer | SexpType::Logical
+    ) {
         return Err(call.error("non-numeric argument to function"));
     }
     if part == 4 {
@@ -2540,8 +2944,16 @@ unsafe fn do_complex(call: &Call<'_>) -> R<Sexp> {
     let count = count.max(length(real)).max(length(imaginary));
     let result = alloc(SexpType::Complex, count)?;
     for index in 0..count {
-        let r = if length(real) > 0 { values::reals(real)[index % length(real)] } else { 0.0 };
-        let i = if length(imaginary) > 0 { values::reals(imaginary)[index % length(imaginary)] } else { 0.0 };
+        let r = if length(real) > 0 {
+            values::reals(real)[index % length(real)]
+        } else {
+            0.0
+        };
+        let i = if length(imaginary) > 0 {
+            values::reals(imaginary)[index % length(imaginary)]
+        } else {
+            0.0
+        };
         values::complexes_mut(result)[index] = Rcomplex { r, i };
     }
     Ok(result)
@@ -2560,7 +2972,9 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     if items.iter().any(|&item| length(item) == 0) {
         return alloc(items[0].kind(), 0);
     }
-    let kind = items.iter().fold(SexpType::Logical, |kind, item| coerce::higher_type(kind, item.kind()));
+    let kind = items.iter().fold(SexpType::Logical, |kind, item| {
+        coerce::higher_type(kind, item.kind())
+    });
     if kind == SexpType::String {
         let result = alloc(SexpType::String, count)?;
         for index in 0..count {
@@ -2576,17 +2990,39 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
                 best = Some(match best {
                     None => value,
                     Some(current) => {
-                        let ordering = crate::sort::collate(&values::char_str(value), &values::char_str(current));
-                        if (is_max && ordering.is_gt()) || (!is_max && ordering.is_lt()) { value } else { current }
+                        let ordering = crate::sort::collate(
+                            &values::char_str(value),
+                            &values::char_str(current),
+                        );
+                        if (is_max && ordering.is_gt()) || (!is_max && ordering.is_lt()) {
+                            value
+                        } else {
+                            current
+                        }
                     }
                 });
             }
-            values::set_elt(result, index, if na && !na_rm { values::na_string() } else { best.unwrap_or(values::na_string()) });
+            values::set_elt(
+                result,
+                index,
+                if na && !na_rm {
+                    values::na_string()
+                } else {
+                    best.unwrap_or(values::na_string())
+                },
+            );
         }
         return Ok(result);
     }
     let integer = matches!(kind, SexpType::Integer | SexpType::Logical);
-    let result = alloc(if integer { SexpType::Integer } else { SexpType::Real }, count)?;
+    let result = alloc(
+        if integer {
+            SexpType::Integer
+        } else {
+            SexpType::Real
+        },
+        count,
+    )?;
     for index in 0..count {
         let mut best: Option<f64> = None;
         let mut na = false;
@@ -2598,12 +3034,26 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             }
             best = Some(match best {
                 None => value,
-                Some(current) => if is_max { current.max(value) } else { current.min(value) },
+                Some(current) => {
+                    if is_max {
+                        current.max(value)
+                    } else {
+                        current.min(value)
+                    }
+                }
             });
         }
-        let value = if na && !na_rm { NA_REAL } else { best.unwrap_or(NA_REAL) };
+        let value = if na && !na_rm {
+            NA_REAL
+        } else {
+            best.unwrap_or(NA_REAL)
+        };
         if integer {
-            values::ints_mut(result)[index] = if value.is_nan() { NA_INTEGER } else { value as i32 };
+            values::ints_mut(result)[index] = if value.is_nan() {
+                NA_INTEGER
+            } else {
+                value as i32
+            };
         } else {
             values::reals_mut(result)[index] = value;
         }
@@ -2638,7 +3088,10 @@ unsafe fn do_which(call: &Call<'_>) -> R<Sexp> {
     let result = values::integer_vector(&positions)?;
     let names = values::names(operand);
     if names != nil() {
-        let indices: Vec<usize> = positions.iter().map(|&position| position as usize - 1).collect();
+        let indices: Vec<usize> = positions
+            .iter()
+            .map(|&position| position as usize - 1)
+            .collect();
         let selected = crate::subset::select_elements(names, &indices)?;
         values::set_attr(result, symbols().names, selected)?;
     }
@@ -2655,7 +3108,13 @@ unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
         }
         let better = match best {
             None => true,
-            Some((_, current)) => if is_max { value > current } else { value < current },
+            Some((_, current)) => {
+                if is_max {
+                    value > current
+                } else {
+                    value < current
+                }
+            }
         };
         if better {
             best = Some((index, value));
@@ -2726,7 +3185,12 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
     }
     let packed: Vec<u64> = flags
         .chunks(width)
-        .map(|chunk| chunk.iter().enumerate().fold(0u64, |word, (bit, flag)| word | (flag << bit)))
+        .map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0u64, |word, (bit, flag)| word | (flag << bit))
+        })
         .collect();
     match width {
         8 => {

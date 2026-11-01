@@ -1,0 +1,99 @@
+#==== records_and_tags
+#---- record_literal
+p <- (x = 1, y = 2)
+#++++
+# p
+  Assign Local
+    NameRef p
+    Record(x, y)
+      Literal Double("1")
+      Literal Double("2")
+
+#---- tuple_literal
+(1L, "a")
+#++++
+# <statement>
+  Tuple
+    Literal Integer("1L")
+    Literal String("a")
+
+#---- one_item_tuple_argument
+f((1L,))
+#++++
+# <statement>
+  Call
+    NameRef f
+    Tuple
+      Literal Integer("1L")
+
+#---- tag_with_payload
+:Some(5L)
+#++++
+# <statement>
+  Tag :Some
+    Tuple
+      Literal Integer("5L")
+
+#---- tag_with_named_payload
+:Rect(width = 2, height = 3)
+#++++
+# <statement>
+  Tag :Rect
+    Record(width, height)
+      Literal Double("2")
+      Literal Double("3")
+
+#---- bare_tag
+:None
+#++++
+# <statement>
+  Tag :None
+
+#---- match_arms
+match (shape) {
+  :Circle(radius = r) => pi * r^2
+  :Rect(width = w, ..) if (w > 0) => w
+  (a, _) | (_, a) => a
+  -1L => 0
+  _ => NULL
+}
+#++++
+# <statement>
+  Match
+    Paren
+      NameRef shape
+    arm
+      pattern tag :Circle
+        pattern record
+          field radius =
+            pattern bind r
+      Binary Multiply
+        NameRef pi
+        Binary Power
+          NameRef r
+          Literal Double("2")
+    arm
+      pattern tag :Rect
+        pattern record ..
+          field width =
+            pattern bind w
+      if
+        Binary Greater
+          NameRef w
+          Literal Double("0")
+      NameRef w
+    arm
+      pattern or
+        pattern tuple
+          pattern bind a
+          pattern _
+        pattern tuple
+          pattern _
+          pattern bind a
+      NameRef a
+    arm
+      pattern literal -Integer("1L")
+      Literal Double("0")
+    arm
+      pattern _
+      Literal Null

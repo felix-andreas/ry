@@ -1346,3 +1346,31 @@ fn turning_inline_annotations_off_warns_even_without_any() {
         run.stderr
     );
 }
+
+#[test]
+fn check_turns_object_system_definitions_into_errors_when_disabled() {
+    let source = (
+        "R/main.R",
+        "setClass(\"Person\", representation(name = \"character\"))\n",
+    );
+
+    let default_run = ry(project(&[source]).path(), &["check", "."]);
+    assert!(
+        default_run.stderr.contains(
+            "`setClass` defines an S4 class. ry recommends a record or a tagged union instead"
+        ),
+        "expected the object-system warning, got: {}",
+        default_run.stderr
+    );
+
+    let disabled = project(&[source, ("ry.toml", "[check]\nobject-systems = false\n")]);
+    let output = ry(disabled.path(), &["check", "."]);
+    assert_eq!(output.code, 1, "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains(
+            "S4 classes are turned off in this project (`[check] object-systems = false`)"
+        ),
+        "expected the object-system error, got: {}",
+        output.stderr
+    );
+}

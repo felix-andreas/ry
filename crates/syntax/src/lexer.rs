@@ -162,7 +162,7 @@ impl Lexer<'_> {
                 LESS,
             ),
             '>' => self.operator(&[("=", GREATER_EQ)], GREATER),
-            '=' => self.operator(&[("=", EQ2)], EQ),
+            '=' => self.operator(&[("=", EQ2), (">", FAT_ARROW)], EQ),
             '!' => self.operator(&[("=", BANG_EQ)], BANG),
             '&' => self.operator(&[("&", AMP2)], AMP),
             '|' => self.operator(&[("|", PIPE2), (">", PIPE_GREATER)], PIPE),

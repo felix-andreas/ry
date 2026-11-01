@@ -1,13 +1,14 @@
-# ry's package loader, GNU R side. It applies plans that ry computes from its analysis of the
-# package: every function definition becomes a promise that parses and evaluates only that
-# definition on first use, and other top-level code runs in collation order. A reload applies
-# a plan that touches only the items that changed.
+# ry's package loader, R side, shared by both runtimes. It applies plans that ry computes from
+# its analysis of the package: every function definition becomes a promise that evaluates only
+# that definition on first use, and other top-level code runs in collation order. A reload
+# applies a plan that touches only the items that changed.
 #
-# The host evaluates this file, compiles its functions, and installs them in the environment
-# it attaches as `tools:ry`, together with `.ry_request` and `.ry_commit`: inside `ry repl` those
-# call into the ry process, and from plain R they run the `ry` executable. The host also
+# A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
+# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The host defines the
+# transport, `.ry_request(root, full)` (which returns the plan) and `.ry_commit(root)`, and
 # creates the session's state, `.ry_packages` (one entry per loaded package root) and
-# `.ry_timing`, since compiled functions are cached across sessions and state must not be.
+# `.ry_timing`, since a host may cache the compiled functions across sessions and state must
+# not be.
 
 .ry_stoplist <- c(
   ".__NAMESPACE__.", ".__S3MethodsTable__.", ".packageName", ".First.lib", ".onLoad",
@@ -26,12 +27,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   full <- isTRUE(full) || !current
   started <- proc.time()[["elapsed"]]
   .ry_phase(NULL)
-  plan_file <- tempfile("ry-plan-", fileext = ".rds")
-  on.exit(unlink(plan_file), add = TRUE)
-  .ry_request(root, plan_file, full)
+  plan <- .ry_request(root, full)
   .ry_phase("plan")
-  plan <- readRDS(plan_file)
-  .ry_phase("read plan")
   if (!is.null(plan$error)) {
     stop(plan$error, call. = FALSE)
   }
@@ -153,8 +150,6 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   state$name <- name
   state$root <- root
   state$ns <- ns
-  state$texts <- new.env(parent = emptyenv())
-  state$srcfiles <- new.env(parent = emptyenv())
   state$sysdata <- character()
   state$dlls <- list()
   state$package_env <- NULL
@@ -188,16 +183,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_import(ns, state$name, plan$imports)
   }
   .ry_phase("imports")
-  for (path in plan$dropped_sources) {
-    for (table in list(state$texts, state$srcfiles)) {
-      if (exists(path, envir = table, inherits = FALSE)) rm(list = path, envir = table)
-    }
-  }
-  for (i in seq_along(plan$source_path)) {
-    path <- plan$source_path[[i]]
-    assign(path, plan$source_text[[i]], envir = state$texts)
-    if (exists(path, envir = state$srcfiles, inherits = FALSE)) rm(list = path, envir = state$srcfiles)
-  }
+  .ry_sources(state, plan)
   if (length(plan$remove)) {
     rm(list = intersect(plan$remove, ls(ns, all.names = TRUE)), envir = ns)
   }
@@ -213,8 +199,12 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     previous <- options(topLevelEnvironment = ns)
     on.exit(options(previous), add = TRUE)
     for (i in seq_along(plan$run_path)) {
-      .ry_run(state, plan$run_path[[i]], plan$run_line[[i]], plan$run_column[[i]],
-              plan$run_start[[i]], plan$run_end[[i]], keep)
+      withCallingHandlers(
+        .ry_run(state, plan, i, keep),
+        error = function(error) {
+          message(sprintf("Error while loading %s:%d", plan$run_path[[i]], plan$run_line[[i]]))
+        }
+      )
     }
   }
   .ry_phase("run")
@@ -284,66 +274,6 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     )
   }
   setNamespaceInfo(ns, "imports", canonical)
-}
-
-# Parses one item at its real position in the file, so its source references, and with them
-# tracebacks and debuggers, point into the file on disk.
-.ry_parse <- function(state, path, line, column, text, keep) {
-  if (keep) {
-    previous <- options(keep.parse.data = FALSE)
-    on.exit(options(previous))
-    padded <- c(character(line - 1L), paste0(strrep(" ", column), text))
-    parse(text = padded, srcfile = .ry_srcfile(state, path), keep.source = TRUE)
-  } else {
-    parse(text = text, keep.source = FALSE)
-  }
-}
-
-# Built on first use: only a definition that is forced needs its file's lines.
-.ry_srcfile <- function(state, path) {
-  srcfile <- state$srcfiles[[path]]
-  if (is.null(srcfile)) {
-    lines <- strsplit(state$texts[[path]], "\n", fixed = TRUE)[[1L]]
-    srcfile <- srcfilecopy(file.path(state$root, path), lines, isFile = TRUE)
-    assign(path, srcfile, envir = state$srcfiles)
-  }
-  srcfile
-}
-
-# One promise per definition, made in C by the same internal that installed packages use for
-# their lazy-load databases. A promise evaluates `.ry_force(i, batch)`, and `batch` keeps the
-# file text each definition was cut from, so a later edit of the file cannot shift it.
-.ry_bind_lazily <- function(state, plan, keep) {
-  batch <- new.env(parent = environment(.ry_bind_lazily))
-  batch$batch <- batch
-  batch$state <- state
-  batch$keep <- keep
-  batch$path <- plan$bind_path
-  batch$text <- unlist(mget(plan$bind_path, envir = state$texts), use.names = FALSE)
-  batch$line <- plan$bind_line
-  batch$column <- plan$bind_column
-  batch$start <- plan$bind_start
-  batch$end <- plan$bind_end
-  keys <- as.list(seq_along(plan$bind_name))
-  .ry_internal("makeLazy", plan$bind_name, keys, quote(.ry_force(key, batch)), batch, state$ns)
-}
-
-.ry_force <- function(i, batch) {
-  text <- substr(batch$text[[i]], batch$start[[i]] + 1L, batch$end[[i]])
-  expressions <- .ry_parse(batch$state, batch$path[[i]], batch$line[[i]], batch$column[[i]],
-                           text, batch$keep)
-  eval(expressions[[1L]], batch$state$ns)
-}
-
-.ry_run <- function(state, path, line, column, start, end, keep) {
-  text <- substr(state$texts[[path]], start + 1L, end)
-  expressions <- .ry_parse(state, path, line, column, text, keep)
-  withCallingHandlers(
-    for (expression in expressions) eval(expression, state$ns),
-    error = function(error) {
-      message(sprintf("Error while loading %s:%d", path, line))
-    }
-  )
 }
 
 .ry_unregister <- function(ns, registration) {
@@ -426,7 +356,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
               call. = FALSE)
       return(NULL)
     }
-    if (isNamespaceLoaded("methods") && methods::is(function_object, "genericFunction")) {
+    if (isS4(function_object) && methods::is(function_object, "genericFunction")) {
       function_object <- function_object@default
     }
     if (typeof(function_object) == "closure") environment(function_object) else .BaseNamespaceEnv

@@ -7,7 +7,6 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-
     unwind::{R, error},
     values::{self, alloc, install, missing_arg, nil, symbols},
 };
@@ -28,7 +27,10 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
         let offset = usize::from(failure.range.start()).min(text.len());
         let before = &text[..offset];
         let line = before.matches('\n').count() + 1;
-        let column = before.rsplit('\n').next().map_or(0, |line| line.chars().count());
+        let column = before
+            .rsplit('\n')
+            .next()
+            .map_or(0, |line| line.chars().count());
         return Err(error(format!(
             "{source_name}:{line}:{column}: {}",
             failure.message
@@ -57,6 +59,12 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
     Ok(result)
 }
 
+/// Lowers one expression node of a tree that parsed without errors, such as a top-level item
+/// of a file the analysis already parsed, so a host that holds the tree needs no second parse.
+pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
+    lower(node)
+}
+
 fn is_skipped(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -69,9 +77,7 @@ fn is_skipped(node: &SyntaxNode) -> bool {
 
 /// The expression children of a node, without trivia, tokens or annotations.
 fn expression_children(node: &SyntaxNode) -> Vec<SyntaxNode> {
-    node.children()
-        .filter(|child| !is_skipped(child))
-        .collect()
+    node.children().filter(|child| !is_skipped(child)).collect()
 }
 
 fn significant_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
@@ -210,6 +216,23 @@ unsafe fn lower(node: &SyntaxNode) -> R<Sexp> {
             }
             values::pairlist(&items, SexpType::Language)
         }
+        SyntaxKind::RECORD_EXPR | SyntaxKind::TUPLE_EXPR => {
+            let head = if node.kind() == SyntaxKind::RECORD_EXPR { ".ry_record" } else { ".ry_tuple" };
+            let mut items = vec![(nil(), install(head)?)];
+            if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                items.extend(literal_items(&arguments)?);
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::TAG_EXPR => {
+            let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag needs a name"))?;
+            let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
+            if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                items.extend(literal_items(&arguments)?);
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::MATCH_EXPR => match_expression(node),
         SyntaxKind::BREAK_EXPR => values::call(symbols().break_, &[]),
         SyntaxKind::NEXT_EXPR => values::call(symbols().next, &[]),
         SyntaxKind::ERROR => Err(error(format!("unexpected '{}'", node.text()))),
@@ -250,9 +273,7 @@ unsafe fn binary(node: &SyntaxNode) -> R<Sexp> {
 /// `placeholder` names the argument that holds the placeholder.
 unsafe fn pipe(left: Sexp, right: Sexp, placeholder: Option<Sexp>) -> R<Sexp> {
     if right.kind() != SexpType::Language {
-        return Err(error(
-            "The pipe operator requires a function call as RHS",
-        ));
+        return Err(error("The pipe operator requires a function call as RHS"));
     }
     let head = right.car();
     if head == symbols().function {
@@ -320,6 +341,162 @@ fn has_stray_placeholder(node: &SyntaxNode) -> bool {
         })
         .count();
     placeholders > consumed
+}
+
+fn child_of_kind(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
+    node.children().find(|child| child.kind() == kind)
+}
+
+/// The items of a record, tuple or tag payload. Unlike a call's arguments, a trailing comma adds
+/// no empty item: `(1L,)` has one.
+unsafe fn literal_items(node: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
+    node.children()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+        .map(|argument| argument_value(&argument))
+        .collect()
+}
+
+/// A tag's name as the string `.ry_tag` takes first.
+unsafe fn tag_name(name: &SyntaxNode) -> R<Sexp> {
+    let token = significant_tokens(name)
+        .into_iter()
+        .next()
+        .ok_or_else(|| error("empty tag name"))?;
+    values::scalar_string(&identifier(token.text()))
+}
+
+/// `match (x) { arms }` becomes `.ry_match(x, `=>`(pattern, body), `=>`(pattern, guard, body))`.
+/// A parenthesized scrutinee lowers to its inner expression, because the parentheses belong to
+/// the `match` syntax, as they do for `if`.
+unsafe fn match_expression(node: &SyntaxNode) -> R<Sexp> {
+    let children = expression_children(node);
+    let (scrutinee, arms) = children
+        .split_first()
+        .ok_or_else(|| error("a `match` needs a value"))?;
+    let scrutinee = if scrutinee.kind() == SyntaxKind::PAREN_EXPR {
+        let inner = expression_children(scrutinee);
+        lower(inner.first().ok_or_else(|| error("a `match` needs a value"))?)?
+    } else {
+        lower(scrutinee)?
+    };
+    let arrow = install("=>")?;
+    let mut items = vec![(nil(), install(".ry_match")?), (nil(), scrutinee)];
+    for arm in arms.iter().filter(|arm| arm.kind() == SyntaxKind::MATCH_ARM) {
+        let parts = expression_children(arm);
+        let mut arm_items = vec![(nil(), arrow)];
+        let mut parts = parts.iter();
+        let pattern_node = parts.next().ok_or_else(|| error("a `match` arm needs a pattern"))?;
+        arm_items.push((nil(), pattern(pattern_node)?));
+        for part in parts {
+            if part.kind() == SyntaxKind::MATCH_GUARD {
+                let condition = expression_children(part);
+                let condition = condition.first().ok_or_else(|| error("an arm guard needs a condition"))?;
+                arm_items.push((nil(), lower(condition)?));
+            } else {
+                arm_items.push((nil(), lower(part)?));
+            }
+        }
+        if arm_items.len() < 3 {
+            return Err(error("a `match` arm needs a value after `=>`"));
+        }
+        items.push((nil(), values::pairlist(&arm_items, SexpType::Language)?));
+    }
+    values::pairlist(&items, SexpType::Language)
+}
+
+/// A pattern stays unevaluated in the arm, in the encoding of the values it matches: `_` and a
+/// binding are symbols, a literal is its constant (a negative number folded), and tag, tuple
+/// and record patterns are `.ry_tag`, `.ry_tuple` and `.ry_record` calls, with the symbol `..`
+/// for the rest and `|` and `(` calls for alternatives and grouping.
+unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
+    match node.kind() {
+        SyntaxKind::PATTERN_WILDCARD => install("_"),
+        SyntaxKind::PATTERN_REST => install(".."),
+        SyntaxKind::PATTERN_BIND => {
+            let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("empty binding pattern"))?;
+            name_symbol(&name)
+        }
+        SyntaxKind::PATTERN_LITERAL => {
+            let negative = significant_tokens(node)
+                .iter()
+                .any(|token| token.kind() == SyntaxKind::MINUS);
+            let literal_node = child_of_kind(node, SyntaxKind::LITERAL).ok_or_else(|| error("empty literal pattern"))?;
+            let token = significant_tokens(&literal_node)
+                .into_iter()
+                .next()
+                .ok_or_else(|| error("empty literal pattern"))?;
+            let value = literal(&token)?;
+            if negative {
+                negate(value)
+            } else {
+                Ok(value)
+            }
+        }
+        SyntaxKind::PATTERN_TAG => {
+            let name = child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag pattern needs a name"))?;
+            let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
+            if let Some(list) = child_of_kind(node, SyntaxKind::PATTERN_LIST) {
+                items.extend(pattern_items(&list)?);
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::PATTERN_LIST => {
+            let entries = pattern_items(node)?;
+            let record = entries.iter().any(|(tag, _)| *tag != nil());
+            let head = install(if record { ".ry_record" } else { ".ry_tuple" })?;
+            let mut items = vec![(nil(), head)];
+            items.extend(entries);
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::PATTERN_OR => {
+            let mut alternatives = node.children().map(|child| pattern(&child));
+            let mut result = alternatives.next().ok_or_else(|| error("empty alternative pattern"))??;
+            let pipe = install("|")?;
+            for alternative in alternatives {
+                result = values::call(pipe, &[result, alternative?])?;
+            }
+            Ok(result)
+        }
+        SyntaxKind::PATTERN_PAREN => {
+            let inner = node.children().next().ok_or_else(|| error("empty pattern group"))?;
+            values::call(symbols().paren, &[pattern(&inner)?])
+        }
+        _ => Err(error(format!("unexpected '{}' in a pattern", node.text()))),
+    }
+}
+
+unsafe fn pattern_items(list: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
+    let mut items = Vec::new();
+    for child in list.children() {
+        if child.kind() == SyntaxKind::PATTERN_FIELD {
+            let name = child_of_kind(&child, SyntaxKind::NAME).ok_or_else(|| error("a field pattern needs a name"))?;
+            let value = child
+                .children()
+                .find(|part| part.kind() != SyntaxKind::NAME)
+                .ok_or_else(|| error("a field pattern needs a pattern"))?;
+            items.push((name_symbol(&name)?, pattern(&value)?));
+        } else {
+            items.push((nil(), pattern(&child)?));
+        }
+    }
+    Ok(items)
+}
+
+/// A negative literal pattern is stored as the negative constant, because a pattern is never
+/// evaluated.
+unsafe fn negate(value: Sexp) -> R<Sexp> {
+    match value.kind() {
+        SexpType::Integer => {
+            let number = values::ints(value)[0];
+            values::scalar_integer(if number == NA_INTEGER { number } else { -number })
+        }
+        SexpType::Real => values::scalar_real(-values::reals(value)[0]),
+        SexpType::Complex => {
+            let number = values::complexes(value)[0];
+            values::scalar_complex(Rcomplex { r: -number.r, i: -number.i })
+        }
+        _ => Err(error("only a number can be negated in a pattern")),
+    }
 }
 
 /// The arguments of a call or subset, with empty arguments as `R_MissingArg`.
@@ -429,7 +606,10 @@ unsafe fn name_symbol(node: &SyntaxNode) -> R<Sexp> {
 
 /// An identifier's name, without backticks.
 fn identifier(text: &str) -> String {
-    match text.strip_prefix('`').and_then(|rest| rest.strip_suffix('`')) {
+    match text
+        .strip_prefix('`')
+        .and_then(|rest| rest.strip_suffix('`'))
+    {
         Some(inner) => unescape(inner).unwrap_or_else(|_| inner.to_owned()),
         None => text.to_owned(),
     }
@@ -568,7 +748,10 @@ fn raw_string(text: &str) -> String {
     // r"---( ... )---": the prefix up to the opening bracket, mirrored at the end.
     let after_r = &text[1..];
     let rest = &after_r[1..];
-    let dashes = rest.chars().take_while(|&character| character == '-').count();
+    let dashes = rest
+        .chars()
+        .take_while(|&character| character == '-')
+        .count();
     let open = rest[dashes..].chars().next().unwrap_or('(');
     let body_start = 1 + 1 + dashes + open.len_utf8();
     let body_end = text.len() - (1 + dashes + 1);
@@ -661,12 +844,16 @@ pub fn unescape(text: &str) -> Result<String, String> {
                     characters.next();
                 }
                 if count == 0 {
-                    return Err(format!("'\\{escape}' used without hex digits in character string"));
+                    return Err(format!(
+                        "'\\{escape}' used without hex digits in character string"
+                    ));
                 }
                 result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
             }
             other => {
-                return Err(format!("'\\{other}' is an unrecognized escape in character string"));
+                return Err(format!(
+                    "'\\{other}' is an unrecognized escape in character string"
+                ));
             }
         }
     }
@@ -681,10 +868,11 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
     let count = values::as_integer_scalar(call.arg(1));
     let text = call.arg(2);
     let (source, name) = if text != nil() {
-        let lines: Vec<String> = values::strings(crate::coerce::coerce_vector(text, SexpType::String)?)
-            .into_iter()
-            .map(|line| line.unwrap_or_else(|| "NA".into()))
-            .collect();
+        let lines: Vec<String> =
+            values::strings(crate::coerce::coerce_vector(text, SexpType::String)?)
+                .into_iter()
+                .map(|line| line.unwrap_or_else(|| "NA".into()))
+                .collect();
         (lines.join("\n"), "<text>".to_owned())
     } else {
         let content = crate::connections::read_all_text(file)?;
@@ -711,9 +899,7 @@ unsafe fn do_str2lang(call: &Call<'_>) -> R<Sexp> {
     let expressions = parse_text(&source, "<text>")?;
     match values::length(expressions) {
         1 => Ok(expressions.element(0)),
-        count => Err(call.error(format!(
-            "parsing result not of length one, but {count}"
-        ))),
+        count => Err(call.error(format!("parsing result not of length one, but {count}"))),
     }
 }
 

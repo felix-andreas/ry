@@ -2,7 +2,7 @@
 //! plan emitter behind `ry load --emit-plan`, and the R code that installs `load_all()`.
 
 use crate::ANALYSIS_STACK_SIZE;
-use loader::gnur::{RUNTIME, error_value, plan_value, rds};
+use loader::r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds};
 use loader::{LoadError, LoadState, Loader};
 use repl::ConsoleHooks;
 use repl::libr::{self, CallRoutine, Sexp};
@@ -31,9 +31,12 @@ struct Session {
 /// R statements that install `load_all()` in `tools:ry`, talking to this process.
 pub fn embedded_runtime() -> String {
     runtime(
-        r#".ry_request <- function(root, plan_file, full) {
+        r#".ry_request <- function(root, full) {
+  plan_file <- tempfile(fileext = ".rds")
+  on.exit(unlink(plan_file))
   failure <- .Call("ry_loader_plan", root, plan_file, full, PACKAGE = "(embedding)")
   if (!is.null(failure)) stop(failure, call. = FALSE)
+  readRDS(plan_file)
 }
 .ry_commit <- function(root) {
   invisible(.Call("ry_loader_commit", root, PACKAGE = "(embedding)"))
@@ -53,11 +56,14 @@ pub fn process_runtime() -> String {
 .ry_state_file <- function(root) {{
   file.path(tempdir(), paste0("ry-load-", gsub("[^A-Za-z0-9]", "_", root), ".json"))
 }}
-.ry_request <- function(root, plan_file, full) {{
+.ry_request <- function(root, full) {{
+  plan_file <- tempfile(fileext = ".rds")
+  on.exit(unlink(plan_file))
   arguments <- c("load", "--emit-plan", shQuote(plan_file), "--state",
                  shQuote(.ry_state_file(root)), if (full) "--full", shQuote(root))
   status <- system2(.ry_executable(), arguments)
   if (!identical(status, 0L)) stop("`ry load` failed with status ", status, call. = FALSE)
+  readRDS(plan_file)
 }}
 .ry_commit <- function(root) {{
   state <- .ry_state_file(root)
@@ -73,7 +79,7 @@ pub fn process_runtime() -> String {
 /// version and cached, because R would otherwise compile each one the first time it runs,
 /// which costs more than a typical reload.
 fn runtime(transport: &str) -> String {
-    let source = format!("{transport}\n{RUNTIME}");
+    let source = format!("{transport}\n{RUNTIME_GNUR}");
     let cache = dirs::cache_dir()
         .map(|directory| directory.join("ry").to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -169,7 +175,7 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
                 Ok(plan) => {
                     let entry = session.fingerprints.entry(plan.root.clone()).or_default();
                     entry.0 = fingerprint;
-                    plan_value(&plan)
+                    plan_value(&plan, true)
                 }
                 Err(error) => error_value(&error.to_string()),
             }
@@ -320,14 +326,14 @@ pub fn emit_plan(
                     .map_err(|error| EmitError::State(pending.clone(), error))?;
                 fs::write(&pending, text).map_err(|error| EmitError::Io(pending, error))?;
             }
-            plan_value(&plan)
+            plan_value(&plan, true)
         }
         Err(error) => error_value(&error.to_string()),
     };
     write_plan(plan_file, &value)
 }
 
-fn write_plan(plan_file: &Path, value: &loader::gnur::RValue) -> Result<(), EmitError> {
+fn write_plan(plan_file: &Path, value: &RValue) -> Result<(), EmitError> {
     fs::write(plan_file, rds(value)).map_err(|error| EmitError::Io(plan_file.to_path_buf(), error))
 }
 

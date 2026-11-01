@@ -1,0 +1,15 @@
+[stdout]
+| [1] "gzip" "TRUE"
+| [1] "bzip2" "TRUE" 
+| [1] "xz"   "TRUE"
+| [1] 1
+| [1] "dim"
+| [1] "dims [product 4] do not match the length of object [8]"
+| [1] "Line starting ':x ...' is malformed!"
+| [1] "Found continuation line starting ' cont ...' at begin of record."
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "Found continuation line starting ' cont ...' at begin of record."

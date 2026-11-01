@@ -21,6 +21,8 @@ bzip2-rs = "0.1.2"
 flate2 = "1.1.9"
 heap = { path = "../heap" }
 interp = { path = "../interp" }
+jit = { path = "../jit" }
+loader = { path = "../loader", features = ["runtime"] }
 libc = "0.2"
 lzma-rs = "0.3.0"
 rustc-hash.workspace = true

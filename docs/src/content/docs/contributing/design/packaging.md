@@ -1,7 +1,7 @@
 ---
 type: Reference
 title: Packages and R versions in the runtime
-description: "Proposal, not implemented: how packages install into ry's runtime, how ry picks GNU R or its own runtime and an R version, and what the loader and the corpus need"
+description: "Proposal, partly built: how packages install into ry's runtime, how ry picks GNU R or its own runtime and an R version, and what the loader and the corpus need"
 tags: [packaging, runtime, r-versions, abi, lazy-loading]
 status: draft
 generated: { by: ry-research-agent/1, at: 2026-10-31T17:00:00Z }
@@ -39,8 +39,9 @@ the corpus need from an installed library. The corpus is the benchmark's 232-pac
 closure installed into a GNU R library, and the differential oracle is the harness that runs the same
 code under GNU R and under ry and compares the results (both from build step 1 of the runtime
 design). A package manager of ry's own (`ry add`, `ry sync`, a lockfile format) is a product question
-the runtime does not need answered, so it stays open. Nothing here is implemented; the measurements
-are real.
+the runtime does not need answered, so it stays open. Only two pieces exist: `crates/rcmd` installs
+a package against ry's R home with `R CMD INSTALL` semantics, and `--runtime` (or `RY_RUNTIME`)
+picks the runtime explicitly. The rest is a proposal; the measurements are real.
 
 ## The decisions
 

@@ -62,6 +62,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("stdout", 0, |_| unsafe { connection_object(1) }),
     internal("stderr", 0, |_| unsafe { connection_object(2) }),
     internal("readLines", 6, do_read_lines),
+    internal("readDCF", 3, do_read_dcf),
     internal("writeLines", 4, do_write_lines).invisible(),
     internal("readChar", 3, do_read_char),
     internal("writeChar", 5, do_write_char).keep_visibility(),
@@ -412,15 +413,8 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
         let bytes = std::fs::read(&path).map_err(|failure| {
             error(format!("cannot open file '{path}': {}", os_message(&failure)))
         })?;
-        let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
-            let mut decoded = Vec::new();
-            MultiGzDecoder::new(&bytes[..])
-                .read_to_end(&mut decoded)
-                .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
-            decoded
-        } else {
-            bytes
-        };
+        let bytes = decompress(bytes)
+            .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
     let mut text = String::new();
@@ -527,7 +521,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     };
     let gzip = !raw
         && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write)
-        && is_gzip(&path).unwrap_or(false);
+        && file_compression(&path).is_ok_and(|compression| compression.is_some());
     let device = Device::File(FileDevice {
         path,
         temporary,
@@ -805,6 +799,106 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
         Ok(())
     })?;
     Ok(nil())
+}
+
+/// `read.dcf()`: one row per record of a Debian control file (records are separated by blank
+/// lines), one column per field. Values of the fields not in `keep.white` are folded: every line
+/// is trimmed and the lines are joined with newlines. A continuation line holding only `.`
+/// stands for an empty line.
+unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
+    let fields = call.arg(1);
+    let keep_white = values::strings(call.arg(2));
+    let text = with_input(call.arg(0), |bytes, position| {
+        let text = String::from_utf8_lossy(&bytes[*position..]).into_owned();
+        *position = bytes.len();
+        text
+    })?;
+    let mut records: Vec<Vec<(String, String)>> = Vec::new();
+    let mut record: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !record.is_empty() {
+                records.push(std::mem::take(&mut record));
+            }
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let Some((tag, value)) = record.last_mut() else {
+                let start: String = line.chars().take(20).collect();
+                return Err(call.error(format!(
+                    "Found continuation line starting '{start} ...' at begin of record."
+                )));
+            };
+            let line = if line.trim() == "." { "" } else { line };
+            let keep = keep_white
+                .iter()
+                .any(|kept| kept.as_deref() == Some(tag.as_str()));
+            value.push('\n');
+            value.push_str(if keep { line } else { line.trim() });
+            continue;
+        }
+        let Some((tag, value)) = line.split_once(':').filter(|(tag, _)| !tag.is_empty()) else {
+            let start: String = line.chars().take(20).collect();
+            return Err(call.error(format!("Line starting '{start} ...' is malformed!")));
+        };
+        let keep = keep_white.iter().any(|kept| kept.as_deref() == Some(tag));
+        let value = if keep {
+            value.trim_start()
+        } else {
+            value.trim()
+        }
+        .to_owned();
+        match record.iter_mut().find(|(seen, _)| seen == tag) {
+            Some(entry) => entry.1 = value,
+            None => record.push((tag.to_owned(), value)),
+        }
+    }
+    if !record.is_empty() {
+        records.push(record);
+    }
+    let columns: Vec<String> = if fields == nil() {
+        let mut columns: Vec<String> = Vec::new();
+        for (tag, _) in records.iter().flatten() {
+            if !columns.contains(tag) {
+                columns.push(tag.clone());
+            }
+        }
+        columns
+    } else {
+        values::strings(fields)
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect()
+    };
+    let mut cells = Vec::with_capacity(records.len() * columns.len());
+    for column in &columns {
+        let keep = keep_white
+            .iter()
+            .any(|kept| kept.as_deref() == Some(column.as_str()));
+        for record in &records {
+            cells.push(
+                record
+                    .iter()
+                    .find(|(tag, _)| tag == column)
+                    .map(|(_, value)| {
+                        if keep {
+                            value.clone()
+                        } else {
+                            value.trim().to_owned()
+                        }
+                    }),
+            );
+        }
+    }
+    let matrix = values::string_vector_na(&cells)?;
+    let dim = values::integer_vector(&[records.len() as i32, columns.len() as i32])?;
+    values::set_attr(matrix, symbols().dim, dim)?;
+    let dimnames = values::alloc(SexpType::List, 2)?;
+    if !columns.is_empty() {
+        values::set_elt(dimnames, 1, values::string_vector(&columns)?);
+    }
+    values::set_attr(matrix, symbols().dimnames, dimnames)?;
+    Ok(matrix)
 }
 
 /// `readChar(con, nchars, useBytes)`: one string per count, stopping at the end of the data.
@@ -2554,7 +2648,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
         let encoder = GzEncoder::new(file, Compression::new(device.compression));
         return Ok(Stream::Deflate { encoder, position: 0 });
     }
-    if mode.read && !mode.write && !device.raw && is_gzip(&device.path)? {
+    if mode.read && !mode.write && !device.raw && file_compression(&device.path)?.is_some() {
         return Ok(Stream::Inflate(open_inflate(&device.path)?));
     }
     let file = OpenOptions::new()
@@ -2583,26 +2677,73 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
     Ok(Stream::Plain(plain))
 }
 
-fn is_gzip(path: &PathBuf) -> std::io::Result<bool> {
-    let mut magic = [0u8; 2];
+/// The compressions a file opened for reading is decoded from, recognized by their magic bytes.
+/// GNU R's `gzfile()` reads all three, because `save()` and `usethis::use_data()` write bzip2
+/// and xz `.rda` files through it.
+#[derive(Clone, Copy)]
+enum Compressed {
+    Gzip,
+    Bzip2,
+    Xz,
+}
+
+fn compression_of(magic: &[u8]) -> Option<Compressed> {
+    if magic.starts_with(&[0x1f, 0x8b]) {
+        Some(Compressed::Gzip)
+    } else if magic.starts_with(b"BZh") {
+        Some(Compressed::Bzip2)
+    } else if magic.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        Some(Compressed::Xz)
+    } else {
+        None
+    }
+}
+
+fn file_compression(path: &PathBuf) -> std::io::Result<Option<Compressed>> {
+    let mut magic = [0u8; 6];
     let mut file = File::open(path)?;
     let mut filled = 0;
-    while filled < 2 {
+    while filled < magic.len() {
         let count = file.read(&mut magic[filled..])?;
         if count == 0 {
-            return Ok(false);
+            break;
         }
         filled += count;
     }
-    Ok(magic == [0x1f, 0x8b])
+    Ok(compression_of(magic.get(..filled).unwrap_or_default()))
 }
 
-/// A gzip reader that reads an uncompressed file as it is, as GNU R's gzfile does.
+/// `bytes` decoded when they start with a compression's magic bytes, else unchanged.
+fn decompress(bytes: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    let Some(compression) = compression_of(&bytes) else {
+        return Ok(bytes);
+    };
+    let mut decoded = Vec::new();
+    decoder(compression, Box::new(&bytes[..]))?.read_to_end(&mut decoded)?;
+    Ok(decoded)
+}
+
+fn decoder<'a>(compression: Compressed, input: Box<dyn Read + 'a>) -> std::io::Result<Box<dyn Read + 'a>> {
+    Ok(match compression {
+        Compressed::Gzip => Box::new(MultiGzDecoder::new(input)),
+        Compressed::Bzip2 => Box::new(bzip2_rs::DecoderReader::new(input)),
+        // lzma-rs decodes xz only into a writer, so the whole stream is decoded up front.
+        Compressed::Xz => {
+            let mut decoded = Vec::new();
+            lzma_rs::xz_decompress(&mut BufReader::new(input), &mut decoded)
+                .map_err(|failure| std::io::Error::other(failure.to_string()))?;
+            Box::new(std::io::Cursor::new(decoded))
+        }
+    })
+}
+
+/// A decompressing reader that reads an uncompressed file as it is, as GNU R's gzfile does.
 fn open_inflate(path: &PathBuf) -> std::io::Result<Inflate> {
-    let compressed = is_gzip(path)?;
     let file = BufReader::new(File::open(path)?);
-    let reader: Box<dyn Read> =
-        if compressed { Box::new(MultiGzDecoder::new(file)) } else { Box::new(file) };
+    let reader = match file_compression(path)? {
+        Some(compression) => decoder(compression, Box::new(file))?,
+        None => Box::new(file),
+    };
     Ok(Inflate { reader, path: path.clone(), position: 0 })
 }
 

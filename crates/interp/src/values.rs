@@ -497,6 +497,7 @@ pub unsafe fn length(object: Sexp) -> usize {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => pairlist_length(object),
         SexpType::Environment => env_length(object),
+        SexpType::Record => object.record_slot_count(),
         _ if object.kind().is_vector() => {
             if object.is_altrep() {
                 altrep_length(object)

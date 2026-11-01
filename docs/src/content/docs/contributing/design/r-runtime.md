@@ -4,12 +4,14 @@ description: "Design draft: how ry runs R, from the C API up to the JIT, the tab
 ---
 
 This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
-and why. Built so far are step 2 of the build order (section 10), the object model and collector in
-`crates/heap` and the C API as `libR.so` in `crates/libr`, and the part of step 4 that needs no
-interpreter: the whole measured C API, ALTREP, connections and package installation in
-`crates/rcmd`. The interpreter is not built, so `ry repl` still drives a GNU R that it loads at
-runtime. The C API measurements in section 2 are real and reproducible. Where section 4 describes
-something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
+and why. Built so far are the object model and collector in `crates/heap`, the C API as `libR.so`
+in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
+`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run --runtime ry`),
+a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
+`crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
+code still comes from a GNU R installation), and the table type's use from the interpreter. `ry repl`
+and `ry run` still drive GNU R by default. The C API measurements in section 2 are real and
+reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 
 ## 1. The recommendations
@@ -507,6 +509,47 @@ R-level ones above. Copy-and-patch is the candidate for an optional baseline tie
 measurements show that tier 0 is too slow for code that is warm but not hot; rcp's results suggest
 that the gain over a good interpreter is real but modest.
 
+### What tier 1 does today
+
+`crates/jit` implements the core of this design for loops; the rest of the list above is still
+ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
+
+- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body that contains a
+  loop compiles on its tenth entry, and a running loop compiles after 500 backward jumps and
+  continues in compiled code at the loop header (on-stack replacement). A body without a loop stays
+  in tier 0, because without direct calls the cost of entering compiled code and forcing arguments
+  through helpers is larger than what it saves.
+- **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
+  a typed plan: one action per instruction plus the abstract state before it, which records each
+  register's and variable's type and where each variable's value lives. Cranelift's frontend builds
+  the SSA form from that plan. There is no separate R-level IR yet, so the optimizations that need
+  one (vector fusion, bounds-check elimination, inlining) are not built.
+- **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
+  registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
+  logical vectors are inline, and a write copies only when the vector is shared.
+- **Variables.** A body that never reflects on its frame keeps its variables in slots instead of
+  its environment. The environment object still exists, but compiled code writes a variable back
+  only before something that could observe it runs (a generic call, a dispatching operation, the
+  first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
+  after something that could change it. Promises are not elided.
+- **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
+  speculated against the binding epoch. A failed guard boxes the live values, writes back the dirty
+  variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
+  then invalidated and may recompile, up to four times per body. An R error, `break` or `next`
+  raised inside a helper leaves compiled code the same way, so tier 0 handles every non-local exit.
+  Compiled code returns to tier 0's loop to deoptimize rather than calling into it, so repeated
+  deoptimization never deepens the native stack.
+- **Warnings.** A warning can run a calling handler, which may read or assign the frame's
+  variables. The fast paths that can warn (integer overflow, an out-of-range read, `sqrt` or `log`
+  of a negative number) leave for tier 0 at that instruction without invalidating the code, and
+  plain arithmetic or a pure builtin writes the frame back and reloads it afterwards whenever a
+  calling handler is established.
+- **The C API and the collector.** Every boxed value compiled code holds is stored in the register
+  window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
+  allocation and every helper call.
+- **Not yet built:** direct calls between compiled closures, promise elision, the use of static
+  types as early profiles, and freeing the machine code of invalidated bodies.
+
 ### How the static types feed the JIT
 
 ry's types are not sound in plain R, because R code can redefine anything at any time. So the JIT
@@ -808,8 +851,7 @@ Each step ends with something real running, and each one is a large, whole chang
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 
-   The part that needs no interpreter is done, with evaluation behind a hook the interpreter
-   installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
+   The C API is done, with evaluation behind a hook the interpreter installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
    names the closure uses (the rest of the 792 are types, macros and enum constants in the headers)
    and implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
    are declared in headers and come from the system libraries. Against the corpus library (GNU R
@@ -820,7 +862,8 @@ Each step ends with something real running, and each one is a large, whole chang
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
    Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation waits for the interpreter.
+   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
+   `rcmd` does not run yet, although the interpreter now exists.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
@@ -831,7 +874,7 @@ Each step ends with something real running, and each one is a large, whole chang
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `frame` type exist (section 7); wiring them into the
-   interpreter waits for step 3.
+   interpreter is next.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would

@@ -71,8 +71,11 @@ command line: it is invoked as `<command…> <script> <report>`, must print the 
 to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defines (`messages`,
 `warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
 it runs the driver through `ry run --runtime ry` with the workspace's debug build (or the binary in
-`ORACLE_RY`), so build `ry` and `libr` first. Without `--engine` or `ORACLE_ENGINE` the second engine
-is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or any command line) makes
+`ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
+build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
+every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
+the compiled tier on every case. Without `--engine` or `ORACLE_ENGINE` the second engine
+is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
 ## The benchmark generator

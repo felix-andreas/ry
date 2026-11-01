@@ -95,7 +95,9 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
         | SexpType::Promise
         | SexpType::Binding
         | SexpType::Any
-        | SexpType::Free => return Ok(object),
+        | SexpType::Free
+        // Immutable, so a copy is the value itself.
+        | SexpType::Record => return Ok(object),
         SexpType::Closure | SexpType::Object => {
             let copy = runtime().heap.alloc_triple(
                 object.kind(),
