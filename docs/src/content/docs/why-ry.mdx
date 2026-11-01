@@ -150,6 +150,33 @@ object-system
   x R6 classes are turned off in this project (`[check] object-systems = false`), so `R6Class` cannot define an R6 class. Use a record or a tagged union instead
 ```
 
+## Speed
+
+ry's own runtime (`ry run --runtime ry`) interprets R and compiles hot code to machine code. Each
+program below exists twice in `tools/bench/why/`: as plain R, and with inline annotations checked
+in [strict mode](/type-checking/strict-mode). Each time is the best of three runs after one warm-up
+run, measured inside the script, so it leaves out startup and, for the typed column, the static
+check. The best run is reported rather than the median because other load on a machine only ever
+slows a run down. All three columns compute the same result.
+
+| program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
+| --- | ---: | ---: | ---: | ---: |
+| closures | 0.818 s | 0.395 s | 0.397 s | 2.1x |
+| drawdown | 0.314 s | 0.024 s | 0.023 s | 13.1x |
+| fib | 0.080 s | 0.094 s | 0.109 s | 0.9x |
+| log_rank | 0.101 s | 0.073 s | 0.062 s | 1.4x |
+| loop_sum | 0.265 s | 0.042 s | 0.040 s | 6.3x |
+| vasicek | 0.042 s | 0.041 s | 0.039 s | 1.0x |
+| vector_arith | 0.176 s | 0.140 s | 0.135 s | 1.3x |
+
+Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R 4.3.3 with its
+bytecode compiler on. `just bench-why` builds ry and regenerates the table on your machine.
+
+Loops and vector code run several times faster than on GNU R, and `vasicek` is at parity. Code
+dominated by small function calls (`fib`) is still about 10% slower. Types do not make code faster
+yet: a static `double` still admits an integer or a logical through promotion, so the compiled code
+keeps its runtime checks, and the differences between the two ry columns are measurement noise.
+
 ## What it leaves out
 
 Every rule in the type system has to be cheap enough to run on each keystroke, so some things are
