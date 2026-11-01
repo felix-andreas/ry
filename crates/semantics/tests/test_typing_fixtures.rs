@@ -10,8 +10,8 @@ use semantics::metadata::{
 use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
 use semantics::{
-    AnalysisSettings, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, file_typing_mode, item_check,
-    item_hir, item_tree,
+    AnalysisSettings, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
+    file_typing_mode, item_check, item_hir, item_tree,
 };
 use std::path::Path;
 use syntax::SyntaxKind;

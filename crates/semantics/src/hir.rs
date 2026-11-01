@@ -5,7 +5,7 @@ use rustc_hash::{FxHashSet, FxHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 use std::{fmt, iter, ops};
-use syntax::ast::{BinaryExpr, Name};
+use syntax::ast::{BinaryExpr, Name, is_expression_kind};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
@@ -210,27 +210,6 @@ impl Module {
             }
         }
     }
-}
-
-/// The parser's expression kinds plus ry's native records, tuples, tags and `match`, which
-/// `syntax::ast::is_expression_kind` does not list yet.
-pub fn is_expression_kind(kind: SyntaxKind) -> bool {
-    syntax::ast::is_expression_kind(kind)
-        || matches!(
-            kind,
-            SyntaxKind::TUPLE_EXPR
-                | SyntaxKind::RECORD_EXPR
-                | SyntaxKind::TAG_EXPR
-                | SyntaxKind::MATCH_EXPR
-        )
-}
-
-/// A `BINARY_EXPR` node's operands, counting ry's native expression kinds as operands.
-pub fn binary_operands(node: &SyntaxNode) -> (Option<SyntaxNode>, Option<SyntaxNode>) {
-    let mut operands = node
-        .children()
-        .filter(|child| is_expression_kind(child.kind()));
-    (operands.next(), operands.next())
 }
 
 /// The names a zeallot pattern binds, in order; `None` unless the pattern is `c()` or `list()`
@@ -798,7 +777,9 @@ impl Module {
                 None => self.missing(range),
             },
             SyntaxKind::TAG_EXPR => {
-                let Some(name_node) = node.children().find(|child| child.kind() == SyntaxKind::NAME)
+                let Some(name_node) = node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::NAME)
                 else {
                     return self.missing(range);
                 };
@@ -909,7 +890,10 @@ impl Module {
                     .children_with_tokens()
                     .filter_map(|element| element.into_token())
                     .any(|token| token.kind() == SyntaxKind::MINUS);
-                match node.children().find(|child| child.kind() == SyntaxKind::LITERAL) {
+                match node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::LITERAL)
+                {
                     Some(literal) => PatternKind::Literal {
                         literal: literal_kind(&literal),
                         negative,
@@ -918,7 +902,10 @@ impl Module {
                 }
             }
             SyntaxKind::PATTERN_TAG => {
-                match node.children().find(|child| child.kind() == SyntaxKind::NAME) {
+                match node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::NAME)
+                {
                     Some(name_node) => {
                         let payload = node
                             .children()
@@ -949,8 +936,9 @@ impl Module {
                         .children()
                         .filter(|child| child.kind() == SyntaxKind::PATTERN_FIELD)
                     {
-                        let Some(name_node) =
-                            field.children().find(|child| child.kind() == SyntaxKind::NAME)
+                        let Some(name_node) = field
+                            .children()
+                            .find(|child| child.kind() == SyntaxKind::NAME)
                         else {
                             continue;
                         };
@@ -1010,7 +998,7 @@ impl Module {
         let Some(operator_token) = binary.operator() else {
             return self.missing(range);
         };
-        let (lhs, rhs) = binary_operands(node);
+        let (lhs, rhs) = (binary.lhs(), binary.rhs());
         let operator = match operator_token.kind() {
             kind @ (SyntaxKind::LESS_MINUS
             | SyntaxKind::EQ

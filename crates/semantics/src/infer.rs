@@ -886,10 +886,8 @@ impl<'db> InferenceTable<'db> {
             (TyKind::NativeRecord(actual_fields), TyKind::NativeRecord(expected_fields))
                 if actual_fields.len() == expected_fields.len() =>
             {
-                actual_fields
-                    .iter()
-                    .zip(expected_fields.iter())
-                    .all(|(actual_field, expected_field)| {
+                actual_fields.iter().zip(expected_fields.iter()).all(
+                    |(actual_field, expected_field)| {
                         actual_field.name == expected_field.name
                             && self.compatible_probe(
                                 db,
@@ -897,19 +895,19 @@ impl<'db> InferenceTable<'db> {
                                 expected_field.ty,
                                 depth + 1,
                             )
-                    })
+                    },
+                )
             }
-            (TyKind::Tag(actual_name, actual_payload), TyKind::Tag(expected_name, expected_payload))
-                if actual_name == expected_name =>
-            {
-                match (actual_payload, expected_payload) {
-                    (None, None) => true,
-                    (Some(actual_payload), Some(expected_payload)) => {
-                        self.compatible_probe(db, *actual_payload, *expected_payload, depth + 1)
-                    }
-                    _ => false,
+            (
+                TyKind::Tag(actual_name, actual_payload),
+                TyKind::Tag(expected_name, expected_payload),
+            ) if actual_name == expected_name => match (actual_payload, expected_payload) {
+                (None, None) => true,
+                (Some(actual_payload), Some(expected_payload)) => {
+                    self.compatible_probe(db, *actual_payload, *expected_payload, depth + 1)
                 }
-            }
+                _ => false,
+            },
             _ => false,
         }
     }

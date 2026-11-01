@@ -44,7 +44,10 @@ const PRINTS: &[(&str, &str)] = &[
     (":None", ":None\n"),
     ("circle", ":Circle(radius = 2)\n"),
     (":Some(5L)", ":Some(5L)\n"),
-    ("(inner = (1, c(2, 3)), tag = :Ok(\"done\"))", "(inner = (1, c(2, 3)), tag = :Ok(\"done\"))\n"),
+    (
+        "(inner = (1, c(2, 3)), tag = :Ok(\"done\"))",
+        "(inner = (1, c(2, 3)), tag = :Ok(\"done\"))\n",
+    ),
     ("list(a = point)", "$a\n(x = 1, y = 2)\n\n"),
     // R's own forms keep their meaning.
     ("(x = 1)", "[1] 1\n"),
@@ -70,7 +73,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("{ p <- point; p$x <- 10; p }", "(x = 10, y = 2)\n"),
     ("{ p <- point; p$x <- 10; point }", "(x = 1, y = 2)\n"),
     ("{ t <- pair; t[[2]] <- \"b\"; t }", "(1L, \"b\")\n"),
-    ("{ p <- (a = (b = 1,),); p$a$b <- 5; p }", "(a = (b = 5,),)\n"),
+    (
+        "{ p <- (a = (b = 1,),); p$a$b <- 5; p }",
+        "(a = (b = 5,),)\n",
+    ),
     // Structural equality, with field order not part of the value.
     ("identical(point, (x = 1, y = 2))", "[1] TRUE\n"),
     ("identical(point, (x = 1, y = 3))", "[1] FALSE\n"),
@@ -78,9 +84,18 @@ const PRINTS: &[(&str, &str)] = &[
     ("identical(:A(1), :B(1))", "[1] FALSE\n"),
     ("identical((x = c(1, 2),), (x = c(1, 2),))", "[1] TRUE\n"),
     ("all.equal(point, (x = 1, y = 2))", "[1] TRUE\n"),
-    ("all.equal(point, (x = 1, y = 3))", "[1] \"Field `y`: values differ\"\n"),
-    ("all.equal(point, pair)", "[1] \"target is a ry record, current is a ry tuple\"\n"),
-    ("all.equal(:A, :B)", "[1] \"target is tag `:A`, current is tag `:B`\"\n"),
+    (
+        "all.equal(point, (x = 1, y = 3))",
+        "[1] \"Field `y`: values differ\"\n",
+    ),
+    (
+        "all.equal(point, pair)",
+        "[1] \"target is a ry record, current is a ry tuple\"\n",
+    ),
+    (
+        "all.equal(:A, :B)",
+        "[1] \"target is tag `:A`, current is tag `:B`\"\n",
+    ),
     // format and deparse use ry syntax.
     ("format(circle)", "[1] \":Circle(radius = 2)\"\n"),
     ("deparse(point)", "[1] \"(x = 1, y = 2)\"\n"),
@@ -89,23 +104,41 @@ const PRINTS: &[(&str, &str)] = &[
     ("deparse(quote((1L,)))", "[1] \"(1L,)\"\n"),
     ("deparse(quote(()))", "[1] \"()\"\n"),
     ("deparse(quote(:None))", "[1] \":None\"\n"),
-    ("deparse(quote(:Circle(radius = 2)))", "[1] \":Circle(radius = 2)\"\n"),
+    (
+        "deparse(quote(:Circle(radius = 2)))",
+        "[1] \":Circle(radius = 2)\"\n",
+    ),
     ("quote((x = 1, y = 2))[[1]]", ".ry_record\n"),
     ("quote(:Some(1))[[2]]", "[1] \"Some\"\n"),
     (
         "quote(match (s) { :Circle(radius = r) => pi * r^2; :Rect(width = w, ..) if (w > 0) => w; (a, _) | (_, a) => a; -1L => 0; (k = v,) => v; _ => NULL })",
         "match (s) {\n    :Circle(radius = r) => pi * r^2\n    :Rect(width = w, ..) if (w > 0) => w\n    (a, _) | (_, a) => a\n    -1L => 0\n    (k = v,) => v\n    _ => NULL\n}\n",
     ),
-    ("quote(match (p) { (x = a, ..) if (a > 0) => a })", "match (p) {\n    (x = a, ..) if (a > 0) => a\n}\n"),
-    ("quote(match (a, b) { (1, _) => TRUE; _ => FALSE })", "match (a, b) {\n    (1, _) => TRUE\n    _ => FALSE\n}\n"),
-    ("quote(match (x) { :Some(..) => 1 })[[3]][[2]]", ":Some(..)\n"),
-    ("quote(match (x) { :Some(..) => 1 })[[3]][[2]][[1]]", ".ry_tag\n"),
+    (
+        "quote(match (p) { (x = a, ..) if (a > 0) => a })",
+        "match (p) {\n    (x = a, ..) if (a > 0) => a\n}\n",
+    ),
+    (
+        "quote(match (a, b) { (1, _) => TRUE; _ => FALSE })",
+        "match (a, b) {\n    (1, _) => TRUE\n    _ => FALSE\n}\n",
+    ),
+    (
+        "quote(match (x) { :Some(..) => 1 })[[3]][[2]]",
+        ":Some(..)\n",
+    ),
+    (
+        "quote(match (x) { :Some(..) => 1 })[[3]][[2]][[1]]",
+        ".ry_tag\n",
+    ),
     ("quote(match (x) { :Some(..) => 1 })[[3]][[2]][[3]]", "..\n"),
     ("quote(match (x) { 1 => 2 })[[1]]", ".ry_match\n"),
     // Conversions.
     ("as.list(point)", "$x\n[1] 1\n\n$y\n[1] 2\n\n"),
     ("as.list(pair)", "[[1]]\n[1] 1\n\n[[2]]\n[1] \"a\"\n\n"),
-    ("as.list(circle)", "$tag\n[1] \"Circle\"\n\n$payload\n$payload$radius\n[1] 2\n\n\n"),
+    (
+        "as.list(circle)",
+        "$tag\n[1] \"Circle\"\n\n$payload\n$payload$radius\n[1] 2\n\n\n",
+    ),
     ("as.record(list(b = 1, a = \"x\"))", "(a = \"x\", b = 1)\n"),
     ("as.tuple(list(1, 2L))", "(1, 2L)\n"),
     ("as.tag(\"Ok\", list(value = 3))", ":Ok(value = 3)\n"),
@@ -113,36 +146,90 @@ const PRINTS: &[(&str, &str)] = &[
     ("identical(as.record(as.list(point)), point)", "[1] TRUE\n"),
     // A list of records works, because storing a value does not look inside it.
     ("list(point, pair)[[2]]", "(1L, \"a\")\n"),
-    ("{ l <- list(); l[[1]] <- circle; l[[1]] }", ":Circle(radius = 2)\n"),
+    (
+        "{ l <- list(); l[[1]] <- circle; l[[1]] }",
+        ":Circle(radius = 2)\n",
+    ),
     ("lapply(list(point), function(p) p$y)[[1]]", "[1] 2\n"),
     // Builtins that pass values along.
     ("invisible(point)", ""),
     ("{ assign(\"q\", point); q }", "(x = 1, y = 2)\n"),
     ("(function(v) v)(pair)", "(1L, \"a\")\n"),
     // S3 dispatch on the implicit class.
-    ("{ format.ry_tag <- function(x, ...) \"a tag\"; format(circle) }", "[1] \"a tag\"\n"),
+    (
+        "{ format.ry_tag <- function(x, ...) \"a tag\"; format(circle) }",
+        "[1] \"a tag\"\n",
+    ),
     // `match`.
-    ("match (circle) { :Rect(width = w, height = h) => w * h; :Circle(radius = r) => r * 10 }", "[1] 20\n"),
-    ("match (:Some(5L)) { :Some(x) if (x > 10L) => \"big\"; :Some(x) => x; :None => 0L }", "[1] 5\n"),
+    (
+        "match (circle) { :Rect(width = w, height = h) => w * h; :Circle(radius = r) => r * 10 }",
+        "[1] 20\n",
+    ),
+    (
+        "match (:Some(5L)) { :Some(x) if (x > 10L) => \"big\"; :Some(x) => x; :None => 0L }",
+        "[1] 5\n",
+    ),
     ("{ match (:Some(3)) { :Some(n) => n }; n }", "[1] 3\n"),
-    ("{ g <- 0; match (2) { v if (v > 5) => 1; _ => 2 }; exists(\"v\") }", "[1] FALSE\n"),
-    ("match (1L) { 1 => \"one\"; _ => \"other\" }", "[1] \"one\"\n"),
-    ("match (NA_real_) { NA => \"missing\"; _ => \"other\" }", "[1] \"missing\"\n"),
-    ("match (NaN) { NA => \"missing\"; NaN => \"nan\"; _ => \"other\" }", "[1] \"nan\"\n"),
+    (
+        "{ g <- 0; match (2) { v if (v > 5) => 1; _ => 2 }; exists(\"v\") }",
+        "[1] FALSE\n",
+    ),
+    (
+        "match (1L) { 1 => \"one\"; _ => \"other\" }",
+        "[1] \"one\"\n",
+    ),
+    (
+        "match (NA_real_) { NA => \"missing\"; _ => \"other\" }",
+        "[1] \"missing\"\n",
+    ),
+    (
+        "match (NaN) { NA => \"missing\"; NaN => \"nan\"; _ => \"other\" }",
+        "[1] \"nan\"\n",
+    ),
     ("match (NA_character_) { \"a\" => 1; NA => 2 }", "[1] 2\n"),
-    ("match (TRUE) { 1 => \"one\"; TRUE => \"true\" }", "[1] \"true\"\n"),
-    ("match (c(1, 2)) { 1 => \"one\"; _ => \"vector\" }", "[1] \"vector\"\n"),
-    ("match (NULL) { NULL => \"null\"; _ => \"other\" }", "[1] \"null\"\n"),
-    ("match (-2) { -2 => \"minus two\"; _ => \"other\" }", "[1] \"minus two\"\n"),
-    ("match ((1, \"b\")) { (1, \"a\") => 1; (_, s) => s }", "[1] \"b\"\n"),
-    ("match (point) { (x = a,) => 1; (x = a, ..) => a + 100 }", "[1] 101\n"),
+    (
+        "match (TRUE) { 1 => \"one\"; TRUE => \"true\" }",
+        "[1] \"true\"\n",
+    ),
+    (
+        "match (c(1, 2)) { 1 => \"one\"; _ => \"vector\" }",
+        "[1] \"vector\"\n",
+    ),
+    (
+        "match (NULL) { NULL => \"null\"; _ => \"other\" }",
+        "[1] \"null\"\n",
+    ),
+    (
+        "match (-2) { -2 => \"minus two\"; _ => \"other\" }",
+        "[1] \"minus two\"\n",
+    ),
+    (
+        "match ((1, \"b\")) { (1, \"a\") => 1; (_, s) => s }",
+        "[1] \"b\"\n",
+    ),
+    (
+        "match (point) { (x = a,) => 1; (x = a, ..) => a + 100 }",
+        "[1] 101\n",
+    ),
     ("match (point) { (y = b, x = a) => b - a }", "[1] 1\n"),
-    ("match ((1, 2)) { (a, 9) | (9, a) => a; (a, b) => a + b }", "[1] 3\n"),
+    (
+        "match ((1, 2)) { (a, 9) | (9, a) => a; (a, b) => a + b }",
+        "[1] 3\n",
+    ),
     ("match ((9, 4)) { (a, 9) | (9, a) => a; _ => 0 }", "[1] 4\n"),
-    ("match (:Rect(width = 2, height = 3)) { :Rect(..) => \"rect\" }", "[1] \"rect\"\n"),
-    ("match (:None) { :Some(x) => x; :None => \"none\" }", "[1] \"none\"\n"),
+    (
+        "match (:Rect(width = 2, height = 3)) { :Rect(..) => \"rect\" }",
+        "[1] \"rect\"\n",
+    ),
+    (
+        "match (:None) { :Some(x) => x; :None => \"none\" }",
+        "[1] \"none\"\n",
+    ),
     ("match (pair) { (_,) => 1; (_, _) => 2 }", "[1] 2\n"),
-    ("{ f <- function(r) match (r) { :Ok(v) => v; :Err(e) => paste0 }; f(:Ok(7)) }", "[1] 7\n"),
+    (
+        "{ f <- function(r) match (r) { :Ok(v) => v; :Err(e) => paste0 }; f(:Ok(7)) }",
+        "[1] 7\n",
+    ),
     ("{ x <- 1; match (x) { y => { x <- 2 } }; x }", "[1] 2\n"),
     ("match (5) { ((x)) => x }", "[1] 5\n"),
     // The collector traces handle slots and leaves raw ones alone: records built before a run of
@@ -151,38 +238,101 @@ const PRINTS: &[(&str, &str)] = &[
         "{ keep <- lapply(1:300, function(i) (d = i / 2, s = :S((i, list(i))), v = c(i, i))); for (k in 1:4) { junk <- lapply(1:400, function(j) c(j, j)); gc() }; keep[[250]] }",
         "(d = 125, s = :S((250L, list(250L))), v = c(250L, 250L))\n",
     ),
-    ("{ l <- list(:Circle(radius = 3)); gc(); l[[1]] }", ":Circle(radius = 3)\n"),
+    (
+        "{ l <- list(:Circle(radius = 3)); gc(); l[[1]] }",
+        ":Circle(radius = 3)\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
-    ("point$z", "the record has no field `z`; its fields are `x`, `y`"),
+    (
+        "point$z",
+        "the record has no field `z`; its fields are `x`, `y`",
+    ),
     ("point$ x", "[1] 1"),
-    ("{ p <- (alpha = 1,); p$al }", "the record has no field `al`; its fields are `alpha`"),
+    (
+        "{ p <- (alpha = 1,); p$al }",
+        "the record has no field `al`; its fields are `alpha`",
+    ),
     ("pair$x", "a tuple has no field `x`"),
-    ("circle$radius", "a tag has no fields; read its payload with `match`"),
-    ("pair[[3L]]", "index 3L is out of range for a tuple of length 2"),
-    ("pair[[0]]", "index 0 is out of range for a tuple of length 2"),
+    (
+        "circle$radius",
+        "a tag has no fields; read its payload with `match`",
+    ),
+    (
+        "pair[[3L]]",
+        "index 3L is out of range for a tuple of length 2",
+    ),
+    (
+        "pair[[0]]",
+        "index 0 is out of range for a tuple of length 2",
+    ),
     ("{ p <- point; p$z <- 1 }", "the record has no field `z`"),
-    ("sum(point)", "`point` is a ry record, not an R object; convert it with `as.list()`"),
-    ("c(pair, 1)", "`pair` is a ry tuple, not an R object; convert it with `as.list()`"),
-    ("names(circle)", "`circle` is a ry tag, not an R object; convert it with `as.list()`"),
+    (
+        "sum(point)",
+        "`point` is a ry record, not an R object; convert it with `as.list()`",
+    ),
+    (
+        "c(pair, 1)",
+        "`pair` is a ry tuple, not an R object; convert it with `as.list()`",
+    ),
+    (
+        "names(circle)",
+        "`circle` is a ry tag, not an R object; convert it with `as.list()`",
+    ),
     ("point[1]", "`point` is a ry record, not an R object"),
-    ("(function(...) sum(...))(point)", "argument 1 is a ry record, not an R object"),
-    ("for (v in point) v", "`point` is a ry record, not an R object"),
+    (
+        "(function(...) sum(...))(point)",
+        "argument 1 is a ry record, not an R object",
+    ),
+    (
+        "for (v in point) v",
+        "`point` is a ry record, not an R object",
+    ),
     ("if (point) 1", "`point` is a ry record, not an R object"),
-    ("as.character(point)", "`point` is a ry record, not an R object"),
-    ("match (3) { 1 => 1; 2 => 2 }", "no arm of this `match` matches 3"),
-    ("match (:Triangle(sides = 3L)) { :Circle(radius = r) => r }", "no arm of this `match` matches :Triangle(sides = 3L)"),
-    ("match (1) { v if (NA) => v }", "missing value where TRUE/FALSE needed"),
-    (".ry_match(1, `=>`(T, 1))", "`T` in a pattern would bind any value to a variable; write `TRUE`"),
+    (
+        "as.character(point)",
+        "`point` is a ry record, not an R object",
+    ),
+    (
+        "match (3) { 1 => 1; 2 => 2 }",
+        "no arm of this `match` matches 3",
+    ),
+    (
+        "match (:Triangle(sides = 3L)) { :Circle(radius = r) => r }",
+        "no arm of this `match` matches :Triangle(sides = 3L)",
+    ),
+    (
+        "match (1) { v if (NA) => v }",
+        "missing value where TRUE/FALSE needed",
+    ),
+    (
+        ".ry_match(1, `=>`(T, 1))",
+        "`T` in a pattern would bind any value to a variable; write `TRUE`",
+    ),
     ("(1L, y = 2)", "this item cannot have a name"),
-    (".ry_tuple(1L, y = 2)", "a tuple's items have no names; use a record for named fields"),
-    (".ry_record(a = 1, 2)", "every field of a record needs a name"),
+    (
+        ".ry_tuple(1L, y = 2)",
+        "a tuple's items have no names; use a record for named fields",
+    ),
+    (
+        ".ry_record(a = 1, 2)",
+        "every field of a record needs a name",
+    ),
     (".ry_record(a = 1, a = 2)", "the field `a` appears twice"),
-    ("as.record(list(1, 2))", "`as.record()`: element 1 has no name"),
-    ("as.tuple(list(a = 1))", "`as.tuple()`: element 1 is named `a`"),
-    (".Internal(serialize(list(point), NULL, FALSE, FALSE, 3L, NULL))", "the value is a ry record, not an R object"),
+    (
+        "as.record(list(1, 2))",
+        "`as.record()`: element 1 has no name",
+    ),
+    (
+        "as.tuple(list(a = 1))",
+        "`as.tuple()`: element 1 is named `a`",
+    ),
+    (
+        ".Internal(serialize(list(point), NULL, FALSE, FALSE, 3L, NULL))",
+        "the value is a ry record, not an R object",
+    ),
 ];
 
 thread_local! {
@@ -215,7 +365,8 @@ fn records_tuples_tags_and_match() {
                 Ok(value) => {
                     if interp::interp().visible {
                         if let Err(failure) = print::print_value_top(value, values::global_env()) {
-                            failures.push(format!("`{code}`: printing failed: {}", message(failure)));
+                            failures
+                                .push(format!("`{code}`: printing failed: {}", message(failure)));
                             continue;
                         }
                     }
@@ -224,7 +375,9 @@ fn records_tuples_tags_and_match() {
                 Err(failure) => format!("{}\n", failure.trim_end()),
             };
             if printed != *expected {
-                failures.push(format!("`{code}`\n  printed  {printed:?}\n  expected {expected:?}"));
+                failures.push(format!(
+                    "`{code}`\n  printed  {printed:?}\n  expected {expected:?}"
+                ));
             }
         }
         for (code, expected) in ERRORS {
@@ -239,10 +392,17 @@ fn records_tuples_tags_and_match() {
                 Err(failure) => failure,
             };
             if !reported.contains(expected) {
-                failures.push(format!("`{code}`\n  reported {reported:?}\n  expected {expected:?}"));
+                failures.push(format!(
+                    "`{code}`\n  reported {reported:?}\n  expected {expected:?}"
+                ));
             }
         }
-        assert!(failures.is_empty(), "{} cases failed:\n{}", failures.len(), failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "{} cases failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }
 
@@ -252,15 +412,21 @@ unsafe fn evaluate(text: &str) -> Result<Sexp, String> {
     unsafe {
         let expressions = lower::parse_text(text, "<test>").map_err(|failure| {
             let reported = message(failure);
-            if reported.is_empty() { interp::interp().error_message.clone() } else { reported }
+            if reported.is_empty() {
+                interp::interp().error_message.clone()
+            } else {
+                reported
+            }
         })?;
         let mut value = values::nil();
         for index in 0..values::length(expressions) {
             interp::interp().error_message.clear();
-            value = eval::eval(expressions.element(index), values::global_env()).map_err(|failure| {
-                let reported = message(failure);
-                format!("{reported}{}", interp::interp().error_message)
-            })?;
+            value = eval::eval(expressions.element(index), values::global_env()).map_err(
+                |failure| {
+                    let reported = message(failure);
+                    format!("{reported}{}", interp::interp().error_message)
+                },
+            )?;
         }
         Ok(value)
     }

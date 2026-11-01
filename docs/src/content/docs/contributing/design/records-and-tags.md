@@ -4,9 +4,10 @@ description: "Design draft for ry's own data modeling: record and tuple literals
 ---
 
 This draft designs the data-modeling features ry recommends over S4, R6 and Reference Classes:
-records, tuples and tagged unions in the style of Roc, with an exhaustive `match`. It is a draft,
-not a contract. Where it disagrees with the [type system reference](/reference/type-system/), the
-reference is right.
+records, tuples and tagged unions in the style of Roc, with an exhaustive `match`. The settled
+typing rules now live in the [type system reference](/reference/type-system/#records-tuples-and-tags),
+which is the contract and wins wherever the two disagree. This page keeps the rationale, the runtime
+representation and the open questions.
 
 ## The shape in one example
 

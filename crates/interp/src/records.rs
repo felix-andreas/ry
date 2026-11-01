@@ -10,9 +10,7 @@ use crate::{
     builtins::{Arg, BuiltinDef, Call, builtin, special},
     deparse, eval, interp,
     unwind::{R, Unwind, error, error_in},
-    values::{
-        self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols,
-    },
+    values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
 };
 use heap::{
     object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
@@ -166,7 +164,10 @@ pub unsafe fn check_native_args(call: Sexp, args: &[Arg]) -> R<()> {
         if arg.value.kind() == SexpType::Record {
             let subject = argument_text(call, position)
                 .unwrap_or_else(|| format!("argument {}", position + 1));
-            return Err(error_in(call, boundary_message(&subject, native_kind(arg.value))));
+            return Err(error_in(
+                call,
+                boundary_message(&subject, native_kind(arg.value)),
+            ));
         }
     }
     Ok(())
@@ -256,7 +257,9 @@ unsafe fn arg_items(args: &[Arg]) -> R<Vec<(Option<Sexp>, Sexp)>> {
 
 /// The interned id of the tag a length-one string names.
 unsafe fn tag_id(name: Sexp) -> Result<u32, String> {
-    if name.kind() != SexpType::String || length(name) != 1 || name.element(0) == values::na_string()
+    if name.kind() != SexpType::String
+        || length(name) != 1
+        || name.element(0) == values::na_string()
     {
         return Err("a tag's name must be a single string".to_owned());
     }
@@ -285,7 +288,10 @@ unsafe fn make(tag: Option<u32>, items: &[(Option<Sexp>, Sexp)]) -> Result<Sexp,
             .collect();
         sorted.sort_by(|(left, _), (right, _)| left.car().bytes().cmp(right.car().bytes()));
         if let Some(pair) = sorted.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-            return Err(format!("the field `{}` appears twice", symbol_name(pair[0].0)));
+            return Err(format!(
+                "the field `{}` appears twice",
+                symbol_name(pair[0].0)
+            ));
         }
         let names: Box<[Sexp]> = sorted.iter().map(|(name, _)| *name).collect();
         let slots = sorted.iter().map(|(_, value)| *value).collect();
@@ -308,7 +314,11 @@ unsafe fn with_slot(object: Sexp, index: usize, value: Sexp) -> R<Sexp> {
     let count = object.record_slot_count();
     let mut slots = Vec::with_capacity(count);
     for position in 0..count {
-        slots.push(if position == index { value } else { slot_value(object, position)? });
+        slots.push(if position == index {
+            value
+        } else {
+            slot_value(object, position)?
+        });
     }
     let heap = crate::heap();
     let result = heap.alloc_record(object.record_layout(), &slots)?;
@@ -361,7 +371,10 @@ unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
             .ok_or_else(|| {
                 error_in(
                     call,
-                    format!("the record has no field `{text}`; its fields are {}", field_list(&layout)),
+                    format!(
+                        "the record has no field `{text}`; its fields are {}",
+                        field_list(&layout)
+                    ),
                 )
             }),
     }
@@ -369,7 +382,10 @@ unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
 
 unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
     let [index] = indices else {
-        return Err(error_in(call, "a record or tuple takes exactly one index in `[[`"));
+        return Err(error_in(
+            call,
+            "a record or tuple takes exactly one index in `[[`",
+        ));
     };
     let index = *index;
     if index.kind() == SexpType::String && length(index) == 1 {
@@ -377,21 +393,29 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
     }
     let layout = layout(object);
     if layout.kind() == NativeKind::Tag {
-        return Err(error_in(call, "a tag has no items; read its payload with `match`"));
+        return Err(error_in(
+            call,
+            "a tag has no items; read its payload with `match`",
+        ));
     }
     if !matches!(index.kind(), SexpType::Integer | SexpType::Real) || length(index) != 1 {
-        return Err(error_in(call, "a record or tuple index must be one string or one number"));
+        return Err(error_in(
+            call,
+            "a record or tuple index must be one string or one number",
+        ));
     }
     let position = values::as_real_scalar(index);
     let count = layout.slot_count();
     if position.is_nan() || position < 1.0 || position.trunc() as usize > count {
-        let what = if layout.kind() == NativeKind::Record { "record" } else { "tuple" };
+        let what = if layout.kind() == NativeKind::Record {
+            "record"
+        } else {
+            "tuple"
+        };
         let shown = deparse::deparse_one_line(index);
         return Err(error_in(
             call,
-            format!(
-                "index {shown} is out of range for a {what} of length {count}"
-            ),
+            format!("index {shown} is out of range for a {what} of length {count}"),
         ));
     }
     Ok(position.trunc() as usize - 1)
@@ -432,7 +456,11 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
         let (pattern, guard, body) = match parts.as_slice() {
             [pattern, body] => (*pattern, None, *body),
             [pattern, guard, body] => (*pattern, Some(*guard), *body),
-            _ => return Err(call.error("a `match` arm needs a pattern, an optional guard and a value")),
+            _ => {
+                return Err(
+                    call.error("a `match` arm needs a pattern, an optional guard and a value")
+                );
+            }
         };
         bindings.clear();
         if !matches(pattern, value, &mut bindings, call.call)? {
@@ -457,7 +485,10 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
         interp().visible = true;
         return eval::eval(body, call.env);
     }
-    Err(call.error(format!("no arm of this `match` matches {}", describe(value))))
+    Err(call.error(format!(
+        "no arm of this `match` matches {}",
+        describe(value)
+    )))
 }
 
 /// The value a failed `match` names, shortened to one line.
@@ -472,18 +503,28 @@ unsafe fn describe(value: Sexp) -> String {
 }
 
 /// Whether `value` matches `pattern`, pushing the names the pattern binds.
-unsafe fn matches(pattern: Sexp, value: Sexp, bindings: &mut Vec<(Sexp, Sexp)>, call: Sexp) -> R<bool> {
+unsafe fn matches(
+    pattern: Sexp,
+    value: Sexp,
+    bindings: &mut Vec<(Sexp, Sexp)>,
+    call: Sexp,
+) -> R<bool> {
     match pattern.kind() {
         SexpType::Symbol => {
             let name = symbol_name(pattern);
             match name.as_ref() {
                 "_" => Ok(true),
-                ".." => Err(error_in(call, "`..` may only end a record pattern or stand for a tag's payload")),
+                ".." => Err(error_in(
+                    call,
+                    "`..` may only end a record pattern or stand for a tag's payload",
+                )),
                 "T" | "F" => {
                     let suggestion = if name == "T" { "TRUE" } else { "FALSE" };
                     Err(error_in(
                         call,
-                        format!("`{name}` in a pattern would bind any value to a variable; write `{suggestion}` to match the logical value"),
+                        format!(
+                            "`{name}` in a pattern would bind any value to a variable; write `{suggestion}` to match the logical value"
+                        ),
                     ))
                 }
                 _ => {
@@ -532,7 +573,10 @@ unsafe fn matches(pattern: Sexp, value: Sexp, bindings: &mut Vec<(Sexp, Sexp)>, 
                         return Ok(false);
                     };
                     if name.kind() != SexpType::String || length(*name) != 1 {
-                        return Err(error_in(call, "a tag pattern's name must be a single string"));
+                        return Err(error_in(
+                            call,
+                            "a tag pattern's name must be a single string",
+                        ));
                     }
                     if tag_name(tag).as_bytes() != name.element(0).bytes() {
                         return Ok(false);
@@ -574,8 +618,14 @@ unsafe fn payload_matches(
     bindings: &mut Vec<(Sexp, Sexp)>,
     call: Sexp,
 ) -> R<bool> {
-    let rest = items.last().is_some_and(|(tag, item)| *tag == nil() && is_rest(*item));
-    let items = if rest { &items[..items.len() - 1] } else { items };
+    let rest = items
+        .last()
+        .is_some_and(|(tag, item)| *tag == nil() && is_rest(*item));
+    let items = if rest {
+        &items[..items.len() - 1]
+    } else {
+        items
+    };
     let named = items.iter().any(|(tag, _)| *tag != nil());
     match &layout.fields {
         Fields::Positional(count) => {
@@ -627,9 +677,10 @@ unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
             left == right || left.is_nan() && right.is_nan()
         }
         (Some(Scalar::Logical(left)), Some(Scalar::Logical(right))) => left == right,
-        (Some(Scalar::Complex(left_real, left_imaginary)), Some(Scalar::Complex(right_real, right_imaginary))) => {
-            left_real == right_real && left_imaginary == right_imaginary
-        }
+        (
+            Some(Scalar::Complex(left_real, left_imaginary)),
+            Some(Scalar::Complex(right_real, right_imaginary)),
+        ) => left_real == right_real && left_imaginary == right_imaginary,
         (Some(Scalar::Text(left)), Some(Scalar::Text(right))) => left == right,
         _ => false,
     }
@@ -656,7 +707,11 @@ unsafe fn scalar(value: Sexp) -> Option<Scalar> {
         },
         SexpType::Real => {
             let number = values::reals(value)[0];
-            if is_na_real(number) { Scalar::Missing } else { Scalar::Number(number) }
+            if is_na_real(number) {
+                Scalar::Missing
+            } else {
+                Scalar::Number(number)
+            }
         }
         SexpType::Complex => {
             let number = values::complexes(value)[0];
@@ -694,7 +749,10 @@ unsafe fn do_as_list(call: &Call<'_>) -> R<Sexp> {
     }
     let list = values::list_vector(&items)?;
     if let Fields::Named(names) = &layout.fields {
-        let names: Vec<String> = names.iter().map(|name| symbol_name(*name).into_owned()).collect();
+        let names: Vec<String> = names
+            .iter()
+            .map(|name| symbol_name(*name).into_owned())
+            .collect();
         values::set_attr(list, symbols().names, values::string_vector(&names)?)?;
     }
     match layout.tag {
@@ -715,7 +773,8 @@ unsafe fn do_as_record(call: &Call<'_>) -> R<Sexp> {
     if object.kind() != SexpType::List || length(object) == 0 {
         return Err(call.error("`as.record()` needs a non-empty named list"));
     }
-    let items = list_items(object, true).map_err(|message| call.error(format!("`as.record()`: {message}")))?;
+    let items = list_items(object, true)
+        .map_err(|message| call.error(format!("`as.record()`: {message}")))?;
     make(None, &items).map_err(|message| call.error(format!("`as.record()`: {message}")))
 }
 
@@ -728,7 +787,8 @@ unsafe fn do_as_tuple(call: &Call<'_>) -> R<Sexp> {
     if !matches!(object.kind(), SexpType::List | SexpType::Nil) {
         return Err(call.error("`as.tuple()` needs a list"));
     }
-    let items = list_items(object, false).map_err(|message| call.error(format!("`as.tuple()`: {message}")))?;
+    let items = list_items(object, false)
+        .map_err(|message| call.error(format!("`as.tuple()`: {message}")))?;
     make(None, &items).map_err(|message| call.error(format!("`as.tuple()`: {message}")))
 }
 
@@ -745,7 +805,8 @@ unsafe fn do_as_tag(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("`as.tag()` needs the payload as a list"));
     }
     let named = values::names(payload) != nil();
-    let items = list_items(payload, named).map_err(|message| call.error(format!("`as.tag()`: {message}")))?;
+    let items = list_items(payload, named)
+        .map_err(|message| call.error(format!("`as.tag()`: {message}")))?;
     make(Some(tag), &items).map_err(|message| call.error(format!("`as.tag()`: {message}")))
 }
 
@@ -753,10 +814,17 @@ unsafe fn list_items(list: Sexp, named: bool) -> Result<Vec<(Option<Sexp>, Sexp)
     let names = values::names(list);
     let mut items = Vec::with_capacity(length(list));
     for index in 0..length(list) {
-        let name = if names == nil() { None } else { Some(names.element(index)) };
+        let name = if names == nil() {
+            None
+        } else {
+            Some(names.element(index))
+        };
         let name = name.filter(|name| *name != values::na_string() && !name.bytes().is_empty());
         let field = match (named, name) {
-            (true, Some(name)) => Some(values::install_bytes(name.bytes()).map_err(|_| "cannot intern a field name".to_owned())?),
+            (true, Some(name)) => Some(
+                values::install_bytes(name.bytes())
+                    .map_err(|_| "cannot intern a field name".to_owned())?,
+            ),
             (true, None) => return Err(format!("element {} has no name", index + 1)),
             (false, Some(name)) => {
                 return Err(format!(
@@ -837,9 +905,10 @@ unsafe fn compare(
                 field_list(&left),
                 field_list(&right)
             )),
-            (Fields::Named(_), Fields::Positional(_)) | (Fields::Positional(_), Fields::Named(_)) => {
-                messages.push(format!("{prefix}target and current have different payload shapes"))
-            }
+            (Fields::Named(_), Fields::Positional(_))
+            | (Fields::Positional(_), Fields::Named(_)) => messages.push(format!(
+                "{prefix}target and current have different payload shapes"
+            )),
             (Fields::Positional(left), Fields::Positional(right)) => messages.push(format!(
                 "{prefix}target has {left} items, current has {right}"
             )),
@@ -873,14 +942,24 @@ unsafe fn compare_r(
     }
     let symbol = values::install("all.equal")?;
     let function = eval::find_var(symbol, values::base_namespace())?;
-    let function = if function == values::unbound() { nil() } else { eval::value_of(function)? };
+    let function = if function == values::unbound() {
+        nil()
+    } else {
+        eval::value_of(function)?
+    };
     if function.kind() != SexpType::Closure {
         messages.push(format!("{prefix}target and current differ"));
         return Ok(());
     }
     let mut args = vec![
-        Arg { tag: nil(), value: target },
-        Arg { tag: nil(), value: current },
+        Arg {
+            tag: nil(),
+            value: target,
+        },
+        Arg {
+            tag: nil(),
+            value: current,
+        },
     ];
     args.extend_from_slice(extra);
     let result = eval::apply(nil(), function, &args, env)?;

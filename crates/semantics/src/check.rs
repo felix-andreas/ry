@@ -2322,12 +2322,18 @@ impl<'db> Checker<'db, '_> {
                 self.join_writes(&complete);
             }
         }
-        let joined_values = if values.is_empty() { all_values } else { values };
+        let joined_values = if values.is_empty() {
+            all_values
+        } else {
+            values
+        };
         let mut joined_values = joined_values.into_iter();
         let Some(first) = joined_values.next() else {
             return unknown(self.db);
         };
-        let joined = joined_values.fold(first, |joined, value| self.join_branch_values(joined, value));
+        let joined = joined_values.fold(first, |joined, value| {
+            self.join_branch_values(joined, value)
+        });
         self.report_conflicting_tags(range, joined)
     }
 
@@ -2398,7 +2404,10 @@ impl<'db> Checker<'db, '_> {
                     .collect();
                 Some(Ty::new(self.db, TyKind::NativeTuple(items)))
             }
-            PatternKind::Record { fields, rest: false } => {
+            PatternKind::Record {
+                fields,
+                rest: false,
+            } => {
                 let fields = fields
                     .iter()
                     .map(|field| NativeField {
@@ -2424,7 +2433,13 @@ impl<'db> Checker<'db, '_> {
         let node = module.pattern(pattern);
         let subject = self.structural(subject);
         if let TyKind::Union(members) = subject.kind(self.db)
-            && !matches!(node.kind, PatternKind::Wildcard | PatternKind::Bind(_) | PatternKind::Missing | PatternKind::Or(_))
+            && !matches!(
+                node.kind,
+                PatternKind::Wildcard
+                    | PatternKind::Bind(_)
+                    | PatternKind::Missing
+                    | PatternKind::Or(_)
+            )
         {
             // A union narrows to the members the pattern can match.
             let mut members: Vec<Ty<'db>> = members
@@ -2495,31 +2510,34 @@ impl<'db> Checker<'db, '_> {
                 let Some(payload) = *payload else {
                     return;
                 };
-                let payload_ty = self.component_union(subject, |db, member| match member.kind(db) {
-                    TyKind::Tag(_, Some(payload)) => Some(*payload),
-                    _ => None,
-                });
+                let payload_ty =
+                    self.component_union(subject, |db, member| match member.kind(db) {
+                        TyKind::Tag(_, Some(payload)) => Some(*payload),
+                        _ => None,
+                    });
                 self.check_pattern(payload, payload_ty, bindings);
             }
             PatternKind::Tuple(items) => {
                 for (position, &item) in items.iter().enumerate() {
-                    let item_ty = self.component_union(subject, |db, member| match member.kind(db) {
-                        TyKind::NativeTuple(types) => types.get(position).copied(),
-                        _ => None,
-                    });
+                    let item_ty =
+                        self.component_union(subject, |db, member| match member.kind(db) {
+                            TyKind::NativeTuple(types) => types.get(position).copied(),
+                            _ => None,
+                        });
                     self.check_pattern(item, item_ty, bindings);
                 }
             }
             PatternKind::Record { fields, .. } => {
                 for field in fields.iter() {
                     let name = field.name;
-                    let field_ty = self.component_union(subject, |db, member| match member.kind(db) {
-                        TyKind::NativeRecord(native) => native
-                            .iter()
-                            .find(|native| native.name.text(db) == name.as_str())
-                            .map(|native| native.ty),
-                        _ => None,
-                    });
+                    let field_ty =
+                        self.component_union(subject, |db, member| match member.kind(db) {
+                            TyKind::NativeRecord(native) => native
+                                .iter()
+                                .find(|native| native.name.text(db) == name.as_str())
+                                .map(|native| native.ty),
+                            _ => None,
+                        });
                     self.check_pattern(field.pattern, field_ty, bindings);
                 }
             }
@@ -7147,7 +7165,7 @@ mod tests {
     use crate::hir::lower_item;
     use crate::naming::resolve_item;
     use syntax::SyntaxKind;
-    use crate::hir::is_expression_kind;
+    use syntax::ast::is_expression_kind;
 
     fn check_source<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
         let parse = syntax::parse(source);

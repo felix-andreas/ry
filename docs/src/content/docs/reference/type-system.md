@@ -542,6 +542,108 @@ site. When two union-typed contracts share only some members, such as `integer |
 call and `logical | character` at the next, the checker does not compute their intersection; annotate
 the value with the member type you intend.
 
+## Records, tuples and tags
+
+Records, tuples and tags are ry's own values, not R lists. The user guide is
+[Records and tags](/type-checking/records-and-tags/); this section is their typing contract. They are
+inline syntax, so with `[check] inline-annotations = false` each literal, tag or `match` is reported
+as a `ry-syntax` warning. Literals are still typed then, but a `match` gets no coverage check. Their types may be written in `#:` comments
+either way.
+
+### Record and tuple types
+
+| Literal | Type |
+| --- | --- |
+| `(x = 1, y = 2)` | `record{x: double, y: double}` |
+| `(1L, "a")` | `tuple{integer, character}` |
+| `(x = 1,)` | `record{x: double}` |
+| `(1L,)` | `tuple{integer}` |
+| `()` | `tuple{}` |
+
+A one-field record and a one-item tuple need the trailing comma, because `(x = 1)` and `(x)` keep
+their R meaning. A literal is all fields or all items, and a repeated field name is an error.
+
+- A record's fields are all required. Field order is part of neither its identity nor its type, so
+  `record{x: double, y: double}` and `record{y: double, x: double}` are the same type.
+- A record and a list are different types: `record{x: double}` does not fit `list{x: double}`, and
+  the reverse does not fit either.
+- `point$x` and `point[["x"]]` type as the field's type, and a field the record lacks is a
+  `type-mismatch`. `pair[[1L]]` with a literal index types as that item, and an index past the end
+  is a `type-mismatch`. A computed index types as the union of the item types.
+- `point$x <- value` rebinds `point` to a copy with that field replaced, and naming a field the
+  record lacks is an error when the code runs. The checker does not yet check such an assignment:
+  it reports neither the missing field nor a value of a different type.
+
+### Tag types
+
+A tag's type is written the way its value is, with types in place of values: `:None` has type
+`:None`, `:Some(5L)` has type `:Some(integer)`, and `:Rect(width = 2, height = 3)` has type
+`:Rect(width: double, height: double)`. Tags are structural and need no declaration.
+
+A *tag union* is an ordinary [union](#union-types), so the union rules apply unchanged: a tag value
+fits a union that lists a tag of the same name with a compatible payload, and an `if` whose branches
+build different tags types as their union. Normalization merges two members with the same tag name
+and payload shape into one member whose payloads are joined position by position, so joining
+`:Some(1L)` with `:Some("a")` gives `:Some(integer | character)`. Two members with the same name and
+a different payload shape are a `type-mismatch` where they meet.
+
+A union that lists `..` as a member is *open*: it also holds every tag it does not list.
+
+- A tag value fits an open union when the union lists its name with a compatible payload, or does
+  not list its name at all.
+- A closed union fits an open one when each of its members does.
+- An open union never fits a closed union. It fits another open union only when every tag the
+  target lists is also listed by the source, with a compatible payload.
+
+There are no row variables, so a function cannot pass the unlisted tags of an open union through
+with their types. Generic tag unions come from aliases, such as
+`#: @alias Option<T> {:Some(T) | :None}`; none is built in.
+
+### `match`
+
+`match (EXPR) { ARMS }` is a `match` expression only when the `{` is on the line of the closing `)`,
+so every R use of `base::match` keeps its meaning. An arm is `PATTERN => EXPR` or
+`PATTERN if (CONDITION) => EXPR`, separated by newlines, `;` or `,`.
+
+| Pattern | Matches |
+| --- | --- |
+| `_` | anything, binding nothing |
+| `name` | anything, binding it to `name` |
+| `1L`, `"a"`, `TRUE`, `NA`, `NULL`, `-1` | a length-one value equal to the literal |
+| `:Tag`, `:Tag(p1, p2)`, `:Tag(field = p)` | a tag with that name whose payload matches |
+| `(p1, p2)`, `(p,)` | a tuple of that length whose items match |
+| `(name = p, ..)`, `(name = p,)` | a record with those fields; without `..`, exactly those fields |
+| `p1 \| p2` | either pattern; both sides must bind the same names |
+
+The type of a `match` is the join of its arm types, as for `if`. A pattern that cannot match the
+scrutinee's type, such as a tag a closed union does not list or a field the record lacks, is a
+`type-mismatch` at the pattern. A scrutinee whose type is not yet known takes its shape from the
+patterns: the arms' tags form a closed union, or an open one when a catch-all arm exists. Pattern
+names are bound in the current environment, so after the `match` a name that only some arms bind
+types like a variable assigned in only some branches of an `if`.
+
+### Exhaustiveness
+
+When the scrutinee's type is known, the arms must cover every value of it. Coverage is computed over
+the cases the type has:
+
+- a closed tag union has one case per tag, and an open union adds an "other tags" case that only a
+  catch-all arm covers;
+- a tuple or a record is one case, with its items or fields checked in turn;
+- a scalar `logical` has three cases, `TRUE`, `FALSE` and `NA`;
+- `NULL` is one case, and a union has the cases of each member;
+- every other type has unboundedly many values, so only a binding or `_` covers it.
+
+A guarded arm never counts toward coverage, because its guard can be false. A `match` that misses a
+case is a `non-exhaustive-match` error naming up to three missing cases as patterns, and an arm that
+the arms above it already cover is an `unreachable-pattern` warning.
+
+### Crossing into R
+
+R functions and C code do not know these values. `as.list()` converts a record, tuple or tag to a
+list, and `as.record()`, `as.tuple()` and `as.tag()` convert back. Passing one to any other R
+function is an error when the code runs. The checker does not report it yet.
+
 ## Function types
 
 A function can be annotated in one of two styles, but not both at once:

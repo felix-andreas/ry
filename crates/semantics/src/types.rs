@@ -686,7 +686,10 @@ mod tests {
         let chr = scalar(&db, Atomic::Character);
         let merged = union_of(
             &db,
-            [tag(&db, "Some", Some(vec![int])), tag(&db, "Some", Some(vec![chr]))],
+            [
+                tag(&db, "Some", Some(vec![int])),
+                tag(&db, "Some", Some(vec![chr])),
+            ],
         );
         assert_eq!(
             merged,

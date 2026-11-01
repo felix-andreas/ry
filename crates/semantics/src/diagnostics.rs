@@ -4,15 +4,15 @@ use crate::annotations::{
 };
 use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
 use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
-use crate::hir::{ExprId, ExpressionKind, Symbol, is_expression_kind};
+use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind, TypeScheme,
-    map_child_types, substitute_rigid, union_of,
+    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
+    TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
@@ -23,6 +23,7 @@ use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{iter, mem};
 use syntax::SyntaxNode;
+use syntax::ast::is_expression_kind;
 use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]

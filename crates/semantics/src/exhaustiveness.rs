@@ -21,7 +21,10 @@ pub struct MatchFinding {
 pub enum MatchFindingKind {
     /// Cases no arm covers, written as patterns, at most [`WITNESS_LIMIT`] of them;
     /// `more` says whether others exist.
-    NonExhaustive { missing: Vec<String>, more: bool },
+    NonExhaustive {
+        missing: Vec<String>,
+        more: bool,
+    },
     Unreachable,
 }
 
@@ -38,10 +41,7 @@ pub fn match_findings<'db>(
         let ExpressionKind::Match { scrutinee, arms } = &expression.kind else {
             continue;
         };
-        let subject = types
-            .get(scrutinee)
-            .copied()
-            .unwrap_or_else(|| unknown(db));
+        let subject = types.get(scrutinee).copied().unwrap_or_else(|| unknown(db));
         let checker = Coverage { db };
         let mut rows: Vec<Vec<Pat>> = Vec::with_capacity(arms.len());
         for arm in arms.iter() {
@@ -98,7 +98,10 @@ enum Pat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Constructor {
     /// A tag with a payload has one field, the payload's tuple or record.
-    Tag { name: String, payload: bool },
+    Tag {
+        name: String,
+        payload: bool,
+    },
     Tuple(usize),
     /// Field names sorted as the record type stores them.
     Record(Vec<String>),
@@ -159,9 +162,15 @@ impl<'db> Coverage<'db> {
                 witnesses.truncate(limit);
                 witnesses
             }
-            Pat::Constructed(constructor, fields) => {
-                self.useful_constructor(&rows, constructor, fields, rest, head_type, rest_types, limit)
-            }
+            Pat::Constructed(constructor, fields) => self.useful_constructor(
+                &rows,
+                constructor,
+                fields,
+                rest,
+                head_type,
+                rest_types,
+                limit,
+            ),
             Pat::Wild => {
                 let (constructors, complete) = type_constructors(self.db, head_type);
                 let heads: Vec<&Constructor> = rows
@@ -374,26 +383,30 @@ fn constructor_field_types<'db>(
         TyKind::Union(members) => members,
         _ => std::slice::from_ref(&ty),
     };
-    let found = members.iter().find_map(|member| match (constructor, member.kind(db)) {
-        (Constructor::Tag { name, payload: true }, TyKind::Tag(member_name, Some(payload)))
-            if member_name.text(db) == name =>
-        {
-            Some(vec![*payload])
-        }
-        (Constructor::Tuple(length), TyKind::NativeTuple(items)) if items.len() == *length => {
-            Some(items.clone())
-        }
-        (Constructor::Record(names), TyKind::NativeRecord(fields))
-            if fields.len() == names.len()
-                && fields
-                    .iter()
-                    .zip(names)
-                    .all(|(field, name)| field.name.text(db) == name) =>
-        {
-            Some(fields.iter().map(|field| field.ty).collect())
-        }
-        _ => None,
-    });
+    let found = members
+        .iter()
+        .find_map(|member| match (constructor, member.kind(db)) {
+            (
+                Constructor::Tag {
+                    name,
+                    payload: true,
+                },
+                TyKind::Tag(member_name, Some(payload)),
+            ) if member_name.text(db) == name => Some(vec![*payload]),
+            (Constructor::Tuple(length), TyKind::NativeTuple(items)) if items.len() == *length => {
+                Some(items.clone())
+            }
+            (Constructor::Record(names), TyKind::NativeRecord(fields))
+                if fields.len() == names.len()
+                    && fields
+                        .iter()
+                        .zip(names)
+                        .all(|(field, name)| field.name.text(db) == name) =>
+            {
+                Some(fields.iter().map(|field| field.ty).collect())
+            }
+            _ => None,
+        });
     found.unwrap_or_else(|| vec![unknown(db); constructor.arity()])
 }
 
@@ -518,7 +531,10 @@ fn render(pattern: &Pat) -> String {
             Constructor::Tag { name, .. } => match fields.first() {
                 None => format!(":{name}"),
                 Some(Pat::Constructed(payload, payload_fields)) => {
-                    format!(":{name}({})", render_fields(payload, payload_fields).join(", "))
+                    format!(
+                        ":{name}({})",
+                        render_fields(payload, payload_fields).join(", ")
+                    )
                 }
                 Some(payload) => format!(":{name}({})", render(payload)),
             },

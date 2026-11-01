@@ -1145,7 +1145,9 @@ impl<'db> Lowering<'db> {
                     .find(|c| c.kind() == SyntaxKind::TYPE_TAG_PAYLOAD)
                 {
                     Some(payload) => {
-                        let named = payload.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD);
+                        let named = payload
+                            .children()
+                            .any(|c| c.kind() == SyntaxKind::TYPE_FIELD);
                         let positional = payload.children().any(|c| is_type_kind(c.kind()));
                         match (named, positional) {
                             (true, true) => {
@@ -1155,7 +1157,9 @@ impl<'db> Lowering<'db> {
                                 ));
                                 return unknown(self.db);
                             }
-                            (true, false) => Some(self.lower_native_fields(&payload, "this tag's payload")),
+                            (true, false) => {
+                                Some(self.lower_native_fields(&payload, "this tag's payload"))
+                            }
                             (false, true) => Some(self.lower_native_items(&payload)),
                             (false, false) => None,
                         }
@@ -1336,7 +1340,10 @@ impl<'db> Lowering<'db> {
     fn lower_native_fields(&mut self, node: &SyntaxNode, container: &str) -> Ty<'db> {
         let mut seen = FxHashSet::default();
         let mut fields = Vec::new();
-        for field in node.children().filter(|c| c.kind() == SyntaxKind::TYPE_FIELD) {
+        for field in node
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
+        {
             let Some(name) = name_text(&field) else {
                 continue;
             };

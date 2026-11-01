@@ -15,25 +15,3 @@ syntax/tests/tsr::expressions-errors__unsupported_subset2_with_over_multiple_lin
 # and calls escape validity a semantic concern, but no semantic layer checks it,
 # so every malformed escape is silently accepted.
 syntax/tests/syntax::quoting__escape_soup
-
-# ry syntax, not a defect on either side. Tuple and record literals, tags and
-# `match` are ry's own syntax and are chosen to be text R rejects, so no R
-# program changes meaning. `()` is the empty tuple.
-union.R__empty_group
-format/tests/format::records_and_tags__literals_space_like_calls
-format/tests/format::records_and_tags__one_item_literals_keep_a_hugged_comma
-format/tests/format::records_and_tags__tags_hug_their_payload
-format/tests/format::records_and_tags__match_puts_one_arm_per_line
-format/tests/format::records_and_tags__match_keeps_comma_separators_and_comments
-format/tests/format::records_and_tags__pattern_strings_use_double_quotes
-format/tests/format::records_and_tags__tag_and_record_types
-syntax/tests/syntax::literals__record_literal
-syntax/tests/syntax::literals__one_field_record
-syntax/tests/syntax::literals__tuple_literal
-syntax/tests/syntax::literals__empty_tuple
-syntax/tests/syntax::literals__tag_without_payload
-syntax/tests/syntax::literals__tag_with_payload
-syntax/tests/syntax::match__match_arms
-syntax/tests/syntax::match__one_field_record_pattern_with_rest
-syntax/tests/syntax::types__tag_union_type
-syntax/tests/tsr::expressions-errors__not_a_parenthesized_expression_1_ts_error
