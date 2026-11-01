@@ -7,7 +7,7 @@
 //! and compiled code reacts by deoptimizing, which hands the unwind to the interpreter.
 
 use crate::analysis::{Speculation, resolve_function};
-use heap::object::{Header, NA_INTEGER, Sexp, SexpType, is_na_real};
+use heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real};
 use interp::{
     arith,
     bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
@@ -265,6 +265,61 @@ unsafe fn finish_load(activation: &mut Activation, slot: i64, loaded: R<(Sexp, b
                 if local { 1 } else { 2 }
             }
         }
+    }
+}
+
+/// Loads a slot's variable for an inlined call without running any code: a promise must
+/// already be forced, and an active binding or a missing variable declines with
+/// [`outcome::LOAD_FAILED`], which hands the call back to tier 0.
+pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -> i32 {
+    unsafe {
+        checked(activation, outcome::LOAD_FAILED, |activation| {
+            let machine = machine(activation);
+            let symbol = compiled(activation).slots[slot as usize];
+            let heap = heap();
+            let empty = heap.known().empty_env;
+            let mut env = machine.env;
+            let mut local = true;
+            while env != empty {
+                if let Some(cell) = heap.frame_cell(env, symbol) {
+                    if cell.has_gp(gp::ACTIVE_BINDING) {
+                        return outcome::LOAD_FAILED;
+                    }
+                    let mut value = cell.cdr();
+                    if value.kind() == SexpType::Promise {
+                        if value.car() == values::unbound() {
+                            return outcome::LOAD_FAILED;
+                        }
+                        value = value.car();
+                    }
+                    if value == values::missing_arg() || value == values::unbound() {
+                        return outcome::LOAD_FAILED;
+                    }
+                    *slot_cell(activation, slot) = value;
+                    return if local { 1 } else { 2 };
+                }
+                local = false;
+                env = env.enclosure();
+            }
+            outcome::LOAD_FAILED
+        })
+    }
+}
+
+/// Whether `value` is a closure made from `formals` and `body` in the activation's
+/// environment, which is what an inlined call of it assumes.
+pub unsafe extern "C" fn jit_closure_matches(activation: *mut Activation, value: *mut Header, formals: *mut Header, body: *mut Header) -> i32 {
+    unsafe {
+        guarded(activation, 0, |activation| {
+            let (Some(value), Some(formals), Some(body)) = (Sexp::from_raw(value), Sexp::from_raw(formals), Sexp::from_raw(body)) else {
+                return 0;
+            };
+            let matches = value.kind() == SexpType::Closure
+                && value.car() == formals
+                && value.tag() == machine(activation).env
+                && bytecode::closure_body(value) == body;
+            matches as i32
+        })
     }
 }
 

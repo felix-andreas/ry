@@ -45,6 +45,9 @@ pub enum Ty {
     List,
     /// A boxed function known to be exactly this object.
     Fun(Sexp),
+    /// A closure made by a `function` expression of this body, in this activation's
+    /// environment: its formals and its body as source.
+    Closure(Sexp, Sexp),
     /// Any boxed value.
     Boxed,
 }
@@ -56,7 +59,7 @@ impl Ty {
 
     /// Whether every value of this type is a plain object, which no builtin dispatches on.
     pub fn is_plain(self) -> bool {
-        !matches!(self, Ty::Boxed | Ty::Bottom)
+        !matches!(self, Ty::Boxed | Ty::Bottom | Ty::Closure(..))
     }
 
     pub fn is_numeric_scalar(self) -> bool {
@@ -250,6 +253,17 @@ pub enum Action {
     SetVar { slot: usize, src: usize },
     /// A function lookup resolved at compile time; the speculations check it still holds.
     GetFun { dst: usize, function: Sexp },
+    /// A function lookup that finds a closure in a slot, loading the slot first when `load`.
+    GetFunSlot { dst: usize, slot: usize, load: Option<Ty> },
+    /// A call of a closure whose body was inlined: each step with the state before it, on
+    /// registers past tier 0's own. The steps have no effect but loading slots, so every check
+    /// that fails in them hands the call itself back to tier 0.
+    Inline { steps: Vec<(Action, State)> },
+    /// Loads a slot without forcing a promise, handing the instruction to tier 0 when the
+    /// variable is not a plain value. Only inlined calls use it.
+    Peek { slot: usize, ty: Ty },
+    /// Copies an unboxed scalar between registers.
+    Move { dst: usize, src: usize, ty: Ty },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step { effect: Effect, objects: Vec<usize>, dst: Option<(usize, Ty)> },
     /// The instruction's check always passes, so control falls through.
@@ -296,6 +310,9 @@ pub struct Block {
 
 pub struct Plan {
     pub insts: Vec<Inst>,
+    /// Registers past tier 0's that hold the unboxed values of inlined calls. They never live
+    /// across an instruction and never reach tier 0.
+    pub temporaries: usize,
     pub blocks: Vec<Block>,
     /// The block each leader pc starts.
     pub block_at: FxHashMap<usize, usize>,
@@ -327,6 +344,36 @@ unsafe fn defaulted_formals(formals: Sexp) -> FxHashSet<Sexp> {
         formal = formal.cdr();
     }
     defaulted
+}
+
+/// Registers past tier 0's for the values of inlined calls.
+const TEMPORARIES: usize = 32;
+
+/// How deeply an inlined call may itself inline calls.
+const MAX_INLINE_DEPTH: usize = 3;
+
+/// An inlined call being lowered.
+struct Lowering {
+    /// The state as of the next step.
+    state: State,
+    steps: Vec<(Action, State)>,
+    /// The next free temporary register.
+    next: usize,
+    /// The formals of the closure being inlined and the registers holding their arguments.
+    scope: Vec<(Sexp, usize)>,
+}
+
+impl Lowering {
+    fn push(&mut self, action: Action) {
+        self.steps.push((action, self.state.clone()));
+    }
+
+    fn temporary(&mut self) -> Option<usize> {
+        (self.next < self.state.registers.len()).then(|| {
+            self.next += 1;
+            self.next - 1
+        })
+    }
 }
 
 /// Why a body is not compiled.
@@ -381,6 +428,7 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         }
     }
     Ok(Plan {
+        temporaries: TEMPORARIES,
         insts: builder.insts,
         blocks,
         block_at,
@@ -583,7 +631,7 @@ impl Builder<'_> {
         loop_headers: &[usize],
     ) -> Result<(), Refusal> {
         let initial = State {
-            registers: vec![Ty::Bottom; self.registers],
+            registers: vec![Ty::Bottom; self.registers + TEMPORARIES],
             slots: vec![Slot::UNLOADED; self.slots.len()],
             visible: None,
         };
@@ -608,7 +656,7 @@ impl Builder<'_> {
                 let Some(&target) = block_at.get(&target_pc) else { continue };
                 let target_live = &live[blocks[target].start];
                 for (register, ty) in out.registers.iter_mut().enumerate() {
-                    if !target_live[register] {
+                    if !target_live.get(register).copied().unwrap_or(false) {
                         *ty = Ty::Bottom;
                     }
                 }
@@ -688,6 +736,18 @@ impl Builder<'_> {
             }
             Op::GetFun => {
                 let symbol = self.constant(operand(1));
+                if let Some(&slot) = self.slot_of.get(&symbol)
+                    && let Ty::Closure(..) = state.slots[slot].ty
+                    && !self.defaulted.contains(&symbol)
+                {
+                    let current = state.slots[slot];
+                    let load = current.may_be(status::NOT_LOADED).then_some(current.ty);
+                    if load.is_some() {
+                        state.slots[slot] = Slot { status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING, ty: current.ty };
+                    }
+                    state.registers[operand(0)] = current.ty;
+                    return self.finish(Action::GetFunSlot { dst: operand(0), slot, load }, inst.op, next_pc, state, edges);
+                }
                 match self.speculate(symbol) {
                     Some(function) if !self.slot_of.contains_key(&symbol) => {
                         state.registers[operand(0)] = Ty::Fun(function);
@@ -698,7 +758,7 @@ impl Builder<'_> {
             }
             Op::BranchUnlessBuiltin => match state.registers[operand(0)] {
                 Ty::Fun(function) if function.kind() == SexpType::Builtin => Action::FallThrough,
-                Ty::Fun(_) => {
+                Ty::Fun(_) | Ty::Closure(..) => {
                     edges.push((operand(1), state.clone()));
                     return Ok((Action::Branch, edges));
                 }
@@ -708,7 +768,18 @@ impl Builder<'_> {
                 }
             },
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
-            Op::CallGeneric | Op::Ast => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), Vec::new(), Effect::Opaque),
+            Op::CallGeneric => {
+                let call = self.constant(operand(2));
+                let inlined = match state.registers[operand(1)] {
+                    Ty::Closure(formals, body) => self.inline(state, call, formals, body, operand(0)),
+                    _ => None,
+                };
+                match inlined {
+                    Some(action) => action,
+                    None => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), Vec::new(), Effect::Opaque),
+                }
+            }
+            Op::Ast => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), Vec::new(), Effect::Opaque),
             Op::Guard => {
                 let symbol = self.constant(operand(0));
                 let expected = self.constant(operand(1));
@@ -780,8 +851,9 @@ impl Builder<'_> {
             }
             Op::Closure => {
                 state.visible = Some(true);
-                state.registers[operand(0)] = Ty::Boxed;
-                Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: Some((operand(0), Ty::Boxed)) }
+                let ty = Ty::Closure(self.constant(operand(1)), self.constant(operand(2)));
+                state.registers[operand(0)] = ty;
+                Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: Some((operand(0), ty)) }
             }
             Op::SubAssign => {
                 let slot = self.slot(self.constant(operand(1)));
@@ -818,15 +890,193 @@ impl Builder<'_> {
                 }
             }
         };
-        // Every instruction reports its fallthrough edge: the fixpoint reads the edges of a
-        // block's last instruction, and code generation reads the state after any instruction.
-        if falls_through(inst.op)
+        self.finish(action, inst.op, next_pc, state, edges)
+    }
+
+    /// Adds the fallthrough edge. Every instruction reports it: the fixpoint reads the edges of a
+    /// block's last instruction, and code generation reads the state after any instruction.
+    #[allow(clippy::type_complexity)]
+    fn finish(&self, action: Action, op: Op, next_pc: Option<usize>, state: &State, mut edges: Vec<(usize, State)>) -> Result<(Action, Vec<(usize, State)>), Refusal> {
+        if falls_through(op)
             && let Some(next) = next_pc
             && !matches!(action, Action::Branch)
         {
             edges.push((next, state.clone()));
         }
         Ok((action, edges))
+    }
+
+    /// Inlines a call of the closure `formals`/`body` made in this activation, when the call and
+    /// the body compute an unboxed scalar from scalars without any effect: arithmetic,
+    /// comparisons, inline builtins and further such calls. The arguments are evaluated before
+    /// the body, which R's lazy evaluation cannot observe because nothing in between has an
+    /// effect, and an argument that would fail or is not a plain scalar hands the whole call
+    /// back to tier 0, which then evaluates it lazily.
+    unsafe fn inline(&mut self, state: &mut State, call: Sexp, formals: Sexp, body: Sexp, dst: usize) -> Option<Action> {
+        let mut lowering = Lowering { state: state.clone(), steps: Vec::new(), next: self.registers, scope: Vec::new() };
+        let result = self.lower_call(&mut lowering, call, formals, body, 0)?;
+        let ty = lowering.state.registers[result];
+        lowering.push(Action::Move { dst, src: result, ty });
+        let mut after = lowering.state;
+        for register in self.registers..after.registers.len() {
+            after.registers[register] = Ty::Bottom;
+        }
+        after.registers[dst] = ty;
+        after.visible = Some(true);
+        *state = after;
+        Some(Action::Inline { steps: lowering.steps })
+    }
+
+    unsafe fn lower_call(&mut self, lowering: &mut Lowering, call: Sexp, formals: Sexp, body: Sexp, depth: usize) -> Option<usize> {
+        if depth > MAX_INLINE_DEPTH {
+            return None;
+        }
+        let args = values::pairlist_items(call.cdr());
+        let formals = values::pairlist_items(formals);
+        let positional = args.iter().all(|(tag, value)| *tag == values::nil() && *value != values::missing_arg() && *value != values::symbols().dots);
+        // Every formal needs its argument: a default is evaluated in the callee's frame, which
+        // the inlined body does not have.
+        if !positional || args.len() != formals.len() || formals.iter().any(|(symbol, _)| *symbol == values::symbols().dots) {
+            return None;
+        }
+        let outer = std::mem::take(&mut lowering.scope);
+        let mut scope = Vec::with_capacity(args.len());
+        for (_, expression) in &args {
+            let register = self.lower_expression(lowering, *expression, depth);
+            match register {
+                Some(register) => scope.push(register),
+                None => {
+                    lowering.scope = outer;
+                    return None;
+                }
+            }
+        }
+        lowering.scope = formals.iter().map(|(symbol, _)| *symbol).zip(scope).collect();
+        let result = self.lower_expression(lowering, body, depth);
+        lowering.scope = outer;
+        result
+    }
+
+    /// Lowers an expression of an inlined call into steps, returning the register that holds
+    /// its unboxed value. Symbols resolve in `lowering.scope` (the formals of the closure being
+    /// inlined) and then in this activation's slots, which is where both the call's arguments
+    /// and the free variables of a closure made in this activation are found.
+    unsafe fn lower_expression(&mut self, lowering: &mut Lowering, expression: Sexp, depth: usize) -> Option<usize> {
+        match expression.kind() {
+            SexpType::Integer | SexpType::Real | SexpType::Logical => {
+                let ty = constant_type(expression);
+                if !ty.is_unboxed() {
+                    return None;
+                }
+                let dst = lowering.temporary()?;
+                lowering.push(Action::Constant { dst, value: expression, ty });
+                lowering.state.registers[dst] = ty;
+                Some(dst)
+            }
+            SexpType::Symbol => {
+                if let Some(&(_, register)) = lowering.scope.iter().find(|(symbol, _)| *symbol == expression) {
+                    return Some(register);
+                }
+                let slot = self.peek_slot(lowering, expression)?;
+                let ty = lowering.state.slots[slot].ty;
+                if !ty.is_unboxed() {
+                    return None;
+                }
+                let dst = lowering.temporary()?;
+                lowering.push(Action::GetVar { dst, slot, load: None, forcing: false });
+                lowering.state.registers[dst] = ty;
+                Some(dst)
+            }
+            SexpType::Language => {
+                let head = expression.car();
+                if head.kind() != SexpType::Symbol {
+                    return None;
+                }
+                let args: Vec<Sexp> = values::pairlist_items(expression.cdr()).iter().map(|(tag, value)| {
+                    if *tag == values::nil() { *value } else { values::missing_arg() }
+                }).collect();
+                if args.contains(&values::missing_arg()) {
+                    return None;
+                }
+                if !lowering.scope.iter().any(|(symbol, _)| *symbol == head)
+                    && let Some(&slot) = self.slot_of.get(&head)
+                {
+                    // A closure this activation made, called from inlined code: inline it too.
+                    self.peek_slot(lowering, head)?;
+                    let Ty::Closure(formals, body) = lowering.state.slots[slot].ty else { return None };
+                    return self.lower_call(lowering, expression, formals, body, depth + 1);
+                }
+                let name = self.base_builtin(lowering, head)?;
+                let registers = args.iter().map(|&arg| self.lower_expression(lowering, arg, depth)).collect::<Option<Vec<usize>>>()?;
+                let types: Vec<Ty> = registers.iter().map(|&register| lowering.state.registers[register]).collect();
+                match (name.as_str(), registers.as_slice()) {
+                    ("(" | "{", [inner]) => Some(*inner),
+                    (operator, [left, right]) if let Some(&(arith, _)) = ARITHS.iter().find(|(_, symbol)| *symbol == operator) => {
+                        let (a, b) = (types[0], types[1]);
+                        let dst = lowering.temporary()?;
+                        let integers = a != Ty::Dbl && b != Ty::Dbl;
+                        let comparison = matches!(arith, Arith::Equal | Arith::NotEqual | Arith::Less | Arith::Greater | Arith::LessEqual | Arith::GreaterEqual);
+                        let (action, ty) = if comparison {
+                            let numeric = if integers { Numeric::Int } else { Numeric::Dbl };
+                            (Action::Comparison { arith, numeric, dst, left: *left, right: *right }, Ty::Lgl)
+                        } else {
+                            let numeric = match arith {
+                                Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
+                                _ => Numeric::Dbl,
+                            };
+                            let ty = if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl };
+                            (Action::Arithmetic { arith, numeric, dst, left: *left, right: *right }, ty)
+                        };
+                        lowering.push(action);
+                        lowering.state.registers[dst] = ty;
+                        Some(dst)
+                    }
+                    (name, _) => {
+                        let (intrinsic, result) = intrinsic_for(name, &types)?;
+                        if !result.is_unboxed() {
+                            return None;
+                        }
+                        let dst = lowering.temporary()?;
+                        lowering.push(Action::Intrinsic { intrinsic, dst, args: registers, result });
+                        lowering.state.registers[dst] = result;
+                        Some(dst)
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Makes sure `symbol`'s slot is loaded in inlined code, peeking at it when it may not be,
+    /// and returns the slot.
+    unsafe fn peek_slot(&mut self, lowering: &mut Lowering, symbol: Sexp) -> Option<usize> {
+        let slot = *self.slot_of.get(&symbol)?;
+        if self.defaulted.contains(&symbol) {
+            return None;
+        }
+        let current = lowering.state.slots[slot];
+        if current.may_be(status::NOT_LOADED) {
+            if !current.may_be(status::LOADED) || current.ty == Ty::Bottom || current.ty == Ty::Boxed {
+                return None;
+            }
+            lowering.push(Action::Peek { slot, ty: current.ty });
+            lowering.state.slots[slot] = Slot { status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING, ty: current.ty };
+        }
+        Some(slot)
+    }
+
+    /// The name of the base builtin `symbol` calls from inlined code, which must not be
+    /// shadowed by a formal of an inlined closure or a variable of this activation.
+    unsafe fn base_builtin(&mut self, lowering: &Lowering, symbol: Sexp) -> Option<String> {
+        if lowering.scope.iter().any(|(formal, _)| *formal == symbol) || self.slot_of.contains_key(&symbol) {
+            return None;
+        }
+        let function = self.speculate(symbol)?;
+        if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
+            return None;
+        }
+        let name = interp::eval::builtin_def(function).ok()?.name;
+        (values::symbol_name(symbol) == name).then(|| name.to_string())
     }
 
     /// A tier-0 step whose destination is refined to `dst`'s type afterwards.

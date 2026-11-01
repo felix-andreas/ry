@@ -160,8 +160,8 @@ fn flags() -> MemFlagsData {
 impl<'p, 'b> Translator<'p, 'b> {
     fn new(plan: &'p Plan, code: Sexp, mut builder: FunctionBuilder<'b>, call_conv: CallConv) -> Translator<'p, 'b> {
         let mut declare = |count: usize, ty: Type| (0..count).map(|_| builder.declare_var(ty)).collect::<Vec<_>>();
-        let integers = declare(plan.registers, I32);
-        let doubles = declare(plan.registers, F64);
+        let integers = declare(plan.registers + plan.temporaries, I32);
+        let doubles = declare(plan.registers + plan.temporaries, F64);
         let slot_integers = declare(plan.slots.len(), I32);
         let slot_doubles = declare(plan.slots.len(), F64);
         let statuses = declare(plan.slots.len(), I32);
@@ -299,8 +299,17 @@ impl<'p, 'b> Translator<'p, 'b> {
         let Some(before) = plan.before[position].clone() else {
             return Ok(false);
         };
+        self.action(position, before, plan.actions[position].clone())
+    }
+
+    /// Translates one action with the state before it; returns whether it emitted the block's
+    /// terminator. The steps of an inlined call come here too, with the call's position, so
+    /// every exit they take leaves at the call.
+    unsafe fn action(&mut self, position: usize, before: State, action: Action) -> Result<bool, Refusal> {
+        let plan = self.plan;
+        let inst = &plan.insts[position];
         let pc = inst.pc;
-        match plan.actions[position].clone() {
+        match action {
             Action::Skip | Action::FallThrough => {}
             Action::Constant { dst, value, ty } => {
                 match ty {
@@ -324,7 +333,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 if let Some(ty) = load {
                     self.load_slot(position, &before, slot, ty, forcing)?;
                 }
-                let ty = self.after(position)?.slots[slot].ty;
+                let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.is_unboxed() {
                     let value = self.use_slot(slot, ty);
                     self.def_register(dst, ty, value);
@@ -346,6 +355,24 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::GetFun { dst, function } => {
                 let pointer = self.builder.ins().iconst(I64, function.as_ptr() as i64);
                 self.store_register(dst, pointer);
+            }
+            Action::GetFunSlot { dst, slot, load } => {
+                if let Some(ty) = load {
+                    self.load_slot(position, &before, slot, ty, false)?;
+                }
+                let value = self.load_slot_cell(slot);
+                self.store_register(dst, value);
+            }
+            Action::Inline { steps } => {
+                for (step, state) in steps {
+                    self.action(position, state, step)?;
+                }
+                self.set_visible(&before, true);
+            }
+            Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
+            Action::Move { dst, src, ty } => {
+                let value = self.use_register(src, ty);
+                self.def_register(dst, ty, value);
             }
             Action::Step { effect, objects, dst } => self.step(position, &before, effect, &objects, dst)?,
             Action::Branch => {
@@ -598,7 +625,8 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Checks that the value an instruction left in `register` has type `ty` and unboxes it,
     /// deoptimizing to `next` otherwise.
     unsafe fn refine(&mut self, register: usize, ty: Ty, next: usize, after: State, live: Vec<bool>) {
-        if matches!(ty, Ty::Boxed | Ty::Bottom) {
+        // A closure an instruction just made has its type by construction.
+        if matches!(ty, Ty::Boxed | Ty::Bottom | Ty::Closure(..)) {
             return;
         }
         let value = self.load_register(register);
@@ -1165,6 +1193,53 @@ impl<'p, 'b> Translator<'p, 'b> {
         Ok(())
     }
 
+    /// Loads a slot for an inlined call without forcing anything, handing the call back to
+    /// tier 0 when the variable is not a plain value already.
+    unsafe fn peek(&mut self, position: usize, before: &State, slot: usize, ty: Ty) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        let mismatch = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::SPECULATION);
+        let done = self.builder.create_block();
+        let load = self.builder.create_block();
+        if before.slots[slot].may_be(status::LOADED) {
+            let status = self.builder.use_var(self.statuses[slot]);
+            let unloaded = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+            self.builder.ins().brif(unloaded, load, &[], done, &[]);
+        } else {
+            self.builder.ins().jump(load, &[]);
+        }
+        self.builder.switch_to_block(load);
+        let slot_constant = iconst(&mut self.builder, slot);
+        let result = self
+            .call(runtime::jit_peek_slot as *const () as usize, &[I64, I64], Some(I32), &[self.activation, slot_constant])
+            .ok_or(Refusal("a helper without a result"))?;
+        let declined = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
+        let peeked = self.builder.create_block();
+        let slow = self.builder.create_block();
+        self.builder.ins().brif(declined, slow, &[], peeked, &[]);
+        self.builder.switch_to_block(slow);
+        self.builder.set_cold_block(slow);
+        self.hand_off(position, before);
+        self.builder.switch_to_block(peeked);
+        let value = self.load_slot_cell(slot);
+        let fits = self.check(value, ty);
+        self.guard(fits, mismatch);
+        self.builder.def_var(self.statuses[slot], result);
+        match ty {
+            Ty::Int | Ty::Lgl => {
+                let unboxed = self.unbox(value, ty);
+                self.builder.def_var(self.slot_integers[slot], unboxed);
+            }
+            Ty::Dbl => {
+                let unboxed = self.unbox(value, ty);
+                self.builder.def_var(self.slot_doubles[slot], unboxed);
+            }
+            _ => {}
+        }
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
+        Ok(())
+    }
+
     /// Makes `slot` dirty with `value`: unboxed for an unboxed `ty`, else an object the slot
     /// then owns a reference to. Releases the reference the slot held to its old value, if it
     /// was dirty and boxed, after counting the new one, since the two may be the same object.
@@ -1445,6 +1520,14 @@ impl<'p, 'b> Translator<'p, 'b> {
     fn check(&mut self, value: Value, ty: Ty) -> Value {
         let (kind, scalar) = match ty {
             Ty::Fun(function) => return self.builder.ins().icmp_imm_s(IntCC::Equal, value, function.as_ptr() as i64),
+            Ty::Closure(formals, body) => {
+                let formals = self.builder.ins().iconst(I64, formals.as_ptr() as i64);
+                let body = self.builder.ins().iconst(I64, body.as_ptr() as i64);
+                let matches = self
+                    .call(runtime::jit_closure_matches as *const () as usize, &[I64, I64, I64, I64], Some(I32), &[self.activation, value, formals, body])
+                    .unwrap_or(formals);
+                return self.builder.ins().icmp_imm_s(IntCC::NotEqual, matches, 0);
+            }
             Ty::Int => (SexpType::Integer, true),
             Ty::Dbl => (SexpType::Real, true),
             Ty::Lgl => (SexpType::Logical, true),
