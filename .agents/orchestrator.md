@@ -72,7 +72,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 3 follow-up (session_0111kWqCeajgVo7m8XVxpfDk, Opus): stats natives, review fixes, GNU R `tests/*.R`, connection builtins, stringi, task callbacks.
 - Table engine follow-up (session_0111kWqB9LKMquDanx18xVTC, Opus): .EACHI, non-equi joins, warning channel, frame() name clash. PR #116 (beats data.table on all 19 db-benchmark queries) merged as 693ee85.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
-- Runtime step 7: the Cranelift JIT (session_0111kWqBQdpLjmrdiA5ajbhR, Opus).
+- JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
 - Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
