@@ -257,6 +257,22 @@ fn seeds_agree_across_tiers() {
     });
 }
 
+#[test]
+fn formal_shadows_enclosing_function() {
+    // `sum` names a base function, but the call must reach the function passed in its place.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("shadowing <- function(sum, n) {\nfor (i in 1:n) NULL\nsum(1, 2)\n}");
+        let outcomes: Vec<String> = (0..4)
+            .map(|_| run("shadowing(function(...) 99, 3L)"))
+            .collect();
+        jit::install_mode(Mode::Off);
+        for outcome in outcomes {
+            assert_eq!(outcome, "99");
+        }
+    });
+}
+
 /// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
 /// fresh closure with the same body under the forced JIT. Each closure is new, so the JIT's run
 /// starts from its own profile and compiles from the second call on.

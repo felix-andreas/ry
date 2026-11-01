@@ -19,6 +19,7 @@ rustc-hash.workspace = true
 regex.workspace = true
 regex-automata = "0.4"
 fancy-regex = { version = "0.20", features = ["leftmost_longest"] }
+regex-syntax = "0.8"
 flate2 = "1"
 libc = "0.2"
 stacker.workspace = true
@@ -30,6 +31,7 @@ zstd = "0.13"
 tiny-skia = "0.11"
 ab_glyph = "0.2"
 jpeg-encoder = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 encoding_rs = "0.8"
 memchr = "2.7"
 

@@ -477,7 +477,9 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
 /// `"max"`.
 unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     let x = values::materialize(call.arg(0))?;
-    if x.kind() == SexpType::Raw {
+    // A classed raw vector is ranked by its bytes, which is what `xtfrm` and so `order` and
+    // `sort` rely on; GNU R refuses only a bare raw vector.
+    if x.kind() == SexpType::Raw && !x.is_object() {
         return Err(error("raw vectors cannot be sorted"));
     }
     let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
@@ -912,6 +914,7 @@ enum Column<'a> {
     Integer(&'a [i32]),
     Real(&'a [f64]),
     Complex(&'a [Rcomplex]),
+    Raw(&'a [u8]),
     String(Vec<Option<Cow<'a, str>>>),
     /// Strings the radix sort orders: GNU R's radix sort compares bytes, as in the C locale,
     /// whatever the session's collation.
@@ -927,6 +930,7 @@ unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
         SexpType::Logical | SexpType::Integer => Some(Column::Integer(values::ints(vector))),
         SexpType::Real => Some(Column::Real(values::reals(vector))),
         SexpType::Complex => Some(Column::Complex(values::complexes(vector))),
+        SexpType::Raw => Some(Column::Raw(values::raws(vector))),
         SexpType::String => Some(Column::String(
             (0..length(vector))
                 .map(|index| string_at(vector, index))
@@ -965,7 +969,7 @@ impl Column<'_> {
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
             Column::String(items) | Column::Bytes(items) => items[index].is_none(),
-            Column::Grouped(_) => false,
+            Column::Grouped(_) | Column::Raw(_) => false,
         }
     }
 
@@ -974,6 +978,7 @@ impl Column<'_> {
         match self {
             Column::Integer(items) => items[left].cmp(&items[right]),
             Column::Grouped(items) => items[left].cmp(&items[right]),
+            Column::Raw(items) => items[left].cmp(&items[right]),
             Column::Real(items) => items[left]
                 .partial_cmp(&items[right])
                 .unwrap_or(Ordering::Equal),
@@ -1619,6 +1624,13 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
                     body_skipped,
                 )
                 && (flags.ignore_environment || x.tag() == y.tag())
+        }
+        // Promises match when they would evaluate the same code in the same environment, so two
+        // `...` objects built from the same call site compare equal.
+        SexpType::Promise => {
+            x.tag() == y.tag()
+                && identical(x.car(), y.car(), flags)
+                && identical(x.cdr(), y.cdr(), flags)
         }
         SexpType::Builtin | SexpType::Special => x.primitive_index() == y.primitive_index(),
         SexpType::ExternalPtr => {

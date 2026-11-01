@@ -1187,6 +1187,15 @@ impl Heap {
         }
     }
 
+    /// The binding count of each bucket of `env`'s hash table and the table's chain counter, as
+    /// GNU R's `env.profile` reports them, or `None` when the frame is not hashed.
+    pub unsafe fn frame_hash_profile(&self, env: Sexp) -> Option<(Vec<usize>, usize)> {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return None;
+        }
+        unsafe { (*env.frame_ptr()).hash_profile() }
+    }
+
     /// Marks the bindings of a closure frame made so far as its formals.
     pub unsafe fn mark_frame_formals(&mut self, env: Sexp) {
         (*env.frame_ptr()).mark_formals();

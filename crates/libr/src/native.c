@@ -1213,7 +1213,8 @@ static Rboolean ry_r_task_callback(SEXP expr, SEXP value, Rboolean succeeded, Rb
     cell = CDR(cell);
     SETCAR(cell, Rf_lang2(quote, expr));
     cell = CDR(cell);
-    SETCAR(cell, Rf_lang2(quote, value));
+    SEXP quoted_value = Rf_lang2(quote, value);
+    SETCAR(cell, quoted_value);
     cell = CDR(cell);
     SETCAR(cell, Rf_ScalarLogical(succeeded));
     cell = CDR(cell);
@@ -1222,6 +1223,9 @@ static Rboolean ry_r_task_callback(SEXP expr, SEXP value, Rboolean succeeded, Rb
         SETCAR(CDR(cell), VECTOR_ELT(state, 1));
     int failed = 0;
     SEXP result = R_tryEval(call, R_GlobalEnv, &failed);
+    /* Dropping the call's reference now keeps the callback from raising the value's reference
+       count until the next collection, which would make the next modification copy it. */
+    SETCADR(quoted_value, R_NilValue);
     Rboolean again = FALSE;
     if (!failed) {
         PROTECT(result);

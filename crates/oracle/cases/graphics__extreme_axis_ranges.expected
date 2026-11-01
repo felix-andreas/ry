@@ -1,0 +1,14 @@
+[stdout]
+| [1] -1.08e+308  1.08e+308
+| [1] -1e+308 -5e+307   0e+00  5e+307  1e+308
+| [1]  0e+00 1e-300  5e+00
+| [1] -307.6483   13.8400
+| [1] -307.6483  308.2504
+| [1] 1e-307 1e-184  1e-61  1e+62 1e+185 1e+308
+[messages]
+[warnings]
+- nonfinite axis=2 limits [GScale(-inf,1,..); log=TRUE] -- corrected now (in plot.window(...))
+[errors]
+[value]
+integer
+| c("null device" = 1L)
