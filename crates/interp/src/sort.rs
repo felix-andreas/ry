@@ -813,7 +813,7 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
     if codes.is_empty() && observations > 0 {
         return Err(error("group length is 0 but data length > 0"));
     }
-    if !codes.is_empty() && observations % codes.len() != 0 {
+    if !codes.is_empty() && !observations.is_multiple_of(codes.len()) {
         warning("data length is not a multiple of split variable")?;
     }
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); level_count];

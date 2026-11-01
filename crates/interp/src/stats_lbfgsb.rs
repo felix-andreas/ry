@@ -594,16 +594,16 @@ impl State {
                 limiting = Some(position);
             }
         }
-        if alpha < 1.0 {
-            if let Some(position) = limiting {
-                let i = free[position];
-                result[i] = if step[position] > 0.0 {
-                    self.upper[i]
-                } else {
-                    self.lower[i]
-                };
-                step[position] = 0.0;
-            }
+        if alpha < 1.0
+            && let Some(position) = limiting
+        {
+            let i = free[position];
+            result[i] = if step[position] > 0.0 {
+                self.upper[i]
+            } else {
+                self.lower[i]
+            };
+            step[position] = 0.0;
         }
         for (position, &i) in free.iter().enumerate() {
             result[i] += alpha * step[position];

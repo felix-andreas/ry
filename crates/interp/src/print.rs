@@ -17,7 +17,7 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| unsafe {
+    internal("prmatrix", 6, |call| {
         Err(call.error("prmatrix is not supported"))
     }),
 ];
@@ -280,10 +280,10 @@ pub unsafe fn environment_label(env: Sexp) -> R<String> {
     if env == values::empty_env() {
         return Ok("<environment: R_EmptyEnv>".into());
     }
-    if crate::envir::is_namespace(env) {
-        if let Some(name) = crate::envir::namespace_name(env) {
-            return Ok(format!("<environment: namespace:{name}>"));
-        }
+    if crate::envir::is_namespace(env)
+        && let Some(name) = crate::envir::namespace_name(env)
+    {
+        return Ok(format!("<environment: namespace:{name}>"));
     }
     if crate::envir::is_package_env(env) {
         let name = get_attr(env, symbols().name);

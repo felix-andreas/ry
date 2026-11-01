@@ -985,14 +985,8 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             }
             list
         }
-        SexpType::Closure => {
-            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
-            copy
-        }
-        SexpType::Object => {
-            let copy = triple(SexpType::Object, nil(), nil(), nil())?;
-            copy
-        }
+        SexpType::Closure => triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?,
+        SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
         _ if kind.is_vector() => {
             let source = materialize(object)?;
             let count = source.length() as usize;

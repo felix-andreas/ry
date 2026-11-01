@@ -68,7 +68,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("row", 1, |call| unsafe { row_col(call, true) }),
     internal("col", 1, |call| unsafe { row_col(call, false) }),
     internal("diag", 3, do_diag),
-    internal("max.col", 2, |call| unsafe {
+    internal("max.col", 2, |call| {
         Err(call.error("max.col is not supported"))
     }),
     internal("shortRowNames", 2, do_short_row_names),
@@ -947,7 +947,7 @@ unsafe fn single_position(
                 }
                 return Err(crate::unwind::error_in(
                     call,
-                    format!("invalid negative subscript in get1index <real>"),
+                    "invalid negative subscript in get1index <real>".to_string(),
                 ));
             }
             if value == 0.0 || value as usize > extent {
@@ -1233,11 +1233,11 @@ pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
 /// relies on that: its default `initialize` method calls it as a plain function on an object
 /// it has just copied, and discards the result.
 pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    if symbol == symbols().dot_data {
-        if let Some(function) = interp_methods_function("setDataPart")? {
-            let call = values::call(function, &[object, value])?;
-            return eval::eval(call, values::base_env());
-        }
+    if symbol == symbols().dot_data
+        && let Some(function) = interp_methods_function("setDataPart")?
+    {
+        let call = values::call(function, &[object, value])?;
+        return eval::eval(call, values::base_env());
     }
     let stored = if value == nil() {
         values::install_bytes(b"\x01NULL\x01")?
@@ -1406,7 +1406,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         if value_count == 0 {
             return Err(crate::unwind::error_in(call, "replacement has length zero"));
         }
-        if total % value_count != 0 {
+        if !total.is_multiple_of(value_count) {
             return Err(crate::unwind::error_in(
                 call,
                 "number of items to replace is not a multiple of replacement length",
@@ -1444,7 +1444,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if value_count == 0 {
         return Err(crate::unwind::error_in(call, "replacement has length zero"));
     }
-    if positions.len() % value_count != 0 {
+    if !positions.len().is_multiple_of(value_count) {
         conditions::warning_call(
             call,
             "number of items to replace is not a multiple of replacement length",
@@ -2514,14 +2514,17 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     let total = rows * cols;
     if count > 0
         && total > 0
-        && (total % count != 0 && count % rows.max(1) != 0 || (count > total && count % total != 0))
+        && (total % count != 0 && !count.is_multiple_of(rows.max(1))
+            || (count > total && !count.is_multiple_of(total)))
     {
         if count > total {
             conditions::warning_call(
                 call.call,
                 format!("data length differs from size of matrix: [{count} != {rows} x {cols}]"),
             )?;
-        } else if (rows > 0 && count % rows != 0) || (cols > 0 && count % cols != 0) {
+        } else if (rows > 0 && !count.is_multiple_of(rows))
+            || (cols > 0 && !count.is_multiple_of(cols))
+        {
             conditions::warning_call(
                 call.call,
                 format!(

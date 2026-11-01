@@ -387,10 +387,11 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             .map(|(tag, _)| tag)
             .collect();
         for symbol in crate::heap().frame_symbols(env) {
-            if !formals.contains(&symbol) && !vars.iter().any(|(var, _)| *var == symbol) {
-                if let Some(cell) = crate::heap().frame_cell(env, symbol) {
-                    vars.push((symbol, cell.cdr()));
-                }
+            if !formals.contains(&symbol)
+                && !vars.iter().any(|(var, _)| *var == symbol)
+                && let Some(cell) = crate::heap().frame_cell(env, symbol)
+            {
+                vars.push((symbol, cell.cdr()));
             }
         }
     }
@@ -675,11 +676,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     // Named arguments passed to NextMethod replace or extend the method's arguments.
     for extra in call.args.iter().skip(2) {
-        if extra.tag != nil() {
-            if let Some(existing) = args.iter_mut().find(|arg| arg.tag == extra.tag) {
-                existing.value = extra.value;
-                continue;
-            }
+        if extra.tag != nil()
+            && let Some(existing) = args.iter_mut().find(|arg| arg.tag == extra.tag)
+        {
+            existing.value = extra.value;
+            continue;
         }
         args.push(*extra);
     }

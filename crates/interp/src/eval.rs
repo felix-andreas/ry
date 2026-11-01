@@ -948,14 +948,14 @@ pub unsafe fn run_closure(
     let caller_srcref = state.srcref;
     state.srcref = values::get_attr(function, symbols().srcref);
     let signature = crate::annotations::enter(call, function, env, depth);
-    let result = signature.and_then(|signature| {
+    let result = signature.map(|signature| {
         let result = scope(|| {
             stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
             })
         });
-        Ok((signature, result))
+        (signature, result)
     });
     let (signature, result) = match result {
         Ok(pair) => pair,
@@ -1342,7 +1342,9 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
         None => (symbol, None),
     };
     let Some(cell) = heap.frame_cell(env, symbol) else {
-        return Err(error(format!("'missing' can only be used for arguments")));
+        return Err(error(
+            "'missing' can only be used for arguments".to_string(),
+        ));
     };
     if let Some(index) = index {
         let dots = cell.cdr();
@@ -1413,7 +1415,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("withVisible", 1, do_with_visible),
     internal("Recall", -1, do_recall).keep_visibility(),
     builtin(".Primitive", 1, do_primitive),
-    internal("identity", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("identity", 1, |call| Ok(call.arg(0))),
     special("~", -1, do_tilde),
     internal("delayedAssign", 4, do_delayed_assign).invisible(),
     internal("makeLazy", 5, do_make_lazy).invisible(),
@@ -1625,7 +1627,7 @@ pub unsafe fn as_condition(value: Sexp, call: Sexp) -> R<bool> {
                     | SexpType::Complex
                     | SexpType::Raw
             ) {
-                return Err(error_in(call, format!("argument is of length zero")));
+                return Err(error_in(call, "argument is of length zero".to_string()));
             }
             Ok(condition != 0)
         }
@@ -2206,7 +2208,7 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
     let name = values::require_string(call.arg(0), "name")?;
     crate::builtins::primitive(&name)
-        .ok_or_else(|| call.error(format!("no such primitive function")))
+        .ok_or_else(|| call.error("no such primitive function".to_string()))
 }
 
 /// A formula: the call itself, with class `formula` and the environment it was made in.

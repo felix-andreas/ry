@@ -1048,7 +1048,7 @@ pub fn parse_number(text: &str) -> f64 {
 /// The content of a quoted string literal, with escapes resolved.
 pub fn string_literal(text: &str) -> R<String> {
     let inner = &text[1..text.len().saturating_sub(1).max(1)];
-    unescape(inner).map_err(|message| error(message))
+    unescape(inner).map_err(error)
 }
 
 fn raw_string(text: &str) -> String {

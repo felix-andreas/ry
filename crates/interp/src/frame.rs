@@ -2704,10 +2704,7 @@ unsafe fn grouped_fallback(
         )
         .agg([col(ROW_INDEX)]);
     if keyed {
-        grouping = grouping.sort(
-            group_names.iter().cloned().collect::<Vec<_>>(),
-            Default::default(),
-        );
+        grouping = grouping.sort(group_names.to_vec(), Default::default());
     }
     let groups = grouping.collect().map_err(|failure| fail(&failure))?;
     let rows_column = groups.column(ROW_INDEX).map_err(|failure| fail(&failure))?;

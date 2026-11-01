@@ -22,9 +22,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("new.env", 3, do_new_env),
     internal("parent.env", 1, do_parent_env),
     internal("parent.env<-", 2, do_set_parent_env),
-    builtin("globalenv", 0, |_| unsafe { Ok(global_env()) }),
-    builtin("emptyenv", 0, |_| unsafe { Ok(empty_env()) }),
-    builtin("baseenv", 0, |_| unsafe { Ok(base_env()) }),
+    builtin("globalenv", 0, |_| Ok(global_env())),
+    builtin("emptyenv", 0, |_| Ok(empty_env())),
+    builtin("baseenv", 0, |_| Ok(base_env())),
     internal("topenv", 2, do_topenv),
     internal("environmentName", 1, do_environment_name),
     internal("assign", 4, do_assign).invisible(),
@@ -84,7 +84,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
     internal("unregisterNamespace", 1, do_unregister_namespace).invisible(),
-    internal("getNamespaceRegistry", 0, |_| unsafe {
+    internal("getNamespaceRegistry", 0, |_| {
         Ok(crate::heap().known().namespace_registry)
     }),
     internal("importIntoEnv", 4, do_import_into_env).invisible(),
@@ -97,9 +97,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mapply", 3, do_mapply),
     internal("rapply", 5, do_rapply),
     internal("eapply", 4, do_eapply),
-    internal("Filter", -1, |_| unsafe { Ok(nil()) }),
-    internal("env.profile", 1, |_| unsafe { Ok(nil()) }),
-    internal("emptyenv", 0, |_| unsafe { Ok(empty_env()) }),
+    internal("Filter", -1, |_| Ok(nil())),
+    internal("env.profile", 1, |_| Ok(nil())),
+    internal("emptyenv", 0, |_| Ok(empty_env())),
     builtin("...length", 0, do_dots_length),
     builtin("...elt", 1, do_dots_elt).keep_visibility(),
     builtin("...names", 0, do_dots_names),
@@ -115,7 +115,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("args", 1, do_args),
     internal("bodyCode", 1, do_body),
     internal("match.call", 4, do_match_call),
-    internal("sys.source", -1, |_| unsafe { Ok(nil()) }),
+    internal("sys.source", -1, |_| Ok(nil())),
 ];
 
 unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {
@@ -1211,7 +1211,7 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
         "max.print" | "nwarnings" => {
             let count = values::as_integer_scalar(value);
             if count < 1 {
-                return Err(error(&format!("invalid value for '{name}'")));
+                return Err(error(format!("invalid value for '{name}'")));
             }
             scalar_integer(count)
         }

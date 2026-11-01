@@ -28,7 +28,7 @@ The quality bar is four things.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** At 300,000 lines the test blocks run 1.7x to 2.1x GNU R's time, while whole processes are close to parity because GNU R spends minutes in testthat's per-file `gc()`. The gap is spread across the interpreter core rather than one hot spot: bytecode `step`, environment-chain lookup (`Heap::frame_cell`), `match_args`, and an allocation per binding and promise on every closure call. Basic operations measured alone are 2x to 4x GNU R's (a closure call, `seq`, `tryCatch`, `format`, `rlang::enquo`). Call overhead and cached global lookup belong to the JIT tier's call work (`decisions.md`, "the JIT tier"); vector kernels such as arithmetic and `sum` are already at or ahead of GNU R.
+- **Per-test time.** At 300,000 lines, with the JIT off, the test blocks run 1.18x to 1.39x GNU R's time, while whole processes are already faster than GNU R. The rest is spread over the interpreter core: on the first 20 dsbench files, bytecode `step` is about 12% of the profile, first touches of fresh nursery pages (`clear_page_erms`) 6%, `Heap::frame_cell` 4%, `allocate_with` 4%, collection 3.5% (mostly R-level `gc()` calls), `mk_char` 3% and `match_args` 2%. Measured alone, a call to a closure with many formals still costs 3x to 5x GNU R's (`inherits` 598 ns against 152, `identical` 1215 against 265, `nchar` 754 against 157), because each formal gets its own binding cell; a bulk cell allocation per frame is the next lever. A plain closure call is already faster than GNU R's (147 ns against 207).
 
 ## Open: the package loader
 
@@ -473,16 +473,17 @@ change that does not pay.
    scans words without touching dead objects. The header layout is private (packages reach it only
    through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
    in large-heap sessions such as the data.table groupby workloads.
-5. **The allocation fast path.** `Heap::allocate` searches `SLOT_SIZES` linearly, pops a `Vec`
-   free list, zeroes the whole slot and pushes onto `young` (`crates/heap/src/heap.rs`). Target: a
-   size-to-class lookup table, bump allocation through free runs of a page, and zeroing only what
-   must be initialized (pointer-holding objects; R leaves atomic vector payloads uninitialized).
+5. **The allocation fast path.** The size-to-class table and partial zeroing are in
+   (`SIZE_CLASS_BY_WORDS`, `allocate_with`'s `zeroed`; a triple is not zeroed at all). Left:
+   bump allocation through free runs of a page instead of popping a `Vec` free list, and the
+   `young` list push (`crates/heap/src/heap.rs`). `allocate_with` is about 4% of a profile of
+   the benchmark tests.
    Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
    2.5 to 3 times slower than GNU R ("Open: the JIT").
-6. **Scratch storage for argument matching.** `match_args` returns a fresh `Vec<Sexp>` on every
-   closure call (`crates/interp/src/eval.rs`). Target: a reusable scratch stack beside the
-   bytecode register file, so a call allocates only what R's semantics require (the frame and its
-   promises). Expected win: call-heavy code such as fib, lapply and `micro/closures`.
+6. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
+   stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
+   so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
+   interpreter's call path, lookups and allocation").
 7. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
    through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
    re-check. Target: hash the index, and sort by spelling only where output order is visible.
