@@ -350,6 +350,7 @@ pub fn check_item_with_annotation<'db>(
         globals,
         table,
         frame_level: 0,
+        discarded_if: None,
         expression_annotations: expression_annotations.iter().cloned().collect(),
         environment: Environment::default(),
         scheme_arena: Vec::new(),
@@ -742,6 +743,8 @@ struct Checker<'db, 'a> {
     /// its binding; a stored monotype lowers back to this level, or a later
     /// generalization in the frame would quantify a variable the environment still holds.
     frame_level: u32,
+    /// The `if` statement about to infer whose value its block discards.
+    discarded_if: Option<ExprId>,
     expression_annotations: FxHashMap<ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
@@ -1496,7 +1499,8 @@ impl<'db> Checker<'db, '_> {
             } => {
                 let (condition, then_branch, else_branch) =
                     (*condition, *then_branch, *else_branch);
-                self.infer_if(condition, then_branch, else_branch)
+                let discarded = self.discarded_if.take() == Some(id);
+                self.infer_if(condition, then_branch, else_branch, discarded)
             }
             ExpressionKind::For {
                 variable_range,
@@ -1529,7 +1533,16 @@ impl<'db> Checker<'db, '_> {
             ExpressionKind::Block { statements } => {
                 let statements = statements.clone();
                 let mut last = null(self.db);
-                for statement in statements {
+                let count = statements.len();
+                for (position, statement) in statements.into_iter().enumerate() {
+                    if position + 1 < count
+                        && matches!(
+                            self.module.expression(statement).kind,
+                            ExpressionKind::If { .. }
+                        )
+                    {
+                        self.discarded_if = Some(statement);
+                    }
                     last = self.infer(statement);
                 }
                 last
@@ -2476,6 +2489,7 @@ impl<'db> Checker<'db, '_> {
         condition: ExprId,
         then_branch: ExprId,
         else_branch: Option<ExprId>,
+        discarded: bool,
     ) -> Ty<'db> {
         self.expect_scalar_logical(condition);
         let guard = self.recognize_guard(condition);
@@ -2519,6 +2533,14 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
                 then_ty
+            }
+            // A value nobody reads must not relate its branches: unifying them would tie
+            // `nm(x, value)` to `attr(x, name) <- value` and so `x` to `value`.
+            (false, false) if discarded => {
+                self.join_writes(&then_writes);
+                let then_ty = self.table.resolve(self.db, then_ty);
+                let else_ty = self.table.resolve(self.db, else_ty);
+                union_of(self.db, [then_ty, else_ty])
             }
             (false, false) => {
                 self.join_writes(&then_writes);

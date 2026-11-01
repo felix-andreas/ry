@@ -223,3 +223,18 @@ Unknown
 neg <- function(m) -(m %*% m)
 #++++
 neg: <T> fn(m: T) -> matrix
+
+#---- a_discarded_if_does_not_tie_its_branches_together
+nm <- function(x, v) { names(x) <- paste0(v, "a"); x }
+sa <- function(x, name, value) {
+  if (name == "names" && length(x) && !is.null(value))
+    nm(x, value)
+  else
+    attr(x, name) <- value
+  invisible(x)
+}
+sa(1, "names", NULL)
+#++++
+nm: <T, U> fn(x: T, v: U) -> T
+sa: <T, U, V> fn(x: T, name: U, value: V) -> T
+double
