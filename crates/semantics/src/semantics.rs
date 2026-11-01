@@ -1347,7 +1347,7 @@ struct SalsaGlobals<'db> {
 /// A script's own declarations are visible to itself alone and shadow project names.
 /// Memoized per file so the merge runs once per file, not once per checked item.
 #[salsa::tracked(returns(ref))]
-fn visible_type_definitions<'db>(
+pub fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {

@@ -43,6 +43,18 @@ pub enum TypeErrorKind<'db> {
         expected: Ty<'db>,
         found: Ty<'db>,
     },
+    /// `(name = value)` where a one-field record `record{name: T}` is expected: R reads it as
+    /// an assignment, and the record needs a trailing comma.
+    AssignmentForRecord {
+        field: String,
+        expected: Ty<'db>,
+    },
+    /// A value that fits a nominal type's representation but was never made one, so the
+    /// message can say how to make it.
+    UnwrappedNominal {
+        nominal: Ty<'db>,
+        found: Ty<'db>,
+    },
     /// Separate from `Mismatch` so the differing field is named instead of printing
     /// two near-identical record types.
     RecordShape {
@@ -602,7 +614,7 @@ pub fn check_item_with_annotation<'db>(
         };
         top_level_bindings.push((info.name, binding_scheme));
     }
-    let match_findings = match_findings(db, module, &expression_types);
+    let match_findings = match_findings(db, context.table.definitions, module, &expression_types);
     ItemCheck {
         match_findings,
         expression_types,
@@ -1355,6 +1367,21 @@ impl<'db> Checker<'db, '_> {
     ) -> TypeError<'db> {
         let expected = self.table.resolve(self.db, expected);
         let found = self.table.resolve(self.db, found);
+        if let Some(field) = value.and_then(|value| self.assignment_for_record(value, expected)) {
+            return TypeError {
+                range,
+                kind: TypeErrorKind::AssignmentForRecord { field, expected },
+            };
+        }
+        if self.fits_representation(expected, found) {
+            return TypeError {
+                range,
+                kind: TypeErrorKind::UnwrappedNominal {
+                    nominal: expected,
+                    found,
+                },
+            };
+        }
         let Some(mismatch) = self.table.explain_record_mismatch(self.db, found, expected) else {
             if let Some((component, expected, found)) =
                 value.and_then(|value| self.native_component_mismatch(value, expected, found))
@@ -1378,6 +1405,46 @@ impl<'db> Checker<'db, '_> {
                 mismatch: Box::new(mismatch),
             },
         }
+    }
+
+    /// The field name when `value` is `(name = ...)` and `expected` is a one-field record of
+    /// that name, which is the record literal written without its trailing comma.
+    fn assignment_for_record(&self, value: ExprId, expected: Ty<'db>) -> Option<String> {
+        let TyKind::NativeRecord(fields) = expected.kind(self.db) else {
+            return None;
+        };
+        let [field] = fields.as_slice() else {
+            return None;
+        };
+        let mut current = value;
+        while let ExpressionKind::Paren(inner) = &self.module.expression(current).kind {
+            current = *inner;
+        }
+        let ExpressionKind::Assign { target, .. } = &self.module.expression(current).kind else {
+            return None;
+        };
+        let ExpressionKind::NameRef(name) = &self.module.expression(*target).kind else {
+            return None;
+        };
+        (name.as_str() == field.name.text(self.db)).then(|| name.as_str().to_owned())
+    }
+
+    /// Whether `found` is a structural value that `@Name(...)` would accept for the nominal
+    /// `expected`.
+    fn fits_representation(&mut self, expected: Ty<'db>, found: Ty<'db>) -> bool {
+        let TyKind::Named(name, arguments) = expected.kind(self.db) else {
+            return false;
+        };
+        if matches!(found.kind(self.db), TyKind::Named(..) | TyKind::Unknown | TyKind::Any) {
+            return false;
+        }
+        let Some(representation) = self.table.representation(self.db, *name, arguments) else {
+            return false;
+        };
+        let snapshot = self.table.snapshot();
+        let fits = self.table.compatible(self.db, found, representation);
+        self.table.rollback(snapshot);
+        fits
     }
 
     /// Follows a native record, tuple or tag literal down to the one component whose type
@@ -1930,7 +1997,8 @@ impl<'db> Checker<'db, '_> {
             let Some(&ty) = self.recorded.get(&value) else {
                 continue;
             };
-            let resolved = self.table.resolve(self.db, ty);
+            // A nominal record or tag is still a ry value when the code runs.
+            let resolved = self.structural(ty);
             if let Some(kind) = native_value_kind(self.db, resolved) {
                 let blamed = self.blame_range(value);
                 let mut index = first_call_error;
@@ -2838,7 +2906,18 @@ impl<'db> Checker<'db, '_> {
                 // A nominal's representation is fixed (that makes `@type` an invariant), so the
                 // write is checked against it and the value keeps its nominal type.
                 TyKind::Named(..) => {
-                    self.check_nominal_field_write(prior, &field_name, value_expression, value);
+                    let representation = self.structural(prior);
+                    if let TyKind::NativeRecord(_) = representation.kind(self.db) {
+                        self.write_replacement_step(
+                            lhs,
+                            ReplacementStep::Field(field_name),
+                            value_expression,
+                            representation,
+                            value,
+                        );
+                    } else {
+                        self.check_nominal_field_write(prior, &field_name, value_expression, value);
+                    }
                     prior
                 }
                 _ => prior,
@@ -2991,14 +3070,13 @@ impl<'db> Checker<'db, '_> {
                 self.table.rollback(snapshot);
             }
         }
-        let subject = self.structural(scrutinee_ty);
         let mut values = Vec::with_capacity(arms.len());
         let mut all_values = Vec::with_capacity(arms.len());
         let mut arm_writes = Vec::with_capacity(arms.len());
         for arm in arms {
             let mark = self.environment.mark();
             let mut bindings = Vec::new();
-            self.check_pattern(arm.pattern, subject, &mut bindings);
+            self.check_pattern(arm.pattern, scrutinee_ty, &mut bindings);
             for (slot, ty) in bindings {
                 self.environment.set(slot, EnvEntry::Mono(ty));
                 self.note_captured_write(slot, ty);
@@ -3158,6 +3236,11 @@ impl<'db> Checker<'db, '_> {
     ) {
         let module = self.module;
         let node = module.pattern(pattern);
+        // A name binds the value as it is, so a payload typed `Tree<T>` stays a `Tree<T>`;
+        // only a pattern that looks inside needs the representation.
+        if let PatternKind::Wildcard | PatternKind::Bind(_) | PatternKind::Missing = node.kind {
+            return self.check_pattern_components(pattern, subject, bindings);
+        }
         let subject = self.structural(subject);
         if let TyKind::Union(members) = subject.kind(self.db)
             && !matches!(
