@@ -19,11 +19,15 @@ that runtime runs.
 - **`DataFrame`** is a typed table with a Polars-style API that runs on the Polars engine.
 - **`ry load`** loads the package you are developing from source, lazily, and the `ry run` and `ry R`
   consoles reload what you edited before each command.
+- **`ry check --fix`** applies the safe fixes (`T` to `TRUE`, `=` to `<-`, a trailing comma), and
+  `--unsafe-fixes` also applies spelling suggestions. The editor gets the same quick fixes plus a
+  fix-all action, a call hierarchy, an outline with sections, folding, selection ranges, semantic
+  highlighting and parameter-name hints.
 
 Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
-aarch64) and macOS (Apple silicon and Intel). The Windows archive holds the checker, formatter and
-language server, without the runtime. The macOS runtime has not been run on a Mac yet, and it
-does not set up the symbol exports that compiled packages need, so treat it as experimental.
+aarch64), macOS (Apple silicon and Intel) and Windows (x86_64). The macOS and Windows runtimes have
+not been run on a real Mac or Windows machine yet (Windows only under Wine), so treat them as
+experimental.
 
 ## ry 0.3.0, a complete rewrite
 

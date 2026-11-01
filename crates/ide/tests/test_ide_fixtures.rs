@@ -1,13 +1,19 @@
-//! A case carries at most one `$0` cursor marker; the output renders each feature at it, then
-//! the inlay hints of the file holding it.
+//! Two suites. In `tests/ide`, a case carries at most one `$0` cursor marker; the output renders
+//! each point feature at it, then the inlay hints of the file holding it. In `tests/structure`, a
+//! case renders the file's outline, folds, semantic tokens and diagnostic fixes, and the selection
+//! ranges at its `$0` cursor when it has one.
 
 use {
     ide::{
-        DefinitionTarget, HoverDefinition, code_actions, completion, definition, document_symbols,
-        hover, inlay_hints, references, rename, signature_help, type_definition, workspace_symbols,
+        CodeActionKind, DefinitionTarget, DocumentSymbol, HoverDefinition, call_hierarchy_item,
+        code_actions, completion, definition, diagnostic_fixes, document_symbols, folding_ranges,
+        hover, incoming_calls, inlay_hints, outgoing_calls, references, rename, selection_ranges,
+        semantic_tokens, signature_help, type_definition, workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Applicability, file_diagnostics},
+        lints::{LintConfig, lint_file},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
         testing::{ProbeDatabase, with_fixture_project},
@@ -188,6 +194,36 @@ fn render_at(
     match rename(db, files, file, offset) {
         Some(edits) => output.push_str(&format!("rename: {} edit(s)\n", edits.len())),
         None => output.push_str("rename: none\n"),
+    }
+    // Rendered only where the cursor names a project function, so other cases stay unchanged.
+    if let Some(item) = call_hierarchy_item(db, files, file, offset) {
+        let render_calls = |calls: Vec<ide::CallHierarchyCall>, caller_side: bool| {
+            calls
+                .iter()
+                .map(|call| {
+                    let ranges: Vec<String> = call
+                        .ranges
+                        .iter()
+                        .map(|range| {
+                            let in_file = if caller_side {
+                                call.item.file
+                            } else {
+                                item.file
+                            };
+                            place(in_file, *range)
+                        })
+                        .collect();
+                    format!("{} [{}]", call.item.name, ranges.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        output.push_str(&format!(
+            "calls {}: in {} | out {}\n",
+            item.name,
+            render_calls(incoming_calls(db, files, &item), true),
+            render_calls(outgoing_calls(db, files, &item), false),
+        ));
     }
     if let Some(type_target) = type_definition(db, files, file, offset) {
         output.push_str(&render_target("type-definition", Some(type_target)));
@@ -437,4 +473,86 @@ fn ide_fixtures() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide"),
         &render,
     );
+}
+
+#[test]
+fn structure_fixtures() {
+    run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/structure"),
+        &render_structure,
+    );
+}
+
+/// Ranges render as the text they cover, so an expectation reads without counting bytes.
+fn render_structure(source: &str) -> String {
+    let cursor = source.find("$0");
+    let text = source.replacen("$0", "", 1);
+    let covered = |range: TextRange| {
+        let slice = text
+            .get(usize::from(range.start())..usize::from(range.end()))
+            .unwrap_or("<out of range>");
+        format!("{slice:?}")
+    };
+    with_fixture_project(
+        vec![(text.clone(), DocumentKind::Package)],
+        |db, sources| {
+            let file = sources[0];
+            let mut output = String::new();
+            fn outline(
+                symbols: &[DocumentSymbol],
+                depth: usize,
+                covered: &dyn Fn(TextRange) -> String,
+                output: &mut String,
+            ) {
+                for symbol in symbols {
+                    let detail = symbol
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" {detail}"))
+                        .unwrap_or_default();
+                    output.push_str(&format!(
+                        "symbol {}{} ({:?}{detail}) at {}\n",
+                        "  ".repeat(depth),
+                        symbol.name,
+                        symbol.kind,
+                        covered(symbol.selection),
+                    ));
+                    outline(&symbol.children, depth + 1, covered, output);
+                }
+            }
+            outline(&document_symbols(db, file), 0, &covered, &mut output);
+            for fold in folding_ranges(db, file) {
+                output.push_str(&format!(
+                    "fold {}..={} {:?}\n",
+                    fold.start_line, fold.end_line, fold.kind
+                ));
+            }
+            for (range, class) in semantic_tokens(db, file) {
+                output.push_str(&format!("token {} {class:?}\n", covered(range)));
+            }
+            let mut diagnostics = file_diagnostics(db, file);
+            diagnostics.extend(lint_file(db, file, &LintConfig::default()));
+            let whole = TextRange::up_to(TextSize::of(text.as_str()));
+            for fix in diagnostic_fixes(&diagnostics, whole) {
+                let unsafe_marker = match fix.kind {
+                    CodeActionKind::DiagnosticFix(Applicability::Unsafe) => " (unsafe)",
+                    _ => "",
+                };
+                for edit in &fix.edits {
+                    output.push_str(&format!(
+                        "fix {}{unsafe_marker}: {} -> {:?}\n",
+                        fix.title,
+                        covered(edit.range),
+                        edit.replacement
+                    ));
+                }
+            }
+            if let Some(at) = cursor {
+                for range in selection_ranges(db, file, TextSize::from(at as u32)) {
+                    output.push_str(&format!("select {}\n", covered(range)));
+                }
+            }
+            output
+        },
+    )
 }

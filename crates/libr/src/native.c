@@ -8,26 +8,55 @@
  * here too, because stable Rust cannot define C variadic functions.
  *
  * Every function defined here that native code may call carries RY_EXPORT; build.rs collects
- * them into the version script that exports them from libR.
+ * them into the version script that exports them from libR. On Windows RY_EXPORT is
+ * dllexport instead, which the linker honors beside the export list rustc writes.
  */
 
+/* Defined before the headers, so LibExtern declares R.dll's own data without dllimport. */
+#define R_DLL_BUILD
+
 #include <setjmp.h>
-#include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <unistd.h>
+#endif
+
 #include <Rinternals.h>
 #include <R_ext/Rdynload.h>
 
+#ifdef _WIN32
+#define RY_EXPORT __declspec(dllexport)
+#define RY_EXPORT_DATA __declspec(dllexport)
+/*
+ * mingw-w64's setjmp macro records the caller's frame, and longjmp then unwinds the stack through
+ * SEH, which needs unwind data for every frame it crosses and runs C++ destructors on the way.
+ * With a null frame the CRT's longjmp restores registers only, as longjmp does on Unix, which is
+ * what the no-Rust-frame invariant above is built for. The compiler builtins are not an option:
+ * clang's __builtin_setjmp saves the canonical frame address but its landing code treats it as
+ * the frame pointer, so a function whose frame pointer sits above the stack pointer (as
+ * R_UnwindProtect's does) resumes with every local misread.
+ */
+#define RY_SETJMP(buffer) _setjmp(buffer, NULL)
+#define RY_LONGJMP(buffer) longjmp(buffer, 1)
+typedef jmp_buf RyJumpBuffer;
+#else
 #define RY_EXPORT __attribute__((visibility("default")))
 #define RY_EXPORT_DATA __attribute__((visibility("default")))
+#define RY_SETJMP(buffer) setjmp(buffer)
+#define RY_LONGJMP(buffer) longjmp(buffer, 1)
+typedef jmp_buf RyJumpBuffer;
+#endif
 
 /* Implemented in Rust (crates/libr/src/boundary.rs). */
 extern void ry_state_save(size_t *protect, size_t *vmax);
@@ -45,7 +74,7 @@ extern void ry_handlers_leave(SEXP target);
 extern void ry_fatal_without_context(void) __attribute__((noreturn));
 
 typedef struct RyContext {
-    jmp_buf buffer;
+    RyJumpBuffer buffer;
     struct RyContext *previous;
     size_t protect;
     size_t vmax;
@@ -77,7 +106,7 @@ __attribute__((noreturn)) void ry_jump(void)
 {
     if (ry_top_context == NULL)
         ry_fatal_without_context();
-    longjmp(ry_top_context->buffer, 1);
+    RY_LONGJMP(ry_top_context->buffer);
 }
 
 RY_EXPORT int ry_context_depth(void)
@@ -166,7 +195,7 @@ int ry_call_native(DL_FUNC function, int count, SEXP *args, SEXP *result)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -179,7 +208,7 @@ int ry_call_void(void (*function)(void *), void *data)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -192,7 +221,7 @@ int ry_call_init(void (*function)(DllInfo *), DllInfo *info)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -206,16 +235,38 @@ int ry_call_init(void (*function)(DllInfo *), DllInfo *info)
  * `Function c("c")` looks up `c`). An error there jumps out of dlopen, as it does in GNU R;
  * the loader lock is recursive and stays with this thread, so later loads still work.
  */
-void *ry_call_dlopen(const char *path, int flags, int *status)
+/*
+ * A failed load leaves its error code in *load_error on Windows, read right after LoadLibraryExW
+ * because the cleanup that follows may overwrite GetLastError(). Elsewhere dlerror() keeps the
+ * message until the next dl call, and *load_error stays 0.
+ */
+void *ry_call_dlopen(const char *path, int global, int *status, unsigned int *load_error)
 {
+    *load_error = 0;
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         *status = 1;
         return NULL;
     }
-    void *handle = dlopen(path, flags);
+#ifdef _WIN32
+    /*
+     * The path is UTF-8, as every path in ry is, so it goes through the wide API. The altered
+     * search path finds a package's own dependent DLLs beside it in libs/x64.
+     */
+    (void) global;
+    void *handle = NULL;
+    int length = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    wchar_t *wide = length > 0 ? malloc(sizeof(wchar_t) * (size_t) length) : NULL;
+    if (wide != NULL && MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, length) > 0)
+        handle = (void *) LoadLibraryExW(wide, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (handle == NULL)
+        *load_error = (unsigned int) GetLastError();
+    free(wide);
+#else
+    void *handle = dlopen(path, RTLD_NOW | (global ? RTLD_GLOBAL : RTLD_LOCAL));
+#endif
     ry_context_pop(&context);
     *status = 0;
     return handle;
@@ -225,7 +276,7 @@ int ry_call_finalizer(R_CFinalizer_t function, SEXP object)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -240,7 +291,7 @@ int ry_altrep_length(R_xlen_t (*method)(SEXP), SEXP x, R_xlen_t *result)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -253,7 +304,7 @@ int ry_altrep_dataptr(void *(*method)(SEXP, Rboolean), SEXP x, int writable, voi
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -266,7 +317,7 @@ int ry_altrep_dataptr_or_null(const void *(*method)(SEXP), SEXP x, const void **
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -279,7 +330,7 @@ int ry_altrep_int_elt(int (*method)(SEXP, R_xlen_t), SEXP x, R_xlen_t i, int *re
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -292,7 +343,7 @@ int ry_altrep_real_elt(double (*method)(SEXP, R_xlen_t), SEXP x, R_xlen_t i, dou
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -305,7 +356,7 @@ int ry_altrep_sexp_elt(SEXP (*method)(SEXP, R_xlen_t), SEXP x, R_xlen_t i, SEXP 
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -318,7 +369,7 @@ int ry_altrep_int_query(int (*method)(SEXP), SEXP x, int *result)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -332,7 +383,7 @@ int ry_altrep_region(R_xlen_t (*method)(SEXP, R_xlen_t, R_xlen_t, void *), SEXP 
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -345,7 +396,7 @@ int ry_altrep_raw_elt(Rbyte (*method)(SEXP, R_xlen_t), SEXP x, R_xlen_t i, Rbyte
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -358,7 +409,7 @@ int ry_altrep_complex_elt(Rcomplex (*method)(SEXP, R_xlen_t), SEXP x, R_xlen_t i
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -371,7 +422,7 @@ int ry_altrep_set_elt(void (*method)(SEXP, R_xlen_t, SEXP), SEXP x, R_xlen_t i, 
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -503,6 +554,13 @@ RY_EXPORT SEXP R_mapAttrib(SEXP x, SEXP (*FUN)(SEXP, SEXP, void *), void *data)
 
 /* Non-local exits that native code sets up itself. */
 
+/* Defined before its first use: clang refuses dllexport on a function already called. */
+RY_EXPORT void R_ContinueUnwind(SEXP cont)
+{
+    ry_unwind_restore(cont);
+    ry_jump();
+}
+
 /*
  * The body runs in a context. When an unwind reaches it, the unwind moves into `cont`, the
  * cleanup runs with jump = TRUE (C++ bindings throw from it, so their destructors run, and call
@@ -513,7 +571,7 @@ RY_EXPORT SEXP R_UnwindProtect(SEXP (*fun)(void *), void *data,
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         ry_unwind_save(cont);
         cleanfun(cleandata, TRUE);
@@ -525,18 +583,12 @@ RY_EXPORT SEXP R_UnwindProtect(SEXP (*fun)(void *), void *data,
     return result;
 }
 
-RY_EXPORT void R_ContinueUnwind(SEXP cont)
-{
-    ry_unwind_restore(cont);
-    ry_jump();
-}
-
 RY_EXPORT SEXP R_ExecWithCleanup(SEXP (*fun)(void *), void *data, void (*cleanfun)(void *),
                                  void *cleandata)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         cleanfun(cleandata);
         ry_jump();
@@ -554,7 +606,7 @@ RY_EXPORT Rboolean R_ToplevelExec(void (*fun)(void *), void *data)
     /* A top-level context hides the condition handlers outside it, as in GNU R. */
     SEXP saved = PROTECT(ry_handlers_enter(R_NilValue));
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         ry_handlers_leave(saved);
         UNPROTECT(1);
@@ -583,7 +635,7 @@ RY_EXPORT SEXP R_tryCatch(SEXP (*body)(void *), void *bdata, SEXP conds,
        inside sees it, ordered among the R-level handlers. */
     SEXP target = PROTECT(ry_handlers_enter(conds));
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         ry_handlers_leave(target);
         SEXP condition = ry_pending_condition(conds, target);
@@ -597,7 +649,7 @@ RY_EXPORT SEXP R_tryCatch(SEXP (*body)(void *), void *bdata, SEXP conds,
         /* The handler may raise in turn; `finally` runs on that path too. */
         RyContext handling;
         ry_context_push(&handling);
-        if (setjmp(handling.buffer)) {
+        if (RY_SETJMP(handling.buffer)) {
             ry_context_land(&handling);
             if (finally != NULL)
                 finally(fdata);
@@ -634,6 +686,12 @@ RY_EXPORT SEXP R_tryCatchError(SEXP (*body)(void *), void *bdata,
  * the event loop through them. The variables are plain C data, so they live here.
  */
 
+RY_EXPORT_DATA void (*R_PolledEvents)(void) = NULL;
+RY_EXPORT_DATA int R_wait_usec = 0;
+
+/* R_ext/eventloop.h is Unix-only in GNU R too: Windows has no select over file descriptors. */
+#ifndef _WIN32
+
 typedef void (*RyInputHandlerProc)(void *);
 
 typedef struct RyInputHandler {
@@ -646,8 +704,6 @@ typedef struct RyInputHandler {
 } RyInputHandler;
 
 RY_EXPORT_DATA RyInputHandler *R_InputHandlers = NULL;
-RY_EXPORT_DATA void (*R_PolledEvents)(void) = NULL;
-RY_EXPORT_DATA int R_wait_usec = 0;
 
 RY_EXPORT RyInputHandler *addInputHandler(RyInputHandler *handlers, int fd,
                                           RyInputHandlerProc handler, int activity)
@@ -752,6 +808,8 @@ RY_EXPORT void R_runHandlers(RyInputHandler *handlers, fd_set *mask)
     }
 }
 
+#endif
+
 /* R_ProcessEvents runs the polled-events hook and acts on a pending interrupt. */
 RY_EXPORT void R_ProcessEvents(void)
 {
@@ -785,6 +843,49 @@ RY_EXPORT_DATA int R_CStackDir = 1;
 RY_EXPORT_DATA int (*R_timeout_handler)(void) = NULL;
 RY_EXPORT_DATA long R_timeout_val = 0;
 RY_EXPORT_DATA Rboolean UserBreak = FALSE;
+
+#ifdef _WIN32
+/* Windows-only parts of R.dll's interface. GNU R's `libintl.h`, which Windows packages compile
+ * against, renames the gettext family to the `libintl_` names R.dll exports. Messages are not
+ * translated, so each returns its message id, picking the plural form by `n` as English does.
+ * These exports spell out dllexport because build.rs collects the Unix export lists from
+ * `RY_EXPORT` markers without evaluating `#ifdef`. */
+__declspec(dllexport) Rboolean EmitEmbeddedUTF8 = FALSE;
+__declspec(dllexport) char *libintl_gettext(const char *msgid)
+{
+    return (char *) msgid;
+}
+__declspec(dllexport) char *libintl_dgettext(const char *domain, const char *msgid)
+{
+    return (char *) msgid;
+}
+__declspec(dllexport) char *libintl_dcgettext(const char *domain, const char *msgid, int category)
+{
+    return (char *) msgid;
+}
+__declspec(dllexport) char *libintl_dngettext(const char *domain, const char *singular,
+                                              const char *plural, unsigned long n)
+{
+    return (char *) (n == 1 ? singular : plural);
+}
+
+/* R's own Rblas.dll and Rlapack.dll leave the reference error handler to R.dll and fail to load
+ * without it. Linux and macOS use the system BLAS and LAPACK, which carry their own, and an export
+ * from libR would interpose on it. When the interpreter calls a routine from Rust, jumping would
+ * cross Rust frames, so the handler returns and the routine reports the negative `info` to its
+ * caller, which raises the error instead. */
+int ry_direct_fortran_active(void);
+__declspec(dllexport) void xerbla_(const char *routine, int *info, size_t routine_length)
+{
+    if (ry_direct_fortran_active())
+        return;
+    char name[7];
+    size_t length = routine_length < 6 ? routine_length : 6;
+    memcpy(name, routine, length);
+    name[length] = '\0';
+    Rf_error("BLAS/LAPACK routine '%6s' gave error code %d", name, -*info);
+}
+#endif
 RY_EXPORT_DATA int R_num_math_threads = 1;
 RY_EXPORT_DATA int R_max_num_math_threads = 1;
 
@@ -1076,7 +1177,7 @@ void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, Rboolean v
     RyContext context;
     ry_context_push(&context);
     ry_task_callbacks_running = 1;
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         ry_task_callbacks_running = 0;
         ry_sweep_task_callbacks();
@@ -1196,7 +1297,7 @@ SEXP ry_maphash_call(SEXP (*function)(SEXP, SEXP, void *), SEXP key, SEXP value,
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         *status = 1;
         return NULL;
@@ -1218,7 +1319,7 @@ RY_EXPORT SEXP R_withCallingErrorHandler(SEXP (*body)(void *), void *bdata,
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         SEXP classes = PROTECT(Rf_mkString("error"));
         SEXP condition = ry_pending_condition(classes, R_NilValue);
@@ -1242,7 +1343,7 @@ RY_EXPORT SEXP R_withCallingErrorHandler(SEXP (*body)(void *), void *bdata,
     {                                                                                        \
         RyContext context;                                                                   \
         ry_context_push(&context);                                                           \
-        if (setjmp(context.buffer)) {                                                        \
+        if (RY_SETJMP(context.buffer)) {                                                        \
             ry_context_land(&context);                                                       \
             return 1;                                                                        \
         }                                                                                    \
@@ -1282,7 +1383,7 @@ int ry_stream_out_bytes(void (*function)(R_outpstream_t, void *, int), R_outpstr
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1296,7 +1397,7 @@ int ry_stream_in_bytes(void (*function)(R_inpstream_t, void *, int), R_inpstream
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1309,7 +1410,7 @@ int ry_stream_in_char(int (*function)(R_inpstream_t), R_inpstream_t stream, int 
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1322,7 +1423,7 @@ int ry_stream_hook(SEXP (*function)(SEXP, SEXP), SEXP object, SEXP data, SEXP *r
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1343,7 +1444,7 @@ int ry_stream_hook(SEXP (*function)(SEXP, SEXP), SEXP object, SEXP data, SEXP *r
 #define RY_CONNECTION_ENTER                                                                     \
     RyContext context;                                                                          \
     ry_context_push(&context);                                                                  \
-    if (setjmp(context.buffer)) {                                                               \
+    if (RY_SETJMP(context.buffer)) {                                                               \
         ry_context_land(&context);                                                              \
         return 1;                                                                               \
     }
@@ -1448,7 +1549,7 @@ int ry_call_optimfn(optimfn *fn, int n, double *par, void *ex, double *result)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1461,7 +1562,7 @@ int ry_call_optimgr(optimgr *gr, int n, double *par, double *gradient, void *ex)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1474,7 +1575,7 @@ int ry_call_integrand(integr_fn *f, double *x, int n, void *ex)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1487,7 +1588,7 @@ int ry_call_fcn(fcn_p fcn, int n, double *x, double *value, void *state)
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }
@@ -1500,7 +1601,7 @@ int ry_call_d2fcn(d2fcn_p d2fcn, int nr, int n, double *x, double *h, void *stat
 {
     RyContext context;
     ry_context_push(&context);
-    if (setjmp(context.buffer)) {
+    if (RY_SETJMP(context.buffer)) {
         ry_context_land(&context);
         return 1;
     }

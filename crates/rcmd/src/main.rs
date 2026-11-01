@@ -143,14 +143,19 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
     let input = expressions.clone();
     let library_path = home.join("lib").join(rcmd::LIBR_FILE);
     // Loading ry's libR globally is what lets compiled packages resolve R's API from it: by
-    // soname on Linux, by flat lookup on macOS.
+    // soname on Linux, by flat lookup on macOS. On Windows a package DLL imports from "R.dll"
+    // by name, which finds the module already loaded.
+    #[cfg(unix)]
     let library = unsafe {
         libloading::os::unix::Library::open(
             Some(&library_path),
             libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
         )
     }
-    .map_err(|error| {
+    .map(libloading::Library::from);
+    #[cfg(windows)]
+    let library = unsafe { libloading::Library::new(&library_path) };
+    let library = library.map_err(|error| {
         rcmd::Error::Usage(format!(
             "cannot load ry's runtime {}: {error}",
             library_path.display()

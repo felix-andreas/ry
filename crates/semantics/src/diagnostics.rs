@@ -26,14 +26,15 @@ use {
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
-            substitute_rigid, union_of,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, for_each_child_type,
+            map_child_types, substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         collections::{BTreeMap, BTreeSet},
         mem,
+        ops::Range,
     },
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
@@ -54,6 +55,9 @@ pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
     pub related: Vec<RelatedLocation>,
+    /// The one edit that resolves the finding, when it is mechanical. Editors offer it as a
+    /// quick fix, so the finding and its fix cannot disagree about the range.
+    pub fix: Option<Fix>,
 }
 
 impl Diagnostic {
@@ -64,8 +68,86 @@ impl Diagnostic {
             code,
             message,
             related: Vec::new(),
+            fix: None,
         }
     }
+
+    pub fn with_fix(
+        mut self,
+        applicability: Applicability,
+        title: String,
+        range: TextRange,
+        replacement: String,
+    ) -> Self {
+        self.fix = Some(Fix {
+            title,
+            range,
+            replacement,
+            applicability,
+        });
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct Fix {
+    pub title: String,
+    pub range: TextRange,
+    pub replacement: String,
+    pub applicability: Applicability,
+}
+
+/// Whether `ry check --fix` may apply a fix without a person looking at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+pub enum Applicability {
+    /// The edit keeps what the code means, such as `T` to `TRUE`.
+    Safe,
+    /// The edit guesses what the author meant, such as the nearest spelling of a name that does
+    /// not exist, so it runs only with `--unsafe-fixes`.
+    Unsafe,
+}
+
+/// The fixes of `diagnostics` that one pass can apply together, in source order. A fix that
+/// overlaps an earlier one waits for the next pass, when the finding is computed again on the
+/// edited text.
+pub fn applicable_fixes(diagnostics: &[Diagnostic], include_unsafe: bool) -> Vec<&Fix> {
+    let mut fixes: Vec<&Fix> = diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.fix.as_ref())
+        .filter(|fix| include_unsafe || fix.applicability == Applicability::Safe)
+        .collect();
+    fixes.sort_by_key(|fix| (fix.range.start(), fix.range.end()));
+    let mut chosen: Vec<&Fix> = Vec::with_capacity(fixes.len());
+    for fix in fixes {
+        // Two insertions at one point would apply in an order nobody chose.
+        let overlaps = chosen.last().is_some_and(|previous| {
+            previous.range.end() > fix.range.start()
+                || (previous.range.end() == fix.range.start()
+                    && (previous.range.is_empty() || fix.range.is_empty()))
+        });
+        if !overlaps {
+            chosen.push(fix);
+        }
+    }
+    chosen
+}
+
+/// `text` with `fixes` applied; the fixes must be in source order and disjoint, as
+/// [`applicable_fixes`] returns them.
+pub fn apply_fixes(text: &str, fixes: &[&Fix]) -> String {
+    let mut edited = String::with_capacity(text.len());
+    let mut copied = 0;
+    for fix in fixes {
+        let (start, end) = (usize::from(fix.range.start()), usize::from(fix.range.end()));
+        let (Some(before), true) = (text.get(copied..start), text.is_char_boundary(end)) else {
+            continue;
+        };
+        edited.push_str(before);
+        edited.push_str(&fix.replacement);
+        copied = end;
+    }
+    edited.push_str(text.get(copied..).unwrap_or_default());
+    edited
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -340,7 +422,6 @@ pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
     file_definitions(db, file);
     file_conditional_writers(db, file);
     file_type_definitions(db, file);
-    top_level_binding_names(db, file);
     type_declaration_names(db, file);
     file_global_variable_declarations(db, file);
 }
@@ -368,18 +449,25 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         for error in &check.errors {
-            diagnostics.push(Diagnostic::new(
-                error.range + offset,
+            let range = error.range + offset;
+            let diagnostic = Diagnostic::new(
+                range,
                 Severity::Error,
                 "type-mismatch",
                 render_type_error_message(db, error),
-            ));
+            );
+            diagnostics.push(match misspelling_fix(file.text(db), range, &error.kind) {
+                Some((title, at, replacement)) => {
+                    diagnostic.with_fix(Applicability::Unsafe, title, at, replacement)
+                }
+                None => diagnostic,
+            });
         }
         // Without inline annotations, records, tags and `match` are reported as `ry-syntax`
         // and their coverage is not counted.
         if !check.match_findings.is_empty() && inline_annotations_enabled(db) {
             for finding in &check.match_findings {
-                diagnostics.push(match_finding_diagnostic(finding, offset));
+                diagnostics.push(match_finding_diagnostic(file.text(db), finding, offset));
             }
         }
         let Some(module) = item_hir(db, item) else {
@@ -484,12 +572,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             let range = module.range(*expression) + offset;
             let display = display_name(name);
-            let suggestion = suggestion
+            let hint = suggestion
+                .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
-            diagnostics.push(Diagnostic::new(range, Severity::Warning, "unresolved", format!(
-                    "I could not resolve `{display}` in this package, its imports, or builtins.{suggestion}"
-                )));
+            diagnostics.push(with_name_fix(
+                Diagnostic::new(range, Severity::Warning, "unresolved", format!(
+                    "I could not resolve `{display}` in this package, its imports, or builtins.{hint}"
+                )),
+                suggestion.as_deref(),
+            ));
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
@@ -506,8 +598,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            let suggestion = nearest_name(name, miss.columns.iter().map(String::as_str))
-                .or(suggestion)
+            let suggestion =
+                nearest_name(name, miss.columns.iter().map(String::as_str)).or(suggestion);
+            let hint = suggestion
+                .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let subject = match &miss.frame {
@@ -515,14 +609,17 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 None => "this frame".to_owned(),
             };
             let range = module.range(*expression) + offset;
-            diagnostics.push(Diagnostic::new(
-                range,
-                Severity::Warning,
-                "unresolved",
-                format!(
-                    "{subject} has no column `{}`, and nothing else defines that name.{suggestion}",
-                    display_name(name)
+            diagnostics.push(with_name_fix(
+                Diagnostic::new(
+                    range,
+                    Severity::Warning,
+                    "unresolved",
+                    format!(
+                        "{subject} has no column `{}`, and nothing else defines that name.{hint}",
+                        display_name(name)
+                    ),
                 ),
+                suggestion.as_deref(),
             ));
         }
     }
@@ -656,11 +753,25 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     .map(String::as_str)
                     .chain(ANNOTATION_PRIMITIVES.iter().copied()),
             )
-            .map(|nearest| format!(" Did you mean `{nearest}`?"))
-            .unwrap_or_default();
-            Diagnostic::new(range, Severity::Error, "annotation", format!(
-                    "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{suggestion}"
-                ))
+            ;
+            let hint = suggestion
+                .as_ref()
+                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .unwrap_or_default();
+            let diagnostic = Diagnostic::new(range, Severity::Error, "annotation", format!(
+                    "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{hint}"
+                ));
+            match suggestion {
+                Some(nearest) => {
+                    diagnostic.with_fix(
+                        Applicability::Unsafe,
+                        format!("Change to `{nearest}`"),
+                        range,
+                        nearest,
+                    )
+                }
+                None => diagnostic,
+            }
         })
         .collect()
 }
@@ -884,6 +995,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                             TypeRenderer::default().render(db, pair.inline),
                             TypeRenderer::default().render(db, pair.comment)
                         ),
+                        fix: comment_agreement_fix(db, file, pair.range, pair.comment_range),
                         related: vec![RelatedLocation {
                             file,
                             range: pair.comment_range,
@@ -930,6 +1042,13 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             severity: Severity::Warning,
             code: "annotation-mismatch",
             message: format!("{disagreement}. {winner}; make the two agree, or delete one"),
+            // Rewriting the comment keeps the program's meaning only while the inline type is
+            // the one ry applies.
+            // The inline function's type parameters are bound on the inline signature, so a
+            // comment that copied one would name a type it never declares.
+            fix: (pair.governing.is_none() && !mentions_type_parameter(db, pair.inline))
+                .then(|| comment_agreement_fix(db, file, pair.range, pair.comment_range))
+                .flatten(),
             related: vec![RelatedLocation {
                 file,
                 range: pair.comment_range,
@@ -951,6 +1070,38 @@ enum AgreementCandidate<'db> {
     Slot(SlotPair<'db>),
     /// So do the bodies of a type defined both ways.
     Definition(DefinitionPair<'db>),
+}
+
+/// Copies the inline type's spelling into the `#:` comment, which keeps what the code means
+/// because ry types the statement by the inline annotation.
+fn comment_agreement_fix(
+    db: &dyn Db,
+    file: SourceFile,
+    inline: TextRange,
+    comment: TextRange,
+) -> Option<Fix> {
+    let spelling = file.text(db).get(Range::<usize>::from(inline))?;
+    // A comment is one line, so a type spread over several lines does not fit in it.
+    if spelling.contains('\n') {
+        return None;
+    }
+    Some(Fix {
+        title: format!("Change the `#:` comment to `{spelling}`"),
+        range: comment,
+        replacement: spelling.to_owned(),
+        applicability: Applicability::Safe,
+    })
+}
+
+fn mentions_type_parameter(db: &dyn Db, ty: Ty<'_>) -> bool {
+    if matches!(ty.kind(db), TyKind::Rigid(_)) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_type_parameter(db, child);
+    });
+    found
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -1058,6 +1209,7 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
                     describe(inline_constraint),
                     describe(comment_constraint)
                 ),
+                fix: None,
                 related: vec![RelatedLocation {
                     file,
                     range: comment_range,
@@ -1167,6 +1319,7 @@ fn definition_agreement_candidates<'db>(
                 message: format!(
                     "{disagreement}. ry uses the inline definition; make the two agree, or delete one"
                 ),
+                fix: None,
                 related: vec![RelatedLocation {
                     file,
                     range: related_range,
@@ -1420,36 +1573,13 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
     sites
 }
 
-/// Range-free, so the project-wide duplicate map depends only on which names
-/// exist and survives body edits unchanged.
+/// Near-empty in healthy projects, so its value-equality firewall holds: a new name that
+/// duplicates nothing leaves every file's duplicate check untouched.
 #[salsa::tracked(returns(ref))]
-fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
-    let mut names = Vec::new();
-    for &item in item_tree(db, file) {
-        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
-            continue;
-        }
-        if let Some(name) = item.name(db).clone() {
-            names.push(name);
-        }
-    }
-    names
-}
-
-/// Near-empty in healthy projects, so its value-equality firewall holds.
-#[salsa::tracked(returns(ref))]
-fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<String, Vec<SourceFile>> {
-    let mut sites: FxHashMap<String, Vec<SourceFile>> = FxHashMap::default();
-    for &project_file in files.files(db) {
-        if *project_file.kind(db) != DocumentKind::Package {
-            continue;
-        }
-        for name in top_level_binding_names(db, project_file) {
-            sites.entry(name.clone()).or_default().push(project_file);
-        }
-    }
-    sites.retain(|_, files| files.len() >= 2);
-    sites
+fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Vec<SourceFile>> {
+    crate::package_definition_index(db, files)
+        .duplicates
+        .clone()
 }
 
 /// Each site warns: per-site winner semantics make every earlier binding dead.
@@ -1465,9 +1595,9 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     if map.is_empty() {
         return Vec::new();
     }
-    let mut own_duplicated: Vec<&str> = Vec::new();
-    for name in top_level_binding_names(db, file) {
-        if map.contains_key(name) && !own_duplicated.contains(&name.as_str()) {
+    let mut own_duplicated: Vec<Symbol> = Vec::new();
+    for &(name, _) in file_definitions(db, file) {
+        if map.contains_key(&name) && !own_duplicated.contains(&name) {
             own_duplicated.push(name);
         }
     }
@@ -1475,13 +1605,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     for name in own_duplicated {
         let mut sites: Vec<(SourceFile, TextRange)> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
-        for &site_file in &map[name] {
+        for &site_file in &map[&name] {
             if seen_files.contains(&site_file) {
                 continue;
             }
             seen_files.push(site_file);
             for (site_name, range) in top_level_name_sites(db, site_file) {
-                if site_name == name {
+                if *site_name == name {
                     sites.push((site_file, *range));
                 }
             }
@@ -1499,6 +1629,7 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     message: format!(
                         "Top-level binding `{name}` overwrites an earlier top-level binding in this package."
                     ),
+                    fix: None,
                     related: vec![RelatedLocation {
                         file: earlier_file,
                         range: earlier_range,
@@ -1515,6 +1646,7 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     message: format!(
                         "Top-level binding `{name}` is overwritten by a later top-level binding in this package."
                     ),
+                    fix: None,
                     related: vec![RelatedLocation {
                         file: later_file,
                         range: later_range,
@@ -1616,7 +1748,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
             }
             seen_files.push(site_file);
             for (site_name, range) in type_declaration_sites(db, site_file) {
-                if site_name == name {
+                if *site_name == name {
                     sites.push((site_file, *range));
                 }
             }
@@ -1637,6 +1769,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
                 message: format!(
                     "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one project-global namespace."
                 ),
+                fix: None,
                 related: vec![RelatedLocation {
                     file: neighbour_file,
                     range: neighbour_range,
@@ -1668,6 +1801,7 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
             message: format!(
                 "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file."
             ),
+            fix: None,
             related: vec![RelatedLocation {
                 file,
                 range: neighbour_range,
@@ -1866,16 +2000,21 @@ fn project_typo_suggestion<'db>(
     name: Name<'db>,
     tests: bool,
 ) -> Option<String> {
+    let text = name.text(db);
+    let characters = text.chars().count();
     let test_names = tests
         .then(|| crate::test_definitions(db, files).keys())
         .into_iter()
         .flatten();
+    // The scan reruns whenever any file adds a name, so it filters on the interned length
+    // and reads only the spellings that could be within budget.
     nearest_name(
-        name.text(db),
+        text,
         crate::package_definitions(db, files)
             .keys()
             .chain(test_names)
-            .map(String::as_str),
+            .filter(|candidate| candidate.characters().abs_diff(characters) <= 2)
+            .map(|candidate| candidate.as_str()),
     )
 }
 
@@ -1890,6 +2029,80 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .keys()
             .chain(library.known_exports.iter())
             .map(String::as_str),
+    )
+}
+
+/// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
+/// may cover a whole call or subset. The fix replaces that spelling only when it occurs exactly
+/// once as a whole name, so it never guesses between two places.
+fn misspelling_fix(
+    text: &str,
+    range: TextRange,
+    kind: &TypeErrorKind<'_>,
+) -> Option<(String, TextRange, String)> {
+    let (wrong, nearest) = match kind {
+        TypeErrorKind::NamedArgumentMismatch {
+            argument,
+            suggestion: Some(nearest),
+            duplicate: false,
+            ..
+        } => (argument, nearest),
+        TypeErrorKind::FieldDoesNotExist {
+            field,
+            suggestion: Some(nearest),
+            ..
+        } => (field, nearest),
+        TypeErrorKind::ColumnDoesNotExist {
+            column,
+            suggestion: Some(nearest),
+            ..
+        } => (column, nearest),
+        _ => return None,
+    };
+    let start = usize::from(range.start());
+    let covered = text.get(start..usize::from(range.end()))?;
+    let is_name_character =
+        |character: char| character.is_alphanumeric() || matches!(character, '.' | '_');
+    let mut whole_names = covered.match_indices(wrong.as_str()).filter(|(at, _)| {
+        !covered[..*at].ends_with(is_name_character)
+            && !covered[at + wrong.len()..].starts_with(is_name_character)
+    });
+    let (at, _) = whole_names.next()?;
+    if whole_names.next().is_some() {
+        return None;
+    }
+    // Inside quotes or backticks the bare spelling is what belongs there.
+    let quoted = covered[..at].ends_with(['"', '\'', '`']);
+    let replacement = if quoted || is_syntactic_name(nearest) {
+        nearest.clone()
+    } else {
+        format!("`{nearest}`")
+    };
+    let at = TextSize::try_from(start + at).ok()?;
+    Some((
+        format!("Change to `{nearest}`"),
+        TextRange::at(at, TextSize::of(wrong.as_str())),
+        replacement,
+    ))
+}
+
+/// Offers the suggested spelling as the fix for a misspelled name that the diagnostic's range
+/// covers exactly. A non-syntactic suggestion is written in backticks so the edit still parses.
+fn with_name_fix(diagnostic: Diagnostic, suggestion: Option<&str>) -> Diagnostic {
+    let Some(nearest) = suggestion else {
+        return diagnostic;
+    };
+    let replacement = if is_syntactic_name(nearest) {
+        nearest.to_owned()
+    } else {
+        format!("`{nearest}`")
+    };
+    let range = diagnostic.range;
+    diagnostic.with_fix(
+        Applicability::Unsafe,
+        format!("Change to `{nearest}`"),
+        range,
+        replacement,
     )
 }
 
@@ -1926,7 +2139,8 @@ pub(crate) fn nearest_name<'a>(
     let mut current: Vec<usize> = Vec::new();
     let mut best: Option<(usize, &str)> = None;
     for candidate in candidates {
-        if candidate == name {
+        // Most candidates fail on length alone, and counting is cheaper than collecting.
+        if candidate == name || candidate.chars().count().abs_diff(name_characters.len()) > budget {
             continue;
         }
         candidate_characters.clear();
@@ -2819,20 +3033,38 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     }
 }
 
-fn match_finding_diagnostic(finding: &MatchFinding, offset: TextSize) -> Diagnostic {
+fn match_finding_diagnostic(text: &str, finding: &MatchFinding, offset: TextSize) -> Diagnostic {
     let range = finding.range + offset;
     match &finding.kind {
-        MatchFindingKind::Unreachable => Diagnostic::new(
-            range,
-            Severity::Warning,
-            "unreachable-pattern",
-            "this arm is unreachable: the arms above it already match every value its pattern matches".to_owned(),
-        ),
-        MatchFindingKind::NonExhaustive { missing, more } => {
+        MatchFindingKind::Unreachable { arm } => {
+            let diagnostic = Diagnostic::new(
+                range,
+                Severity::Warning,
+                "unreachable-pattern",
+                "this arm is unreachable: the arms above it already match every value its pattern matches".to_owned(),
+            );
+            // An arm that never runs can go without changing what the program does.
+            match whole_lines(text, *arm + offset) {
+                Some(lines) => diagnostic.with_fix(
+                    Applicability::Safe,
+                    "Remove the unreachable arm".to_owned(),
+                    lines,
+                    String::new(),
+                ),
+                None => diagnostic,
+            }
+        }
+        MatchFindingKind::NonExhaustive {
+            missing,
+            more,
+            expression,
+        } => {
             let message = if missing.iter().all(|case| case == "_") {
-                "this `match` does not handle every value: add a catch-all `_ => ...` arm".to_owned()
+                "this `match` does not handle every value: add a catch-all `_ => ...` arm"
+                    .to_owned()
             } else {
-                let mut cases: Vec<String> = missing.iter().map(|case| format!("`{case}`")).collect();
+                let mut cases: Vec<String> =
+                    missing.iter().map(|case| format!("`{case}`")).collect();
                 if *more {
                     cases.push("more".to_owned());
                 }
@@ -2850,9 +3082,76 @@ fn match_finding_diagnostic(finding: &MatchFinding, offset: TextSize) -> Diagnos
                     "this `match` does not handle {listed}: add {arm} for {pronoun}, or a catch-all `_ => ...` arm"
                 )
             };
-            Diagnostic::new(range, Severity::Error, "non-exhaustive-match", message)
+            let diagnostic =
+                Diagnostic::new(range, Severity::Error, "non-exhaustive-match", message);
+            match missing_arms_fix(text, missing, *expression + offset) {
+                Some((title, at, arms)) => {
+                    diagnostic.with_fix(Applicability::Unsafe, title, at, arms)
+                }
+                None => diagnostic,
+            }
         }
     }
+}
+
+/// `range` widened to the whole lines it covers, newline included, when nothing else shares
+/// those lines; otherwise `None`, because removing part of a line could join two statements.
+fn whole_lines(text: &str, range: TextRange) -> Option<TextRange> {
+    let start = usize::from(range.start());
+    let end = usize::from(range.end());
+    let before = text.get(..start)?;
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    if !before[line_start..].trim().is_empty() {
+        return None;
+    }
+    let after = text.get(end..)?;
+    let line_end = after
+        .find('\n')
+        .map_or(text.len(), |newline| end + newline + 1);
+    if !text.get(end..line_end)?.trim().is_empty() {
+        return None;
+    }
+    Some(TextRange::new(
+        TextSize::try_from(line_start).ok()?,
+        TextSize::try_from(line_end).ok()?,
+    ))
+}
+
+/// One arm per missing case, each stopping with an error, inserted on their own lines before
+/// the `match`'s closing brace and indented like the arm above. A `match` written on one line
+/// gets no fix, since there is no line to put the arms on. Unsafe: the arms silence the finding
+/// without handling anything.
+fn missing_arms_fix(
+    text: &str,
+    missing: &[String],
+    expression: TextRange,
+) -> Option<(String, TextRange, String)> {
+    let end = usize::from(expression.end());
+    let brace = end.checked_sub(1)?;
+    if text.get(brace..end)? != "}" {
+        return None;
+    }
+    let before = text.get(..brace)?;
+    let line_start = before.rfind('\n')? + 1;
+    if !before[line_start..].trim().is_empty() || line_start <= usize::from(expression.start()) {
+        return None;
+    }
+    let previous = before[..line_start - 1]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let previous_line = &before[previous..line_start - 1];
+    let indent = &previous_line[..previous_line.len() - previous_line.trim_start().len()];
+    let arms: String = missing
+        .iter()
+        .map(|case| format!("{indent}{case} => stop(\"not handled yet\")\n"))
+        .collect();
+    let title = if missing.len() == 1 {
+        format!("Add an arm for `{}`", missing[0])
+    } else {
+        "Add arms for the missing cases".to_owned()
+    };
+    let at = TextSize::try_from(line_start).ok()?;
+    Some((title, TextRange::empty(at), arms))
 }
 
 /// Names variables `T`/`U`/`V` in first-occurrence order. Share one renderer

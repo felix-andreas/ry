@@ -49,6 +49,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     state <- .ry_new_package(plan, root)
   }
   state$export_all <- export_all
+  # Exports are resynced by scanning every name in the namespace, which a reload that only
+  # rebinds existing names cannot change.
+  plan$keeps_names <- isTRUE(plan$keeps_names) && !resync
   # A statement that fails leaves the namespace partly updated, so the attached package
   # environment follows it either way rather than mixing two versions.
   applied <- FALSE
@@ -58,7 +61,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
-    .ry_sync_package_env(state, if (resync) NULL else plan$touched)
+    .ry_sync_package_env(state, if (resync) NULL else plan$touched, plan$keeps_names)
   }
   .ry_phase("attach")
   .ry_commit(root)
@@ -245,7 +248,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_load_compiled(state, plan$dynamic_libraries)
   }
   .ry_phase("S3")
-  .ry_sync_exports(ns, plan$namespace, state$export_all)
+  if (!plan$keeps_names) {
+    .ry_sync_exports(ns, plan$namespace, state$export_all)
+  }
   .ry_phase("exports")
   if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
     get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
@@ -451,10 +456,18 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 # whichever environment forces it first, both see the value. Stale names always go, since
 # running or undoing code (S4 registrations, `assign()`) changes names no plan lists; `touched`
 # limits the copying to the bindings a plan changed, and without it everything is copied.
-.ry_sync_package_env <- function(state, touched = NULL) {
+.ry_sync_package_env <- function(state, touched = NULL, keeps_names = FALSE) {
   environment <- state$package_env
   ns <- state$ns
-  exported <- names(getNamespaceInfo(ns, "exports"))
+  exports <- getNamespaceInfo(ns, "exports")
+  # With the same names as before, nothing is stale or missing, and only the rebound
+  # bindings need copying.
+  if (keeps_names) {
+    names <- touched[vapply(touched, exists, NA, envir = exports, inherits = FALSE)]
+    if (length(names)) .ry_internal("importIntoEnv", environment, names, ns, names)
+    return(invisible())
+  }
+  exported <- names(exports)
   imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
   present <- names(environment)
   stale <- present[!(present %in% exported) & !(present %in% imported)]

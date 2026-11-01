@@ -33,13 +33,16 @@ use {
     futures::future::BoxFuture,
     ide::{
         CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
-        HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
+        FoldKind, HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
         classify_type_token,
     },
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics, warm_project_folds},
+        diagnostics::{
+            Applicability, Diagnostic, Severity, applicable_fixes, parse_stage_diagnostics,
+            warm_project_folds,
+        },
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -71,7 +74,7 @@ use {
         thread,
         time::{Duration, Instant},
     },
-    syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name},
+    syntax::{SyntaxElement, TextRange, TextSize, is_syntactic_name},
     tokio::{runtime::Handle, sync::oneshot},
     tower::ServiceBuilder,
 };
@@ -332,8 +335,17 @@ impl ServerState {
     {
         let (reply, receive) = oneshot::channel();
         let job = Job::Run(Box::new(move |worker| {
+            // An edit that lands mid-request cancels its queries; the client asks again for the
+            // new text, so the answer is `ContentModified` rather than a dead worker.
+            let response = salsa::Cancelled::catch(AssertUnwindSafe(|| build(worker)))
+                .unwrap_or_else(|_| {
+                    Err(ResponseError::new(
+                        ErrorCode::CONTENT_MODIFIED,
+                        "the document changed during the request",
+                    ))
+                });
             // The receiver is gone only when the client cancelled the request.
-            reply.send(build(worker)).ok();
+            reply.send(response).ok();
         }));
         // Queued first: a background unit cancelled before the request is queued would just
         // start the next one.
@@ -438,6 +450,15 @@ struct Worker {
     /// Files whose `library()` scan a cancellation interrupted. The edit that cancelled it may
     /// be to another file, so nothing else would rescan this one: idle time owes it.
     pending_attached_scans: BTreeSet<PathBuf>,
+    /// The fix-bearing findings of each open document's last settled publish, with the text they
+    /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
+    /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
+    published_fixes: HashMap<SourceFile, PublishedFixes>,
+}
+
+struct PublishedFixes {
+    text: String,
+    diagnostics: Vec<Diagnostic>,
 }
 
 struct WorkspaceMetadata {
@@ -549,6 +570,7 @@ impl Worker {
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
+            published_fixes: HashMap::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
         // durable as its least durable input, and nearly every memo reads the stubs or the
@@ -1087,10 +1109,10 @@ impl Worker {
     }
 
     fn to_text_range(&self, text: &str, range: lsp_types::Range) -> TextRange {
-        TextRange::new(
-            self.to_offset(text, range.start),
-            self.to_offset(text, range.end),
-        )
+        // A client may send a reversed range; it still names the same span.
+        let start = self.to_offset(text, range.start);
+        let end = self.to_offset(text, range.end);
+        TextRange::new(start.min(end), start.max(end))
     }
 
     fn to_range(&self, text: &str, range: TextRange) -> lsp_types::Range {
@@ -1103,6 +1125,46 @@ impl Worker {
     fn to_range_in(&self, file: SourceFile, range: TextRange) -> lsp_types::Range {
         let text = self.text(file);
         self.to_range(&text, range)
+    }
+
+    fn convert_hierarchy_item(
+        &self,
+        item: ide::CallHierarchyItem,
+    ) -> Option<lsp_types::CallHierarchyItem> {
+        let path = self.path_of(item.file)?;
+        Some(lsp_types::CallHierarchyItem {
+            name: item.name,
+            kind: if item.is_function {
+                lsp_types::SymbolKind::FUNCTION
+            } else {
+                lsp_types::SymbolKind::VARIABLE
+            },
+            tags: None,
+            detail: item.detail,
+            uri: self.document_uri(path),
+            range: self.to_range_in(item.file, item.range),
+            selection_range: self.to_range_in(item.file, item.selection),
+            data: None,
+        })
+    }
+
+    /// The client hands back an item from an earlier answer, and the function is found again at
+    /// its name.
+    fn resolve_hierarchy_item(
+        &mut self,
+        item: &lsp_types::CallHierarchyItem,
+    ) -> Option<ide::CallHierarchyItem> {
+        // Only a function re-resolves from its name. A caller shown as a top-level statement
+        // starts at whatever that statement calls first, which would name a different function.
+        if item.kind != lsp_types::SymbolKind::FUNCTION {
+            return None;
+        }
+        let (file, text) = self.document(&item.uri)?;
+        let offset = self.to_offset(&text, item.selection_range.start);
+        let files = ProjectFiles::get(&self.db);
+        self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
+            .ok()
+            .flatten()
     }
 
     fn path_of(&self, file: SourceFile) -> Option<&PathBuf> {
@@ -1365,6 +1427,9 @@ impl Worker {
             return;
         }
         self.open_documents.remove(&path);
+        if let Some(file) = self.files.get(&path) {
+            self.published_fixes.remove(file);
+        }
         self.pending_semantic_publishes.retain(|owed| owed != &path);
         self.pending_lowering.retain(|owed| owed != &path);
 
@@ -1636,8 +1701,40 @@ impl Worker {
     fn settled_diagnostics(&mut self, path: &Path) -> Option<Vec<lsp_types::Diagnostic>> {
         let &file = self.files.get(path)?;
         let config = self.config.clone();
-        let rendered = document_diagnostics(&self.db, file, &config);
-        Some(self.finish_diagnostics(file, rendered))
+        let text = self.text(file);
+        let published = apply_suppressions(document_diagnostics(&self.db, file, &config), &text);
+        let fixable = published
+            .iter()
+            .filter(|diagnostic| diagnostic.fix.is_some())
+            .cloned()
+            .collect();
+        let converted = published
+            .into_iter()
+            .map(|diagnostic| self.convert_diagnostic(&text, diagnostic))
+            .collect();
+        self.published_fixes.insert(
+            file,
+            PublishedFixes {
+                text,
+                diagnostics: fixable,
+            },
+        );
+        Some(converted)
+    }
+
+    /// The settled findings that carry a fix, from the last publish while the text still matches
+    /// it, and derived afresh otherwise. Suppressions apply first, so a suppressed finding
+    /// offers nothing.
+    fn fixable_diagnostics(&self, file: SourceFile, text: &str) -> Vec<Diagnostic> {
+        if let Some(published) = self.published_fixes.get(&file)
+            && published.text == text
+        {
+            return published.diagnostics.clone();
+        }
+        apply_suppressions(document_diagnostics(&self.db, file, &self.config), text)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.fix.is_some())
+            .collect()
     }
 
     fn finish_diagnostics(
@@ -1868,7 +1965,10 @@ fn initialize_result(
             }),
             code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
                 lsp_types::CodeActionOptions {
-                    code_action_kinds: Some(vec![lsp_types::CodeActionKind::QUICKFIX]),
+                    code_action_kinds: Some(vec![
+                        lsp_types::CodeActionKind::QUICKFIX,
+                        lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+                    ]),
                     ..Default::default()
                 },
             )),
@@ -1902,14 +2002,18 @@ fn initialize_result(
             }),
             references_provider: Some(lsp_types::OneOf::Left(true)),
             document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+            call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
             folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+            selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(
+                true,
+            )),
             rename_provider: Some(lsp_types::OneOf::Left(true)),
             semantic_tokens_provider: Some(
                 lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                     lsp_types::SemanticTokensOptions {
                         legend: lsp_types::SemanticTokensLegend {
-                            // In `semantic_class_index` order. Only ry's own syntax is
-                            // colored, because R grammars already color R.
+                            // In `semantic_class_index` order. R grammars already color R's
+                            // tokens, so plain R gets only the classes they cannot know.
                             token_types: vec![
                                 lsp_types::SemanticTokenType::TYPE,
                                 lsp_types::SemanticTokenType::TYPE_PARAMETER,
@@ -1918,11 +2022,15 @@ fn initialize_result(
                                 lsp_types::SemanticTokenType::DECORATOR,
                                 lsp_types::SemanticTokenType::KEYWORD,
                                 lsp_types::SemanticTokenType::ENUM_MEMBER,
+                                lsp_types::SemanticTokenType::FUNCTION,
+                                lsp_types::SemanticTokenType::NAMESPACE,
                             ],
-                            token_modifiers: Vec::new(),
+                            token_modifiers: vec![
+                                lsp_types::SemanticTokenModifier::DEFAULT_LIBRARY,
+                            ],
                         },
                         full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
-                        range: None,
+                        range: Some(true),
                         work_done_progress_options: Default::default(),
                     },
                 ),
@@ -2130,6 +2238,89 @@ impl LanguageServer for ServerState {
         })
     }
 
+    fn prepare_call_hierarchy(
+        &mut self,
+        params: lsp_types::CallHierarchyPrepareParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyItem>>, Self::Error>> {
+        self.read(move |worker| {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position_params)
+            else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let item = worker
+                .cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
+                .unwrap_or_default();
+            Ok(item
+                .and_then(|item| worker.convert_hierarchy_item(item))
+                .map(|item| vec![item]))
+        })
+    }
+
+    fn incoming_calls(
+        &mut self,
+        params: lsp_types::CallHierarchyIncomingCallsParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyIncomingCall>>, Self::Error>>
+    {
+        self.read(move |worker| {
+            let Some(item) = worker.resolve_hierarchy_item(&params.item) else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let calls = worker
+                .cancellable(|worker| ide::incoming_calls(&worker.db, files, &item))
+                .unwrap_or_default();
+            Ok(Some(
+                calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let from_ranges = call
+                            .ranges
+                            .iter()
+                            .map(|range| worker.to_range_in(call.item.file, *range))
+                            .collect();
+                        Some(lsp_types::CallHierarchyIncomingCall {
+                            from: worker.convert_hierarchy_item(call.item)?,
+                            from_ranges,
+                        })
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
+    fn outgoing_calls(
+        &mut self,
+        params: lsp_types::CallHierarchyOutgoingCallsParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyOutgoingCall>>, Self::Error>>
+    {
+        self.read(move |worker| {
+            let Some(item) = worker.resolve_hierarchy_item(&params.item) else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let calls = worker
+                .cancellable(|worker| ide::outgoing_calls(&worker.db, files, &item))
+                .unwrap_or_default();
+            Ok(Some(
+                calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let from_ranges = call
+                            .ranges
+                            .iter()
+                            .map(|range| worker.to_range_in(item.file, *range))
+                            .collect();
+                        Some(lsp_types::CallHierarchyOutgoingCall {
+                            to: worker.convert_hierarchy_item(call.item)?,
+                            from_ranges,
+                        })
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
     fn document_highlight(
         &mut self,
         params: lsp_types::DocumentHighlightParams,
@@ -2261,7 +2452,10 @@ impl LanguageServer for ServerState {
                     .map(|hint| lsp_types::InlayHint {
                         position: worker.to_position(&text, hint.offset),
                         label: lsp_types::InlayHintLabel::String(hint.label),
-                        kind: Some(lsp_types::InlayHintKind::TYPE),
+                        kind: Some(match hint.kind {
+                            ide::InlayHintKind::Type => lsp_types::InlayHintKind::TYPE,
+                            ide::InlayHintKind::Parameter => lsp_types::InlayHintKind::PARAMETER,
+                        }),
                         text_edits: None,
                         tooltip: None,
                         padding_left: Some(false),
@@ -2317,8 +2511,37 @@ impl LanguageServer for ServerState {
             };
             let text = worker.text(file);
             let range = worker.to_text_range(&text, params.range);
+            // An editor that asks only for the fix-all action (on save, typically) gets nothing
+            // else, and one that asks only for quick fixes never gets it.
+            let only = params.context.only.as_deref();
+            let wants = |kind: &lsp_types::CodeActionKind| {
+                only.is_none_or(|kinds| {
+                    kinds
+                        .iter()
+                        .any(|asked| kind.as_str().starts_with(asked.as_str()))
+                })
+            };
+            let wants_quick_fixes = wants(&lsp_types::CodeActionKind::QUICKFIX);
+            let wants_fix_all = wants(&lsp_types::CodeActionKind::SOURCE_FIX_ALL);
             let actions = worker
-                .cancellable(|worker| ide::code_actions(&worker.db, file, range))
+                .cancellable(|worker| {
+                    let fixable = worker.fixable_diagnostics(file, &text);
+                    let mut actions = Vec::new();
+                    if wants_quick_fixes {
+                        actions.extend(ide::diagnostic_fixes(&fixable, range));
+                        actions.extend(ide::code_actions(&worker.db, file, range));
+                    }
+                    // Listed beside the quick fixes only when it does more than one of them.
+                    let worth_listing =
+                        only.is_some() || applicable_fixes(&fixable, false).len() > 1;
+                    if wants_fix_all
+                        && worth_listing
+                        && let Some(action) = ide::fix_all(&fixable)
+                    {
+                        actions.push(action);
+                    }
+                    actions
+                })
                 .unwrap_or_default();
             if actions.is_empty() {
                 return Ok(None);
@@ -2336,9 +2559,21 @@ impl LanguageServer for ServerState {
                                 new_text: edit.replacement,
                             })
                             .collect();
+                        // An editor's "fix" shortcut applies the preferred action unseen, so only
+                        // a fix that keeps the code's meaning may be preferred.
+                        let is_preferred = (action.kind
+                            == ide::CodeActionKind::DiagnosticFix(Applicability::Safe))
+                        .then_some(true);
+                        let kind = match action.kind {
+                            ide::CodeActionKind::FixAll => {
+                                lsp_types::CodeActionKind::SOURCE_FIX_ALL
+                            }
+                            _ => lsp_types::CodeActionKind::QUICKFIX,
+                        };
                         lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
                             title: action.title,
-                            kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                            kind: Some(kind),
+                            is_preferred,
                             edit: Some(lsp_types::WorkspaceEdit {
                                 changes: Some(HashMap::from([(uri.clone(), edits)])),
                                 ..Default::default()
@@ -2507,10 +2742,63 @@ impl LanguageServer for ServerState {
         params: lsp_types::FoldingRangeParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::FoldingRange>>, Self::Error>> {
         self.read(move |worker| {
+            let Some((file, _)) = worker.document(&params.text_document.uri) else {
+                return Ok(None);
+            };
+            let folds = worker
+                .cancellable(|worker| ide::folding_ranges(&worker.db, file))
+                .unwrap_or_default();
+            Ok(Some(
+                folds
+                    .into_iter()
+                    .map(|fold| lsp_types::FoldingRange {
+                        start_line: fold.start_line,
+                        start_character: None,
+                        end_line: fold.end_line,
+                        end_character: None,
+                        kind: Some(match fold.kind {
+                            FoldKind::Comment => lsp_types::FoldingRangeKind::Comment,
+                            FoldKind::Block | FoldKind::Section | FoldKind::Region => {
+                                lsp_types::FoldingRangeKind::Region
+                            }
+                        }),
+                        collapsed_text: None,
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
+    fn selection_range(
+        &mut self,
+        params: lsp_types::SelectionRangeParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::SelectionRange>>, Self::Error>> {
+        self.read(move |worker| {
             let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            Ok(Some(folding_ranges(&worker.db, file, &text)))
+            let mut selections = Vec::new();
+            for position in params.positions {
+                let offset = worker.to_offset(&text, position);
+                let ranges = worker
+                    .cancellable(|worker| ide::selection_ranges(&worker.db, file, offset))
+                    .unwrap_or_default();
+                // The protocol links each range to its parent, so the chain is built outermost
+                // first.
+                let mut selection: Option<lsp_types::SelectionRange> = None;
+                for range in ranges.into_iter().rev() {
+                    selection = Some(lsp_types::SelectionRange {
+                        range: worker.to_range(&text, range),
+                        parent: selection.map(Box::new),
+                    });
+                }
+                // Every position needs an answer, so an empty chain falls back to the cursor.
+                selections.push(selection.unwrap_or(lsp_types::SelectionRange {
+                    range: lsp_types::Range::new(position, position),
+                    parent: None,
+                }));
+            }
+            Ok(Some(selections))
         })
     }
 
@@ -2535,8 +2823,42 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding);
+            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding, None);
             Ok(Some(lsp_types::SemanticTokensResult::Tokens(
+                lsp_types::SemanticTokens {
+                    result_id: None,
+                    data: tokens,
+                },
+            )))
+        })
+    }
+
+    fn semantic_tokens_range(
+        &mut self,
+        params: lsp_types::SemanticTokensRangeParams,
+    ) -> BoxFuture<'static, Result<Option<lsp_types::SemanticTokensRangeResult>, Self::Error>> {
+        self.read(move |worker| {
+            let Some(path) = worker.document_path(&params.text_document.uri) else {
+                return Ok(None);
+            };
+            // A stub is small and has no tree, so its range request answers with every token.
+            if let Some(stub) = worker.stub_documents.get(&path).cloned() {
+                let tokens = stub_semantic_tokens(&stub, worker.encoding);
+                return Ok(Some(lsp_types::SemanticTokensRangeResult::Tokens(
+                    lsp_types::SemanticTokens {
+                        result_id: None,
+                        data: tokens,
+                    },
+                )));
+            }
+            let Some(&file) = worker.files.get(&path) else {
+                return Ok(None);
+            };
+            let text = worker.text(file);
+            let viewport = worker.to_text_range(&text, params.range);
+            let tokens =
+                ry_semantic_tokens(&worker.db, file, &text, worker.encoding, Some(viewport));
+            Ok(Some(lsp_types::SemanticTokensRangeResult::Tokens(
                 lsp_types::SemanticTokens {
                     result_id: None,
                     data: tokens,
@@ -2652,6 +2974,8 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
             lsp_types::SymbolKind::METHOD
         }
         DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        // The kind RStudio's outline and the R language server use for sections.
+        DocumentSymbolKind::Section => lsp_types::SymbolKind::STRING,
     }
 }
 
@@ -2791,79 +3115,28 @@ fn diagnostics_cancelled_error() -> ResponseError {
     )
 }
 
-/// Brace/paren/argument-list folds keep the closing delimiter visible;
-/// consecutive comments (including `#:` blocks) fold as one region.
-fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_types::FoldingRange> {
-    let index = LineIndex::new(text);
-    let parse = semantics::parse(db, file);
-    let mut ranges = Vec::new();
-    for node in parse.syntax_node().descendants() {
-        if matches!(
-            node.kind(),
-            SyntaxKind::BRACE_EXPR | SyntaxKind::PAREN_EXPR | SyntaxKind::ARGUMENT_LIST
-        ) {
-            let start = index.line_column(node.text_range().start());
-            let end = index.line_column(node.text_range().end());
-            if end.line > start.line {
-                ranges.push(lsp_types::FoldingRange {
-                    start_line: start.line,
-                    start_character: None,
-                    end_line: end.line - 1,
-                    end_character: None,
-                    kind: Some(lsp_types::FoldingRangeKind::Region),
-                    collapsed_text: None,
-                });
-            }
-        }
-    }
-    let mut comment_lines: Vec<u32> = parse
-        .syntax_node()
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::COMMENT)
-        .map(|token| index.line_column(token.text_range().start()).line)
-        .collect();
-    comment_lines.sort_unstable();
-    comment_lines.dedup();
-    let mut runs: Vec<(u32, u32)> = Vec::new();
-    for line in comment_lines {
-        match runs.last_mut() {
-            Some((_, end)) if line == *end + 1 => *end = line,
-            _ => runs.push((line, line)),
-        }
-    }
-    ranges.extend(
-        runs.into_iter()
-            .filter(|(start, end)| end > start)
-            .map(|(start, end)| lsp_types::FoldingRange {
-                start_line: start,
-                start_character: None,
-                end_line: end,
-                end_character: None,
-                kind: Some(lsp_types::FoldingRangeKind::Comment),
-                collapsed_text: None,
-            }),
-    );
-    ranges.sort_by_key(|range| (range.start_line, range.end_line));
-    ranges
-}
-
+/// `viewport` keeps the tokens that overlap it, for a range request on a large file.
 fn ry_semantic_tokens(
     db: &RootDatabase,
     file: SourceFile,
     text: &str,
     encoding: PositionEncoding,
+    viewport: Option<TextRange>,
 ) -> Vec<lsp_types::SemanticToken> {
     let spans = ide::semantic_tokens(db, file)
         .into_iter()
-        .map(|(range, class)| (range, semantic_class_index(class)))
+        .filter(|(range, _)| {
+            viewport.is_none_or(|viewport| {
+                range.start() < viewport.end() && viewport.start() < range.end()
+            })
+        })
         .collect();
     delta_encode_tokens(spans, text, encoding)
 }
 
-/// The class's index in the advertised legend.
-fn semantic_class_index(class: SemanticClass) -> u32 {
-    match class {
+/// The class's token type index in the advertised legend, and its modifier bits.
+fn semantic_class_index(class: SemanticClass) -> (u32, u32) {
+    let token_type = match class {
         SemanticClass::Type => 0,
         SemanticClass::TypeParameter => 1,
         SemanticClass::Parameter => 2,
@@ -2871,14 +3144,22 @@ fn semantic_class_index(class: SemanticClass) -> u32 {
         SemanticClass::Decorator => 4,
         SemanticClass::Keyword => 5,
         SemanticClass::Tag => 6,
-    }
+        SemanticClass::Function | SemanticClass::LibraryFunction => 7,
+        SemanticClass::Namespace => 8,
+    };
+    // Bit 0 is `defaultLibrary`, the only advertised modifier.
+    let modifiers = match class {
+        SemanticClass::LibraryFunction => 1,
+        _ => 0,
+    };
+    (token_type, modifiers)
 }
 
 /// Each declaration's type half runs through the annotation grammar, offset back
 /// into the buffer.
 fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types::SemanticToken> {
     let index = LineIndex::new(text);
-    let mut spans: Vec<(TextRange, u32)> = Vec::new();
+    let mut spans: Vec<(TextRange, SemanticClass)> = Vec::new();
     for (line_number, raw_line) in text.lines().enumerate() {
         let line_start = index.line_start(line_number as u32) as usize;
         let content = match raw_line.find('#') {
@@ -2891,7 +3172,10 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
         if trimmed.is_empty() {
             continue;
         }
-        let push = |spans: &mut Vec<(TextRange, u32)>, start: usize, len: usize, class: u32| {
+        let push = |spans: &mut Vec<(TextRange, SemanticClass)>,
+                    start: usize,
+                    len: usize,
+                    class: SemanticClass| {
             let absolute = (line_start + start) as u32;
             spans.push((
                 TextRange::new(absolute.into(), (absolute + len as u32).into()),
@@ -2899,11 +3183,11 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             ));
         };
         if let Some(rest) = trimmed.strip_prefix("@type") {
-            push(&mut spans, indent, "@type".len(), 4);
+            push(&mut spans, indent, "@type".len(), SemanticClass::Decorator);
             let name = rest.trim_start();
             if !name.is_empty() {
                 let name_start = indent + trimmed.len() - name.len();
-                push(&mut spans, name_start, name.len(), 0);
+                push(&mut spans, name_start, name.len(), SemanticClass::Type);
             }
             continue;
         }
@@ -2916,7 +3200,12 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
         type_offset += leading;
         type_text = type_text.trim_start();
         if let Some(rest) = type_text.strip_prefix("@masked") {
-            push(&mut spans, type_offset, "@masked".len(), 4);
+            push(
+                &mut spans,
+                type_offset,
+                "@masked".len(),
+                SemanticClass::Decorator,
+            );
             let after = rest.trim_start();
             type_offset += type_text.len() - after.len();
             type_text = after;
@@ -2934,7 +3223,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             if u32::from(range.start()) < 3 || range.is_empty() {
                 continue;
             }
-            if let Some(class) = classify_type_token(&token).map(semantic_class_index) {
+            if let Some(class) = classify_type_token(&token) {
                 let start = usize::from(range.start()) - 3;
                 let length = usize::from(range.len());
                 if start + length <= type_text.len() + 1 {
@@ -2947,7 +3236,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
 }
 
 fn delta_encode_tokens(
-    mut spans: Vec<(TextRange, u32)>,
+    mut spans: Vec<(TextRange, SemanticClass)>,
     text: &str,
     encoding: PositionEncoding,
 ) -> Vec<lsp_types::SemanticToken> {
@@ -2956,7 +3245,8 @@ fn delta_encode_tokens(
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for (range, token_type) in spans {
+    for (range, class) in spans {
+        let (token_type, token_modifiers_bitset) = semantic_class_index(class);
         let position = match encoding {
             PositionEncoding::Utf8 => index.line_column(range.start()),
             PositionEncoding::Utf16 => index.line_column_utf16(range.start(), text),
@@ -2978,7 +3268,7 @@ fn delta_encode_tokens(
             delta_start,
             length,
             token_type,
-            token_modifiers_bitset: 0,
+            token_modifiers_bitset,
         });
         previous_line = position.line;
         previous_start = position.column;

@@ -1128,7 +1128,7 @@ impl Context<'_> {
         match module.kind(target_expression) {
             // `"x" <- 1` is `x <- 1` in R.
             ExpressionKind::NameRef(_) | ExpressionKind::Literal(LiteralKind::String(_)) => {
-                let name = &match module.kind(target_expression) {
+                let name = match module.kind(target_expression) {
                     ExpressionKind::NameRef(name) => *name,
                     ExpressionKind::Literal(LiteralKind::String(text)) => {
                         Symbol::new(&module[text])
@@ -1153,26 +1153,26 @@ impl Context<'_> {
                                 // counter's initializer looks like a dead store.
                                 let frame = self.scopes[depth].id;
                                 for write in &mut self.writes {
-                                    if write.scope == frame && write.name == *name {
+                                    if write.scope == frame && write.name == name {
                                         write.used = true;
                                     }
                                 }
-                                self.record_write_site(assignment, *name, range, slot, true);
+                                self.record_write_site(assignment, name, range, slot, true);
                             }
                             None => {
                                 if self.emit {
-                                    self.naming.non_locals.insert(target, *name);
-                                    self.naming.super_globals.insert(*name);
+                                    self.naming.non_locals.insert(target, name);
+                                    self.naming.super_globals.insert(name);
                                 }
                             }
                         }
                     }
                     _ => {
                         let kind = self.assignment_binding_kind();
-                        let slot = self.frame_slot(*name, range, kind);
+                        let slot = self.frame_slot(name, range, kind);
                         self.naming.resolutions.insert(target, slot);
                         let reportable = kind == BindingKind::Local;
-                        self.record_write_site(assignment, *name, range, slot, reportable);
+                        self.record_write_site(assignment, name, range, slot, reportable);
                     }
                 }
             }

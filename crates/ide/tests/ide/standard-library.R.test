@@ -18,6 +18,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: list[integer]\n"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @7: list[integer]
+hint @20list =
 
 #---- completion_after_a_module_prefix
 parsed <- Str.to_$0
@@ -53,6 +54,8 @@ action: Add inferred type annotations for the whole file
 completion (2): Dict.get, Dict.single
 hint @1: Dict<character, double>
 hint @39: :Ok(double) | :Err(:KeyNotFound)
+hint @52dict =
+hint @55key =
 
 #---- annotation_completion_offers_library_types
 #: Res$0
@@ -76,6 +79,8 @@ references: 9..15
 rename: none
 signature: none
 completion (1): Result
+hint @90result =
+hint @93default =
 
 #---- hint_drops_an_impossible_vector_member
 type Position = Record{x: double, y: double}
@@ -88,6 +93,7 @@ hover-definition: global 108..117
 definition 108..117
 references: 108..117*
 rename: 1 edit(s)
+calls summarise: in  | out
 signature: none
 action: Add inferred type annotation for `summarise`
   edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
@@ -95,3 +101,5 @@ action: Add inferred type annotations for the whole file
   edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
 completion (37): summarise, Summary, summary, summary.aov, summary.connection, Summary.data.frame, summary.data.frame, Summary.Date
 hint @117: fn(positions: list[Position]) -> double[]
+hint @159FUN =
+hint @175FUN.VALUE =

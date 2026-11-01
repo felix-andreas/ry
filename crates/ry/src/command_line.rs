@@ -43,6 +43,13 @@ pub enum Command {
         /// affect the exit code)
         #[arg(long, value_enum, default_value = "warning")]
         min_severity: MinSeverity,
+        /// Apply the safe fixes in place, then report what remains
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+        /// With `--fix`, also apply fixes that guess what you meant, such as
+        /// the nearest spelling of a misspelled name
+        #[arg(long, default_value_t = false, requires = "fix")]
+        unsafe_fixes: bool,
     },
     /// Run the formatter on the given files or directories
     #[command(alias = "format")]

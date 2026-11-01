@@ -10,6 +10,7 @@ hover-definition: global R/def.R:0..6
 definition R/def.R:0..6
 references: R/def.R:0..6*, R/use.R:10..16
 rename: 2 edit(s)
+calls helper: in result [R/use.R:10..16] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `result`
@@ -32,6 +33,7 @@ hover-definition: global R/def.R:0..6
 definition R/def.R:0..6
 references: R/def.R:0..6*, R/use.R:26..32
 rename: 2 edit(s)
+calls helper: in wrapper [R/use.R:26..32] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `wrapper`
@@ -161,6 +163,8 @@ parameters: f: character | [[signature]: character[]] | [definition]: Any | ...:
 action: Add inferred type annotations for the whole file
   edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @19signature =
+hint @29definition =
 hint @48: fn() -> Any
 
 #---- class_reference_in_signature_resolves_to_setclass_generic_ref
@@ -175,11 +179,14 @@ hover 10..17: character
 definition R/classes.R:67..72
 references: R/classes.R:67..72*, R/classes.R:104..109, R/methods.R:11..16
 rename: 3 edit(s)
+calls speak: in  | out
 signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
 parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
 action: Add inferred type annotations for the whole file
   edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @19signature =
+hint @29definition =
 hint @48: fn() -> Any
 
 #---- class_reference_in_signature_resolves_to_setclass_new_class_ref
@@ -201,6 +208,8 @@ action: Add inferred type annotation for `make`
 action: Add inferred type annotations for the whole file
   edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @19signature =
+hint @29definition =
 hint @48: fn() -> Any
 
 #==== definition_annotation_type_names
@@ -314,6 +323,7 @@ hover-definition: global R/def.R:0..6
 definition R/def.R:0..6
 references: R/def.R:0..6*, R/use.R:26..32, R/use.R:49..55
 rename: 3 edit(s)
+calls helper: in wrapper [R/use.R:26..32], result [R/use.R:49..55] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `wrapper`
@@ -475,6 +485,7 @@ rename: 3 edit(s)
 signature: fn(Class: character, ...: Any) -> fn(...: Any) -> Any
 parameters: [Class: character] | ...: Any
 completion: none
+hint @9Class =
 
 #==== type_names
 #---- type_references_span_annotations_across_files_type
@@ -564,6 +575,7 @@ hover-definition: global R/def.R:0..6
 definition R/def.R:0..6
 references: R/def.R:0..6*, R/use.R:10..16
 rename: 2 edit(s)
+calls helper: in result [R/use.R:10..16] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `result`
@@ -612,3 +624,71 @@ rename: 3 edit(s)
 signature: fn(Class: character, ...: Any) -> fn(...: Any) -> Any
 parameters: [Class: character] | ...: Any
 completion: none
+hint @9Class =
+
+#==== call_hierarchy
+#---- callers_and_callees_across_files
+#~~~~ R/math.R
+square <- function(x) x * x
+sum_of_squares <- function(values) {
+  total <- 0
+  for (value in values) total <- total + squ$0are(value)
+  report(total)
+}
+#~~~~ R/report.R
+report <- function(total) {
+  message(total)
+  square(total)
+}
+squares <- lapply(1:3, square)
+first <- square(2)
+#++++
+hover 119..125: square: <T: numeric> fn(x: T) -> T
+hover-definition: global R/math.R:0..6
+definition R/math.R:0..6
+references: R/math.R:0..6*, R/math.R:119..125, R/report.R:47..53, R/report.R:86..92, R/report.R:103..109
+rename: 5 edit(s)
+calls square: in sum_of_squares [R/math.R:119..125], report [R/report.R:47..53], first [R/report.R:103..109] | out
+signature: <T: numeric> fn(x: T) -> T
+parameters: [x: T]
+action: Add inferred type annotation for `sum_of_squares`
+  edit 28..28 -> "#: <T> fn(values: T) -> double\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
+  edit 65..65 -> "  #: double\n"
+  edit 28..28 -> "#: <T> fn(values: T) -> double\n"
+completion (13): square, squares, sQuote, sum_of_squares, seq.default, sequence, sequence.default, setequal
+hint @6: <T: numeric> fn(x: T) -> T
+hint @42: <T> fn(values: T) -> double
+hint @72: double
+hint @107: double
+
+#---- calls_out_of_a_function
+#~~~~ R/math.R
+square <- function(x) x * x
+sum_of_sq$0uares <- function(values) {
+  total <- 0
+  for (value in values) total <- total + square(value)
+  report(square(total))
+}
+#~~~~ R/report.R
+report <- function(total) message(total)
+#++++
+hover 28..42: sum_of_squares: <T> fn(values: T) -> NULL
+hover-definition: global R/math.R:28..42
+definition R/math.R:28..42
+references: R/math.R:28..42*
+rename: 1 edit(s)
+calls sum_of_squares: in  | out square [R/math.R:119..125, R/math.R:142..148], report [R/math.R:135..141]
+signature: none
+action: Add inferred type annotation for `sum_of_squares`
+  edit 28..28 -> "#: <T> fn(values: T) -> NULL\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
+  edit 65..65 -> "  #: double\n"
+  edit 28..28 -> "#: <T> fn(values: T) -> NULL\n"
+completion (1): sum_of_squares
+hint @6: <T: numeric> fn(x: T) -> T
+hint @42: <T> fn(values: T) -> NULL
+hint @72: double
+hint @107: double

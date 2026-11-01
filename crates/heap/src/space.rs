@@ -73,7 +73,7 @@ const POISON: u8 = 0xDB;
 
 pub(crate) struct Space {
     /// The start of the reservation, which `base` rounds up to a page boundary.
-    reservation: *mut libc::c_void,
+    reservation: *mut u8,
     reserved_bytes: usize,
     base: NonNull<u8>,
     /// Pages backed by memory, a prefix of the reservation.
@@ -122,18 +122,7 @@ impl Space {
     pub fn new() -> Space {
         let mut reserved_bytes = RESERVED_BYTES;
         let base_mapping = loop {
-            // SAFETY: an anonymous private mapping with no access rights only reserves addresses.
-            let mapping = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    reserved_bytes,
-                    libc::PROT_NONE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
-                    -1,
-                    0,
-                )
-            };
-            if mapping != libc::MAP_FAILED {
+            if let Some(mapping) = virtual_memory::reserve(reserved_bytes) {
                 break mapping;
             }
             if reserved_bytes == MINIMUM_RESERVED_BYTES {
@@ -144,8 +133,8 @@ impl Space {
             }
             reserved_bytes /= 2;
         };
-        // `mmap` returns page-aligned memory, but pages here are 64 KiB, so the first partial
-        // one is skipped.
+        // A reservation is aligned to the system page (4 KiB on Unix), but pages here are
+        // 64 KiB, so the first partial one is skipped.
         let aligned = (base_mapping as usize).next_multiple_of(PAGE_SIZE);
         let base = NonNull::new(aligned as *mut u8)
             .unwrap_or_else(|| panic!("mmap returned a null reservation"));
@@ -234,17 +223,13 @@ impl Space {
                 return None;
             }
             // SAFETY: the range lies inside the reservation, past every committed page.
-            let failed = unsafe {
-                libc::mprotect(
-                    self.base
-                        .as_ptr()
-                        .add(self.committed_pages * PAGE_SIZE)
-                        .cast(),
+            let committed = unsafe {
+                virtual_memory::commit(
+                    self.base.as_ptr().add(self.committed_pages * PAGE_SIZE),
                     commit * PAGE_SIZE,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                ) != 0
+                )
             };
-            if failed {
+            if !committed {
                 return None;
             }
             self.committed_pages += commit;
@@ -493,8 +478,8 @@ impl Drop for Space {
             }
         }
         // SAFETY: the reservation is unmapped exactly once, after its last object is dropped.
-        let failed = unsafe { libc::munmap(self.reservation, self.reserved_bytes) != 0 };
-        if failed {
+        let released = unsafe { virtual_memory::release(self.reservation, self.reserved_bytes) };
+        if !released {
             panic!(
                 "cannot release the R heap's address space: {}",
                 std::io::Error::last_os_error()
@@ -530,4 +515,62 @@ fn set_bits(mut bits: u64) -> impl Iterator<Item = usize> {
         bits &= bits - 1;
         Some(bit)
     })
+}
+
+/// Address-space reservation, the one place the heap talks to the operating system. Memory is
+/// reserved inaccessible up front and committed a run of pages at a time, so the heap's pages
+/// stay contiguous without claiming physical memory before they are used.
+#[cfg(unix)]
+mod virtual_memory {
+    /// Reserves `bytes` of inaccessible, page-aligned address space.
+    pub fn reserve(bytes: usize) -> Option<*mut u8> {
+        // SAFETY: an anonymous private mapping with no access rights only reserves addresses.
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        (mapping != libc::MAP_FAILED).then_some(mapping.cast())
+    }
+
+    /// Makes `bytes` at `start`, inside a reservation, readable and writable.
+    pub unsafe fn commit(start: *mut u8, bytes: usize) -> bool {
+        unsafe { libc::mprotect(start.cast(), bytes, libc::PROT_READ | libc::PROT_WRITE) == 0 }
+    }
+
+    /// Returns a whole reservation to the system.
+    pub unsafe fn release(start: *mut u8, bytes: usize) -> bool {
+        unsafe { libc::munmap(start.cast(), bytes) == 0 }
+    }
+}
+
+#[cfg(windows)]
+mod virtual_memory {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
+        VirtualFree,
+    };
+
+    /// Reserves `bytes` of inaccessible address space, aligned to the 64 KiB allocation
+    /// granularity.
+    pub fn reserve(bytes: usize) -> Option<*mut u8> {
+        // SAFETY: reserving without committing maps nothing.
+        let start = unsafe { VirtualAlloc(std::ptr::null(), bytes, MEM_RESERVE, PAGE_NOACCESS) };
+        (!start.is_null()).then_some(start.cast())
+    }
+
+    /// Commits `bytes` at `start`, inside a reservation, as readable and writable memory.
+    pub unsafe fn commit(start: *mut u8, bytes: usize) -> bool {
+        unsafe { !VirtualAlloc(start.cast(), bytes, MEM_COMMIT, PAGE_READWRITE).is_null() }
+    }
+
+    /// Returns a whole reservation to the system; `MEM_RELEASE` takes the size 0.
+    pub unsafe fn release(start: *mut u8, _bytes: usize) -> bool {
+        unsafe { VirtualFree(start.cast(), 0, MEM_RELEASE) != 0 }
+    }
 }
