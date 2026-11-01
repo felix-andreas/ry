@@ -22,6 +22,31 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `mi_option_arena_eager_commit` in mimalloc's `mi_option_e`, which `libmimalloc-sys` does not
+/// export as a constant.
+#[cfg(target_os = "linux")]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+
+/// An eagerly committed arena is backed by transparent huge pages, which the kernel zeroes in full
+/// when they are first touched or faulted back in after a purge, compacting memory to find them.
+/// Loading a package plans it on every core and every new arena paid for that zeroing, which made
+/// the plan of a large package take twice as long and vary from run to run; data.table's
+/// `rbindlist` on 1e7 rows went from about one second to six once earlier work had left purged
+/// arenas behind. mimalloc reads the option each time it reserves an arena, so it is set from a
+/// constructor that runs when the library loads, as a default that `MIMALLOC_ARENA_EAGER_COMMIT`
+/// can still override. The `ry` binary sets the same option for its own allocator in
+/// `crates/ry/src/main.rs`.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static LAZY_ARENA_COMMIT: extern "C" fn() = {
+    extern "C" fn lazy_arena_commit() {
+        // SAFETY: setting an option's default has no preconditions.
+        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+    }
+    lazy_arena_commit
+};
+
 pub mod altrep;
 pub mod applic;
 pub mod arith;
@@ -41,6 +66,7 @@ pub mod hashtab;
 pub mod legacy;
 pub mod linpack;
 pub mod lists;
+pub mod macho;
 pub mod memory;
 pub mod rmath;
 pub mod serialize;

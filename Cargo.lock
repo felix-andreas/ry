@@ -2018,11 +2018,13 @@ name = "libr"
 version = "0.4.0-beta"
 dependencies = [
  "cc",
+ "dirs",
  "heap",
  "interp",
  "jit",
  "libc",
  "libloading",
+ "libmimalloc-sys",
  "loader",
  "mimalloc",
  "polars",

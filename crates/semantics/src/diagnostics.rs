@@ -10,11 +10,11 @@ use {
             TypeErrorKind, column_element,
         },
         exhaustiveness::{MatchFinding, MatchFindingKind},
-        file_syntax_sites, file_type_definitions,
+        file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-        item_tree,
+        item_syntax, item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
@@ -75,9 +75,9 @@ pub struct RelatedLocation {
     pub message: &'static str,
 }
 
-/// Derives every fact a later pass reads from the file's tree, while the tree is resident.
-/// A cold pass that evicts trees between batches calls this first, so checking a file never
-/// re-parses another one: past this point only the file's own diagnostics read its tree.
+/// Derives every fact a later pass reads from the file's tree. A cold pass calls this for
+/// every file across all cores first, so a later check that reaches another file finds its
+/// facts memoized instead of walking that file's tree on the checking thread.
 pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = crate::metadata::file_attached_namespaces(db, file);
     let _ = file_error_ranges(db, file);
@@ -86,8 +86,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = definition_agreement_candidates(db, file);
     let _ = crate::lints::file_syntax_lints(db, file, *lints);
     let _ = crate::file_typing_mode(db, file);
-    let _ = crate::file_type_definitions(db, file);
-    let _ = type_declaration_names(db, file);
+    warm_project_folds(db, file);
     let _ = parse_stage_diagnostics(db, file);
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
@@ -330,6 +329,18 @@ fn file_error_ranges(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
         .filter(|error| !error.in_annotation)
         .map(|error| error.range)
         .collect()
+}
+
+/// Derives the file's share of every project-wide map a single file's check folds, so a host
+/// can spread that work across cores before the first check. Without it, the first check
+/// derives the share of every file of the project on one thread.
+pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
+    file_definitions(db, file);
+    file_conditional_writers(db, file);
+    file_type_definitions(db, file);
+    top_level_binding_names(db, file);
+    type_declaration_names(db, file);
+    file_global_variable_declarations(db, file);
 }
 
 #[salsa::tracked(returns(clone))]
@@ -775,8 +786,7 @@ struct AnnotationReferences<'db> {
 
 /// Every annotation in the file lowered with file ranges (the `#:` blocks, and the inline
 /// sites unless inline annotations are turned off), keeping only those that reference a
-/// type or report a typing error. Memoized because it reads the tree, which a cold check
-/// evicts after its first pass.
+/// type or report a typing error. Memoized so that diagnostics never walk the tree again.
 #[salsa::tracked(returns(ref))]
 fn file_annotation_references<'db>(
     db: &'db dyn Db,
@@ -929,8 +939,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
 }
 
 /// A disagreement between a statement's inline annotation and its `#:` comment, found from
-/// syntax alone. Memoized because it reads the tree, which a cold check evicts after its
-/// first pass.
+/// syntax alone. Memoized so that diagnostics never walk the tree again.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum AgreementCandidate<'db> {
     /// Compared as written (a type-parameter constraint, a definition's kind or arity), so
@@ -1717,7 +1726,24 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
 fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     use crate::hir::LiteralKind;
     let mut declared = BTreeSet::new();
+    // Every file of the project is asked, so the common answer must not cost a tree walk.
+    if !file.text(db).contains("globalVariables") {
+        return declared;
+    }
     for &item in item_tree(db, file) {
+        // Lowering every item of the project to find a handful of calls would dominate a
+        // single file's check, so the name is matched on the syntax first.
+        let spelled = *item.kind(db) == ItemKind::Statement
+            && item_syntax(db, item).is_some_and(|syntax| {
+                syntax
+                    .syntax_node()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.text().trim_matches('`') == "globalVariables")
+            });
+        if !spelled {
+            continue;
+        }
         let Some(module) = item_hir(db, item) else {
             continue;
         };
@@ -2399,7 +2425,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             }
         }
         TypeErrorKind::MaybeNullCallee { found } => format!(
-            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch",
+            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter",
             renderer.render(db, *found)
         ),
         TypeErrorKind::KnownTypeUnderIfUnknown { found } => format!(

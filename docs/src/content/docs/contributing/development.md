@@ -28,12 +28,15 @@ just gate                           # tests, clippy -D warnings, and fmt --check
 just battery                        # all workspace tests, excluding zed_ry
 just fixture <group__case>          # one fixture case
 just bless -p semantics --test ...  # rewrite fixture expectations from current output
-just fuzz-deep                      # the long seeded fuzz run
+just docs-test [page]               # run the docs' marked examples through the real binary
 just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
 just repl-e2e                       # drive `ry R` and `ry run` through a pty
 just release-dry-run                # package and smoke-test this machine's release archive
 ```
+
+The simulators, fuzzers and long oracle runs have their own recipes, which
+[Robustness](/contributing/robustness#running-the-long-harnesses) lists.
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a
 different target and package as its second and third arguments. Review the diff after every bless:
@@ -96,8 +99,9 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
 
 ## The docs site
 
-Every typed example in the docs is a pair of tabs, `Inline` first and `Comments` second, inside a
-Starlight `<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. Pages
+Every typed example in the docs is a pair of tabs, `Inline` and `Comments`, inside a Starlight
+`<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. A page lists
+`Comments` first when it teaches the `#:` form (the step 2 pages) and `Inline` first otherwise. Pages
 with tabs are `.mdx`. Every annotation form has both spellings, type definitions included, so the
 Inline tab carries no `#:` line except to show the two spellings together.
 

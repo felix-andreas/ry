@@ -64,7 +64,7 @@ definition 10..11
 references: 10..11*, 27..28
 rename: 2 edit(s)
 signature: none
-completion (16): Box, Any, character, complex, double, fn, integer, list
+completion (17): Box, Any, character, complex, double, fn, integer, list
 
 #---- nominal_constructor_name_navigates
 type UserId = integer
@@ -122,7 +122,10 @@ rename: none
 signature: none
 action: Replace `@if-unknown` with `@trust`
   edit 32..43 -> "@trust"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
 completion (1): integer
+hint @5: data.frame
 
 #---- no_hint_restates_a_nominal_constructor
 type Money = double
