@@ -380,9 +380,15 @@ unsafe fn random_vector(
         let mut deviates = SessionDeviates;
         let mut arguments = [0.0f64; 3];
         let mut outcome = Ok(());
+        let scalar = lengths[..parameters].iter().all(|&length| length == 1);
+        for index in 0..parameters {
+            arguments[index] = reals(operands[index])[0];
+        }
         for (element, slot) in drawn.iter_mut().enumerate() {
-            for index in 0..parameters {
-                arguments[index] = reals(operands[index])[element % lengths[index]];
+            if !scalar {
+                for index in 0..parameters {
+                    arguments[index] = reals(operands[index])[element % lengths[index]];
+                }
             }
             match function(&mut deviates, &arguments) {
                 Ok(value) => *slot = value,

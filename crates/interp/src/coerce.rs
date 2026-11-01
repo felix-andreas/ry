@@ -702,8 +702,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2))
     } }),
     builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }),
+    // R 4.3, the version ry implements, still counts `NULL` as atomic, and base R's own code
+    // (`var`, through `sd`) relies on it.
     builtin("is.atomic", 1, |call| unsafe { {
-        scalar_bool(call.arg(0).kind().is_atomic())
+        scalar_bool(call.arg(0) == nil() || call.arg(0).kind().is_atomic())
     } }),
     builtin("is.recursive", 1, |call| unsafe { {
         scalar_bool(matches!(

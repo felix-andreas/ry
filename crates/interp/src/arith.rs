@@ -1170,7 +1170,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
-    let result = alloc(SexpType::Logical, count)?;
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
     let kind = coerce::higher_type(
         if left == nil() {
             SexpType::Logical
@@ -1229,41 +1229,66 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 values::ints_mut(result)[index] = comparison.holds(a.cmp(&b)) as i32;
             }
         }
+        _ if count == 0 => {}
         SexpType::Integer | SexpType::Logical
-            if left.kind() != SexpType::Real && right.kind() != SexpType::Real =>
+            if matches!(left.kind(), SexpType::Integer | SexpType::Logical)
+                && matches!(right.kind(), SexpType::Integer | SexpType::Logical) =>
         {
-            let left = coerce_vector(left, SexpType::Integer)?;
-            let right = coerce_vector(right, SexpType::Integer)?;
-            let a = values::ints(left);
-            let b = values::ints(right);
-            for index in 0..count {
-                let x = a[index % left_length];
-                let y = b[index % right_length];
-                values::ints_mut(result)[index] = if x == NA_INTEGER || y == NA_INTEGER {
-                    NA_LOGICAL
-                } else {
-                    comparison.holds(x.cmp(&y)) as i32
-                };
-            }
+            let output = values::ints_mut(result);
+            compare_kernel(comparison, values::ints(left), values::ints(right), output, |x| x == NA_INTEGER, |x| x == NA_INTEGER, |x| x, |y| y);
         }
         _ => {
-            let left = coerce_vector(left, SexpType::Real)?;
-            let right = coerce_vector(right, SexpType::Real)?;
-            let a = values::reals(left);
-            let b = values::reals(right);
-            for index in 0..count {
-                let x = a[index % left_length];
-                let y = b[index % right_length];
-                values::ints_mut(result)[index] = if x.is_nan() || y.is_nan() {
-                    NA_LOGICAL
-                } else {
-                    comparison.holds(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)) as i32
-                };
+            let output = values::ints_mut(result);
+            let real = |value: f64| value;
+            let integer_na = |value: i32| value == NA_INTEGER;
+            let real_na = |value: f64| value.is_nan();
+            let left_integer = matches!(left.kind(), SexpType::Integer | SexpType::Logical);
+            let right_integer = matches!(right.kind(), SexpType::Integer | SexpType::Logical);
+            match (left_integer, right_integer, left.kind() == SexpType::Real && right.kind() == SexpType::Real) {
+                (_, _, true) => compare_kernel(comparison, values::reals(left), values::reals(right), output, real_na, real_na, real, real),
+                (false, true, _) if left.kind() == SexpType::Real => {
+                    compare_kernel(comparison, values::reals(left), values::ints(right), output, real_na, integer_na, real, widen)
+                }
+                (true, false, _) if right.kind() == SexpType::Real => {
+                    compare_kernel(comparison, values::ints(left), values::reals(right), output, integer_na, real_na, widen, real)
+                }
+                _ => {
+                    let left = coerce_vector(left, SexpType::Real)?;
+                    let right = coerce_vector(right, SexpType::Real)?;
+                    compare_kernel(comparison, values::reals(left), values::reals(right), output, real_na, real_na, real, real);
+                }
             }
         }
     }
     relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
     Ok(result)
+}
+
+/// Compares elementwise with recycling, `NA` wherever either side is missing. Each operator
+/// gets its own loop for the same reason as [`real_kernel`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn compare_kernel<A: Copy, B: Copy, T: PartialOrd>(
+    comparison: Comparison,
+    a: &[A],
+    b: &[B],
+    output: &mut [i32],
+    left_na: impl Fn(A) -> bool,
+    right_na: impl Fn(B) -> bool,
+    left: impl Fn(A) -> T,
+    right: impl Fn(B) -> T,
+) {
+    let compare = |x: A, y: B, holds: fn(&T, &T) -> bool| {
+        if left_na(x) || right_na(y) { NA_LOGICAL } else { holds(&left(x), &right(y)) as i32 }
+    };
+    match comparison {
+        Comparison::Equal => recycle(a, b, output, |x, y| compare(x, y, T::eq)),
+        Comparison::NotEqual => recycle(a, b, output, |x, y| compare(x, y, T::ne)),
+        Comparison::Less => recycle(a, b, output, |x, y| compare(x, y, T::lt)),
+        Comparison::Greater => recycle(a, b, output, |x, y| compare(x, y, T::gt)),
+        Comparison::LessEqual => recycle(a, b, output, |x, y| compare(x, y, T::le)),
+        Comparison::GreaterEqual => recycle(a, b, output, |x, y| compare(x, y, T::ge)),
+    }
 }
 
 // Logic.
@@ -1299,6 +1324,15 @@ unsafe fn logical_at(vector: Sexp, index: usize) -> i32 {
     }
 }
 
+/// A vector's elements as logicals, borrowed when it already is one.
+unsafe fn logical_view<'a>(vector: Sexp) -> std::borrow::Cow<'a, [i32]> {
+    if vector.kind() == SexpType::Logical {
+        std::borrow::Cow::Borrowed(values::ints(vector))
+    } else {
+        std::borrow::Cow::Owned((0..length(vector)).map(|index| logical_at(vector, index)).collect())
+    }
+}
+
 unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;
     let right = values::materialize(call.arg(1))?;
@@ -1329,25 +1363,20 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        let a = logical_at(left, index % left_length);
-        let b = logical_at(right, index % right_length);
-        values::ints_mut(result)[index] = if is_and {
-            if a == 0 || b == 0 {
-                0
-            } else if a == NA_LOGICAL || b == NA_LOGICAL {
-                NA_LOGICAL
-            } else {
-                1
-            }
-        } else if a == 1 || b == 1 {
-            1
-        } else if a == NA_LOGICAL || b == NA_LOGICAL {
-            NA_LOGICAL
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
+    if count > 0 {
+        let (left_values, right_values) = (logical_view(left), logical_view(right));
+        let (a, b) = (left_values.as_ref(), right_values.as_ref());
+        let output = values::ints_mut(result);
+        if is_and {
+            recycle(a, b, output, |x, y| {
+                if x == 0 || y == 0 { 0 } else if x == NA_LOGICAL || y == NA_LOGICAL { NA_LOGICAL } else { 1 }
+            });
         } else {
-            0
-        };
+            recycle(a, b, output, |x, y| {
+                if x == 1 || y == 1 { 1 } else if x == NA_LOGICAL || y == NA_LOGICAL { NA_LOGICAL } else { 0 }
+            });
+        }
     }
     relational_attributes(left, right, result, call.call)?;
     Ok(result)
@@ -2357,16 +2386,34 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
         SexpType::Real => {
             let data = values::reals(operand);
             let mut total = CompensatedSum::default();
-            for &value in data {
-                total.add(value);
+            total.add_all(data);
+            let mut mean = total.total() / count as f64;
+            // GNU R sums in long double, whose wider range keeps the mean of huge finite values
+            // finite; dividing each value first does the same in double.
+            if mean.is_infinite() && data.iter().all(|value| value.is_finite()) {
+                let mut scaled = CompensatedSum::default();
+                for &value in data {
+                    scaled.add(value / count as f64);
+                }
+                mean = scaled.total();
             }
-            let mean = total.total() / count as f64;
             if !mean.is_finite() {
                 return scalar_real(mean);
             }
+            // GNU R forms each deviation in long double, so it is exact; the deviation and its
+            // rounding error together are exact in double too.
             let mut correction = CompensatedSum::default();
-            for &value in data {
-                correction.add(value - mean);
+            for chunk in data.chunks(128) {
+                let mut deviations = [0.0; 256];
+                for (pair, &value) in deviations.chunks_exact_mut(2).zip(chunk) {
+                    // Knuth's two-sum of `value` and `-mean`.
+                    let deviation = value - mean;
+                    let negated_part = deviation - value;
+                    let value_part = deviation - negated_part;
+                    pair[0] = deviation;
+                    pair[1] = (value - value_part) + (-mean - negated_part);
+                }
+                correction.add_all(&deviations[..2 * chunk.len()]);
             }
             scalar_real(mean + correction.total() / count as f64)
         }

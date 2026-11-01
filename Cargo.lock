@@ -1795,6 +1795,7 @@ dependencies = [
  "heap",
  "interp",
  "rustc-hash 2.1.3",
+ "smallvec",
  "syntax",
 ]
 

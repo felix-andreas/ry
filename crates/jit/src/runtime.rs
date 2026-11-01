@@ -16,6 +16,7 @@ use interp::{
     unwind::{R, Unwind, error},
     values,
 };
+use smallvec::SmallVec;
 use std::{
     any::Any,
     cell::Cell,
@@ -331,7 +332,7 @@ pub unsafe extern "C" fn jit_call(
             let arguments = std::slice::from_raw_parts(arguments, 2 * count as usize);
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
-                let mut args = Vec::with_capacity(count as usize);
+                let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
                 let mut expressions = call.cdr();
                 for pair in arguments.chunks_exact(2) {
                     let (kind, bits) = (pair[0] as i32, pair[1]);

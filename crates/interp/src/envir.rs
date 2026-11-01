@@ -1788,6 +1788,35 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     namespace_lookup(package_value, &name, exported, call.env)
 }
 
+/// `getExportedValue(package, name)` without calling R code, for a namespace that is loaded and
+/// exports `name` from its own frame. Anything else (a namespace still to load, lazy data, an
+/// export re-exported from an import) gives `None`, and base R's own function handles it.
+unsafe fn loaded_export(package: &str, symbol: Sexp) -> R<Option<Sexp>> {
+    let environment_in = |symbol: Sexp, env: Sexp| -> R<Option<Sexp>> {
+        let value = value_of(find_var_in_frame(symbol, env)?)?;
+        Ok((value.kind() == SexpType::Environment).then_some(value))
+    };
+    let registry = crate::heap().known().namespace_registry;
+    let Some(namespace) = environment_in(values::install(package)?, registry)? else {
+        return Ok(None);
+    };
+    let Some(info) = environment_in(symbols().dot_namespace, namespace)? else {
+        return Ok(None);
+    };
+    let Some(exports) = environment_in(values::install("exports")?, info)? else {
+        return Ok(None);
+    };
+    let internal = value_of(find_var_in_frame(symbol, exports)?)?;
+    let Some(internal) = values::first_string(internal) else {
+        return Ok(None);
+    };
+    let value = find_var_in_frame(values::install(&internal)?, namespace)?;
+    if value == unbound() {
+        return Ok(None);
+    }
+    value_of(value).map(Some)
+}
+
 /// Looks `name` up in a package's namespace, loading it if needed. Base is looked up directly;
 /// other packages go through base R's own `getExportedValue` and `asNamespace`.
 unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
@@ -1801,6 +1830,9 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
             return Err(error(format!("object '{name}' not found")));
         }
         return value_of(value);
+    }
+    if exported && let Some(value) = loaded_export(&package_name, symbol)? {
+        return Ok(value);
     }
     let function_name = if exported { "getExportedValue" } else { "get" };
     let function = eval::find_fun(values::install(function_name)?, base_namespace())?;
