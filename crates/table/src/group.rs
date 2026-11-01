@@ -26,7 +26,7 @@ use polars_core::runtime::THREAD_POOL;
 use rayon::prelude::*;
 
 use crate::kernel::{
-    CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, fill, gather_column,
+    CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, and, fill, gather_column,
 };
 use crate::query::{Aggregate, Expr, Query, Rows, Select, SortKey};
 use crate::{ColumnType, Result, Schema, Table};
@@ -673,7 +673,12 @@ fn key_columns(
         let Expr::Column(source) = expr else {
             continue;
         };
-        columns.push(gather_column(frame.column(source)?, first_rows, None, name.clone())?);
+        columns.push(gather_column(
+            frame.column(source)?,
+            first_rows,
+            None,
+            name.clone(),
+        )?);
     }
     Ok(columns)
 }
@@ -686,7 +691,7 @@ pub(crate) fn temporary(index: usize) -> PlSmallStr {
 /// when part of it does not collapse to one value per group.
 pub(crate) fn rewrite(expr: &Expr, aggregates: &mut Vec<Expr>) -> Option<Expr> {
     Some(match expr {
-        Expr::Aggregate { .. } | Expr::Count => {
+        Expr::Aggregate { .. } | Expr::Count | Expr::Correlation(..) => {
             let index = match aggregates.iter().position(|known| known == expr) {
                 Some(index) => index,
                 None => {
@@ -697,9 +702,7 @@ pub(crate) fn rewrite(expr: &Expr, aggregates: &mut Vec<Expr>) -> Option<Expr> {
             Expr::Column(temporary(index))
         }
         Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Na(_) => expr.clone(),
-        Expr::Character(_) | Expr::Column(_) | Expr::Head(..) | Expr::Correlation(..) => {
-            return None;
-        }
+        Expr::Character(_) | Expr::Column(_) | Expr::Head(..) => return None,
         Expr::Unary(op, arg) => Expr::Unary(*op, Box::new(rewrite(arg, aggregates)?)),
         Expr::Binary(op, left, right) => Expr::Binary(
             *op,
@@ -730,6 +733,10 @@ enum Function {
     First,
     Last,
     Count,
+    Var,
+    Sd,
+    Median,
+    Correlation,
     /// The best rows of each group under a [`Ranking`].
     Top,
 }
@@ -746,6 +753,12 @@ enum Input {
     },
     /// A column whose values are only gathered (`first`, `last` and `head`), never combined.
     Gathered(Vector),
+    /// The two inputs of `cor`. A row is `NA` when either value is.
+    Pair {
+        x: Buffer<f64>,
+        y: Buffer<f64>,
+        validity: Option<Bitmap>,
+    },
 }
 
 impl Aggregation {
@@ -763,6 +776,33 @@ impl Aggregation {
                 arg,
                 na_rm,
             } => (*function, arg, *na_rm),
+            Expr::Correlation(x, y) => {
+                let (
+                    Vector::Double {
+                        values: x,
+                        validity: x_validity,
+                    },
+                    Vector::Double {
+                        values: y,
+                        validity: y_validity,
+                    },
+                ) = (
+                    doubles(evaluator, x, height)?,
+                    doubles(evaluator, y, height)?,
+                )
+                else {
+                    return None;
+                };
+                return Some(Aggregation {
+                    function: Function::Correlation,
+                    input: Input::Pair {
+                        x,
+                        y,
+                        validity: and(x_validity.as_ref(), y_validity.as_ref()),
+                    },
+                    na_rm: false,
+                });
+            }
             _ => return None,
         };
         let function = match function {
@@ -773,8 +813,32 @@ impl Aggregation {
             Aggregate::First => Function::First,
             Aggregate::Last => Function::Last,
             Aggregate::Length => Function::Count,
-            Aggregate::Median | Aggregate::Sd | Aggregate::Var => return None,
+            Aggregate::Median => Function::Median,
+            Aggregate::Sd => Function::Sd,
+            Aggregate::Var => Function::Var,
         };
+        if matches!(function, Function::Median | Function::Sd | Function::Var) {
+            let Vector::Double { values, validity } = doubles(evaluator, arg, height)? else {
+                return None;
+            };
+            // Where R's `median` meets a `NaN` its answer depends on the sort; the plan decides.
+            if function == Function::Median
+                && !na_rm
+                && (0..height).any(|row| {
+                    values[row].is_nan()
+                        && validity
+                            .as_ref()
+                            .is_none_or(|validity| validity.get_bit(row))
+                })
+            {
+                return None;
+            }
+            return Some(Aggregation {
+                function,
+                input: Input::Double { values, validity },
+                na_rm,
+            });
+        }
         if function == Function::Count {
             // `length(x)` still needs `x` to be a valid expression.
             evaluator.eval(arg)?;
@@ -805,6 +869,14 @@ impl Aggregation {
             na_rm,
         })
     }
+}
+
+/// An aggregate's argument evaluated as doubles.
+fn doubles(evaluator: &Evaluator, arg: &Expr, height: usize) -> Option<Vector> {
+    evaluator
+        .eval(arg)?
+        .cast(ColumnType::Double)?
+        .into_vector(height)
 }
 
 /// One aggregation's per-slot accumulators. `missing` records that a group met an `NA`, which
@@ -841,6 +913,18 @@ enum State {
         rows: Vec<u32>,
     },
     Count(Vec<u32>),
+    /// Running moments for `var`, `sd` and `cor`.
+    Moments {
+        moments: Vec<Moments>,
+        missing: Vec<bool>,
+    },
+    /// Every value with its slot, for `median`. One flat list appends far faster than a list per
+    /// group; the values are sorted into groups once, when the medians are taken.
+    Values {
+        slots: usize,
+        entries: Vec<(u32, f64)>,
+        missing: Vec<bool>,
+    },
     /// Each group's best rows under the ranking, best first, [`NO_ROW`]-padded to `k` per group.
     Top {
         k: usize,
@@ -882,6 +966,15 @@ impl State {
                 rows: vec![NO_ROW; slots],
             },
             Function::Count => State::Count(vec![0; slots]),
+            Function::Var | Function::Sd | Function::Correlation => State::Moments {
+                moments: vec![Moments::default(); slots],
+                missing: vec![false; slots],
+            },
+            Function::Median => State::Values {
+                slots,
+                entries: Vec::new(),
+                missing: vec![false; slots],
+            },
             Function::Top => {
                 let k = top.map_or(1, |ranking| ranking.k);
                 State::Top {
@@ -998,6 +1091,31 @@ impl State {
                 }
             }
             (
+                State::Moments { moments, missing },
+                State::Moments {
+                    moments: later_moments,
+                    missing: later_missing,
+                },
+            ) => {
+                for (moment, later) in moments.iter_mut().zip(later_moments) {
+                    moment.merge(&later);
+                }
+                or_into(missing, later_missing);
+            }
+            (
+                State::Values {
+                    entries, missing, ..
+                },
+                State::Values {
+                    entries: later_entries,
+                    missing: later_missing,
+                    ..
+                },
+            ) => {
+                entries.extend(later_entries);
+                or_into(missing, later_missing);
+            }
+            (
                 State::Top { k, rows },
                 State::Top {
                     rows: later_rows, ..
@@ -1110,6 +1228,37 @@ impl State {
                 rows.extend(other_rows);
             }
             (State::Count(counts), State::Count(other_counts)) => counts.extend(other_counts),
+            (
+                State::Moments { moments, missing },
+                State::Moments {
+                    moments: other_moments,
+                    missing: other_missing,
+                },
+            ) => {
+                moments.extend(other_moments);
+                missing.extend(other_missing);
+            }
+            (
+                State::Values {
+                    slots,
+                    entries,
+                    missing,
+                },
+                State::Values {
+                    slots: other_slots,
+                    entries: other_entries,
+                    missing: other_missing,
+                },
+            ) => {
+                let offset = *slots as u32;
+                entries.extend(
+                    other_entries
+                        .into_iter()
+                        .map(|(slot, value)| (slot + offset, value)),
+                );
+                *slots += other_slots;
+                missing.extend(other_missing);
+            }
             (
                 State::Top { rows, .. },
                 State::Top {
@@ -1232,7 +1381,7 @@ fn update(
                         .as_ref()
                         .is_none_or(|validity| validity.get_bit(row))
                         .then(|| values[row]),
-                    Input::None | Input::Gathered(_) => return,
+                    Input::None | Input::Gathered(_) | Input::Pair { .. } => return,
                 };
                 match value {
                     Some(value) if !(na_rm && value.is_nan()) => {
@@ -1303,6 +1452,56 @@ fn update(
                     seen[slot] = true;
                 } else if !na_rm {
                     missing[slot] = true;
+                }
+            }
+        }
+        (State::Moments { moments, missing }, Input::Double { values, validity }) => {
+            for index in 0..len {
+                let (row, slot) = (row_of(index), slot_of(index));
+                let value = values[row];
+                if validity
+                    .as_ref()
+                    .is_some_and(|validity| !validity.get_bit(row))
+                {
+                    if !na_rm {
+                        missing[slot] = true;
+                    }
+                } else if !(na_rm && value.is_nan()) {
+                    moments[slot].add(value, 0.0);
+                }
+            }
+        }
+        (State::Moments { moments, missing }, Input::Pair { x, y, validity }) => {
+            for index in 0..len {
+                let (row, slot) = (row_of(index), slot_of(index));
+                if validity
+                    .as_ref()
+                    .is_some_and(|validity| !validity.get_bit(row))
+                {
+                    missing[slot] = true;
+                } else {
+                    moments[slot].add(x[row], y[row]);
+                }
+            }
+        }
+        (
+            State::Values {
+                entries, missing, ..
+            },
+            Input::Double { values, validity },
+        ) => {
+            for index in 0..len {
+                let (row, slot) = (row_of(index), slot_of(index));
+                let value = values[row];
+                if validity
+                    .as_ref()
+                    .is_some_and(|validity| !validity.get_bit(row))
+                {
+                    if !na_rm {
+                        missing[slot] = true;
+                    }
+                } else if !(na_rm && value.is_nan()) {
+                    entries.push((slot as u32, value));
                 }
             }
         }
@@ -1438,11 +1637,145 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
             values: Buffer::from(gather_slots(order, |slot| counts[slot] as i32)),
             validity: None,
         },
+        State::Moments { moments, missing } => {
+            let function = aggregation.function;
+            let results = gather_slots(order, |slot| {
+                let moment = &moments[slot];
+                // `NA` where R's `var` and `cor` are: fewer than two values, and for `cor` a
+                // zero spread or a `NaN`.
+                match function {
+                    _ if missing[slot] || moment.count < 2.0 => None,
+                    Function::Correlation => {
+                        let correlation = moment.co / (moment.m2_x * moment.m2_y).sqrt();
+                        (!correlation.is_nan()).then_some(correlation)
+                    }
+                    Function::Sd => Some((moment.m2_x / (moment.count - 1.0)).sqrt()),
+                    _ => Some(moment.m2_x / (moment.count - 1.0)),
+                }
+            });
+            let validity: Bitmap = results.iter().map(Option::is_some).collect();
+            Vector::Double {
+                values: Buffer::from(
+                    results
+                        .iter()
+                        .map(|result| result.unwrap_or(0.0))
+                        .collect::<Vec<_>>(),
+                ),
+                validity: (validity.unset_bits() > 0).then_some(validity),
+            }
+        }
+        State::Values {
+            slots,
+            entries,
+            missing,
+        } => {
+            // A counting sort puts each group's values together, and the groups' medians are then
+            // selected in place, in parallel.
+            let (starts, mut sorted) = sort_by_slot(entries, *slots);
+            let mut groups: Vec<&mut [f64]> = Vec::with_capacity(*slots);
+            let mut rest = sorted.as_mut_slice();
+            for slot in 0..*slots {
+                let (group, tail) = rest.split_at_mut(starts[slot + 1] - starts[slot]);
+                groups.push(group);
+                rest = tail;
+            }
+            let by_slot: Vec<Option<f64>> = THREAD_POOL.install(|| {
+                groups
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(slot, group)| {
+                        if missing[slot] || group.is_empty() {
+                            return None;
+                        }
+                        let (middle, even) = (group.len() / 2, group.len() % 2 == 0);
+                        let (below, upper, _) =
+                            group.select_nth_unstable_by(middle, f64::total_cmp);
+                        let upper = *upper;
+                        Some(if even {
+                            let lower = below.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                            (lower + upper) / 2.0
+                        } else {
+                            upper
+                        })
+                    })
+                    .collect()
+            });
+            let medians = gather_slots(order, |slot| by_slot[slot]);
+            let validity: Bitmap = medians.iter().map(Option::is_some).collect();
+            Vector::Double {
+                values: Buffer::from(
+                    medians
+                        .iter()
+                        .map(|median| median.unwrap_or(0.0))
+                        .collect::<Vec<_>>(),
+                ),
+                validity: (validity.unset_bits() > 0).then_some(validity),
+            }
+        }
         State::Top { .. } => Vector::Integer {
             values: Buffer::from(vec![0; groups]),
             validity: Some(Bitmap::new_zeroed(groups)),
         },
     }
+}
+
+/// Counting-sorts `(slot, value)` entries by slot, keeping their order within a slot. Returns the
+/// values and where each slot's run starts, with the total length appended.
+fn sort_by_slot(entries: &[(u32, f64)], slots: usize) -> (Vec<usize>, Vec<f64>) {
+    let threads = THREAD_POOL.current_num_threads();
+    // Each part counts its slots in a histogram of its own, which pays off only when the
+    // histograms are small next to the entries.
+    let parts = if entries.len() >= PARALLEL_ROWS && slots.saturating_mul(threads) <= entries.len()
+    {
+        threads
+    } else {
+        1
+    };
+    let parts: Vec<&[(u32, f64)]> = entries
+        .chunks(entries.len().div_ceil(parts).max(1))
+        .collect();
+    let mut next: Vec<Vec<usize>> = THREAD_POOL.install(|| {
+        parts
+            .par_iter()
+            .map(|part| {
+                let mut counts = vec![0usize; slots];
+                for (slot, _) in *part {
+                    counts[*slot as usize] += 1;
+                }
+                counts
+            })
+            .collect()
+    });
+    let mut starts = Vec::with_capacity(slots + 1);
+    let mut position = 0;
+    for slot in 0..slots {
+        starts.push(position);
+        for counts in &mut next {
+            let count = counts[slot];
+            counts[slot] = position;
+            position += count;
+        }
+    }
+    starts.push(position);
+    let mut sorted: Vec<f64> = Vec::with_capacity(entries.len());
+    let target = Shared(sorted.as_mut_ptr());
+    THREAD_POOL.install(|| {
+        parts
+            .par_iter()
+            .zip(next.par_iter_mut())
+            .for_each(|(part, next)| {
+                for (slot, value) in *part {
+                    let position = &mut next[*slot as usize];
+                    // SAFETY: the parts' offsets for a slot are disjoint runs inside that slot's
+                    // run, and the runs cover `0..entries.len()` exactly once.
+                    unsafe { target.write(*position, *value) };
+                    *position += 1;
+                }
+            });
+    });
+    // SAFETY: the scatter wrote every element in `0..entries.len()`.
+    unsafe { sorted.set_len(entries.len()) };
+    (starts, sorted)
 }
 
 fn gather_slots<T: Send>(order: &[u32], value: impl Fn(usize) -> T + Sync) -> Vec<T> {
@@ -1622,5 +1955,54 @@ fn with_validity(vector: Vector, keep: &Bitmap) -> Vector {
             values,
             validity: combine(validity),
         },
+    }
+}
+
+/// One group's running count, means, sums of squared deviations and co-moment, updated with
+/// Welford's method and merged with Chan's, which stay accurate where summing squares would
+/// cancel. `var` and `sd` use only `x`.
+#[derive(Clone, Copy, Default)]
+struct Moments {
+    count: f64,
+    mean_x: f64,
+    mean_y: f64,
+    m2_x: f64,
+    m2_y: f64,
+    co: f64,
+}
+
+impl Moments {
+    /// The update is symmetric in `x` and `y`, so `cor(a, b)` and `cor(b, a)` agree exactly, as
+    /// R's do.
+    fn add(&mut self, x: f64, y: f64) {
+        self.count += 1.0;
+        let delta_x = x - self.mean_x;
+        let delta_y = y - self.mean_y;
+        let weight = (self.count - 1.0) / self.count;
+        self.mean_x += delta_x / self.count;
+        self.mean_y += delta_y / self.count;
+        self.m2_x += delta_x * delta_x * weight;
+        self.m2_y += delta_y * delta_y * weight;
+        self.co += delta_x * delta_y * weight;
+    }
+
+    fn merge(&mut self, later: &Moments) {
+        if later.count == 0.0 {
+            return;
+        }
+        if self.count == 0.0 {
+            *self = *later;
+            return;
+        }
+        let count = self.count + later.count;
+        let weight = self.count * later.count / count;
+        let delta_x = later.mean_x - self.mean_x;
+        let delta_y = later.mean_y - self.mean_y;
+        self.mean_x += delta_x * later.count / count;
+        self.mean_y += delta_y * later.count / count;
+        self.m2_x += later.m2_x + delta_x * delta_x * weight;
+        self.m2_y += later.m2_y + delta_y * delta_y * weight;
+        self.co += later.co + delta_x * delta_y * weight;
+        self.count = count;
     }
 }

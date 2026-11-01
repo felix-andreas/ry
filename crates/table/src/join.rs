@@ -531,13 +531,25 @@ fn rolling(
     }
     let x_rows = match (Vector::of(x_column), Vector::of(i_column)) {
         (
-            Some(Vector::Integer { values: x_values, .. }),
-            Some(Vector::Integer { values: i_values, .. }),
+            Some(Vector::Integer {
+                values: x_values, ..
+            }),
+            Some(Vector::Integer {
+                values: i_values, ..
+            }),
         ) => roll(&keys, &x_values, &i_values, direction, limit),
         (
-            Some(Vector::Double { values: x_values, .. }),
-            Some(Vector::Double { values: i_values, .. }),
-        ) if !x_values.iter().chain(i_values.iter()).any(|value| value.is_nan()) => {
+            Some(Vector::Double {
+                values: x_values, ..
+            }),
+            Some(Vector::Double {
+                values: i_values, ..
+            }),
+        ) if !x_values
+            .iter()
+            .chain(i_values.iter())
+            .any(|value| value.is_nan()) =>
+        {
             roll(&keys, &x_values, &i_values, direction, limit)
         }
         _ => None,
@@ -588,7 +600,10 @@ where
     });
     let mut runs: Vec<Option<Range<u32>>> = vec![None; keys.radix as usize];
     let mut start = 0u32;
-    let ends = starts?.into_iter().flatten().chain(std::iter::once(x_height as u32));
+    let ends = starts?
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(x_height as u32));
     for end in ends {
         if end == 0 {
             continue;
@@ -609,9 +624,9 @@ where
                 let values = &x_values[run.start as usize..run.end as usize];
                 let after = values.partition_point(|x_value| *x_value <= value);
                 match direction {
-                    Direction::Backward => after.checked_sub(1).filter(|position| {
-                        within(value.into() - values[*position].into())
-                    }),
+                    Direction::Backward => after
+                        .checked_sub(1)
+                        .filter(|position| within(value.into() - values[*position].into())),
                     Direction::Forward => {
                         let at = if after > 0 && values[after - 1] == value {
                             after - 1

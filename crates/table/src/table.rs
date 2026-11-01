@@ -207,6 +207,8 @@ impl fmt::Display for Schema {
 /// holds the table: an unshared table is updated in place through `&mut self`, and a shared one
 /// is first [`fork`](Table::fork)ed, which copies only the column list, because the Arrow
 /// buffers themselves are immutable and shared.
+///
+/// Every column is one contiguous chunk, so kernels read it as a slice without copying.
 #[derive(Clone, Debug, Default)]
 pub struct Table {
     frame: DataFrame,
@@ -368,7 +370,7 @@ impl Table {
     /// R dtype already, so it skips [`set_column`](Table::set_column)'s normalizing scan.
     pub(crate) fn put_column(&mut self, column: Column) -> Result<()> {
         self.forget_key(column.name().clone().as_str());
-        self.frame.with_column(column)?;
+        self.frame.with_column(column.rechunk())?;
         Ok(())
     }
 
@@ -383,7 +385,7 @@ impl Table {
     /// Sorts the table by `columns` and records them as its key, as `setkey` does.
     pub fn set_key(&mut self, columns: &[&str]) -> Result<()> {
         let frame = std::mem::take(&mut self.frame);
-        self.frame = frame.sort(
+        let mut sorted = frame.sort(
             columns
                 .iter()
                 .copied()
@@ -391,6 +393,8 @@ impl Table {
                 .collect::<Vec<_>>(),
             Default::default(),
         )?;
+        sorted.rechunk_mut_par();
+        self.frame = sorted;
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();
         Ok(())
     }
@@ -403,7 +407,8 @@ impl Table {
 
     /// Wraps a frame whose columns already hold R dtypes, such as one gathered from other tables'
     /// columns, without [`Table::new`]'s scan of every integer column for `i32::MIN`.
-    pub(crate) fn from_normalized(frame: DataFrame) -> Table {
+    pub(crate) fn from_normalized(mut frame: DataFrame) -> Table {
+        frame.rechunk_mut_par();
         Table {
             frame,
             key: Vec::new(),
@@ -416,8 +421,14 @@ impl Table {
     }
 }
 
-/// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for.
+/// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for,
+/// and makes it one contiguous chunk. Every kernel reads a column as one slice, so a column left
+/// in the many chunks a CSV reader produces would be copied again by every query that reads it.
 fn normalize(column: Column) -> Result<Column> {
+    Ok(convert(column)?.rechunk())
+}
+
+fn convert(column: Column) -> Result<Column> {
     let target = match column.dtype() {
         DataType::Int32 => {
             // R's `NA_integer_` is `i32::MIN`, so a valid `i32::MIN` must become a null, or R would

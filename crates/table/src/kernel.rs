@@ -727,27 +727,27 @@ where
 
 pub(crate) trait IsNan {
     const CAN_BE_NAN: bool;
-    fn is_nan(self) -> bool;
+    fn is_nan(&self) -> bool;
 }
 
 impl IsNan for i32 {
     const CAN_BE_NAN: bool = false;
-    fn is_nan(self) -> bool {
+    fn is_nan(&self) -> bool {
         false
     }
 }
 
 impl IsNan for f64 {
     const CAN_BE_NAN: bool = true;
-    fn is_nan(self) -> bool {
-        f64::is_nan(self)
+    fn is_nan(&self) -> bool {
+        f64::is_nan(*self)
     }
 }
 
 fn side_has_nan<T: Copy + IsNan + Sync>(side: &Side<T>) -> bool {
     match side {
         Side::Array(values) => any(values, |value| value.is_nan()),
-        Side::Scalar(value) => value.is_some_and(IsNan::is_nan),
+        Side::Scalar(value) => value.is_some_and(|value| value.is_nan()),
     }
 }
 
