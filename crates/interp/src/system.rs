@@ -218,7 +218,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
     builtin("enc2native", 1, |call| Ok(call.arg(0))),
-    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
+    builtin("enc2utf8", 1, do_enc2utf8),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -250,8 +250,16 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }
     }),
     // ry has no interactive debugger, so `browser()` continues as it does in a
-    // non-interactive GNU R session.
-    special("browser", -1, |_| Ok(nil())).invisible(),
+    // non-interactive GNU R session, which `R CMD check` and testthat turn into an error.
+    special("browser", -1, |call| {
+        let checked = std::env::var("_R_CHECK_BROWSER_NONINTERACTIVE_")
+            .is_ok_and(|value| matches!(value.as_str(), "true" | "TRUE" | "True" | "T"));
+        if !crate::interp().interactive && checked {
+            return Err(call.error("non-interactive browser() -- left over from debugging?"));
+        }
+        Ok(nil())
+    })
+    .invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
@@ -2715,6 +2723,48 @@ unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
             "unknown"
         };
         values::set_elt(result, index, values::mkchar(name)?);
+    }
+    Ok(result)
+}
+
+/// `enc2utf8`: re-encodes latin1 strings as UTF-8 and marks native non-ASCII strings as UTF-8,
+/// which is what GNU R does in a UTF-8 locale. The vector is copied only when a string changes.
+unsafe fn do_enc2utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("argument is not a character vector"));
+    }
+    let mut result = strings;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        if charsxp == values::na_string()
+            || charsxp.has_gp(heap::object::gp::UTF8)
+            || charsxp.has_gp(heap::object::gp::BYTES)
+            || charsxp.bytes().is_ascii()
+        {
+            continue;
+        }
+        let converted = if charsxp.has_gp(heap::object::gp::LATIN1) {
+            charsxp
+                .bytes()
+                .iter()
+                .map(|&byte| byte as char)
+                .collect::<String>()
+                .into_bytes()
+        } else if std::str::from_utf8(charsxp.bytes()).is_ok() {
+            charsxp.bytes().to_vec()
+        } else {
+            continue;
+        };
+        if result == strings {
+            result = values::shallow_duplicate(strings)?;
+            crate::heap().root(result);
+        }
+        values::set_elt(
+            result,
+            index,
+            values::mkchar_bytes(&converted, Encoding::Utf8)?,
+        );
     }
     Ok(result)
 }
