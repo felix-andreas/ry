@@ -167,6 +167,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 .unwrap_or_default()
         })
     }),
+    internal("Sys.which", 1, do_sys_which),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
     internal("Sys.umask", 1, do_sys_umask),
     internal("Sys.getpid", 0, |_| unsafe {
@@ -372,6 +373,53 @@ fn temp_dir() -> String {
         })
         .clone()
     }
+}
+
+/// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
+/// suffixes tried when the name has none, as a forward-slash path named by the name, or "".
+/// Unix base R finds programs with `command -v` in R code instead.
+unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let result = map_strings(call, |name| {
+        find_program(name)
+            .map(|path| path.display().to_string().replace('\\', "/"))
+            .unwrap_or_default()
+    })?;
+    if names != nil() {
+        values::set_attr(result, symbols().names, names)?;
+    }
+    Ok(result)
+}
+
+fn find_program(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(name);
+    let extensions: Vec<String> = if candidate.extension().is_some() || !cfg!(windows) {
+        vec![String::new()]
+    } else {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| extension.to_ascii_lowercase())
+            .chain([String::new()])
+            .collect()
+    };
+    let directories: Vec<PathBuf> = if candidate.components().count() > 1 {
+        vec![PathBuf::new()]
+    } else {
+        std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default()
+    };
+    directories.iter().find_map(|directory| {
+        extensions.iter().find_map(|extension| {
+            let path = directory.join(format!("{name}{extension}"));
+            path.is_file().then_some(path)
+        })
+    })
 }
 
 unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<Sexp> {
@@ -3571,8 +3619,30 @@ pub unsafe fn init_locale() {
         LC_MEASUREMENT,
     ] {
         set_locale(category, c"".as_ptr());
+        #[cfg(windows)]
+        use_utf8_codeset(category);
     }
     crate::sort::refresh_collation();
+}
+
+/// Moves a Windows locale category to the UTF-8 codeset of the same language and region
+/// (`English_United States.1252` becomes `English_United States.utf8`). ry's native encoding is
+/// UTF-8 on Windows, as GNU R's is from 4.2 on, and `ry.exe` asks Windows for the UTF-8 code page
+/// in its manifest. A system that ignores the manifest (older Windows, Wine) still starts the C
+/// runtime in the ANSI code page, which would convert native strings as Latin-1 and report a
+/// locale that contradicts `l10n_info()`.
+#[cfg(windows)]
+unsafe fn use_utf8_codeset(category: libc::c_int) {
+    let current = current_locale(category);
+    let Some((language, codeset)) = current.rsplit_once('.') else {
+        return;
+    };
+    if codeset.eq_ignore_ascii_case("utf8") || codeset.eq_ignore_ascii_case("utf-8") {
+        return;
+    }
+    if let Ok(name) = std::ffi::CString::new(format!("{language}.UTF-8")) {
+        set_locale(category, name.as_ptr());
+    }
 }
 
 /// macOS's C library has no paper or measurement category, and Windows's has no messages
@@ -3621,12 +3691,27 @@ unsafe fn set_locale(category: libc::c_int, name: *const libc::c_char) -> *mut l
 unsafe fn current_locale(category: libc::c_int) -> String {
     let current = set_locale(category, std::ptr::null());
     if current.is_null() {
-        String::new()
-    } else {
-        std::ffi::CStr::from_ptr(current)
-            .to_string_lossy()
-            .into_owned()
+        return String::new();
     }
+    let name = std::ffi::CStr::from_ptr(current)
+        .to_string_lossy()
+        .into_owned();
+    // Some C runtimes (Wine's) name the UTF-8 codeset by its code page number; Microsoft's
+    // reports `.utf8`, which code testing the locale name for UTF-8 expects and which `setlocale`
+    // accepts back.
+    // The composite `LC_ALL` name joins every category as `LC_COLLATE=...;LC_CTYPE=...`.
+    #[cfg(windows)]
+    if name.contains(".65001") {
+        return name
+            .split(';')
+            .map(|part| match part.strip_suffix(".65001") {
+                Some(language) => format!("{language}.utf8"),
+                None => part.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+    }
+    name
 }
 
 unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
