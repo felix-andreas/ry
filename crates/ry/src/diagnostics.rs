@@ -7,32 +7,22 @@ use {
         diagnostics::{
             Diagnostic, Severity, file_diagnostics, parse_stage_diagnostics, strict_diagnostics,
         },
-        file_typing_mode,
+        file_is_strict, file_typing_mode,
         lints::lint_file,
     },
 };
 
-/// A file's `# typing:` directive wins over `[check] strict`.
-pub fn file_is_strict(db: &dyn Db, file: SourceFile, config: &Config) -> bool {
-    match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => config.check.strict,
-    }
-}
-
 /// In position order. Suppression comments are the caller's step.
 pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
-    let (typing_enabled, strict_enabled) = match file_typing_mode(db, file) {
-        Some(TypingMode::Off) => (false, false),
-        Some(TypingMode::On) => (true, false),
-        Some(TypingMode::Strict) => (true, true),
+    // The database's settings carry `[check] strict`, because the checks record strict mode's
+    // origins only in a strict file.
+    let strict_enabled = file_is_strict(db, file);
+    let typing_enabled = match file_typing_mode(db, file) {
+        Some(TypingMode::Off) => false,
+        Some(TypingMode::On | TypingMode::Strict) => true,
         // Strict mode rejects code it cannot type, which would mean little if it then hid the
         // type errors in the code it can, so it implies typing like `# typing: strict` does.
-        None => (
-            config.check.typing || config.check.strict,
-            config.check.strict,
-        ),
+        None => config.check.typing || strict_enabled,
     };
     let mut rendered: Vec<Diagnostic> = file_diagnostics(db, file)
         .into_iter()

@@ -391,6 +391,10 @@ fn worker_gone_error() -> ResponseError {
     ResponseError::new(ErrorCode::INTERNAL_ERROR, "analysis worker unavailable")
 }
 
+fn internal_error(error: impl std::fmt::Display) -> ResponseError {
+    ResponseError::new(ErrorCode::INTERNAL_ERROR, error.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PositionEncoding {
     Utf8,
@@ -576,9 +580,12 @@ impl Worker {
         // durable as its least durable input, and nearly every memo reads the stubs or the
         // settings, so one LOW input would make a keystroke deep-verify the whole project.
         worker.install_stubs();
-        let _: AnalysisSettings = AnalysisSettings::builder(worker.config.check.inline_annotations)
-            .durability(Durability::MEDIUM)
-            .new(&worker.db);
+        let _: AnalysisSettings = AnalysisSettings::builder(
+            worker.config.check.inline_annotations,
+            worker.config.check.strict,
+        )
+        .durability(Durability::MEDIUM)
+        .new(&worker.db);
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
@@ -1493,12 +1500,16 @@ impl Worker {
                     Ok(config) => {
                         config_changed |= config != self.config;
                         let inline_annotations = config.check.inline_annotations;
+                        let strict = config.check.strict;
                         self.config = config;
                         let settings = AnalysisSettings::get(&self.db);
                         if *settings.inline_annotations(&self.db) != inline_annotations {
                             settings
                                 .set_inline_annotations(&mut self.db)
                                 .to(inline_annotations);
+                        }
+                        if *settings.strict(&self.db) != strict {
+                            settings.set_strict(&mut self.db).to(strict);
                         }
                         self.report_config_warnings();
                         self.publish_config_diagnostics(None);
@@ -1996,6 +2007,9 @@ fn initialize_result(
             references_provider: Some(lsp_types::OneOf::Left(true)),
             document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
             call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
+            code_lens_provider: Some(lsp_types::CodeLensOptions {
+                resolve_provider: Some(true),
+            }),
             folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
             selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(
                 true,
@@ -2727,6 +2741,121 @@ impl LanguageServer for ServerState {
                 })
                 .collect();
             Ok(Some(lsp_types::WorkspaceSymbolResponse::Flat(symbols)))
+        })
+    }
+
+    fn code_lens(
+        &mut self,
+        params: lsp_types::CodeLensParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CodeLens>>, Self::Error>> {
+        self.read(move |worker| {
+            let uri = params.text_document.uri;
+            let Some((file, text)) = worker.document(&uri) else {
+                return Ok(None);
+            };
+            let lenses = worker
+                .cancellable(|worker| ide::code_lenses(&worker.db, file))
+                .unwrap_or_default();
+            let uri_argument = serde_json::Value::String(uri.to_string());
+            let mut result = Vec::new();
+            for lens in lenses {
+                let range = worker.to_range(&text, lens.range);
+                let command = |title: &str, command: &str, arguments: Vec<serde_json::Value>| {
+                    lsp_types::CodeLens {
+                        range,
+                        command: Some(lsp_types::Command {
+                            title: title.to_owned(),
+                            command: command.to_owned(),
+                            arguments: Some(arguments),
+                        }),
+                        data: None,
+                    }
+                };
+                match lens.kind {
+                    ide::CodeLensKind::RunFile => {
+                        result.push(command(
+                            "Run file",
+                            "ry.runFile",
+                            vec![uri_argument.clone()],
+                        ));
+                    }
+                    ide::CodeLensKind::Test { name } => {
+                        let arguments = vec![uri_argument.clone(), serde_json::Value::String(name)];
+                        result.push(command("Run test", "ry.runTest", arguments.clone()));
+                        result.push(command("Debug test", "ry.debugTest", arguments));
+                    }
+                    ide::CodeLensKind::References => result.push(lsp_types::CodeLens {
+                        range,
+                        command: None,
+                        data: Some(uri_argument.clone()),
+                    }),
+                }
+            }
+            Ok(Some(result))
+        })
+    }
+
+    /// Only a reference count is left to resolve. Its command passes the client plain LSP
+    /// locations: `ry.showReferences` is the client's, because the editor's own peek command
+    /// takes editor types that no server can send.
+    fn code_lens_resolve(
+        &mut self,
+        lens: lsp_types::CodeLens,
+    ) -> BoxFuture<'static, Result<lsp_types::CodeLens, Self::Error>> {
+        self.read(move |worker| {
+            let Some(uri) = lens
+                .data
+                .as_ref()
+                .and_then(|data| data.as_str())
+                .and_then(|uri| lsp_types::Url::parse(uri).ok())
+            else {
+                return Ok(lens);
+            };
+            let position = lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: lens.range.start,
+            };
+            let Some((file, _, offset)) = worker.document_at(&position) else {
+                return Ok(lens);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            // A cancelled search fails the request as `ContentModified` instead of showing a
+            // count of zero.
+            let occurrences = ide::references(&worker.db, files, file, offset, false);
+            let locations: Vec<lsp_types::Location> = occurrences
+                .into_iter()
+                .filter_map(|occurrence| {
+                    let path = worker.path_of(occurrence.file)?;
+                    Some(lsp_types::Location {
+                        uri: worker.document_uri(path),
+                        range: worker.to_range_in(occurrence.file, occurrence.range),
+                    })
+                })
+                .collect();
+            let title = match locations.len() {
+                1 => "1 reference".to_owned(),
+                count => format!("{count} references"),
+            };
+            let command = match locations.is_empty() {
+                true => lsp_types::Command {
+                    title,
+                    command: String::new(),
+                    arguments: None,
+                },
+                false => lsp_types::Command {
+                    title,
+                    command: "ry.showReferences".to_owned(),
+                    arguments: Some(vec![
+                        serde_json::Value::String(uri.to_string()),
+                        serde_json::to_value(lens.range.start).map_err(internal_error)?,
+                        serde_json::to_value(&locations).map_err(internal_error)?,
+                    ]),
+                },
+            };
+            Ok(lsp_types::CodeLens {
+                command: Some(command),
+                ..lens
+            })
         })
     }
 

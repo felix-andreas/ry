@@ -10,7 +10,7 @@ use {
             report, scan_data_files, warn_config,
         },
         config::Config,
-        diagnostics::{apply_suppressions, document_diagnostics, file_is_strict},
+        diagnostics::{apply_suppressions, document_diagnostics},
     },
     repl::{Filtered, InputFilter},
     salsa::Setter,
@@ -69,7 +69,7 @@ impl Preflight {
     pub fn new(config: Config, path: PathBuf) -> Preflight {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        semantics::AnalysisSettings::new(&db, config.check.inline_annotations);
+        semantics::AnalysisSettings::new(&db, config.check.inline_annotations, config.check.strict);
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         ProjectFiles::new(&db, vec![file]);
         Preflight {
@@ -184,7 +184,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             .spawn_scoped(scope, || {
                 let analysis =
                     analyze_project(root, config.clone(), std::slice::from_ref(&sources))?;
-                let errors = strict_errors(&analysis, config);
+                let errors = strict_errors(&analysis);
                 Ok::<_, CommandError>((analysis, errors))
             });
         match worker {
@@ -310,12 +310,12 @@ fn remember_clean(record: &Path, fingerprint: &str) {
 
 /// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does
 /// not cover.
-fn strict_errors(analysis: &ProjectAnalysis, config: &Config) -> Vec<Vec<Diagnostic>> {
+fn strict_errors(analysis: &ProjectAnalysis) -> Vec<Vec<Diagnostic>> {
     analysis
         .files
         .iter()
         .map(|file| {
-            if !file.requested || !file_is_strict(&analysis.db, file.file, config) {
+            if !file.requested || !semantics::file_is_strict(&analysis.db, file.file) {
                 return Vec::new();
             }
             file.diagnostics
@@ -343,7 +343,7 @@ fn findings(
     config: &Config,
     source: &str,
 ) -> (Verdict, Vec<Diagnostic>) {
-    let strict = file_is_strict(db, file, config);
+    let strict = semantics::file_is_strict(db, file);
     // Plain R without strict mode has nothing to report, so it skips analysis entirely.
     if !strict && !has_inline_annotation(&semantics::parse(db, file).syntax_node()) {
         return (Verdict::Run, Vec::new());

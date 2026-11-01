@@ -188,6 +188,27 @@ pub unsafe extern "C" fn Rf_endEmbeddedR(_fatal: c_int) {
     crate::extptr::R_RunExitFinalizers();
 }
 
+/// The arguments an embedding front end hands `R_set_command_line_arguments`, which
+/// `commandArgs()` returns once the session starts.
+pub(crate) static EMBEDDING_ARGUMENTS: Global<Vec<String>> = Global::new(Vec::new());
+
+/// `R_set_command_line_arguments(argc, argv)`: records what `commandArgs()` returns. A session
+/// that is already running sees the new arguments at once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_set_command_line_arguments(argc: c_int, argv: *mut *mut c_char) {
+    let mut arguments = Vec::new();
+    for index in 0..argc.max(0) as usize {
+        let argument = *argv.add(index);
+        if !argument.is_null() {
+            arguments.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
+        }
+    }
+    if interp::is_installed() {
+        interp::interp().command_args = arguments.clone();
+    }
+    *EMBEDDING_ARGUMENTS.as_ptr() = arguments;
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn setup_Rmainloop() {
     runtime();

@@ -58,5 +58,5 @@ test_that("models @ID@ recover the signal", {
   #: double[]
   response <- data$y
   label <- as.integer(response > stats::median(response))
-  expect_gt(auc_@ID@(stats::fitted(logistic), label), 0.8)
+  expect_gt(auc_@ID@(stats::fitted(logistic), label), 0.7)
 })

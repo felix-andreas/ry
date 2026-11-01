@@ -173,6 +173,8 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
         let _ = item_name_range(db, item);
+        let _ = crate::item_binds_only_own_name(db, item);
+        let _ = crate::top_level::item_declared_pure(db, item);
     }
 }
 
@@ -588,7 +590,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
-        for (expression, miss) in &check.column_misses {
+        for (expression, miss) in check.column_misses.iter() {
             let Some(name) = naming
                 .non_locals
                 .get(expression)
@@ -2380,11 +2382,15 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Published by hosts only under `[check] strict` or the per-file directive. An
-/// origin that is an assignment's value is phrased against the assigned name.
+/// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
+/// strict origins for. An origin that is an assignment's value is phrased against the assigned
+/// name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    if !crate::file_is_strict(db, file) {
+        return diagnostics;
+    }
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
     let broken_ranges = file_error_ranges(db, file);
@@ -3143,9 +3149,9 @@ fn whole_lines(text: &str, range: TextRange) -> Option<TextRange> {
 }
 
 /// One arm per missing case, each stopping with an error, inserted on their own lines before
-/// the `match`'s closing brace and indented like the arm above. A `match` written on one line
-/// gets no fix, since there is no line to put the arms on. Unsafe: the arms silence the finding
-/// without handling anything.
+/// the `match`'s closing brace, indented like the first arm and ended like the file's lines. A
+/// `match` written on one line gets no fix, since there is no line to put the arms on. Unsafe:
+/// the arms silence the finding without handling anything.
 fn missing_arms_fix(
     text: &str,
     missing: &[String],
@@ -3161,14 +3167,30 @@ fn missing_arms_fix(
     if !before[line_start..].trim().is_empty() || line_start <= usize::from(expression.start()) {
         return None;
     }
-    let previous = before[..line_start - 1]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
-    let previous_line = &before[previous..line_start - 1];
-    let indent = &previous_line[..previous_line.len() - previous_line.trim_start().len()];
+    // The first line after the `match` line is the first arm (or a comment beside it), which
+    // sets the arms' indent even when a later arm continues over several lines. With no arm yet,
+    // the arms go one level inside the closing brace.
+    let first_line_end = usize::from(expression.start())
+        + text.get(usize::from(expression.start())..)?.find('\n')?
+        + 1;
+    let indent = before
+        .get(first_line_end..line_start)
+        .unwrap_or_default()
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line[..line.len() - line.trim_start().len()].to_owned())
+        .unwrap_or_else(|| {
+            let brace_line = &before[line_start..];
+            format!("{brace_line}  ")
+        });
+    let newline = if before[..line_start].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let arms: String = missing
         .iter()
-        .map(|case| format!("{indent}{case} => stop(\"not handled yet\")\n"))
+        .map(|case| format!("{indent}{case} => stop(\"not handled yet\"){newline}"))
         .collect();
     let title = if missing.len() == 1 {
         format!("Add an arm for `{}`", missing[0])

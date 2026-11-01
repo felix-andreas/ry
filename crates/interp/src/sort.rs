@@ -1400,13 +1400,40 @@ unsafe fn duplicated_elements(
     }
     let x = values::materialize(x)?;
     let count = length(x);
+    let list = matches!(x.kind(), SexpType::List | SexpType::Expression);
+    let incomparables = if list {
+        None
+    } else {
+        incomparable_keys(incomparables, x.kind())?
+    };
+    if incomparables.is_none() {
+        // Without incomparables each type hashes its own plain key, and a character vector of
+        // ASCII strings hashes the string objects, since interning makes equal ASCII text one
+        // object (`NA` included), as `match` relies on too.
+        match x.kind() {
+            SexpType::Logical | SexpType::Integer => {
+                let values = values::ints(x);
+                return Ok(mark_duplicates(count, from_last, |index| values[index]));
+            }
+            SexpType::Real => {
+                let values = values::reals(x);
+                return Ok(mark_duplicates(count, from_last, |index| {
+                    real_key(values[index])
+                }));
+            }
+            SexpType::String if all_ascii(x) => {
+                return Ok(mark_duplicates(count, from_last, |index| x.element(index)));
+            }
+            _ => {}
+        }
+    }
     let mut duplicated = vec![false; count];
     let visit: Box<dyn Iterator<Item = usize>> = if from_last {
         Box::new((0..count).rev())
     } else {
         Box::new(0..count)
     };
-    if matches!(x.kind(), SexpType::List | SexpType::Expression) {
+    if list {
         let flags = IdenticalFlags::default();
         let mut buckets: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
         for index in visit {
@@ -1423,7 +1450,6 @@ unsafe fn duplicated_elements(
         }
         return Ok(duplicated);
     }
-    let incomparables = incomparable_keys(incomparables, x.kind())?;
     let keys = element_keys(x);
     let mut seen: FxHashSet<&Key<'_>> = FxHashSet::default();
     for index in visit {
@@ -1435,6 +1461,24 @@ unsafe fn duplicated_elements(
         }
     }
     Ok(duplicated)
+}
+
+/// Flags each of `count` elements whose key an earlier element (a later one with `from_last`)
+/// already had.
+fn mark_duplicates<K: Hash + Eq>(
+    count: usize,
+    from_last: bool,
+    key: impl Fn(usize) -> K,
+) -> Vec<bool> {
+    let mut duplicated = vec![false; count];
+    let mut seen: FxHashSet<K> = FxHashSet::default();
+    let mut visit = |index: usize| duplicated[index] = !seen.insert(key(index));
+    if from_last {
+        (0..count).rev().for_each(&mut visit);
+    } else {
+        (0..count).for_each(&mut visit);
+    }
+    duplicated
 }
 
 /// A hash consistent with `identical()` under its default flags: identical objects hash alike.

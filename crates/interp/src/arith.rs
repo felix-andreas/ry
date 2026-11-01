@@ -15,6 +15,7 @@ use {
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    smallvec::SmallVec,
 };
 
 unsafe extern "C" {
@@ -2568,8 +2569,8 @@ enum Summary {
 }
 
 /// The values a summary function reduces, and whether `na.rm` was set.
-unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
-    let mut items = Vec::new();
+unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
+    let mut items = SmallVec::new();
     let mut na_rm = false;
     for arg in call.args {
         if arg.tag == symbols().na_rm {
@@ -2583,9 +2584,7 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (mut items, na_rm) = summary_args(call)?;
-    // NULL contributes no values, and the typed loops below read vectors' payloads directly.
-    items.retain(|item| *item != nil());
+    let (items, na_rm) = summary_args(call)?;
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String
@@ -2597,8 +2596,6 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             )));
         }
     }
-    // `NULL` contributes nothing, and it has no elements to read.
-    let items: Vec<Sexp> = items.into_iter().filter(|item| *item != nil()).collect();
     let kind = items.iter().fold(SexpType::Logical, |kind, item| {
         coerce::higher_type(kind, item.kind())
     });

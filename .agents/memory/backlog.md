@@ -28,9 +28,10 @@ The quality bar is four things.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
 - **`rowSums` and `colSums` accumulate in a software long double model** to match GNU R's last digit, which makes them slower than GNU R on large matrices. A faster exact accumulator (two-sum, or 128-bit fixed point) would keep the digits.
+- **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__device_files` (the PostScript header lacks `%%DocumentMedia`, and the bounding box swaps width and height), and `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** On the first 20 dsbench files with the JIT off, ry's test blocks take 8.3 s against GNU R's 7.5 s (about 11% slower), and wall time is already level. The gap is interpreter work, not memory management: allocation and collection are under 7% of the runtime thread's profile, and a full collection on the loaded heap takes 35 ms against GNU R's 130 ms (the R-level `gc()` calls come from lgr's `Logger$finalize`, which GNU R pays too). The largest buckets are the data.table "event tables" tests (one repeated 200 times: 12.7 s against 9.2 s) and "serving validates requests". Their profile is flat over bytecode `step` (10%), `frame_cell`, closure calls, `mk_char`, `length` and `match_args`, so the next levers are fewer allocations per call and faster lookups rather than the allocator. A closure-call microbenchmark (`f(i, 1, d = 3)` plus a nine-formal call) still runs about 1.75x GNU R.
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 118k instructions against GNU R's 72k, spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: fewer lookups per call (resolve base functions at compile time behind a guard), fewer cells and promises per call, and finding the callers of `mk_char` in the test code.
 
 ## Open: the package loader
 
@@ -548,16 +549,14 @@ is the audit list, highest expected win first. The layouts below were read from 
 expected win is unverified until measured, so profile before and after each change, and revert a
 change that does not pay.
 
-1. **The checker's types: a per-item store instead of interning every intermediate type.** `Ty`
-   is a pointer into a sharded, process-wide hash-consing table over `TyKind`, whose composite
-   variants own `Vec<Ty>` children (`intern_type` in `crates/semantics/src/types.rs`). Every type
-   `Checker::infer` builds mid-check, including unions, substitutions and resolved variables,
-   allocates a `Vec`, hashes it and takes a shard lock; `intern_type` is about 4% of cold-check
-   CPU exclusive, and a rebuild that changes no child already skips it (`map_child_types`). Target: a per-check SoA store (kind tags, one flat child array,
-   `u32` ids, union-find variables in the style of Roc's `Subs`), interning only exported schemes
-   and recorded expression types at the item boundary. Expected win: item checking is about 45% of
-   cold-check CPU at roughly 1.5 µs per expression, and this is the structural cut the 1 s target
-   needs ("Benchmark code bases (measured)").
+1. **The checker's types: a per-item store instead of interning every intermediate type.**
+   Measured, it is not the structural cut it looked like. A cold check of the finance bench interns
+   only 2,362 distinct types (about 0.3 MB, so the table is no memory problem), and interning,
+   `TyKind` hashing and equality together are about 2.5% of cold-check samples; `resolve_rec` is
+   another 2%, and content flags already let it skip variable-free types. A per-check SoA store in
+   the style of Roc's `Subs` would win at most those few percent, so it waits until a profile
+   shows the type table on top. The remaining cost of item checking (about a third of samples) is
+   spread over `infer`, call matching, formal-use collection and salsa reads.
 2. **The JIT's analysis plan.** Done: flat state rows, bitset liveness and a bump arena
    (`crates/jit/src/analysis.rs`).
 3. **Side mark bitmaps in the collector.** Done (`decisions.md`, "Small objects live in bitmap
@@ -2074,6 +2073,10 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **A CSV read peaks far above the table it makes.** A 5e7-row `groupby.csv` (2.6 GB) peaks at
+  10 GB resident, 2.6 GB of it the mapped file, for a 1.7 GB table: Polars parses the three id
+  columns as strings (16-byte views per row) before `strings_as_factors` codes them. Parsing a
+  column that will become a factor straight into codes would cut the peak by about 2.4 GB.
 - **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
   a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
   the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
@@ -2081,11 +2084,17 @@ The end-to-end guard rests on the corpus suites.
   to never (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory"), because
   refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
   Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
-- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
-  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
-  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
-  31 s for the same file. A factor representation that keeps the levels as a plain string array
-  and maps them only on demand would remove the 6 s.
+- **A factor build is bound by Polars' Enum interning.** `string_to_factor`
+  (`crates/table/src/convert.rs`) hashes, deduplicates and sorts the levels itself in parallel
+  (1.8 s for `join_big.csv`'s 9.95 million distinct `id6` values on 4 cores), then hands the sorted
+  levels to Polars' `FrozenCategories::new`, which inserts them one at a time into a concurrent
+  table that copies and hashes each key again: 9.6 s for those 9.95 million levels, 3.1 s to build
+  and 2.4 s to drop for 6.3 million. The whole factor conversion is 0.9 s for `groupby.csv`, 7.3 s
+  for `join_x.csv` and 12.3 s for `join_big.csv`, against data.table's `fread(stringsAsFactors =
+  TRUE)` at 5.3 s, 31 s and 37 s (1e7 rows, parse included on both sides). Removing the rest needs
+  a factor type outside Polars (codes plus a plain levels array, mapped to an Enum only when a
+  Polars plan needs one), which every kernel and the lazy planner must handle (`decisions.md`,
+  "Factors stay Polars Enums").
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
@@ -2134,21 +2143,10 @@ The end-to-end guard rests on the corpus suites.
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
   root only, because `SourceFile` carries no path.
-- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `CJ(id3, id4)`
-  (10,000 by 100) takes 0.013 s against 0.007 s at best of 10. The first two `dcast` calls of a
-  session take 0.06 to 0.07 s against about 0.045 s, and later ones 0.018 s against 0.027 s, so
-  `tools/bench/table/ops.R`, which times two runs, still shows `dcast` behind at 1e6 (0.048 s
-  against 0.026 s) and at parity at 1e7 (0.197 s against 0.196 s). Profile the warm-up.
 - **Uninitialized vector payloads are read through `&mut [T]`.** `alloc_vector_uninit` (and
   `Rf_allocVector`, which uses it) hands out numeric payloads that callers such as
   `crates/libr/src/frame_altrep.rs` and `crates/interp/src/values.rs` fill through `slice_mut`,
   which forms a reference to uninitialized memory. Fill through raw pointers or `MaybeUninit`.
-- **`rbindlist` and `fwrite` trail GNU R by 10 to 25% inside `tools/bench/table/ops.R`.** At 1e7
-  rows the best of two ops.R runs has `rbindlist` at 1.07 s against 0.85 s and `fwrite` at 0.99 s
-  against 0.76 s, while run alone after `fread` (best of 8) ry is faster: 0.76 s against 0.87 s
-  and 0.76 s against 0.94 s. The difference is the heap the earlier questions leave behind, so
-  profile with them in place. `fwrite` varies by 2x between runs on both engines. `unique`,
-  `uniqueN`, `between` and `chin` are at parity within noise.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
@@ -2157,7 +2155,9 @@ The end-to-end guard rests on the corpus suites.
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
-- **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
+- **The 5 GB (1e8 rows) run has not been done.** Its CSVs need about 16 GB of disk, and
+  `tools/bench/table/ops.R` needs more than 15 GB of memory, since `rbindlist(list(x, x))` holds
+  the 5 GB table and a 10 GB result at once.
 
 ## Open: the runtime
 
@@ -2328,13 +2328,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
-- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
-  its R home from symbolic links, which need Developer Mode, and does not drive Rtools, so there is
-  no Windows `R CMD INSTALL` yet (package DLLs have been built by hand against `libR.dll.a`).
-- **C API exports packages may link but `libR` lacks** (found by diffing GNU R 4.5's `R.dll`
-  export table, on every platform): `R_findVar`, `R_findVarInFrame`, `R_findVarLoc`,
-  `R_findVarLocInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its siblings, `Rf_mbrtowc`,
-  `utf8clen`, `R_MissingArgError`. The rest of the 316-name difference is GNU R internals and RGui.
+- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
+  follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
+  `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
+  the Windows runner, and `R CMD config` there needs Rtools' `make` on `PATH`.
 
 ## Explicitly out of scope for now
 
@@ -2935,19 +2932,19 @@ typing on:
 | data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
 | biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions.md`, "HIR as struct-of-arrays") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions.md`, "HIR as struct-of-arrays") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak memory of `ry check` is about 1.6 KiB per line with tests. Trees stay resident
-  (`decisions.md`, "every host keeps every tree"); the other holders are HIR, naming and check memos
-  and salsa's per-memo metadata (about 17 MiB for `file_diagnostics` alone). Next steps: box the
-  rare `ItemNaming`/`ItemCheck` fields, cut the `frame_binder` memo count, `CallArgument.name` and
-  `StrictOriginKind` as `Symbol`, and a smaller `Expression` layout.
-- Every host keeps every tree (about 80 MiB of `ry check`'s peak on a benchmark code base),
-  because salsa's LRU takes a mutex per read. Bounding tree memory again needs eviction without
-  per-read bookkeeping, for example dropping a file's trees explicitly once its facts are derived.
+- Peak RSS of `ry check` is 417-419 MiB on the benchmark code bases (`decisions.md`, "`ry check`
+  releases its trees once, and memoized records are compact"). The largest heap holders left are
+  HIR kinds (30 MB) and ranges (15 MB), salsa's dependency edges (about 30 MB), the naming and
+  check memos, the source texts (20 MB) and mimalloc's overhead over glibc (about 45 MiB). A
+  typed, strict finance bench peaks at about 712 MiB, because strict origins are recorded there;
+  that table is the next memory target for strict projects.
+- The server keeps every tree. Bounding its tree memory would need eviction without salsa's
+  per-read bookkeeping.
 - The cold check's remaining waits are salsa claims on project-wide queries
   (`duplicate_binding_map`, `project_arithmetic_classes`, `project_type_definitions`) computed by
   one thread while the others need them; deriving them before the diagnostics pass, or as
@@ -2998,17 +2995,18 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 ## Open: editor parity
 
 - More quick fixes: a missing `library()` for a namespaced name.
-- `missing_arms_fix` takes its indent from the previous physical line, so after a continuation
-  line the new arms are misindented, and it inserts `\n` in a CRLF file.
-- A finding in a file with a syntax error still says "`ry check --fix` applies it", though
-  `--fix` skips such files.
-- `pkg::name` is always a library token, even when `pkg` is the project's own package.
 - Semantic tokens: coloring of `$` fields and frame columns.
+- Hover does not read the console's environment: a value defined only in the "ry console" terminal
+  has no type in the editor. It needs the console to publish its global bindings (a libR export
+  read by the server), which the console's owners should design with it.
+- Debugger: it cannot attach to a running console yet, and `debugonce()`/`trace()` do not map
+  onto it. Columns come from the srcref's tab-expanded column, so they are off on lines with
+  tabs, and `browser()` in code without a srcref does not stop.
+- Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
+  `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
 - Not done from rust-analyzer's list, with the reason:
-  - Code lens (run test, references count): needs client commands the VS Code extension does not
-    register yet; add them together.
   - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.

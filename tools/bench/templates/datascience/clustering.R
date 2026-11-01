@@ -15,7 +15,7 @@ blobs_@ID@ <- function(rows = @ROWS@L, centers = @CENTERS@L, seed = 6L) {
 
 #: fn(points: matrix, [centers]: integer) -> integer[]
 cluster_kmeans_@ID@ <- function(points, centers = @CENTERS@L) {
-  stats::kmeans(points, centers = centers, nstart = 5L)$cluster
+  stats::kmeans(points, centers = centers, nstart = 25L)$cluster
 }
 
 #: fn(points: matrix, [centers]: integer) -> integer[]
