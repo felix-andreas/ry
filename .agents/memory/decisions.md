@@ -2753,3 +2753,21 @@ first lines R had already read, leaving R mid-command.
 - **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
   code that libR and the interpreter both run. No effect on static analysis.
 
+
+# Decision record: matching GNU R's own tests where its behavior is an artifact
+
+GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its implementation, not from the language. Each is reproduced from observed output (black-box against Rscript), never from GNU R's source.
+
+- **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes.
+- **`%%` and `%/%`** correct the remainder in extended precision, handle a divisor too large for the quotient, and warn past 2^63, matching GNU R's observed results on huge operands.
+- **Invalid UTF-8 bytes** survive text processing as private-use code points (one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. A strings-as-bytes representation would touch every string consumer, so the stand-in keeps the change local.
+- **`agrep` and `adist`** use an approximate-match NFA over edit costs; `adist`'s `counts` traceback prefers the order GNU R reports (observed, not derived).
+- **Scripts run as console input**: one top-level expression at a time, with `stdin()` reading the rest of the script, because GNU R's tests read data from their own source that way.
+- **Message sinks and abort restarts**: `sink(type = "message")` diverts every stderr writer, reaching top level invokes an R-level `abort` restart, and messages are cut to `warning.length`.
+- **`.Last.value` holds no reference count**, so binding it never forces a copy on the next modification, as in GNU R.
+- **Replacement primitives called directly** (`` `names<-`(x, v) `` outside an assignment) copy their target, because only a complex assignment owns it.
+- **`pretty()` and plot axes near the double range**: the 4% axis extension is clamped to ±`DBL_MAX`; a log axis stays inside `log10(0.99*DBL_MAX)` and `log10(1.01*DBL_MIN)`; a zero log limit becomes -320 with GNU R's "nonfinite axis limits -- corrected now" warning. `GEPretty` and `Rf_CreateAtVector` in libR reuse the interpreter's `linear_axis` and `at_vector`, so grid and base graphics share one tick algorithm.
+- **Deparse parenthesizes dangling operands**: an `if`, loop or low-precedence unary operator that ends a binary operator's left operand gets parentheses (GNU R's PR#18232 fix). GNU R leaves `function` bare there, which reparses differently; ry keeps the parentheses on purpose.
+- **`smooth.spline`** (`rbart`, `bvalus` in `crates/interp/src/stats_spline.rs`) is written from the penalized B-spline method. It copies GNU R's 0.333 in the roughness integral because the printed matrices and fitted values depend on it. Near-interpolating GCV fits can settle on a different `spar`, since the criterion there is rounding noise; that divergence is accepted.
+- **`Fexact`, `parseLatex`, `gzcon`, `OutDec`, classed `parseError` conditions and `file(encoding=)` re-encoding** are native implementations of the documented interfaces, checked against GNU R's tests.
+- **Impact:** no effect on static analysis. Each behavior has one implementation in `crates/interp`, and the GNU test runner (`contributing/corpus-and-oracle.md`) is the regression check.
