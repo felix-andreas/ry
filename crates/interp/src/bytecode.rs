@@ -850,6 +850,19 @@ impl Compiler {
             if inlined {
                 return self.guarded(call, head, primitive, dst, &name, &args);
             }
+        } else if let Some(function) = self.library_function(head)? {
+            let args = values::pairlist_items(call.cdr());
+            // Registers do not count as references, so the later arguments must not update an
+            // earlier one in place, as for any builtin call.
+            let plain = args.iter().all(|(tag, value)| {
+                *tag == nil() && *value != symbols().dots && *value != missing_arg()
+            }) && !args
+                .iter()
+                .skip(1)
+                .any(|(_, value)| may_modify_in_place(*value));
+            if plain {
+                return self.library_call(call, head, function, dst, &args);
+            }
         }
         self.general_call(call, head, dst)
     }
@@ -984,22 +997,90 @@ impl Compiler {
         let Some(expected) = expected else {
             return Ok(None);
         };
-        // A walk that forces no promise: compiling must not run code.
+        Ok(self
+            .enclosing_function(symbol)
+            .filter(|&value| value == expected))
+    }
+
+    /// The function `symbol` names from the closure's enclosure, found by a walk that forces no
+    /// promise, since compiling must not run code. `None` when a binding on the way is active
+    /// or an unforced promise.
+    unsafe fn enclosing_function(&self, symbol: Sexp) -> Option<Sexp> {
         let heap = crate::heap();
         let mut env = self.enclosure;
         while env != heap.known().empty_env {
             if let Some(cell) = heap.frame_cell(env, symbol) {
                 let value = forced_value(cell.cdr());
                 if cell.has_gp(gp::ACTIVE_BINDING) || value.kind() == SexpType::Promise {
-                    return Ok(None);
+                    return None;
                 }
                 if values::is_function(value) {
-                    return Ok((value == expected).then_some(expected));
+                    return Some(value);
                 }
             }
             env = env.enclosure();
         }
-        Ok(None)
+        None
+    }
+
+    /// The standard library builtin `symbol` names from the closure's enclosure, such as
+    /// `Dict.get` from `package:ry`.
+    unsafe fn library_function(&self, symbol: Sexp) -> R<Option<Sexp>> {
+        let Some(function) = self.enclosing_function(symbol) else {
+            return Ok(None);
+        };
+        if function.kind() != SexpType::Builtin {
+            return Ok(None);
+        }
+        let definition = eval::builtin_def(function)?;
+        Ok((definition.accepts_native && definition.kind == crate::builtins::Kind::Builtin)
+            .then_some(function))
+    }
+
+    /// A call to a standard library builtin resolved while compiling: a guard that the name
+    /// still finds that builtin, then the builtin called on the argument values, with no lookup
+    /// of the function, no promises and no dispatch. A name rebound since compiling falls back
+    /// to the evaluator.
+    unsafe fn library_call(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        function: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(function);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let call_constant = self.constant(call);
+        let mark = self.next_register;
+        let function_register = self.allocate();
+        self.emit(Op::Constant, &[function_register, expected]);
+        let base = self.next_register;
+        for _ in args {
+            self.allocate();
+        }
+        for (index, (_, value)) in args.iter().enumerate() {
+            self.expression(*value, base + index as u32)?;
+        }
+        self.emit(
+            Op::CallBuiltin,
+            &[
+                dst,
+                function_register,
+                call_constant,
+                base,
+                args.len() as u32,
+            ],
+        );
+        self.release_to(mark);
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
     }
 
     unsafe fn guarded(

@@ -46,6 +46,27 @@ const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> Bu
     builtin(name, -1, function).accepting_native()
 }
 
+/// The library builtins that never run R code: they read their arguments, compute natively and
+/// return or raise an error, so compiled code may call them without saving its state first.
+const LEAVES: &[&str] = &[
+    "List.len",
+    "List.is_empty",
+    "List.get",
+    "List.contains",
+    "Dict.len",
+    "Dict.is_empty",
+    "Dict.get",
+    "Dict.contains",
+    "Set.len",
+    "Set.is_empty",
+    "Set.contains",
+];
+
+/// Whether the library builtin `name` is one of [`LEAVES`].
+pub fn is_leaf(name: &str) -> bool {
+    LEAVES.contains(&name)
+}
+
 pub const BUILTINS: &[BuiltinDef] = &[
     library("Result.is_ok", result_is_ok),
     library("Result.is_err", result_is_err),
@@ -470,11 +491,54 @@ unsafe fn text<'a>(call: &Call<'_>, parameter: &str, value: Sexp) -> R<std::borr
 
 // Tags.
 
-unsafe fn tag(name: &str, payload: &[Sexp]) -> R<Sexp> {
-    let symbol = values::install(name)?;
-    let id = crate::heap().layouts.intern_tag(symbol);
-    let items: Vec<(Option<Sexp>, Sexp)> = payload.iter().map(|&value| (None, value)).collect();
-    records::make(Some(id), &items).map_err(error)
+/// The tags the library returns on its hot paths, interned once per interpreter. Building
+/// `:Ok(value)` then costs one allocation and no symbol or layout lookup, and an error without a
+/// payload, such as `:Err(:KeyNotFound)`, is one shared value: a tag is immutable, so sharing it
+/// is unobservable.
+#[derive(Default)]
+pub struct Tags {
+    layouts: Vec<(&'static str, usize, u32)>,
+    errors: Vec<(&'static str, Sexp)>,
+}
+
+impl Tags {
+    pub fn trace(&self, marker: &mut heap::Marker<'_>) {
+        for &(_, error) in &self.errors {
+            // SAFETY: the collector runs on the interpreter's thread, and the cache keeps each
+            // error alive for the interpreter's lifetime.
+            unsafe { marker.mark(error) };
+        }
+    }
+}
+
+unsafe fn tag(name: &'static str, payload: &[Sexp]) -> R<Sexp> {
+    let cached = crate::interp()
+        .library_tags
+        .layouts
+        .iter()
+        .find(|(cached, arity, _)| *cached == name && *arity == payload.len())
+        .map(|&(_, _, layout)| layout);
+    let layout = match cached {
+        Some(layout) => layout,
+        None => {
+            let symbol = values::install(name)?;
+            let heap = crate::heap();
+            let id = heap.layouts.intern_tag(symbol);
+            let layout = heap.layouts.intern(Layout {
+                tag: Some(id),
+                fields: Fields::Positional(payload.len() as u32),
+            });
+            crate::interp()
+                .library_tags
+                .layouts
+                .push((name, payload.len(), layout));
+            layout
+        }
+    };
+    let heap = crate::heap();
+    let object = heap.alloc_record(layout, payload).map_err(|failure| error(failure.to_string()))?;
+    heap.root(object);
+    Ok(object)
 }
 
 unsafe fn ok(value: Sexp) -> R<Sexp> {
@@ -482,9 +546,19 @@ unsafe fn ok(value: Sexp) -> R<Sexp> {
 }
 
 /// `:Err(:Name)`.
-unsafe fn err(name: &str) -> R<Sexp> {
+unsafe fn err(name: &'static str) -> R<Sexp> {
+    if let Some(&(_, error)) = crate::interp()
+        .library_tags
+        .errors
+        .iter()
+        .find(|(cached, _)| *cached == name)
+    {
+        return Ok(error);
+    }
     let reason = tag(name, &[])?;
-    tag("Err", &[reason])
+    let error = tag("Err", &[reason])?;
+    crate::interp().library_tags.errors.push((name, error));
+    Ok(error)
 }
 
 unsafe fn record(fields: &[(&str, Sexp)]) -> R<Sexp> {
@@ -2708,7 +2782,15 @@ unsafe fn key_hash(key: Key) -> u64 {
         Key::Number(number) => (1u8, (number + 0.0).to_bits()).hash(&mut hasher),
         Key::Text(text) => (2u8, text.bytes()).hash(&mut hasher),
     }
-    hasher.finish()
+    // FxHash's final multiply carries entropy only toward the high bits, and the index masks
+    // the low ones: whole numbers as doubles differ only in their high bits, so without this
+    // mix every integer key would share one probe chain. This is the finalizer of MurmurHash3.
+    let mut hash = hasher.finish();
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^ (hash >> 33)
 }
 
 /// The key a length-one value names, refusing `NA`, `NaN` and the atomic types that are not keys.
@@ -2718,26 +2800,32 @@ unsafe fn key_of(call: &Call<'_>, parameter: &str, value: Sexp) -> R<(Key, KeyKi
         return Err(wrong(call, parameter, needed, value));
     }
     let materialized = values::materialize(value)?;
-    let key = match materialized.kind() {
-        SexpType::Logical => match values::ints(materialized)[0] {
+    key_in(materialized).ok_or_else(|| wrong(call, parameter, needed, value))
+}
+
+/// The key a length-one, materialized, attribute-free value names, if it is one.
+unsafe fn key_in(value: Sexp) -> Option<(Key, KeyKind)> {
+    match value.kind() {
+        SexpType::Logical => match values::ints(value)[0] {
             NA_LOGICAL => None,
             flag => Some((Key::Logical(flag != 0), KeyKind::Logical)),
         },
-        SexpType::Integer => match values::ints(materialized)[0] {
-            NA_INTEGER => None,
-            number => Some((Key::Number(f64::from(number)), KeyKind::Integer)),
-        },
-        SexpType::Real => {
-            let number = values::reals(materialized)[0];
-            (!number.is_nan()).then_some((Key::Number(number), KeyKind::Double))
-        }
+        SexpType::Integer => integer_key(values::ints(value)[0]),
+        SexpType::Real => double_key(values::reals(value)[0]),
         SexpType::String => {
-            let text = materialized.element(0);
+            let text = value.element(0);
             (text != values::na_string()).then_some((Key::Text(text), KeyKind::Text))
         }
         _ => None,
-    };
-    key.ok_or_else(|| wrong(call, parameter, needed, value))
+    }
+}
+
+fn integer_key(number: i32) -> Option<(Key, KeyKind)> {
+    (number != NA_INTEGER).then_some((Key::Number(f64::from(number)), KeyKind::Integer))
+}
+
+fn double_key(number: f64) -> Option<(Key, KeyKind)> {
+    (!number.is_nan()).then_some((Key::Number(number), KeyKind::Double))
 }
 
 /// The key at `index` of a collection's key vector.
@@ -3004,6 +3092,67 @@ pub(crate) unsafe fn collection_prefix(
 }
 
 /// The number of entries of a dictionary or set, `length()`'s answer for one.
+// Compiled code. The optimizing tier calls the hot collection builtins through these, without
+// an argument list or a handle scope. `None` means the call would raise an error, and compiled
+// code then hands the call back to tier 0, which raises it.
+
+/// A key as compiled code holds it: an unboxed integer or double, or a boxed value.
+#[derive(Clone, Copy)]
+pub enum CompiledKey {
+    Integer(i32),
+    Double(f64),
+    Value(Sexp),
+}
+
+/// The entry count of `value` when it is a collection of `kind`.
+pub unsafe fn compiled_count(value: Sexp, kind: NativeKind) -> Option<usize> {
+    (value.kind() == SexpType::Record && records::native_kind(value) == kind)
+        .then(|| entry_count(value))
+}
+
+/// The position of `key` in `collection`, a collection of `kind`, with `Some(None)` when it is
+/// absent.
+pub unsafe fn compiled_position(
+    collection: Sexp,
+    kind: NativeKind,
+    key: CompiledKey,
+) -> Option<Option<usize>> {
+    if collection.kind() != SexpType::Record || records::native_kind(collection) != kind {
+        return None;
+    }
+    let (key, key_kind) = match key {
+        CompiledKey::Integer(number) => integer_key(number)?,
+        CompiledKey::Double(number) => double_key(number)?,
+        CompiledKey::Value(value) => {
+            if length(value) != 1 || value.is_object() || value.is_altrep() {
+                return None;
+            }
+            key_in(value)?
+        }
+    };
+    // A single key is stored unboxed in the slot; the general path reads it.
+    let Slot::Handle(keys) = collection.record_slot(0) else {
+        return None;
+    };
+    match (key_kind_of(keys)?, key_kind) {
+        (stored, given) if stored == given => {}
+        (KeyKind::Integer | KeyKind::Double, KeyKind::Integer | KeyKind::Double) => {}
+        _ => return None,
+    }
+    let Slot::Handle(index) = collection.record_slot(index_slot(kind)) else {
+        return None;
+    };
+    Some(probe(values::ints(index), key, |position| key_at(keys, position)).ok())
+}
+
+/// What `Dict.get()` returns for the entry at `position` of `dict`, or for a missing key.
+pub unsafe fn compiled_get_result(dict: Sexp, position: Option<usize>) -> R<Sexp> {
+    match position {
+        Some(position) => ok(records::slot_value(dict, 1)?.element(position)),
+        None => err("KeyNotFound"),
+    }
+}
+
 pub(crate) unsafe fn entry_count(object: Sexp) -> usize {
     match object.record_slot(0) {
         Slot::Handle(keys) => length(keys),

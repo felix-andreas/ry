@@ -8,12 +8,16 @@
 
 use {
     crate::analysis::{Speculation, resolve_function},
-    heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+    heap::{
+        object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+    },
     interp::{
         arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
         eval, heap,
+        standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
         values,
     },
@@ -581,6 +585,73 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
 
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
+}
+
+/// Key kinds [`jit_collection_position`] takes.
+pub mod key {
+    pub const INTEGER: i32 = 0;
+    pub const DOUBLE: i32 = 1;
+    pub const VALUE: i32 = 2;
+}
+
+fn collection_kind(set: i32) -> NativeKind {
+    if set != 0 {
+        NativeKind::Set
+    } else {
+        NativeKind::Dict
+    }
+}
+
+/// `Dict.len()` or `Set.len()`: the entry count, or -1 when tier 0 must run the call.
+pub unsafe extern "C" fn jit_collection_count(value: *mut Header, set: i32) -> i64 {
+    unsafe {
+        standard_library::compiled_count(Sexp::from_raw(value), collection_kind(set))
+            .map_or(-1, |count| count as i64)
+    }
+}
+
+/// Where the key is in a dict or set: its position, -1 when it is absent, or -2 when tier 0
+/// must run the call. `kind` says which of `integer`, `double` and `value` holds the key.
+pub unsafe extern "C" fn jit_collection_position(
+    collection: *mut Header,
+    set: i32,
+    kind: i32,
+    integer: i32,
+    double: f64,
+    value: *mut Header,
+) -> i64 {
+    unsafe {
+        let key = match kind {
+            key::INTEGER => CompiledKey::Integer(integer),
+            key::DOUBLE => CompiledKey::Double(double),
+            _ => CompiledKey::Value(Sexp::from_raw(value)),
+        };
+        match standard_library::compiled_position(
+            Sexp::from_raw(collection),
+            collection_kind(set),
+            key,
+        ) {
+            Some(Some(position)) => position as i64,
+            Some(None) => -1,
+            None => -2,
+        }
+    }
+}
+
+/// `Dict.get()`'s result for the entry at `position`, or for a missing key when it is -1.
+pub unsafe extern "C" fn jit_dict_get(
+    activation: *mut Activation,
+    dict: *mut Header,
+    position: i64,
+) -> *mut Header {
+    unsafe {
+        boxed(activation, || {
+            standard_library::compiled_get_result(
+                Sexp::from_raw(dict),
+                usize::try_from(position).ok(),
+            )
+        })
+    }
 }
 
 /// Whether a calling handler is established, so a warning would run R code.

@@ -269,6 +269,12 @@ pub enum Intrinsic {
     Modulo(Numeric),
     /// `%/%`
     IntegerDivide(Numeric),
+    /// `Dict.len()` or `Set.len()` (when `set`), or their `is_empty` (when `empty`).
+    CollectionCount { set: bool, empty: bool },
+    /// `Dict.contains()` or `Set.contains()`.
+    CollectionContains { set: bool },
+    /// `Dict.get()`.
+    DictGet,
 }
 
 /// Where a directly called closure's argument comes from.
@@ -1877,6 +1883,15 @@ impl Builder<'_> {
                 result,
             });
         }
+        // A library leaf never dispatches, so even an object argument cannot run R code.
+        if definition.accepts_native && interp::standard_library::is_leaf(name) {
+            return Ok(self.opaque_step(
+                state,
+                Some((dst, feedback)),
+                Vec::new(),
+                Effect::PureUnlessObserved,
+            ));
+        }
         if PURE_BUILTINS.contains(&name) {
             let objects: Vec<usize> = args
                 .iter()
@@ -2141,7 +2156,37 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             Numeric::Int
         }
     };
+    // A dict or set is only ever an unknown boxed value to the analysis.
+    let boxed = |ty: &Ty| *ty == Ty::Boxed;
+    let key = |ty: &Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Boxed);
     Some(match (name, types) {
+        ("Dict.len" | "Set.len", [collection]) if boxed(collection) => (
+            Intrinsic::CollectionCount {
+                set: name == "Set.len",
+                empty: false,
+            },
+            Ty::Int,
+        ),
+        ("Dict.is_empty" | "Set.is_empty", [collection]) if boxed(collection) => (
+            Intrinsic::CollectionCount {
+                set: name == "Set.is_empty",
+                empty: true,
+            },
+            Ty::Lgl,
+        ),
+        ("Dict.contains" | "Set.contains", [collection, element])
+            if boxed(collection) && key(element) =>
+        {
+            (
+                Intrinsic::CollectionContains {
+                    set: name == "Set.contains",
+                },
+                Ty::Lgl,
+            )
+        }
+        ("Dict.get", [dict, element]) if boxed(dict) && key(element) => {
+            (Intrinsic::DictGet, Ty::Boxed)
+        }
         ("[" | "[[", [vector, index])
             if vector.is_vector() && matches!(index, Ty::Int | Ty::Dbl) =>
         {
