@@ -69,12 +69,13 @@ const { id, step } = Astro.props;
   [data-step] .v-strict,
   [data-step] .v-rpp {
     transition:
-      fill-opacity 0.6s ease,
-      stroke-opacity 0.6s ease,
-      opacity 0.6s ease;
+      fill-opacity var(--switch-duration, 380ms) var(--switch-ease, ease-in-out),
+      stroke-opacity var(--switch-duration, 380ms) var(--switch-ease, ease-in-out),
+      opacity var(--switch-duration, 380ms) var(--switch-ease, ease-in-out);
   }
   [data-step] .v-marker {
-    transition: transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+    /* The marker travels farther than the pill, so it gets twice the time on the same curve. */
+    transition: transform calc(var(--switch-duration, 380ms) * 2) var(--switch-ease, ease-in-out);
   }
   .v-pulse {
     transform-box: fill-box;

@@ -3077,14 +3077,29 @@ first lines R had already read, leaving R mid-command.
   `data-step` attribute on `Venn.astro`; without it the diagram stays static, as on `why-ry.mdx`).
   Runtime and migration snippets reveal code first and output after, once on first view and again
   on each tab switch, and one neutral pill slides between tabs (no colored outline or glow). Every
-  snippet function uses a `{}` body. All motion is off under `prefers-reduced-motion`.
-- **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
-  tab when the JIT benchmark table lands. The DataFrame tab shows the Polars-style API, never
+  switch (pill, panel fade, line reveal, Venn marker) shares one symmetric ease-in-out curve and
+  duration from `--switch-ease` and `--switch-duration`, because an ease-out curve read as abrupt.
+  Every snippet function uses a `{}` body. All motion is off under `prefers-reduced-motion`.
+- **Each landing snippet teaches exactly its tab's concept.** It must pass two tests: an R user who
+  has never seen ry understands it in five seconds, and nothing besides the tab's concept makes a
+  newcomer stop and wonder. So snippets use `type`, never `alias` (the distinction lives in the
+  custom-types docs), avoid incidental syntax (`@new`, one-field records that need a trailing
+  comma, generics, open unions, `eval(parse())` tricks), lay unions out one variant per line with
+  a leading `|`, and use the fewest annotations that make the point. If a snippet needs a sentence
+  to be understood, simplify the snippet instead.
+- **The checker tab opens untyped.** Plain R with a real `ry check` finding comes first, and an
+  Untyped/Typed toggle in the frame header adds one `#:` line that finds a second bug, with a
+  one-line caption saying R reads it as a comment. Each toolchain view ends with one quiet docs
+  link. Leading with annotations assumed the reader already knew what they were.
+- **A tab appears only once its feature has a real snippet.** The runtime's Speed tab charts the
+  why-ry Speed table as speedup over GNU R on one linear axis from zero with a 1x line, sorted so
+  the strongest wins lead, and keeps every program, including the slowdown (drawn in grey), because
+  hiding a loss would cost more trust than it buys; it links to the full table and method. The DataFrame tab shows the Polars-style API, never
   data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
   `tools/bench/table` result. No placeholder tabs.
 - **The migration has four steps, each with a real snippet and real output:** check the code you
-  have, add types as `#:` comments, switch to inline types, then move data to ry's records, tags
-  and tables under strict mode. Each step is optional and reversible, which is what makes adopting
+  have, add types as `#:` comments, switch to inline types (which ry also enforces at run time),
+  then go fully typed under strict mode. Each step is optional and reversible, which is what makes adopting
   ry safe for an existing code base. `why-ry.mdx` tells it in full.
 - **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
   GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
