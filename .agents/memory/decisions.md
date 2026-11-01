@@ -2751,10 +2751,16 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
-  compiled code meant forcing every argument through a promise helper, which made
-  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
-  loop-only rule went with it.
+- **Every hot body compiles, loop or not, unless it would run nothing natively.** Loop-only
+  compilation was a stopgap while entering compiled code meant forcing every argument through a
+  promise helper, which made `function(a, b) a + b` slower compiled than in tier 0. Direct calls
+  removed that cost, so the loop-only rule went with it. A body whose plan has no loop and no
+  inlined call, direct call, arithmetic, comparison, intrinsic, element assignment or `&&`/`||`
+  (`Plan::runs_natively`) would only call the same helpers tier 0 does, so it is refused
+  (`analysis::NOTHING_NATIVE`, permanent) instead of costing a compile; most base R wrappers are
+  such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
+  callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
+  on top of the higher entry threshold's 280M.
 - **Function speculation is validated by the binding epoch alone.** Compiling marks each
   speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
   cell is assigned or a watched symbol is defined in any function frame (which could shadow the
@@ -2763,17 +2769,17 @@ first lines R had already read, leaving R mid-command.
   rare, and recompiles are capped per body. When the epoch has moved, each speculation is
   re-resolved from the environment its lookup started in, which for a function looked up inside an
   inlined or directly called closure is that closure's environment, not the compiled body's.
-- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
-  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
-  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
-  invisible when the callee cannot assign anything an argument reads before forcing it
-  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
-  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+- **A call to a speculated closure is direct and binds plain values.** Arguments that are
+  effect-free are evaluated eagerly in the caller and bound as values into the callee's frame,
+  skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early
+  evaluation is only invisible when the callee cannot assign anything an argument reads before
+  forcing it (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must
+  be frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
   lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
-  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
-  the one accepted hole. A promise object is still
-  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
-  needs compiled-to-compiled calls that know the callee never reflects.
+  while a calling handler is established. A frame-safe callee cannot call `substitute()`,
+  `missing()` or `sys.call()`, so no promise is needed, and the frame records no argument list
+  because only `nargs`, method dispatch and `standardGeneric` read it. S3 dispatch from those
+  builtins on a classed argument is the one accepted hole.
 - **Small local closures inline.** A call of a closure defined by a function expression in the same
   body, whose arguments and body compute a scalar from scalars without effects, runs inline on
   unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
@@ -2792,8 +2798,66 @@ first lines R had already read, leaving R mid-command.
   Strict typing costs a little at run time instead (about 200 instructions per annotated call for
   the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
   is still the plan in `r-runtime.md`.
+- **A cold body waits instead of compiling with boxed guesses.** A hot body whose arithmetic reads
+  an operand with no feedback, or whose `for` loop never ran, refuses to compile as `COLD`
+  (`analysis::COLD`), which resets its counters without spending a compile. This is the recursive
+  case: `fib` turns hot on its way down, before any call has returned, so compiling then types
+  every call result as a boxed unknown. `TIER_STATE` counts compiles in its low byte and cold
+  refusals above it (`runtime::COLD_REFUSAL`); after three cold refusals the body compiles with
+  what it has, so a body that never fills its feedback still compiles.
+- **A declared return type is the call result's early profile.** When a direct call's site has no
+  feedback, its result type comes from the callee's declared return annotation
+  (`annotations::declared_return_type`). A declared `double` still admits an integer through
+  promotion, so this is a profile, not a proof, and the usual guards stay. Typed recursive code therefore compiles on
+  the first try instead of waiting.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+- **Compile latency: what was measured and rejected.** Cranelift's `opt_level = "none"` as a
+  first tier did not shorten whole-process time on the why-ry programs (compiling is dominated by
+  lowering and register allocation, which `none` keeps), so there is one tier. A back-edge
+  threshold of 2000 instead of 500 changed instruction counts by under 4% either way. Not built:
+  background compilation (compiled code embeds heap pointers and speculations validated against
+  the interpreter's state at compile time, so a second thread would need the heap frozen or a
+  revalidation step) and a persistent code cache keyed by body hash (the same embedded pointers
+  make machine code process-specific; it would need relocations for every constant and
+  speculation).
+- **Inlining keeps annotation checks.** An inlined call has no frame, so `annotations::enter` and
+  `check_return` never run for it. The inliner therefore inlines a typed closure only when
+  `annotations::admits_inline` proves, from the argument and result storage types it inferred,
+  that every check would pass; otherwise the call stays a real call. Before this, a typed callee
+  inlined into a hot loop silently skipped its checks (`test_tiers.rs` pins both directions).
+- **A builtin's repeated calls check the signature once.** `lapply` and `vapply` over an atomic
+  vector call the same closure with one argument whose storage type is the vector's, so
+  `eval::KnownFirst` resolves `annotations::entry_for` once per function and later calls run as
+  `Entry::Checked`, skipping the per-call parameter checks. A list's elements differ, so lists
+  check every call.
+- **Arrays are their own JIT types.** `Ty::IntArr`, `DblArr` and `LglArr` come from three
+  feedback kinds (`feedback::INTEGER_ARRAY` and so on, which is why feedback is 16 bits per
+  instruction, stored as an integer vector). The guard reads the kind and the flag bits only,
+  because the Array bit promises no attributes. `x[[i]]` reads the item directly and
+  `x[[i]] <- v` stores it when `v` has the Array's exact item type and is not missing; a missing
+  value, another type or a position out of range goes to tier 0, which applies the Array rules
+  (a double position past the last item is an error, not truncated into range). `[` and
+  arithmetic on Arrays stay generic, because their results must be Arrays checked for missing
+  values. A copy for a shared Array keeps the bit (`jit_duplicate`). `List.len` is the `length`
+  intrinsic on an Array or list.
+- **A forgotten variable keeps its type as a guess.** An opaque call forgets every slot, since
+  it may rebind anything, but the slot keeps the type it had. A later load where tier 0 has
+  never read the variable (a branch not taken yet) speculates on that type behind a guard,
+  instead of loading it boxed and leaving its arithmetic to tier 0 for good.
+- **A failed guard after a load resumes after the load.** The load may have forced a promise,
+  and only that forcing set the visibility `withVisible(x)` reads, so tier 0 continues at the
+  next instruction with the boxed value instead of loading again.
+- **A closure's type names its source body.** A `function` site replaces its body constant with
+  the shared compiled code once it has run, so the analysis maps that code back to its source
+  before building `Ty::Closure`. Otherwise the closure guard never matches and the body
+  recompiles until it gives up, with every call left to tier 0.
+- **A backward jump compiles impatiently.** The cold refusal (wait for code that has never run to
+  record its types) applies only to compiles at entry. At a loop's back edge the loop is the hot
+  code, and waiting for the code after it ran three more rounds of back-edge thresholds in
+  tier 0. An impatient compile that reaches a loop which has never run guesses an integer
+  sequence behind the guard rather than refusing, because any refusal other than a cold one
+  disables the body for good.
 
 # Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
 
@@ -3647,7 +3711,11 @@ explicit allocators".
   `hashbrown::HashMap::new_in(&bump)` builds with hashbrown 0.16's `nightly` feature, which makes
   it take std's trait. So arenas are `bumpalo` through std's `Vec` and `Box`, maps stay on
   `hashbrown` (std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter), and the
-  earlier `allocator-api2` polyfill route is dropped: nothing needs it.
+  earlier `allocator-api2` polyfill route is dropped. One trap: in any build that also links
+  Cranelift, `bumpalo`'s `allocator_api` feature must stay off, because Cargo unifies it with the
+  `allocator-api2` feature `regalloc2` uses, and with both on `bumpalo` drops the `allocator-api2`
+  impl and `regalloc2` fails to compile. The JIT therefore wraps `&Bump` in its own std
+  `Allocator` (`Arena` in `crates/jit/src/analysis.rs`).
 - **The pin moves forward deliberately.** Bump the date in one commit that also fixes what the new
   nightly breaks (new lints, rustfmt changes), never by floating `nightly`, so a build is
   reproducible. `flake.nix` reads the channel from `rust-toolchain.toml`, so a bump also needs
@@ -3686,6 +3754,14 @@ explicit allocators".
   (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
   pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
   Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Measured: the JIT's analysis plan.** Operands borrowed from the bytecode words, abstract
+  states as rows of one flat matrix, liveness as bitsets, `block_at` as a dense array, all in one
+  `Bump` per compilation (`crates/jit/src/analysis.rs`). Over the seven `tools/bench/why`
+  programs, analysis time per program fell from about 6.0 ms to about 4.5 ms (min of five runs,
+  roughly 100 compiled bodies each). The first cut was 25% slower than the old layout, because the
+  state matrix grew by doubling inside the arena, and a bump arena cannot reuse a vector's old
+  buffer, so every regrowth copied the whole matrix: reserve arena lists whose final size is
+  roughly known. Analysis is about 5% of compile time; Cranelift's code generation is the rest.
 - **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a

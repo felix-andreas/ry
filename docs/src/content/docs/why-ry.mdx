@@ -28,25 +28,25 @@ R, with the same results:
 
 | program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
 | --- | ---: | ---: | ---: | ---: |
-| array_dot | 0.219 s | 0.028 s | 2.472 s | 7.8x |
-| array_filter | 0.206 s | 0.023 s | 1.818 s | 9.0x |
-| array_map | 0.295 s | 0.030 s | 5.815 s | 9.8x |
-| array_sum | 0.137 s | 0.026 s | 1.537 s | 5.3x |
-| closures | 0.704 s | 0.760 s | 0.817 s | 0.9x |
-| drawdown | 0.280 s | 0.029 s | 0.029 s | 9.7x |
-| fib | 0.074 s | 0.081 s | 0.112 s | 0.9x |
-| log_rank | 0.096 s | 0.111 s | 0.087 s | 0.9x |
-| loop_sum | 0.247 s | 0.039 s | 0.041 s | 6.3x |
-| vasicek | 0.035 s | 0.038 s | 0.040 s | 0.9x |
-| vector_arith | 0.144 s | 0.127 s | 0.128 s | 1.1x |
+| array_dot | 0.218 s | 0.027 s | 0.030 s | 8.1x |
+| array_filter | 0.194 s | 0.036 s | 0.027 s | 5.4x |
+| array_map | 0.309 s | 0.044 s | 0.050 s | 7.0x |
+| array_sum | 0.139 s | 0.028 s | 0.038 s | 5.0x |
+| closures | 0.731 s | 0.434 s | 0.451 s | 1.7x |
+| drawdown | 0.298 s | 0.022 s | 0.021 s | 13.5x |
+| fib | 0.079 s | 0.067 s | 0.071 s | 1.2x |
+| log_rank | 0.098 s | 0.063 s | 0.061 s | 1.6x |
+| loop_sum | 0.244 s | 0.054 s | 0.050 s | 4.5x |
+| vasicek | 0.036 s | 0.050 s | 0.039 s | 0.7x |
+| vector_arith | 0.188 s | 0.164 s | 0.190 s | 1.1x |
 
-Code dominated by small function calls (`closures`, `fib`) is about 10% slower than GNU R, and
-`log_rank` and `vasicek` are at parity. Types do not make code faster yet. A static `double` still
-admits an integer or a logical through promotion, so the compiled code keeps its runtime checks.
-The typed `array_*` programs, which store their values in ry's `Array` type, are much slower
-because the compiler does not yet handle `Array` element access, and the typed `array_map` sums
-in a different order, so its last digits differ from GNU R's. The runtime is still incomplete (see
-[Status](#status)), and [How it was measured](#how-it-was-measured) describes the benchmark.
+`vasicek` is still slower than GNU R, and call-heavy code (`fib`) is close to parity. Typed code runs
+as fast as untyped code, but not yet faster: every call to a typed function still checks its
+arguments and its result. The typed `array_*` programs store their values in ry's `Array` type,
+which compiles to direct item loads and stores. The typed `array_map` sums with `List.sum` in double
+precision, while GNU R's `sum` uses extended precision, so its last digits differ. The runtime is
+still incomplete (see [Status](#status)), and [How it was measured](#how-it-was-measured) describes
+the benchmark.
 
 ## From plain R to fully typed code in four steps
 

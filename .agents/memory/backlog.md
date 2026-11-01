@@ -487,12 +487,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
-- **Compiled-to-compiled calls.** `micro/fib` is still about 10% behind GNU R. Callgrind puts a
-  call at about 3,300 instructions, of which about 750 are allocation and collection across about
-  seven allocations (frame, forced promises, argument cells), and about 280 are tier 0's entry into
-  the callee. A call from compiled code should enter the callee's compiled code directly, with
-  arguments in registers and no promise when the callee provably never reflects
-  (`substitute`, `missing`, `sys.call`).
+- **Compiled-to-compiled calls.** `fib` in `tools/bench/why` now runs about 1.2 times faster
+  than GNU R: a hot body whose call results have not returned yet refuses to compile as cold and
+  waits (`decisions.md`, "Cold refusals"), and a frame-safe direct call binds its arguments as plain
+  values. A call still allocates an environment, a binding cell per formal and the boxed arguments,
+  and reading a formal (`jit_load`) costs about 440 instructions. A call from compiled code should
+  enter the callee's compiled code directly, with unboxed arguments and no environment when the
+  callee's frame cannot escape.
 - **Calls dominate the benchmark packages' test suites.** A `perf` profile of full-size dsbench's
   testthat suites (JIT on) puts 12% of samples under `jit::`, and about 85% of that is
   `jit::runtime::jit_step` handing a call back to tier 0. Each closure call there still matches
@@ -508,17 +509,16 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   two-expectation `test_that` block about 60 ms against 28. The likely wins, in order: no binding
   cell or promise per argument for a closure whose frame cannot escape, a cached global function
   lookup, and less `Heap::root` and handle traffic per call.
-- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
-  reads the checker's per-function summaries yet, and strict typing does not remove guards
-  (`decisions.md`, "Static types do not remove guards"). Typed code currently runs at the speed of
-  untyped code, minus the boundary checks.
+- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). A
+  direct call's result type comes from the callee's declared return type when the call site has no
+  feedback yet (`call_result_at` in `crates/jit/src/analysis.rs`), so typed `fib` compiles on its
+  first try, and typed Arrays compile to direct item loads and stores (`decisions.md`, "Arrays are
+  their own JIT types"). Typed and untyped code now run within measurement noise of each other, but
+  every call still runs the argument and return checks (`annotations::enter`, `check_return`). Next: skip a direct call's argument checks when the
+  compile-time argument types already satisfy the callee's masks, and the return check when the
+  compiled body provably returns the declared type.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
-- **`uniroot(extendInt = "yes")` loops to its iteration limit under `RY_JIT=force`** after another
-  closure with a formal named `f` ran first (`stats__optimize_and_integrate`, the `ry-jit` engine
-  only). The `while` condition `f.lower * f.upper > 0` keeps reading the old `f.upper` after the
-  body reassigns it inside `is.na(f.upper <- f(...))`; both are formals with defaults
-  (`defaulted`). Already on main before the statement-clearing work.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
@@ -562,13 +562,8 @@ change that does not pay.
    and recorded expression types at the item boundary. Expected win: item checking is about 45% of
    cold-check CPU at roughly 1.5 µs per expression, and this is the structural cut the 1 s target
    needs ("Benchmark code bases (measured)").
-2. **The JIT's analysis plan.** `Plan` stores `Inst { operands: Vec<usize> }` per instruction, a
-   full `State` (two `Vec`s) before every instruction and along every edge, liveness as
-   `Vec<Vec<bool>>`, and `block_at` as a hash map keyed by pc (`crates/jit/src/analysis.rs`).
-   Target: operands in one `Vec<u32>` addressed by ranges, states as rows of one flat matrix with
-   stride `registers + slots`, liveness as a bitset, `block_at` as a dense array, all in a bump
-   arena dropped after codegen. Expected win: compile latency, which decides how early and how much
-   code the JIT can afford to compile once it compiles calls.
+2. **The JIT's analysis plan.** Done: flat state rows, bitset liveness and a bump arena
+   (`crates/jit/src/analysis.rs`).
 3. **Side mark bitmaps in the collector.** Done (`decisions.md`, "Small objects live in bitmap
    pages").
 4. **The allocation fast path.** Done with the same change: allocation claims a bitmap word of
