@@ -1,70 +1,87 @@
 ---
 title: Loading packages
-description: Load the R package you are working on from source, lazily, and reload only what you changed
+description: Edit your package, run the next command, and see the change, without calling load_all() or restarting R
 ---
 
-ry loads the package you are developing straight from its sources, as `devtools::load_all()` does,
-but it parses a function only when you first call it, and after an edit it replaces exactly the
-definitions you changed. On a 14,000-line package a cold load is almost 10 times faster than
-`load_all()` and a reload after an edit about 60 times faster (see [Speed](#speed)).
-
-```sh
-ry repl            # inside a package: load it, and reload edits before each command
-ry load -f run.R   # load it, run a script, and exit
-```
+When you work on an R package, most of your time goes into one loop: edit a function, run it, look at
+the result, edit again. Start `ry repl` anywhere inside the package and that loop needs no extra
+step, because ry reloads what you changed before each command:
 
 ```text
-$ ry load -e 'count_words("the quick fox")'
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 3 ms.
+$ ry repl
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+> count_words("the  quick fox")
+[1] 4
+```
+
+The double space produced an empty word, so you change `strsplit(text, " ")` in `R/count.R` to split
+on `"[[:space:]]+"`, save, and run the same command again:
+
+```text
+> count_words("the  quick fox")
+Reloaded tally: 1 function rebound, in 3 ms.
 [1] 3
 ```
 
-## In the console
+There is no `load_all()` to remember and no session to restart. A reload replaces exactly the
+definitions you changed and reruns only the top-level code that depends on them, so it stays fast on
+a large package: about 50 ms after an edit on a 326,000-line package, where `devtools::load_all()`
+takes 6.6 s (see [Speed](#speed)).
 
-Started anywhere inside a package, `ry repl` loads that package before the first prompt. When you
-then edit a file and run the next command, ry reloads first, so the command sees the code on disk:
+## Running one command or a script
+
+`ry load` loads the package, runs something, and exits, which suits a quick check from the shell or
+a script in CI:
 
 ```text
-> greet()
-[1] "first version"
-> greet()        # after editing R/greet.R
-Reloaded replpkg: 1 function rebound, in 2 ms.
-[1] "second, edited version"
+$ ry load -e 'count_words("the quick fox")'
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+[1] 3
 ```
 
-`load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from scratch, and
-`ry repl --no-load` starts without loading anything.
+`ry load -f run.R` runs a script instead of an expression.
 
-## From plain R
+## From RStudio or plain R
 
-In RStudio, `Rscript`, or any other R session, ry provides the same `load_all()`:
+If you work in RStudio or another R session, ry provides a `load_all()` you call as you do today:
 
 ```r
 source(pipe("ry load --r-entry"))
 load_all()
 ```
 
-Put the first line in your `~/.Rprofile` to keep calling `load_all()` as you do today. It takes
-`path`, `export_all` (default `TRUE`), `attach`, `full`, and `quiet`.
+Put the first line in your `~/.Rprofile` so `load_all()` is there in every session. It takes `path`,
+`export_all` (default `TRUE`), `attach`, `full`, and `quiet`. This `load_all()` reloads only when you
+call it, as devtools' does.
+
+## Controlling reloads
+
+In `ry repl`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
+scratch when you want a clean slate, and `ry repl --no-load` starts the console without loading the
+package at all.
+
+## Which R runs your package
+
+`ry repl` and `load_all()` in an R session run your package on GNU R. `ry load` runs it on ry's own
+runtime by default; pass `--runtime gnu-r`, or set `RY_RUNTIME=gnu-r`, to run it on GNU R instead.
+
+A package written in plain R, with or without [inline annotations](/type-checking/inline-annotations),
+loads on both. A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads only
+on ry's runtime, because GNU R's parser rejects it.
 
 ## Speed
 
-`ry load` runs on ry's own interpreter, and parses each file once: the analysis's syntax trees
-are what the interpreter evaluates, so a lazy function is lowered from that tree on first use. Pass
-`--runtime gnu-r` (or set `RY_RUNTIME=gnu-r`) to load on GNU R instead. `ry repl` always loads on GNU R, `ry run`
-does unless you pass `--runtime ry`, and `load_all()` in plain R runs on GNU R by definition.
+A load parses a function only when something first calls it, and a reload touches only the
+definitions you changed. `tools/loader-bench` times `devtools::load_all()`, `loadfast::load_fast()`
+and ry on generated packages of 80 files (14,000 lines) and 500 files (326,000 lines):
 
-A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads and runs only on ry's
-runtime, because GNU R's parser rejects it (`unexpected ':'` for a tag). Inline annotations alone
-are fine on both.
-
-`tools/loader-bench` generates packages of 80 files (14,000 lines) and 500 files (326,000 lines) and
-times `devtools::load_all()`, `loadfast::load_fast()` and ry on both runtimes. On the larger package
-ry loads cold in about a second (`load_fast()` about 3 s, `load_all()` about 7 s) and reloads after
-a body edit in about 50 ms (81 ms and 6.6 s).
+| 326,000 lines | `load_all()` | `load_fast()` | ry |
+| --- | --- | --- | --- |
+| cold load | about 7 s | about 3 s | about 1 s |
+| reload after a body edit | 6.6 s | 81 ms | about 50 ms |
 
 Keeping source references, as an interactive session does by default, adds 10 to 20% to a cold
 load.
 
 [Package loading](/reference/package-loading) lists exactly what a load and a reload do, and what
-`load_all()` does that ry does not yet.
+devtools' `load_all()` does that ry does not yet.

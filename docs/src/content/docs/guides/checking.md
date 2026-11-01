@@ -1,32 +1,44 @@
 ---
 title: Checking code
-description: What ry check reports without any configuration, and how to silence a finding
+description: What ry check reports in an existing R project without any configuration, and how to silence a finding
 ---
 
-`ry check` reads every `.R` file in the project, plus the R chunks of `.Rmd`, `.qmd`, and `.Rnw`
-documents, and reports problems without running anything. This page covers what it finds with no
-configuration. Type errors are opt-in and have [their own section](/type-checking/overview).
-
-## Names
-
-Every name is resolved by R's scoping rules, so a typo is reported where you wrote it rather than
-when execution reaches it:
+`ry check` finds the mistakes R would only show you when a line runs, without running anything and
+without any configuration. Run it in the project directory:
 
 ```text
+$ ry check
 unresolved
 
   ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+   --[R/discount.R:2:11]
+ 1 | apply_discount <- function(price, rate) {
+ 2 |   price * ratee
+   |           ^^^^^
+ 3 | }
+
+1 problem in 1 file
 ```
 
-Files in a package's `R/` share one namespace, a script is read from top to bottom, and `library()`
-calls, `DESCRIPTION` dependencies, and `NAMESPACE` imports bring names into scope. The same analysis reports an assignment that
-nothing reads, a top-level name defined twice in a package (R silently keeps one of them),
-`pkg::name` where the package does not export `name`, and a `NAMESPACE` that imports or exports a
-name that does not exist.
+It reads every `.R` file in the project, plus the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents.
+Your editor shows the same findings as you type ([Editors](/guides/editors)). This page covers what
+`ry check` finds with no configuration; type errors are opt-in and have
+[their own section](/type-checking/overview).
 
-Inside data-masking functions such as dplyr's `filter()` and `mutate()`, `data.table`'s `[`, and base
-`with()`, `subset()`, and `transform()`, a bare name refers to a column, so it is not reported as
-unresolved:
+## Names
+
+A misspelled name is the most common finding, and R reports it only when execution reaches it. ry
+resolves every name by R's scoping rules, so the typo is reported where you wrote it, as above.
+
+Files in a package's `R/` share one namespace, a script is read from top to bottom, and `library()`
+calls, `DESCRIPTION` dependencies, and `NAMESPACE` imports bring names into scope. The same analysis
+reports an assignment that nothing reads, a top-level name defined twice in a package (R silently
+keeps one of them), `pkg::name` where the package does not export `name`, and a `NAMESPACE` that
+imports or exports a name that does not exist.
+
+Inside data-masking functions such as dplyr's `filter()` and `mutate()`, `data.table`'s `[`, and
+base `with()`, `subset()`, and `transform()`, a bare name refers to a column, so this code reports
+nothing:
 
 ```r
 library(dplyr)
@@ -40,8 +52,9 @@ by_region <- function(sales) {
 
 ## Syntax errors
 
-R's parser stops at the first error and names the token it choked on. ry names what is missing and
-keeps analyzing the rest of the file:
+R's parser stops at the first error and names the token it choked on, so for this code it says
+`unexpected symbol` and points at `subtitle`. ry names what is missing and keeps analyzing the rest
+of the file:
 
 ```r
 config <- list(
@@ -60,12 +73,10 @@ syntax-error
    |                    ^
 ```
 
-R would stop with `unexpected symbol` and point at `subtitle`.
-
 ## Lints
 
-Three lints are on by default. Here they are in a script, with the `unused` finding for each
-assignment left out:
+Three lints are on by default, because each catches a habit that causes bugs. Here they are in a
+script, with the `unused` finding for each assignment left out:
 
 ```r
 total = 2L
@@ -87,10 +98,10 @@ trailing-comma
   ! Unexpected comma after last argument
 ```
 
-The trailing comma is a warning: R passes it as an empty argument, which breaks `c(1, 2, )` when it
-runs but is harmless to a function that never evaluates it.
-[Diagnostic codes](/reference/diagnostic-codes) lists every code with its reason, and
-[configuration](/reference/configuration) shows how to turn each one on or off.
+`T` is an ordinary variable that any code can overwrite. The trailing comma passes an empty
+argument, which breaks `c(1, 2, )` when it runs but is harmless to a function that never evaluates
+it, so it is a warning. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
+reason, and [configuration](/reference/configuration) shows how to turn each one on or off.
 
 ## Silencing one finding
 

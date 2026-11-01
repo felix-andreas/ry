@@ -3,6 +3,10 @@ title: Installation
 description: Every way to install ry
 ---
 
+Most people install ry through their editor, and the VS Code extension needs nothing else. Install
+the command-line binary as well if you want `ry check`, `ry fmt` and `ry repl` in a terminal or in
+CI.
+
 ## VS Code
 
 The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) bundles the
@@ -62,13 +66,15 @@ Zed has no built-in R support, so install the [R extension](https://zed.dev/exte
 put the [command-line binary](#command-line) on your `PATH`: the extension's automatic download
 finds only 0.1.1, from before the rename, and fails.
 
-## Other editors
-
-Any editor with LSP support can run `ry server` as the language server for R files.
-
 ## RStudio
 
 RStudio has no language-server integration, but it can use ry as its formatter. Under **Tools →
 Global Options → Code → Formatting**, set **Code formatter** to **External** and **Reformat command**
 to `path/to/ry fmt`. For format-on-save, tick **Reformat documents on save** under **Code → Saving**.
-Diagnostics do not show up inside RStudio, so run `ry check` in a terminal or in CI.
+Diagnostics do not show up inside RStudio, so run `ry check` in a terminal or in CI. RStudio's
+console can still reload your package with ry's `load_all()`, as
+[Loading packages](/guides/loading-packages#from-rstudio-or-plain-r) shows.
+
+## Other editors
+
+Any editor with LSP support can run `ry server` as the language server for R files.

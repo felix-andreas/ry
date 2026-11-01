@@ -3,11 +3,15 @@ title: Working with DataFrames
 description: ry's built-in table, queried with a Polars-style API and run on the Polars engine
 ---
 
-A `DataFrame` is ry's built-in table. You query it with the same verbs as
-[Polars](https://pola.rs): `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
-`join` and `head`, with column expressions written as `col("x")`. Each query runs inside the Polars
-engine instead of as R code, and the type checker knows every column's type at every step.
-DataFrames need ry's own runtime, so run scripts that use them with `ry run --runtime ry script.R`.
+A `DataFrame` is ry's built-in table, for code where data.table is too slow or too hard to read.
+Each query runs inside the [Polars](https://pola.rs) engine instead of as R code, which on
+db-benchmark's questions at a million rows takes about half the time data.table does
+([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
+column is reported before the query runs.
+
+You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
+`join` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
+so run scripts that use them with `ry run --runtime ry script.R`:
 
 ```r
 sales <- DataFrame(
@@ -252,5 +256,8 @@ Key: <g>
 `tools/bench/table/` times db-benchmark's group-by and join questions, `:=` update loops and a keyed
 rolling join, written once for data.table under GNU R and once for DataFrames under
 `ry run --runtime ry`, and `tools/bench/table/ops.R` times data.table's own functions (`fread`,
-`setkey`, `rbindlist`, `melt` and the rest), which run data.table's C code through ry's C API. The
-[design notes](/contributing/design/r-runtime/#7-the-table-type) have the results.
+`setkey`, `rbindlist`, `melt` and the rest), which run data.table's C code through ry's C API. At a
+million rows the db-benchmark questions take 2.4 s on DataFrames against 4.8 s on data.table (4
+threads), and DataFrames are behind only on the median and standard-deviation group-by and the keyed
+rolling join. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the full
+results.

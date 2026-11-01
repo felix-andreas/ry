@@ -5,8 +5,12 @@ description: "Types written in the code itself, and how they live next to `#:` c
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-This page covers the inline spelling and how it lives next to `#:` comments. You can write a type
-right after a name, and a function's return type after its parameters:
+A `#:` comment repeats every parameter name of the function below it, so renaming a parameter
+means editing two places. Inline annotations put each type next to the name it belongs to, which is
+shorter to write and to read, and on ry's runtime they are also checked when the code runs. The
+cost is that plain `Rscript` cannot run a file that has them, which is why this is a separate step.
+
+You write a type right after a name, and a function's return type after its parameters:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">

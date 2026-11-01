@@ -5,17 +5,17 @@ description: One toolchain for R, a type system on top of it, and a path from th
 
 import Venn from '../../components/Venn.astro';
 
-R code bases that are years old are now being changed by agents, and code an agent writes needs to
-be checked by something other than a person reading every line. The future of such a code base is
-typed, checked on every edit, and safe for an agent to change. R has no type checker, so ry adds
-one. You can use it today on the R code you already have, and it takes that code there one step at
-a time.
+R reports most mistakes only when a line runs: a misspelled name, a string where a number belongs,
+a `NULL` nobody handled. That was tolerable while people wrote and read every line. Now agents
+change R code bases that are years old, and code an agent writes needs to be checked by something
+other than a person reading it. R has no type checker, so ry adds one, and it works today on the R
+code you already have.
 
-With ry you check, format, load and run R from one tool configured by one `ry.toml`. Its type
-system sits on top of R, so plain R stays valid. ry also adds what R lacks: records, tagged unions,
-a typed table called `DataFrame` with a Polars-style API, and a standard library. Everything ry
-runs, plain R plus these additions, is what we call R++. Strict mode then keeps only code whose types are known, which we
-call R--.
+ry is one tool for R: it checks, formats, loads and runs your code, configured by one `ry.toml`.
+Its type system sits on top of R, so plain R stays valid. It also adds what R lacks: records,
+tagged unions, a typed table called `DataFrame` with a Polars-style API, and a standard library.
+Everything ry runs, plain R plus these additions, is what we call R++. Strict mode then keeps only
+code whose types are known, which we call R--.
 
 <figure>
   <Venn id="ry-venn" />
@@ -23,8 +23,9 @@ call R--.
 
 ## From plain R to fully typed code in four steps
 
-Your code moves from the blue circle toward the purple one. Each step is optional, and you can stop
-after any of them.
+Your code moves from the blue circle toward the purple one, one step at a time. Each step is
+optional, and you can stop after any of them, so you can adopt ry on a large code base without a
+rewrite.
 
 ### 1. Check the code you have
 
@@ -49,8 +50,9 @@ unresolved
  3 | }
 ```
 
-The same analysis drives [your editor](/guides/editors), and `ry fmt`, `ry load` and `ry repl`
-cover formatting, loading a package from its sources, and the console.
+The same analysis drives [your editor](/guides/editors). `ry fmt` formats the project, and
+`ry repl`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
+command, so you never call `load_all()` again.
 
 ### 2. Type your code
 

@@ -5,6 +5,10 @@ description: How ry tells a single value from a vector, and the four kinds of li
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
+Two of R's most common runtime errors come from shapes: a vector of length two where an `if`
+expects one value, and a misspelled list field that silently reads as `NULL`. ry's types record
+both, so it reports these before the code runs, while your code stays the same R.
+
 ## Scalars and vectors
 
 R has no scalars: `1L` is an integer vector of length one. But an `if` condition, an operand of

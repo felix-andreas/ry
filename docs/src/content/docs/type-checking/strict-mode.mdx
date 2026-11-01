@@ -5,8 +5,10 @@ description: Reject code whose types ry cannot determine
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-By default, ry checks what it can and lets the rest through as `Unknown`. Strict mode turns that
-around: every value ry cannot type, and every parameter nothing constrains, is an error.
+By default, ry checks what it can and lets the rest through as `Unknown`, so a clean `ry check`
+does not tell you how much was actually checked. Strict mode turns that around: every value ry
+cannot type, and every parameter nothing constrains, is an error. A clean run then means every value
+in the code has a known type, which is what you want before you let an agent change it.
 
 ```toml
 [check]
