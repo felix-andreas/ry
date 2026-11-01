@@ -49,6 +49,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("url", 6, |_| Err(error("ry does not support URL connections yet"))),
     internal("pipe", 3, do_pipe),
     internal("rawConnection", 3, do_raw_connection),
+    internal("unz", 3, do_unz),
     internal("rawConnectionValue", 1, |call| unsafe { raw_connection_value(call.arg(0)) }),
     internal("textConnection", 5, do_text_connection),
     internal("textConnectionValue", 1, |call| unsafe { text_connection_value(call.arg(0)) }),
@@ -625,6 +626,23 @@ unsafe fn do_raw_connection(call: &Call<'_>) -> R<Sexp> {
     new_builtin("rawConnection", description.as_bytes(), &open, &open, device, |con| {
         (*con).canseek = 1;
     })
+}
+
+/// `unz(description, open, encoding)`: reads one member of a zip archive, named
+/// `"archive:member"` with the member after the last colon, as GNU R splits it.
+unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
+    let description = values::require_string(call.arg(0), "description")?;
+    let open = values::require_string(call.arg(1), "open")?;
+    let Some((archive, member)) = description.rsplit_once(':') else {
+        return Err(error("invalid 'description' argument"));
+    };
+    let device = Device::Zip(ZipDevice {
+        archive: PathBuf::from(expand_path(archive)),
+        member: member.to_owned(),
+        data: Vec::new(),
+        position: 0,
+    });
+    new_builtin("unz", description.as_bytes(), &open, "r", device, |_| {})
 }
 
 /// `textConnection(nm, object, open, env, type)`: reads the lines of a character vector, or
@@ -2472,6 +2490,7 @@ enum Device {
     TextInput(TextInput),
     TextOutput(TextOutput),
     Pipe(PipeDevice),
+    Zip(ZipDevice),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2560,6 +2579,14 @@ struct Inflate {
 }
 
 struct RawDevice {
+    data: Vec<u8>,
+    position: usize,
+}
+
+/// `unz()`: a member of a zip archive, decompressed whole when the connection opens.
+struct ZipDevice {
+    archive: PathBuf,
+    member: String,
     data: Vec<u8>,
     position: usize,
 }
@@ -2691,6 +2718,31 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             // A raw connection is always binary, whatever its mode says.
             (*con).text = 0;
             (*con).save = NO_SAVE;
+            return Ok(true);
+        }
+        Device::Zip(zip) => {
+            if mode.write {
+                return Err(error("can only open zip file connections for reading"));
+            }
+            let archive_name = zip.archive.to_string_lossy().into_owned();
+            let Ok(archive) = std::fs::read(&zip.archive) else {
+                crate::conditions::warning(format!("cannot open zip file '{archive_name}'"))?;
+                return Ok(false);
+            };
+            let Some(data) = crate::utils::zip_member_named(&archive, &zip.member) else {
+                crate::conditions::warning(format!(
+                    "cannot locate file '{}' in zip file '{archive_name}'",
+                    zip.member
+                ))?;
+                return Ok(false);
+            };
+            zip.data = data;
+            zip.position = 0;
+            (*con).canseek = 0;
+            (*con).isopen = 1;
+            (*con).canread = 1;
+            (*con).canwrite = 0;
+            (*con).text = (!mode.binary) as Rboolean;
             return Ok(true);
         }
         Device::Standard(_) | Device::TextInput(_) | Device::TextOutput(_) => {}
@@ -2856,6 +2908,11 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
             }
             Ok(())
         }
+        Device::Zip(zip) => {
+            zip.data = Vec::new();
+            zip.position = 0;
+            Ok(())
+        }
         Device::Standard(_) | Device::Raw(_) | Device::TextInput(_) => Ok(()),
     }
 }
@@ -2882,7 +2939,9 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
             Some(Stream::Deflate { .. }) => Err(error("cannot read from this connection")),
             None => Err(error("connection is not open")),
         },
-        Device::Raw(RawDevice { data, position }) | Device::TextInput(TextInput { data, position }) => {
+        Device::Raw(RawDevice { data, position })
+        | Device::TextInput(TextInput { data, position })
+        | Device::Zip(ZipDevice { data, position, .. }) => {
             let available = data.get(*position..).unwrap_or_default();
             let count = available.len().min(buffer.len());
             buffer[..count].copy_from_slice(&available[..count]);
@@ -3017,7 +3076,7 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             raw.position = end;
             Ok(bytes.len())
         }
-        Device::TextInput(_) => Err(error("cannot write to this connection")),
+        Device::TextInput(_) | Device::Zip(_) => Err(error("cannot write to this connection")),
         Device::TextOutput(_) if !printing => Err(missing("write")),
         Device::TextOutput(output) => {
             let mut completed = false;
@@ -3055,7 +3114,7 @@ unsafe fn update_text_target(output: &TextOutput) -> R<()> {
 unsafe fn device_seek(con: Rconnection, position: f64, origin: SeekOrigin, side: SeekSide) -> R<f64> {
     let query = position.is_nan();
     match device(con)? {
-        Device::Standard(_) | Device::Pipe(_) => Err(missing("seek")),
+        Device::Standard(_) | Device::Pipe(_) | Device::Zip(_) => Err(missing("seek")),
         Device::TextInput(_) | Device::TextOutput(_) => {
             if !query && position >= 0.0 {
                 return Err(error("seek is not relevant for text connection"));
