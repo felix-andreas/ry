@@ -20,7 +20,7 @@ configuration:
 | `ry-aarch64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `LICENSE` |
 | `ry-aarch64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `LICENSE` |
 | `ry-x86_64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `LICENSE` |
-| `ry-x86_64-pc-windows-msvc.zip` | `ry.exe`, `LICENSE` (no runtime yet) |
+| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `R.dll`, `LICENSE` |
 
 ry looks for its runtime beside the executable and in `../lib/ry/`, so an installer may place
 `ry` in `bin/` and the library in `lib/ry/`. At run time, `ry run`, `ry R` and `ry load` also need
@@ -32,6 +32,11 @@ has the install name `@rpath/libR.dylib` and exports the same names as the Linux
 checked by cross-compiling from Linux (`contributing/design/r-runtime.md`, section 11). The smoke
 test's `RY_SMOKE_PACKAGES` step, which loads a CRAN binary of jsonlite under `ry run`, is the first
 run on a real Mac.
+
+The Windows archive is built for `x86_64-pc-windows-gnullvm` with MSYS2's clang64 toolchain, so
+`ry.exe` and `R.dll` link the UCRT, as Rtools-built packages do. Both have been run under Wine only
+(`contributing/design/r-runtime.md`, section 11); the smoke test, which also loads a CRAN binary of
+jsonlite and calls the installation's `Rblas.dll` and `Rlapack.dll`, is the first run on Windows.
 
 The VS Code extension is published once per platform, each copy bundling that platform's `ry`,
 plus one copy without a binary for every other platform. The Zed extension ships no binary: it
@@ -64,5 +69,5 @@ therefore the one counter across channels: never release `0.4.0-beta` and `0.4.0
    hand and run `ry --version`.
 7. Update [Installation](/installation). For the first release from the workflow that means: each
    archive holds `ry` and the runtime, which must stay side by side (or the runtime goes in
-   `../lib/ry/`); the Windows archive is now `ry-x86_64-pc-windows-msvc.zip`; Linux needs glibc
+   `../lib/ry/`); the Windows archive is now `ry-x86_64-pc-windows-gnullvm.zip` and carries `R.dll`, so `ry run` and `ry load` work on Windows; Linux needs glibc
    2.35; and Linux arm64 and Intel macOS archives exist.

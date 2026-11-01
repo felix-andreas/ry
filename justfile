@@ -164,26 +164,26 @@ bump-version $version:
     git add Cargo.toml Cargo.lock editors/code/package.json
     git commit -m "chore: release {{ version }}"
 
-# Build this machine's release archive into release/VERSION: `ry` and ry's runtime (libR) side by side.
-package version:
+# Build a release archive into release/VERSION: `ry` and ry's runtime (libR) side by side. TARGET
+# defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with an LLVM mingw toolchain
+# (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages share the UCRT.
+package version target="":
     #!/usr/bin/env bash
     set -euo pipefail
-    target=$(rustc -vV | sed -n 's/^host: //p')
-    build="${CARGO_TARGET_DIR:-target}/release"
+    target="{{ target }}"
+    [ -n "$target" ] || target=$(rustc -vV | sed -n 's/^host: //p')
+    build="${CARGO_TARGET_DIR:-target}/$target/release"
     dir="release/{{ version }}"
     stage="$dir/ry-$target"
     rm -rf "$stage"
     mkdir -p "$stage"
+    cargo build --release --locked --target "$target" -p ry-lang -p libr
     case "$target" in
     	*windows*)
-    		# R.dll needs the windows-gnu target linked with lld (r-runtime.md, section 11), which this
-    		# runner does not set up yet, so the archive carries the CLI alone.
-    		cargo build --release --locked -p ry-lang
-    		cp "$build/ry.exe" LICENSE "$stage/"
-    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE >/dev/null)
+    		cp "$build/ry.exe" "$build/R.dll" LICENSE "$stage/"
+    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe R.dll LICENSE >/dev/null)
     		;;
     	*)
-    		cargo build --release --locked -p ry-lang -p libr
     		library=libR.so
     		case "$target" in *apple*) library=libR.dylib ;; esac
     		cp "$build/ry" "$build/$library" LICENSE "$stage/"

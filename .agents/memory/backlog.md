@@ -2338,7 +2338,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
-  its R home from symbolic links, which need Developer Mode.
+  its R home from symbolic links, which need Developer Mode, and does not drive Rtools, so there is
+  no Windows `R CMD INSTALL` yet (package DLLs have been built by hand against `libR.dll.a`).
+- **C API exports packages may link but `libR` lacks** (found by diffing GNU R 4.5's `R.dll`
+  export table, on every platform): `R_findVar`, `R_findVarInFrame`, `R_findVarLoc`,
+  `R_findVarLocInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its siblings, `Rf_mbrtowc`,
+  `utf8clen`, `R_MissingArgError`. The rest of the 316-name difference is GNU R internals and RGui.
 
 ## Explicitly out of scope for now
 

@@ -411,12 +411,13 @@ mod imp {
         }
 
         /// Converts from the start of `input` into `output`, advancing `input` past what was
-        /// used. Returns how many bytes were written and why it stopped early, if it did.
+        /// used. Returns how many bytes were written, and either how many characters were
+        /// converted irreversibly (as `iconv(3)` counts them) or why it stopped early.
         pub fn convert(
             &mut self,
             input: &mut &[u8],
             output: &mut [u8],
-        ) -> (usize, Result<(), IconvStop>) {
+        ) -> (usize, Result<usize, IconvStop>) {
             let mut input_pointer = input.as_ptr() as *mut c_char;
             let mut input_left = input.len();
             let mut output_pointer = output.as_mut_ptr() as *mut c_char;
@@ -436,7 +437,7 @@ mod imp {
             *input = &input[input.len() - input_left..];
             let written = output.len() - output_left;
             if status != usize::MAX {
-                return (written, Ok(()));
+                return (written, Ok(status));
             }
             let stop = match error {
                 Some(libc::E2BIG) => IconvStop::OutputFull,
@@ -870,11 +871,13 @@ impl PortableIconv {
         Some(converter)
     }
 
+    /// Like the `iconv(3)` wrapper's `convert`. Nothing converts irreversibly here: a
+    /// character the target cannot represent stops the conversion as invalid instead.
     pub fn convert(
         &mut self,
         input: &mut &[u8],
         output: &mut [u8],
-    ) -> (usize, Result<(), IconvStop>) {
+    ) -> (usize, Result<usize, IconvStop>) {
         let mut written = 0;
         while !input.is_empty() {
             if !self.input_started {
@@ -905,7 +908,7 @@ impl PortableIconv {
             self.output_started = true;
             *input = &input[length..];
         }
-        (written, Ok(()))
+        (written, Ok(0))
     }
 
     pub fn finish(&mut self, output: &mut [u8]) -> (usize, Result<(), IconvStop>) {
@@ -1197,7 +1200,7 @@ pub fn convert_all(
         let (written, outcome) = converter.convert(input, &mut buffer);
         output.extend_from_slice(&buffer[..written]);
         match outcome {
-            Ok(()) => return Ok(()),
+            Ok(_) => return Ok(()),
             Err(IconvStop::OutputFull) => continue,
             Err(stop) => return Err(stop),
         }
@@ -1208,7 +1211,7 @@ pub fn convert_all(
 mod tests {
     use super::{IconvStop, PortableIconv};
 
-    fn convert(from: &str, to: &str, input: &[u8]) -> (Vec<u8>, Result<(), IconvStop>) {
+    fn convert(from: &str, to: &str, input: &[u8]) -> (Vec<u8>, Result<usize, IconvStop>) {
         let mut converter = PortableIconv::open(from, to).expect("known encodings");
         let mut rest = input;
         let mut output = vec![0u8; 64];
@@ -1221,31 +1224,31 @@ mod tests {
     fn converts_between_unicode_forms_and_latin1() {
         assert_eq!(
             convert("UTF-8", "latin1", "café".as_bytes()),
-            (b"caf\xe9".to_vec(), Ok(()))
+            (b"caf\xe9".to_vec(), Ok(0))
         );
         assert_eq!(
             convert("latin1", "UTF-8", b"caf\xe9"),
-            ("café".as_bytes().to_vec(), Ok(()))
+            ("café".as_bytes().to_vec(), Ok(0))
         );
         assert_eq!(
             convert("UTF-8", "UTF-16LE", "a€".as_bytes()),
-            (vec![b'a', 0, 0xAC, 0x20], Ok(()))
+            (vec![b'a', 0, 0xAC, 0x20], Ok(0))
         );
         assert_eq!(
             convert("UTF-16", "UTF-8", &[0xFF, 0xFE, b'h', 0, b'i', 0]),
-            (b"hi".to_vec(), Ok(()))
+            (b"hi".to_vec(), Ok(0))
         );
         assert_eq!(
             convert("UTF-8", "UTF-32BE", "😀".as_bytes()),
-            (vec![0, 1, 0xF6, 0x00], Ok(()))
+            (vec![0, 1, 0xF6, 0x00], Ok(0))
         );
         assert_eq!(
             convert("UTF-8", "CP1252", "€".as_bytes()),
-            (vec![0x80], Ok(()))
+            (vec![0x80], Ok(0))
         );
         assert_eq!(
             convert("windows-1252", "UTF-8", &[0x80]),
-            ("€".as_bytes().to_vec(), Ok(()))
+            ("€".as_bytes().to_vec(), Ok(0))
         );
     }
 

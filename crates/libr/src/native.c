@@ -39,13 +39,17 @@
 #define RY_EXPORT __declspec(dllexport)
 #define RY_EXPORT_DATA __declspec(dllexport)
 /*
- * mingw-w64's longjmp unwinds the stack through SEH, which needs unwind data for every frame it
- * crosses and runs C++ destructors on the way. The builtins restore registers only, as longjmp
- * does on Unix, which is what the no-Rust-frame invariant above is built for.
+ * mingw-w64's setjmp macro records the caller's frame, and longjmp then unwinds the stack through
+ * SEH, which needs unwind data for every frame it crosses and runs C++ destructors on the way.
+ * With a null frame the CRT's longjmp restores registers only, as longjmp does on Unix, which is
+ * what the no-Rust-frame invariant above is built for. The compiler builtins are not an option:
+ * clang's __builtin_setjmp saves the canonical frame address but its landing code treats it as
+ * the frame pointer, so a function whose frame pointer sits above the stack pointer (as
+ * R_UnwindProtect's does) resumes with every local misread.
  */
-#define RY_SETJMP(buffer) __builtin_setjmp(buffer)
-#define RY_LONGJMP(buffer) __builtin_longjmp(buffer, 1)
-typedef void *RyJumpBuffer[5];
+#define RY_SETJMP(buffer) _setjmp(buffer, NULL)
+#define RY_LONGJMP(buffer) longjmp(buffer, 1)
+typedef jmp_buf RyJumpBuffer;
 #else
 #define RY_EXPORT __attribute__((visibility("default")))
 #define RY_EXPORT_DATA __attribute__((visibility("default")))
@@ -550,6 +554,13 @@ RY_EXPORT SEXP R_mapAttrib(SEXP x, SEXP (*FUN)(SEXP, SEXP, void *), void *data)
 
 /* Non-local exits that native code sets up itself. */
 
+/* Defined before its first use: clang refuses dllexport on a function already called. */
+RY_EXPORT void R_ContinueUnwind(SEXP cont)
+{
+    ry_unwind_restore(cont);
+    ry_jump();
+}
+
 /*
  * The body runs in a context. When an unwind reaches it, the unwind moves into `cont`, the
  * cleanup runs with jump = TRUE (C++ bindings throw from it, so their destructors run, and call
@@ -570,12 +581,6 @@ RY_EXPORT SEXP R_UnwindProtect(SEXP (*fun)(void *), void *data,
     ry_context_pop(&context);
     cleanfun(cleandata, FALSE);
     return result;
-}
-
-RY_EXPORT void R_ContinueUnwind(SEXP cont)
-{
-    ry_unwind_restore(cont);
-    ry_jump();
 }
 
 RY_EXPORT SEXP R_ExecWithCleanup(SEXP (*fun)(void *), void *data, void (*cleanfun)(void *),
@@ -838,6 +843,44 @@ RY_EXPORT_DATA int R_CStackDir = 1;
 RY_EXPORT_DATA int (*R_timeout_handler)(void) = NULL;
 RY_EXPORT_DATA long R_timeout_val = 0;
 RY_EXPORT_DATA Rboolean UserBreak = FALSE;
+
+#ifdef _WIN32
+/* Windows-only parts of R.dll's interface. GNU R's `libintl.h`, which Windows packages compile
+ * against, renames the gettext family to the `libintl_` names R.dll exports. Messages are not
+ * translated, so each returns its message id, picking the plural form by `n` as English does.
+ * These exports spell out dllexport because build.rs collects the Unix export lists from
+ * `RY_EXPORT` markers without evaluating `#ifdef`. */
+__declspec(dllexport) Rboolean EmitEmbeddedUTF8 = FALSE;
+__declspec(dllexport) char *libintl_gettext(const char *msgid)
+{
+    return (char *) msgid;
+}
+__declspec(dllexport) char *libintl_dgettext(const char *domain, const char *msgid)
+{
+    return (char *) msgid;
+}
+__declspec(dllexport) char *libintl_dcgettext(const char *domain, const char *msgid, int category)
+{
+    return (char *) msgid;
+}
+__declspec(dllexport) char *libintl_dngettext(const char *domain, const char *singular,
+                                              const char *plural, unsigned long n)
+{
+    return (char *) (n == 1 ? singular : plural);
+}
+
+/* R's own Rblas.dll and Rlapack.dll leave the reference error handler to R.dll and fail to load
+ * without it. Linux and macOS use the system BLAS and LAPACK, which carry their own, and an export
+ * from libR would interpose on it. */
+__declspec(dllexport) void xerbla_(const char *routine, int *info, size_t routine_length)
+{
+    char name[7];
+    size_t length = routine_length < 6 ? routine_length : 6;
+    memcpy(name, routine, length);
+    name[length] = '\0';
+    Rf_error("BLAS/LAPACK routine '%6s' gave error code %d", name, -*info);
+}
+#endif
 RY_EXPORT_DATA int R_num_math_threads = 1;
 RY_EXPORT_DATA int R_max_num_math_threads = 1;
 
