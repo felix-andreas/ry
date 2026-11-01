@@ -1862,7 +1862,10 @@ The end-to-end guard rests on the corpus suites.
   under ry's runtime an attached data.table still runs its own versions, which return a
   `data.table` and reject a frame. The runtime needs these names routed to the engine
   (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
-  installs, before the checker's types are true at run time.
+  installs, before the checker's types are true at run time. The `[` bridge
+  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
+  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
+  and decline to data.table otherwise.
 - **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
