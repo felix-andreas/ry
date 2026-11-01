@@ -184,7 +184,7 @@ or_else <- function(value, fallback) {
   }
 }
 #++++
-or_else: <T> fn(value: T | NULL, fallback: T) -> T
+or_else: <T> fn(value: T | NULL, [fallback]: T) -> T
 0..7 warning[unused] `or_else` is assigned but never used.
 
 #---- coalesce_accepts_null_and_binds_from_the_fallback
@@ -194,7 +194,7 @@ or_else <- function(value, fallback) {
 picked <- or_else(NULL, "anonymous")
 picked
 #++++
-or_else: <T> fn(value: T | NULL, fallback: T) -> T
+or_else: <T> fn(value: T | NULL, [fallback]: T) -> T
 picked: character
 character
 

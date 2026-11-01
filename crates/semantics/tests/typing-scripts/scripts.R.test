@@ -402,8 +402,8 @@ guard <- function(con) {
 }
 print(guard)
 #++++
-guard: <T> fn(con: T) -> logical
-fn(con: T) -> logical
+guard: <T> fn([con]: T) -> logical
+fn([con]: T) -> logical
 383..391 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins.
 
 #---- a_real_dead_store_beside_an_on_exit_guard_still_reports
@@ -417,8 +417,8 @@ guard <- function(con) {
 }
 print(guard)
 #++++
-guard: <T> fn(con: T) -> integer
-fn(con: T) -> integer
+guard: <T> fn([con]: T) -> integer
+fn([con]: T) -> integer
 72..80 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins.
 89..96 warning[unused] `scratch` is assigned but never used.
 
@@ -449,7 +449,7 @@ integer
 fallback <- NULL %||% 3L
 print(fallback)
 #++++
-%||%: <T> fn(a: T | NULL, b: T) -> T
+%||%: <T> fn(a: T | NULL, [b]: T) -> T
 fallback: Unknown
 T
 

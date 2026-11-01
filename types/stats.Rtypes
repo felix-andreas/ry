@@ -22,7 +22,7 @@ quantile : fn(x: Any, [probs]: Any, [na.rm]: logical, [names]: logical, [type]: 
 fivenum : fn(x: Any, [na.rm]: logical) -> double[]
 
 # `setNames` returns its first argument with names attached: a genuine generic.
-setNames : <T> fn(object: T, nm: Any) -> T
+setNames : <T> fn([object]: T, nm: Any) -> T
 
 # NA handling. `na.omit` mirrors its input (type-preserving). `complete.cases` is one logical per row
 # (scalar-claim).

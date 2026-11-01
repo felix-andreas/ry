@@ -274,3 +274,30 @@ fit: list{coefficients: double[], rank: integer}
 double[]
 NULL
 NULL
+
+#---- a_formal_read_on_one_branch_only_may_be_left_out
+delete_token <- function(resource, tenant, hash = NULL) {
+  if (is.null(hash)) {
+    hash <- paste(resource, tenant)
+  }
+  hash
+}
+or_default <- function(x, y) if (is.null(x)) y else x
+by_hash <- function() delete_token(hash = "abc")
+known <- function() or_default(1)
+#++++
+delete_token: <T, U, V> fn([resource]: T, [tenant]: U, [hash]: V | NULL) -> Unknown
+or_default: <T> fn(x: T | NULL, [y]: T) -> T
+by_hash: fn() -> Unknown
+known: fn() -> double
+
+#---- forwarding_a_formal_under_its_own_name_leaves_it_to_the_callee
+inner <- function(x, finally) {
+  if (missing(finally)) x else finally
+}
+outer <- function(x, finally) inner(x, finally = finally)
+run <- function() outer(1)
+#++++
+inner: <T> fn([x]: T, [finally]: T) -> T
+outer: <T> fn(x: T, [finally]: T) -> T
+run: fn() -> double

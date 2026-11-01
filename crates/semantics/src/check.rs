@@ -1121,7 +1121,7 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 #[derive(Default)]
 struct FormalUses {
     missing_tested: FxHashSet<Symbol>,
-    /// Names read where no write of them dominates the read.
+    /// Names read on every path where no write of them dominates the read.
     forced: FxHashSet<Symbol>,
     assigned: FxHashSet<Symbol>,
 }
@@ -1143,6 +1143,16 @@ fn join_assigned(
         .flatten()
         .reduce(|joined, branch| joined.intersection(&branch).copied().collect())
         .unwrap_or(before)
+}
+
+/// The names every branch forces, diverging branches included: R reports a missing
+/// argument only on the path that reads it, so a formal one branch never touches is
+/// optional.
+fn join_forced(branches: impl IntoIterator<Item = FxHashSet<Symbol>>) -> FxHashSet<Symbol> {
+    branches
+        .into_iter()
+        .reduce(|joined, branch| joined.intersection(&branch).copied().collect())
+        .unwrap_or_default()
 }
 
 enum ArgumentTarget {
@@ -3532,12 +3542,14 @@ impl<'db> Checker<'db, '_> {
             } => {
                 self.collect_formal_uses(*condition, uses);
                 let before = uses.assigned.clone();
-                let then_assigned = self.collect_branch_uses(*then_branch, uses, &before);
-                let else_assigned = match else_branch {
+                let (then_assigned, then_forced) =
+                    self.collect_branch_uses(*then_branch, uses, &before);
+                let (else_assigned, else_forced) = match else_branch {
                     Some(else_branch) => self.collect_branch_uses(*else_branch, uses, &before),
-                    None => Some(before.clone()),
+                    None => (Some(before.clone()), FxHashSet::default()),
                 };
                 uses.assigned = join_assigned(before, [then_assigned, else_assigned]);
+                uses.forced.extend(join_forced([then_forced, else_forced]));
                 return;
             }
             ExpressionKind::Binary {
@@ -3575,7 +3587,7 @@ impl<'db> Checker<'db, '_> {
             // `local()` evaluates in a new frame, so its writes bind nothing here.
             ExpressionKind::Local { body } => {
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*body, uses, &before);
+                self.collect_formal_uses(*body, uses);
                 uses.assigned = before;
                 return;
             }
@@ -3583,6 +3595,7 @@ impl<'db> Checker<'db, '_> {
                 self.collect_formal_uses(*scrutinee, uses);
                 let before = uses.assigned.clone();
                 let mut arm_assigned = Vec::with_capacity(arms.len());
+                let mut arm_forced = Vec::with_capacity(arms.len());
                 for arm in arms {
                     let mut entry = before.clone();
                     for &binding in &arm.bindings {
@@ -3596,9 +3609,12 @@ impl<'db> Checker<'db, '_> {
                         self.collect_formal_uses(guard, uses);
                     }
                     let entry = mem::take(&mut uses.assigned);
-                    arm_assigned.push(self.collect_branch_uses(arm.body, uses, &entry));
+                    let (assigned, forced) = self.collect_branch_uses(arm.body, uses, &entry);
+                    arm_assigned.push(assigned);
+                    arm_forced.push(forced);
                 }
                 uses.assigned = join_assigned(before, arm_assigned);
+                uses.forced.extend(join_forced(arm_forced));
                 return;
             }
             ExpressionKind::Call { callee, arguments } => {
@@ -3613,15 +3629,17 @@ impl<'db> Checker<'db, '_> {
                             self.collect_formal_uses(subject, uses);
                         }
                         let before = uses.assigned.clone();
-                        let mut arm_assigned: Vec<Option<FxHashSet<Symbol>>> = alternatives
+                        let (mut arm_assigned, mut arm_forced): (Vec<_>, Vec<_>) = alternatives
                             .iter()
                             .filter_map(|argument| argument.value)
                             .map(|value| self.collect_branch_uses(value, uses, &before))
-                            .collect();
+                            .unzip();
                         if alternatives.last().is_none_or(|last| last.name.is_some()) {
                             arm_assigned.push(Some(before.clone()));
+                            arm_forced.push(FxHashSet::default());
                         }
                         uses.assigned = join_assigned(before, arm_assigned);
+                        uses.forced.extend(join_forced(arm_forced));
                         return;
                     }
                     if callee_name == "missing" {
@@ -3641,6 +3659,30 @@ impl<'db> Checker<'db, '_> {
                         return;
                     }
                 }
+                // `f(x = x)` hands the promise on unforced, and a closure the project defines
+                // decides for itself whether to read it, so forwarding a formal under its own
+                // name does not force it. A library function such as `list` forces every
+                // argument.
+                self.collect_formal_uses(*callee, uses);
+                let forwards = match &self.module.expression(*callee).kind {
+                    ExpressionKind::NameRef(name) => self
+                        .globals
+                        .is_none_or(|globals| globals.library_candidates(name).is_none()),
+                    _ => false,
+                };
+                for argument in arguments {
+                    let Some(value) = argument.value else { continue };
+                    if forwards
+                        && let Some(name) = argument.name
+                        && let ExpressionKind::NameRef(value_name) =
+                            &self.module.expression(value).kind
+                        && *value_name == name
+                    {
+                        continue;
+                    }
+                    self.collect_formal_uses(value, uses);
+                }
+                return;
             }
             _ => {}
         }
@@ -3650,17 +3692,20 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// Walks one branch from `before` and returns what it leaves assigned, or `None` when it
-    /// diverges, so a join ignores it.
+    /// diverges, so a join ignores it, together with the names it forces. The branch's forced
+    /// names stay out of `uses.forced`: the caller decides whether every path forces them.
     fn collect_branch_uses(
         &self,
         id: ExprId,
         uses: &mut FormalUses,
         before: &FxHashSet<Symbol>,
-    ) -> Option<FxHashSet<Symbol>> {
+    ) -> (Option<FxHashSet<Symbol>>, FxHashSet<Symbol>) {
         uses.assigned = before.clone();
+        let outer_forced = mem::take(&mut uses.forced);
         self.collect_formal_uses(id, uses);
+        let forced = mem::replace(&mut uses.forced, outer_forced);
         let after = mem::take(&mut uses.assigned);
-        (!self.diverges(id)).then_some(after)
+        ((!self.diverges(id)).then_some(after), forced)
     }
 
     /// A forced formal that the call omits evaluates its default, so the default's reads

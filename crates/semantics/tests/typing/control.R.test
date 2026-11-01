@@ -4,7 +4,7 @@ f <- function(flag, x) if (flag) x else "s"
 a <- f(TRUE, 1)
 b <- f(TRUE, "text")
 #++++
-f: <T> fn(flag: logical, x: T) -> T | character
+f: <T> fn(flag: logical, [x]: T) -> T | character
 a: double | character
 b: character
 
@@ -20,7 +20,7 @@ b: Unknown
 #---- two_open_branches_still_tie_to_each_other
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, fallback: T) -> T
+coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
 
 #---- a_constrained_branch_may_unify_so_recursion_converges
 fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
@@ -182,7 +182,7 @@ f: fn(x: integer | NULL) -> integer
 #---- coalesce_idiom_shapes
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, fallback: T) -> T
+coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
 
 #---- family_guard_filters
 f <- function(flag) {

@@ -609,7 +609,7 @@ bquote : fn(expr: Any, [where]: Any, [splice]: logical) -> Any
 deparse : fn(expr: Any, [width.cutoff]: Any, [backtick]: logical, [control]: Any, [nlines]: Any) -> character
 parse : fn([file]: Any, [n]: Any, [text]: Any, [prompt]: Any, [keep.source]: logical, [srcfile]: Any, [encoding]: character) -> Any
 body : fn(fun: Any) -> Any
-formals : fn(fun: Any, [envir]: Any) -> Any
+formals : fn([fun]: Any, [envir]: Any) -> Any
 args : fn(name: Any) -> Any
 # NSE data-masking helpers: deliberately not modeled beyond resolution.
 subset : Any

@@ -225,7 +225,7 @@ apply_op <- function(op, a, b) {
 
 run <- function() apply_op("add", 3L, 4L)
 #++++
-apply_op: <T, U: numeric> fn(op: T, a: U, b: U) -> Unknown
+apply_op: <T, U: numeric> fn(op: T, [a]: U, [b]: U) -> Unknown
 run: fn() -> Unknown
 
 #---- mutual_recursion_is_clean
@@ -359,7 +359,7 @@ run <- function() {
 #++++
 countdown: <T: numeric> fn(n: T) -> integer
 greet: <T, U> fn(name: T, [greeting]: U) -> character
-clamp: <T> fn(x: T, lo: T, hi: T) -> T
+clamp: <T> fn(x: T, lo: T, [hi]: T) -> T
 compose: <T, U, V> fn(f: fn(T) -> U, g: fn(V) -> T) -> fn(x: V) -> U
 run: fn() -> list{depth: integer, hello: character, hi: character, bounded: integer, out: integer}
 
@@ -1300,4 +1300,4 @@ fill <- function(object, coredata = NULL) {
 #++++
 quarter_of: fn([type]: Unknown) -> Unknown
 asked: Unknown
-fill: <T> fn(object: Unknown, [coredata]: T | NULL) -> Unknown
+fill: <T> fn([object]: Unknown, [coredata]: T | NULL) -> Unknown

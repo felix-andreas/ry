@@ -29,10 +29,10 @@ str : fn(object: Any, [max.level]: Any, [vec.len]: Any, [list.len]: Any, [digits
 # formals must be declared (named-formals) or `write.csv(x, f, row.names = FALSE)` would falsely
 # error. `write.csv` forbids overriding `sep`/`dec`/`qmethod` in R, so only the formals it genuinely
 # accepts are declared.
-read.csv : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
-read.csv2 : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
-read.delim : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
-read.table : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, [stringsAsFactors]: logical, [colClasses]: Any, [nrows]: integer, [skip]: integer, [na.strings]: Any, ...: Any) -> data.frame
+read.csv : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
+read.csv2 : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
+read.delim : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
+read.table : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, [stringsAsFactors]: logical, [colClasses]: Any, [nrows]: integer, [skip]: integer, [na.strings]: Any, ...: Any) -> data.frame
 write.csv : fn(x: Any, [file]: Any, [quote]: Any, [na]: character, [row.names]: Any, [fileEncoding]: character, [eol]: character, ...: Any) -> NULL
 write.csv2 : fn(x: Any, [file]: Any, [quote]: Any, [na]: character, [row.names]: Any, [fileEncoding]: character, [eol]: character, ...: Any) -> NULL
 write.table : fn(x: Any, [file]: Any, [append]: logical, [quote]: Any, [sep]: character, [eol]: character, [na]: character, [dec]: character, [row.names]: Any, [col.names]: Any, [qmethod]: character, [fileEncoding]: character) -> NULL

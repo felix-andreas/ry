@@ -231,12 +231,15 @@ g: <T> fn([x]: T) -> character
 f: fn() -> character
 
 #---- a_missing_named_formal_is_named_in_the_message
-g <- function(a, b = NULL) if (is.null(b)) a else b
+g <- function(a, b = NULL) {
+  print(a)
+  if (is.null(b)) a else b
+}
 f <- function() g(b = 2)
 #++++
 g: <T> fn(a: T, [b]: T | NULL) -> T
 f: Unknown
-68..69 error[type-mismatch] this call leaves out `a`, which the function requires
+85..86 error[type-mismatch] this call leaves out `a`, which the function requires
 
 #---- an_overflow_counts_only_positional_arguments
 g <- function(x, y) x + y
@@ -694,7 +697,7 @@ f: fn() -> character
 convert <- function(x, converter, ...) converter(x = x, ...)
 f <- function() convert("a", toupper)
 #++++
-convert: <T, U> fn(x: T, converter: fn(x: T) -> U, ...: Any) -> U
+convert: <T, U> fn([x]: T, converter: fn(x: T) -> U, ...: Any) -> U
 f: fn() -> character
 
 #---- a_lowercase_name_goes_to_the_dots_not_to_X
