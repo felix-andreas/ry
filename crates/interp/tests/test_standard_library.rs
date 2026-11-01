@@ -383,6 +383,10 @@ fn declarations() -> Vec<(String, Vec<String>)> {
     text.lines()
         .filter_map(|line| {
             let (name, signature) = line.split_once(" : ")?;
+            // The list conversions are base builtins, declared here only for the checker.
+            if name.starts_with("as.") {
+                return None;
+            }
             let parameters = &signature[signature.find("fn(")? + 3..];
             let mut depth = 0usize;
             let mut names = Vec::new();

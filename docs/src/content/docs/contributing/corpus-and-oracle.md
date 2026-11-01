@@ -106,6 +106,25 @@ first if you rebuild while a long run is going.
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
 measures the container, not ry. `MEMORY.md` records the current rate.
 
+## Running against another GNU R
+
+The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,
+which is how to compare against a newer R installed beside the system one, for example with
+[rig](https://github.com/r-lib/rig) (`rig add 4.6` installs under `/opt/R/<version>`):
+
+```sh
+ORACLE_R=/opt/R/4.6.2/bin/R just oracle verify            # the single-file cases
+ORACLE_RSCRIPT=/opt/R/4.6.2/bin/Rscript just oracle packages   # the package corpus
+```
+
+`ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
+The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs: `verify` under
+4.6.2 passes 90 of 105 cases against 102 of 105 under 4.3.3, mostly in `stats`, `s4` and printing.
+Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing rig puts its
+`R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in `/usr/local/bin` to keep
+the system R as the default. Whether ry's own runtime can load the newer R's base library through
+`R_HOME` is untested.
+
 ## The benchmark generator
 
 ```sh

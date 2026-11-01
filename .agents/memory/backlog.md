@@ -2623,3 +2623,26 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   unresolved and the defining file reports it unused. Destructured names also lack declaration
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
+
+## Open: findings from the records, library and frame round
+
+- **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
+  as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
+  which makes a diagnostic differ from the user's own definition. Show the declaration order.
+- **`@Money(list(amount = "x", ...))` blames the whole `list(...)` call.** The wrong field's value is
+  the precise range.
+- **A join column missing from both frames is reported twice at one range**, once per frame
+  (`sales[ids, on = "teem"]`). One finding naming both frames would be quieter.
+- **Strict mode reports an `if (x < 0) stop(...)` guard** as an undetermined type (already on
+  `strict-mode.mdx`); a function that ends in `stop()` should type as `Never` there.
+- **`ry run` on a debug build is unusable for loops** (a 20M-iteration loop took over three minutes
+  against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
+  against a release build.
+
+## Open: findings from the developer-workflow round
+
+- **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
+  function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
+  Position[]`; the second member is the vector view of the same element type and adds noise.
+- **A piped `ry repl` prints nothing.** With stdin not a terminal the console reads no commands and
+  exits silently; it should either evaluate stdin or say it needs a terminal.
