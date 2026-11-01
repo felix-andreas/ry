@@ -684,3 +684,16 @@ strip_name: <T, U> fn(spec: T, name: U) -> character
 active_rows <- function(gradient, fixed) which(gradient > 0 & !as.matrix(fixed))
 #++++
 active_rows: <T, U> fn(gradient: T, fixed: U) -> integer[]
+
+#---- negating_a_parameter_shaped_by_an_is_null_test
+fifo_mode <- function(read = NULL, write = NULL) {
+  if (is.null(read) && is.null(write)) {
+    read <- TRUE
+    write <- FALSE
+  }
+  if (is.null(read)) read <- !write
+  if (is.null(write)) write <- !read
+  read && write
+}
+#++++
+fifo_mode: fn([read]: logical | NULL, [write]: logical | NULL) -> logical

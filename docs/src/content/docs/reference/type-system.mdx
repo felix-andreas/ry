@@ -1690,6 +1690,9 @@ Logical negation coerces its operand exactly as a [scalar condition](#conditions
 - An operand whose type is still undetermined is constrained to `logical`, and the result is
   `logical`, except for an unannotated formal with a default, which stays open as it does in a
   [condition](#conditions).
+- A union negates when each member does, and an undetermined member counts as one that does. An
+  unannotated parameter shaped by an `is.null()` test has such a type, so after
+  `if (is.null(read)) read <- !write` the `!write` is not an error.
 - Any other operand is a type error.
 
 ### Range operator `:`
