@@ -334,6 +334,10 @@ pub(crate) struct EnvironmentObject {
     pub frame: Cell<*mut Frame>,
     pub enclosure: Cell<Sexp>,
     pub spare: Cell<usize>,
+    /// Where `frame` points. The frame lives in the environment's own slot, because a closure
+    /// call makes an environment, and a separate allocation for its frame would double the
+    /// allocator traffic of every call.
+    pub storage: std::mem::MaybeUninit<Frame>,
 }
 
 #[repr(C)]
@@ -699,6 +703,14 @@ impl Sexp {
 
     pub(crate) unsafe fn set_frame_ptr(self, frame: *mut Frame) {
         unsafe { self.payload::<EnvironmentObject>().frame.set(frame) }
+    }
+
+    /// The uninitialized space for this environment's frame.
+    pub(crate) unsafe fn frame_storage(self) -> *mut Frame {
+        unsafe {
+            let payload = self.0.as_ptr().cast::<EnvironmentObject>();
+            std::ptr::addr_of_mut!((*payload).storage).cast::<Frame>()
+        }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {

@@ -11,6 +11,7 @@ path = "src/interp.rs"
 
 [dependencies]
 heap = { path = "../heap" }
+smallvec = { version = "1.15", features = ["union"] }
 syntax = { path = "../syntax" }
 table = { path = "../table" }
 rowan.workspace = true

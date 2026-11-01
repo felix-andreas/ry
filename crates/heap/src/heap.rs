@@ -509,7 +509,7 @@ impl Heap {
     ) -> HeapResult<Sexp> {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
         let keep = [first, second, third, extra.unwrap_or(first)];
-        let object = self.allocate(kind, size, &keep)?;
+        let object = self.allocate_with(kind, size, &keep, false)?;
         object.set_car_unbarriered(first);
         object.set_cdr_unbarriered(second);
         object.set_tag_unbarriered(third);
@@ -546,7 +546,9 @@ impl Heap {
     pub unsafe fn alloc_environment(&mut self, enclosure: Sexp) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
         let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
-        object.set_frame_ptr(Box::into_raw(Box::<Frame>::default()));
+        let frame = object.frame_storage();
+        frame.write(Frame::default());
+        object.set_frame_ptr(frame);
         object.set_enclosure_unbarriered(enclosure);
         Ok(object)
     }
@@ -811,6 +813,18 @@ impl Heap {
         Ok(())
     }
 
+    /// Binds `symbol` in the frame of `env`, a function frame that does not bind it yet, and
+    /// returns the new cell. A closure call binds each formal this way: formals are distinct, and
+    /// the frame is new, so neither the probe nor the lock checks of [`Heap::define`] can matter.
+    pub unsafe fn define_fresh(&mut self, env: Sexp, symbol: Sexp, value: Sexp) -> HeapResult<Sexp> {
+        debug_assert!(env.has_gp(gp::FUNCTION_FRAME) && self.frame_cell(env, symbol).is_none());
+        let cell =
+            self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
+        self.write_barrier(env, cell);
+        (*env.frame_ptr()).insert(cell);
+        Ok(cell)
+    }
+
     pub unsafe fn set_binding_value(&mut self, cell: Sexp, value: Sexp) -> HeapResult<()> {
         if cell.has_gp(gp::BINDING_LOCKED) {
             return Err(HeapError::LockedBinding {
@@ -957,6 +971,12 @@ impl Heap {
     // Collection.
 
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {
+        self.allocate_with(kind, size, keep, true)
+    }
+
+    /// `allocate`, leaving the body uninitialized unless `zeroed`: a caller that writes every
+    /// field itself, as a triple's does, saves clearing the slot on the hottest allocation path.
+    unsafe fn allocate_with(&mut self, kind: SexpType, size: usize, keep: &[Sexp], zeroed: bool) -> HeapResult<Sexp> {
         self.maybe_collect(size, keep);
         let class = SLOT_SIZES.iter().position(|&slot| slot >= size);
         let (memory, size_class, gc) = match class {
@@ -965,7 +985,9 @@ impl Heap {
                     Some(memory) => memory,
                     None => self.grow_class(class)?,
                 };
-                std::ptr::write_bytes(memory.as_ptr(), 0, SLOT_SIZES[class]);
+                if zeroed {
+                    std::ptr::write_bytes(memory.as_ptr(), 0, size);
+                }
                 (memory, class as u8, 0)
             }
             None => {
@@ -1404,7 +1426,7 @@ impl Heap {
         if object.kind() == SexpType::Environment && !object.is_altrep() {
             let frame = object.frame_ptr();
             if !frame.is_null() {
-                drop(Box::from_raw(frame));
+                std::ptr::drop_in_place(frame);
                 object.set_frame_ptr(std::ptr::null_mut());
             }
         }
@@ -1516,7 +1538,7 @@ impl Drop for Heap {
                         {
                             let frame = object.frame_ptr();
                             if !frame.is_null() {
-                                drop(Box::from_raw(frame));
+                                std::ptr::drop_in_place(frame);
                             }
                         }
                     }

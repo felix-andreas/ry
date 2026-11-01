@@ -14,6 +14,14 @@ use crate::{
     },
 };
 use heap::object::{Sexp, SexpType, gp};
+use smallvec::SmallVec;
+
+/// A call's arguments as values or promises. Inline for the common few, so a closure call
+/// allocates no vector for them.
+pub type Args = SmallVec<[Arg; 6]>;
+
+/// What [`match_args`] returns: one value per formal.
+pub type Matched = SmallVec<[Sexp; 8]>;
 
 /// The binding-cell bit that marks a formal bound to its default, which `missing()` reads.
 pub const BINDING_MISSING: u16 = 1 << 0;
@@ -592,9 +600,9 @@ unsafe fn counted_push(args: &[Arg]) {
 }
 
 /// Wraps a closure's arguments in promises, expanding `...` into the promises it holds.
-pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
+pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Args> {
     let dots = symbols().dots;
-    let mut args = Vec::new();
+    let mut args = Args::new();
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
         if expression == dots {
@@ -718,21 +726,16 @@ pub unsafe fn apply_closure(
     let missing = missing_arg();
     let heap = crate::heap();
     let mut formal = formals;
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
+    for &actual in &actuals {
         let symbol = formal.tag();
-        let actual = actuals[index];
         if actual == missing && formal.car() != missing {
             let promise = make_promise(formal.car(), env)?;
-            heap.define(env, symbol, promise)?;
-            if let Some(cell) = heap.frame_cell(env, symbol) {
-                cell.set_gp_bits(BINDING_MISSING, true);
-            }
+            let cell = heap.define_fresh(env, symbol, promise)?;
+            cell.set_gp_bits(BINDING_MISSING, true);
         } else {
-            heap.define(env, symbol, actual)?;
+            heap.define_fresh(env, symbol, actual)?;
         }
         formal = formal.cdr();
-        index += 1;
     }
     heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
@@ -748,8 +751,11 @@ pub unsafe fn apply_closure(
 
 /// The arguments as a pairlist of their values or promises, which a frame records.
 pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
-    let items: Vec<(Sexp, Sexp)> = args.iter().map(|arg| (arg.tag, arg.value)).collect();
-    values::pairlist(&items, SexpType::Pairlist)
+    let mut list = nil();
+    for arg in args.iter().rev() {
+        list = cons_tagged(arg.value, list, arg.tag)?;
+    }
+    Ok(list)
 }
 
 /// Runs a closure body in an environment whose arguments are already bound.
@@ -932,7 +938,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
 /// GNU R's argument matching: exact names, then partial names for the formals before `...`, then
 /// positions. Returns one value per formal: the supplied value or promise, `R_MissingArg`, or
 /// for `...` a `DOTSXP` of what it collects.
-pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>> {
+pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
     let missing = missing_arg();
     let dots_symbol = symbols().dots;
     if let Some(matched) = match_positional_args(formals, args, missing, dots_symbol)? {
@@ -1076,7 +1082,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>
             ),
         ));
     }
-    let mut result: Vec<Sexp> = matched
+    let mut result: Matched = matched
         .into_iter()
         .map(|value| value.unwrap_or(missing))
         .collect();
@@ -1102,13 +1108,13 @@ unsafe fn match_positional_args(
     args: &[Arg],
     missing: Sexp,
     dots_symbol: Sexp,
-) -> R<Option<Vec<Sexp>>> {
+) -> R<Option<Matched>> {
     let is_named =
         |arg: &Arg| arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty();
     if args.iter().any(is_named) {
         return Ok(None);
     }
-    let mut result = Vec::with_capacity(args.len().max(4));
+    let mut result = Matched::new();
     let mut remaining = args.iter();
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
@@ -1488,7 +1494,13 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     sequence.increment_refcount();
     let mut cell = sequence;
     let mut outcome = Ok(nil());
+    let heap = crate::heap();
+    heap.root(sequence);
+    // Each element is rooted when it is allocated, and the binding keeps it alive after that, so
+    // releasing per iteration stops a long loop from holding every element it ever made.
+    let mark = heap.handle_mark();
     for index in 0..count {
+        crate::heap().release_handles(mark);
         let element = match sequence.kind() {
             SexpType::List | SexpType::Expression => Ok(sequence.element(index)),
             SexpType::Pairlist | SexpType::Language => {

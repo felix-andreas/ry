@@ -826,7 +826,7 @@ pub unsafe fn dispatch_or_eval(
     // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
     // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
     if first == symbols().dots {
-        let promised = eval::promise_args(arguments, env)?;
+        let promised = eval::promise_args(arguments, env)?.into_vec();
         let Some(head) = promised.first() else {
             return Ok(Err(promised));
         };
