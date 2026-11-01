@@ -748,6 +748,20 @@ way. Every union, written or inferred, is normalized:
 - A union with an `Any` member is `Any`, because every value already satisfies `Any`.
 - Otherwise, a union with an `Unknown` member is `Unknown`.
 
+A call's result drops a union member that is a type parameter of the called function which no
+argument constrained, because such a parameter stands for no value. `Result.and_then` returns
+`Result<B, E | F>`, where `F` is the error type of the step, so a step that never fails leaves `F`
+unconstrained and the result keeps the error `E` alone:
+
+```r
+a <- Result.and_then(Str.to_integer("1"), function(n) :Ok(n))
+# :Ok(integer) | :Err(:InvalidNumStr)
+b <- Result.and_then(Str.to_integer("1"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+# :Ok(integer) | :Err(:InvalidNumStr | :NotPositive)
+```
+
+A union made only of such parameters stays as it is.
+
 ### Union compatibility
 
 A value fits an expected union when it fits any one member, with the usual coercions applied per

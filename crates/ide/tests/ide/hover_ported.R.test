@@ -239,7 +239,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: NULL\n"
-completion (108): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (111): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 
@@ -255,7 +255,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
-completion (55): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
+completion (56): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
 hint @5: <T> fn(parameter: T) -> T
 
 #==== hover_literals
@@ -334,7 +334,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (73): La.svd, La_library, La_version, LakeHuron, LazyFrame.collect, LazyFrame.explain, LazyFrame.filter, LazyFrame.group_by
+completion (96): La.svd, La_library, La_version, LakeHuron, LazyFrame.collect, LazyFrame.explain, LazyFrame.filter, LazyFrame.group_by
 hint @5: integer
 
 #==== hover_annotated
@@ -348,7 +348,7 @@ definition 11..18
 references: 11..18*
 rename: 1 edit(s)
 signature: none
-completion (97): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
+completion (99): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
 
 #---- if_unknown_annotation
 frame <- data.frame(a = 1)
@@ -374,7 +374,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (81): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (87): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -596,7 +596,7 @@ rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-completion (63): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
+completion (65): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
 hint @6: <T> fn(x: T) -> T
 
 #---- two_type_variables
@@ -626,7 +626,7 @@ rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
-completion (66): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
+completion (67): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
 hint @7: <T: numeric> fn(x: T) -> T
 
 #---- partially_inferred_function
@@ -681,7 +681,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (20): undebug, undebugcall, packageNotFoundError, unique.data.frame, unique.default, units.difftime, unloadNamespace, unRematchDefinition
+completion (21): undebug, undebugcall, packageNotFoundError, unique.data.frame, unique.default, units.difftime, unloadNamespace, unRematchDefinition
 
 #==== hover_stubs
 #---- overloaded_stub_name

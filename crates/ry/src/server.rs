@@ -761,6 +761,7 @@ impl Worker {
                 namespace,
                 overloads,
                 declaration,
+                documentation,
             } => {
                 let mut summary = if *overloads > 1 {
                     format!(
@@ -774,6 +775,9 @@ impl Worker {
                     declaration.and_then(|target| self.render_stub_source_location(target))
                 {
                     summary.push_str(&format!(" Declared at `{location}`."));
+                }
+                if let Some(documentation) = documentation {
+                    summary = format!("{documentation}\n\n{summary}");
                 }
                 Some(summary)
             }

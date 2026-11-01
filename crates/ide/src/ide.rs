@@ -46,6 +46,8 @@ pub enum HoverDefinition {
         namespace: String,
         overloads: usize,
         declaration: Option<StubTarget>,
+        /// The declaration's `#'` lines, as Markdown.
+        documentation: Option<String>,
     },
 }
 
@@ -430,6 +432,7 @@ fn stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
         namespace: declaring_namespace(db, name)?.to_owned(),
         overloads: stubs(db)?.schemes.get(name).map_or(0, Vec::len),
         declaration: stub_target(db, name),
+        documentation: stubs(db)?.documentation.get(name).cloned(),
     })
 }
 
@@ -1165,7 +1168,13 @@ pub fn completion(
                         .exports_by_namespace
                         .iter()
                         .find(|(_, names)| names.contains(name))
-                        .map(|(namespace, _)| format!("From the `{namespace}` package."))
+                        .map(|(namespace, _)| {
+                            let origin = format!("From the `{namespace}` package.");
+                            match library.documentation.get(name) {
+                                Some(text) => format!("{text}\n\n{origin}"),
+                                None => origin,
+                            }
+                        })
                 };
                 items.extend(
                     library
@@ -2279,6 +2288,7 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
             namespace: namespace.to_owned(),
             overloads: 0,
             declaration: stub_target(db, &cursor.name),
+            documentation: None,
         })
     } else {
         None
