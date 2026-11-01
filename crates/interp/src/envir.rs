@@ -83,7 +83,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
     internal("getNamespaceValue", 3, |call| unsafe {
         let name = values::require_string(call.arg(1), "name")?;
-        namespace_lookup(call.arg(0), &name, false, call.env)
+        let exported = values::as_logical_scalar(call.arg(2)) == 1;
+        namespace_lookup(call.arg(0), &name, exported, call.env)
     }),
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
@@ -1744,32 +1745,60 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     namespace_lookup(package_value, &name, exported, call.env)
 }
 
-/// Looks `name` up in a package's namespace, loading it if needed. Base is looked up directly;
-/// other packages go through base R's own `getExportedValue` and `asNamespace`.
+/// Looks `name` up in a package's namespace (a namespace environment or a package name),
+/// loading it if needed. An exported name is looked up through the namespace's export table,
+/// which maps it to the internal name, from the namespace outward, because a package may export
+/// a function it imports, as graphics does with base's `plot`; lazy data comes last. An
+/// internal name (`:::`) must be bound in the namespace itself.
 unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
-    let package_name = values::first_string(package).map(|text| text.into_owned()).unwrap_or_default();
     let symbol = values::install(name)?;
-    if package_name == "base" {
-        let value = find_var_in_frame(symbol, base_namespace())?;
+    let namespace = if package.kind() == SexpType::Environment {
+        package
+    } else if values::first_string(package).is_some_and(|package_name| package_name == "base") {
+        base_namespace()
+    } else {
+        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
+        eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?
+    };
+    if namespace == base_namespace() || !exported {
+        let value = find_var_in_frame(symbol, namespace)?;
         if value == unbound() {
             return Err(error(format!("object '{name}' not found")));
         }
         return value_of(value);
     }
-    let function_name = if exported { "getExportedValue" } else { "get" };
-    let function = eval::find_fun(values::install(function_name)?, base_namespace())?;
-    let name_value = values::scalar_string(name)?;
-    if exported {
-        eval::apply(nil(), function, &eval::value_args(&[package, name_value]), env)
-    } else {
-        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
-        let namespace = eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?;
-        let inherits = scalar_bool(false)?;
-        let args = [
-            Arg { tag: nil(), value: name_value },
-            Arg { tag: values::install("envir")?, value: namespace },
-            Arg { tag: values::install("inherits")?, value: inherits },
-        ];
-        eval::apply(nil(), function, &args, env)
+    let info = find_var_in_frame(values::install(".__NAMESPACE__.")?, namespace)?;
+    let table = |field: &str| -> R<Sexp> {
+        if info.kind() != SexpType::Environment {
+            return Ok(unbound());
+        }
+        let table = find_var_in_frame(values::install(field)?, info)?;
+        if table.kind() != SexpType::Environment {
+            return Ok(unbound());
+        }
+        find_var_in_frame(symbol, table)
+    };
+    let internal_name = table("exports")?;
+    if internal_name != unbound() {
+        let internal_symbol = match values::first_string(internal_name) {
+            Some(internal) => values::install(&internal)?,
+            None => symbol,
+        };
+        let value = eval::find_var(internal_symbol, namespace)?;
+        if value == unbound() {
+            return Err(error(format!("object '{name}' not found")));
+        }
+        return value_of(value);
     }
+    let data = table("lazydata")?;
+    if data != unbound() {
+        return value_of(data);
+    }
+    let package_name = if info.kind() == SexpType::Environment {
+        let spec = find_var_in_frame(values::install("spec")?, info)?;
+        values::first_string(spec).map(|text| text.into_owned()).unwrap_or_default()
+    } else {
+        values::first_string(package).map(|text| text.into_owned()).unwrap_or_default()
+    };
+    Err(error(format!("'{name}' is not an exported object from 'namespace:{package_name}'")))
 }
