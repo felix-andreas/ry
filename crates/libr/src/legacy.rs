@@ -9,14 +9,16 @@
 //! marks afterwards). A string keeps its mark in its own header, since those kernels touch every
 //! string; a vector's scratch value lives in `Runtime::truelengths`.
 
-use crate::{
-    R_xlen_t, SEXPTYPE,
-    boundary::{ApiResult, enter, error},
-    runtime,
-    vectors::sexp_type,
+use {
+    crate::{
+        R_xlen_t, SEXPTYPE,
+        boundary::{ApiResult, enter, error},
+        runtime,
+        vectors::sexp_type,
+    },
+    heap::object::{Sexp, SexpType},
+    std::ffi::c_int,
 };
-use heap::object::{Sexp, SexpType};
-use std::ffi::c_int;
 
 unsafe fn vector_or_string(object: Sexp, what: &str) -> ApiResult<Sexp> {
     if object.kind().is_vector() || object.kind() == SexpType::Char {
@@ -53,8 +55,11 @@ pub unsafe fn truelength(object: Sexp) -> ApiResult<R_xlen_t> {
 pub unsafe fn set_truelength(object: Sexp, value: R_xlen_t) -> ApiResult<()> {
     let object = vector_or_string(object, "SET_TRUELENGTH")?;
     if object.kind() == SexpType::Char {
-        let value = i32::try_from(value)
-            .map_err(|_| error(format!("SET_TRUELENGTH() on a string takes a 32-bit value, not {value}")))?;
+        let value = i32::try_from(value).map_err(|_| {
+            error(format!(
+                "SET_TRUELENGTH() on a string takes a 32-bit value, not {value}"
+            ))
+        })?;
         object.set_char_truelength(value);
         return Ok(());
     }

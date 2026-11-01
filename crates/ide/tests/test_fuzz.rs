@@ -1,12 +1,17 @@
 //! Every feature runs at sampled offsets and must not panic or produce a range outside the text
 //! it indexes. `FUZZ_ITERS` scales the mutation budget.
 
-use ide::{DefinitionTarget, DocumentSymbol};
-use semantics::stubs::install_shipped_stubs;
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::collections::{BTreeSet, HashSet};
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed};
-use syntax::{SyntaxKind, TextRange, TextSize, lex};
+use {
+    ide::{DefinitionTarget, DocumentSymbol},
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile, stubs::install_shipped_stubs,
+    },
+    std::collections::{BTreeSet, HashSet},
+    syntax::{
+        SyntaxKind, TextRange, TextSize, lex,
+        testing::{SplitMix64, fuzz_iterations, mutate_seed},
+    },
+};
 
 const SEEDS: &[&str] = &[
     "x <- 1L\ny <- x + 1\n",

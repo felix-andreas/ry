@@ -9,22 +9,30 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::r::{RUNTIME_RY, RValue, error_value, plan_value};
-use crate::{Code, Loader};
-use heap::object::{Sexp, SexpType};
-use interp::builtins::{BuiltinDef, Call, internal, internal_function};
-use interp::eval::{define, eval, make_promise};
-use interp::lower::{lower_node, parse_text};
-use interp::scope;
-use interp::unwind::{R, error};
-use interp::values::{self, install, length, nil};
-use rustc_hash::FxHashMap;
-use semantics::ANALYSIS_STACK_SIZE;
-use std::ffi::c_void;
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, PoisonError};
-use std::thread;
-use syntax::{Parse, SyntaxNode, TextRange, TextSize};
+use {
+    crate::{
+        Code, Loader,
+        r::{RUNTIME_RY, RValue, error_value, plan_value},
+    },
+    heap::object::{Sexp, SexpType},
+    interp::{
+        builtins::{BuiltinDef, Call, internal, internal_function},
+        eval::{define, eval, make_promise},
+        lower::{lower_node, parse_text},
+        scope,
+        unwind::{R, error},
+        values::{self, install, length, nil},
+    },
+    rustc_hash::FxHashMap,
+    semantics::ANALYSIS_STACK_SIZE,
+    std::{
+        ffi::c_void,
+        path::{Path, PathBuf},
+        sync::{LazyLock, Mutex, PoisonError},
+        thread,
+    },
+    syntax::{Parse, SyntaxNode, TextRange, TextSize},
+};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderPlan", 2, do_plan),
@@ -94,9 +102,14 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
             .name("ry-loader".to_owned())
             .stack_size(ANALYSIS_STACK_SIZE)
             .spawn_scoped(threads, || plan(&root, full))
-            .map(|thread| thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+            .map(|thread| {
+                thread
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
     });
-    let value = value.map_err(|failure| error(format!("cannot start the loader's thread: {failure}")))?;
+    let value =
+        value.map_err(|failure| error(format!("cannot start the loader's thread: {failure}")))?;
     scope(|| r_value(&value))
 }
 
@@ -228,7 +241,11 @@ unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
 /// Lowers the outermost node spanning exactly `start..end` of `tree`.
 unsafe fn lower_range(tree: &Parse, start: u32, end: u32) -> R<Sexp> {
     let root = SyntaxNode::new_root(tree.green().clone());
-    if start > end || !root.text_range().contains_range(TextRange::new(start.into(), end.into())) {
+    if start > end
+        || !root
+            .text_range()
+            .contains_range(TextRange::new(start.into(), end.into()))
+    {
         return Err(error("a definition's code is not in its syntax tree"));
     }
     let range = TextRange::new(TextSize::from(start), TextSize::from(end));

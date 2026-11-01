@@ -2,10 +2,12 @@
 //! follows the script reaches it verbatim, options resolve to the documented runtime, and no
 //! argument vector panics the parser. `FUZZ_ITERS` scales the budgets; runs are deterministic.
 
-use clap::Parser;
-use ry::command_line::{Cli, Keybindings, Mode, Runtime, Session};
-use std::path::PathBuf;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    clap::Parser,
+    ry::command_line::{Cli, Keybindings, Mode, Runtime, Session},
+    std::path::PathBuf,
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 /// Tokens that look like options of ry's, of R's, or of nothing, plus ordinary words.
 const TOKENS: &[&str] = &[

@@ -1,12 +1,14 @@
 //! External pointers, weak references and finalizers.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, DlFunc, enter, error, run_finalizer},
-    runtime,
+use {
+    crate::{
+        Rboolean,
+        boundary::{ApiResult, DlFunc, enter, error, run_finalizer},
+        runtime,
+    },
+    heap::object::{Sexp, SexpType},
+    std::ffi::c_void,
 };
-use heap::object::{Sexp, SexpType};
-use std::ffi::c_void;
 
 unsafe fn external_ptr(object: Sexp, accessor: &str) -> ApiResult<Sexp> {
     if object.kind() != SexpType::ExternalPtr {

@@ -37,41 +37,24 @@
             renv
             devtools
           ];
-        # The toolchain comes from rust-toolchain.toml, the same file rustup reads, so nix and
-        # cargo builds use one compiler. Without that file, the latest nightly stands in.
+        # The compiler rustup builds with, from rust-toolchain.toml, plus what nix alone needs: the
+        # release cross targets and rust-analyzer for the dev shell.
         rustToolchain =
           pkgs:
           let
-            toolchainFile = ./rust-toolchain.toml;
-            pinned = (builtins.fromTOML (builtins.readFile toolchainFile)).toolchain;
-            crossTargets = [
-              "x86_64-unknown-linux-gnu"
-              "aarch64-unknown-linux-gnu"
-              "x86_64-pc-windows-gnu"
-              "aarch64-apple-darwin"
-              "x86_64-apple-darwin"
-            ];
-            extensions = [
-              "rust-src"
-              "rust-analyzer"
-            ];
+            pinned = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
           in
-          if builtins.pathExists toolchainFile then
-            pkgs.rust-bin.fromRustupToolchain (
-              pinned
-              // {
-                targets = (pinned.targets or [ ]) ++ crossTargets;
-                components = (pinned.components or [ ]) ++ extensions;
-              }
-            )
-          else
-            pkgs.rust-bin.selectLatestNightlyWith (
-              toolchain:
-              toolchain.default.override {
-                targets = crossTargets;
-                inherit extensions;
-              }
-            );
+          pkgs.rust-bin.fromRustupToolchain (
+            pinned
+            // {
+              targets = pinned.targets ++ [
+                "x86_64-unknown-linux-gnu"
+                "x86_64-pc-windows-gnu"
+                "aarch64-apple-darwin"
+              ];
+              components = pinned.components ++ [ "rust-analyzer" ];
+            }
+          );
       };
 
       packages = self.lib.eachSystem (
