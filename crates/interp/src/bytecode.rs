@@ -878,6 +878,18 @@ impl Compiler {
         let name = symbol_name(head).into_owned();
         if let Some(primitive) = self.base_primitive(head, &name)? {
             let args = values::pairlist_items(call.cdr());
+            // Ahead of the dispatch-or-eval path `$` would otherwise take, so a record field
+            // read gets the site's shape cache.
+            if name == "$"
+                && let [(subject_tag, subject), (field_tag, field)] = args.as_slice()
+                && *subject_tag == nil()
+                && *field_tag == nil()
+                && field.kind() == SexpType::Symbol
+                && *subject != symbols().dots
+                && *subject != missing_arg()
+            {
+                return self.field(call, head, primitive, dst, *subject, *field);
+            }
             if self.eager_subject(primitive, &args)? {
                 return self.subject_call(call, head, primitive, dst, &args);
             }
@@ -917,15 +929,6 @@ impl Compiler {
             }
             if inlined {
                 return self.guarded(call, head, primitive, dst, &name, &args);
-            }
-            if name == "$"
-                && plain
-                && let [(_, subject), (_, field)] = args.as_slice()
-                && field.kind() == SexpType::Symbol
-                && *subject != symbols().dots
-                && *subject != missing_arg()
-            {
-                return self.field(call, head, primitive, dst, *subject, *field);
             }
         } else if let Some(function) = self.library_function(head)? {
             let args = values::pairlist_items(call.cdr());
