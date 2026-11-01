@@ -162,7 +162,10 @@ pub fn library_dir() -> PathBuf {
     candidates
         .into_iter()
         .filter_map(|path| {
-            let modified = path.metadata().and_then(|metadata| metadata.modified()).ok()?;
+            let modified = path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
             Some((modified, path))
         })
         .max()
