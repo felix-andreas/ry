@@ -108,6 +108,34 @@ A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The 
 the field's type, and assigning to a field that the record does not have is an error, because a
 record's fields are fixed.
 
+## Passing them to R
+
+R functions and C code do not know these values, so passing one to an R function is an error:
+
+```r
+point <- (x = 1, y = 2)
+sum(point)
+```
+
+```text
+type-mismatch
+
+  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+```
+
+A few R functions do accept them, such as `length()`, `print()`, `format()`, `identical()` and
+`list()`, and so do the functions your own project defines. If the checker misses a case, the code
+still stops when it runs, with the same fix in the message:
+
+```text
+Error in sum(point) :
+  `point` is a ry record, not an R object; convert it with `as.list()`
+Execution halted
+```
+
+Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
+`as.record()`, `as.tuple()` and `as.tag()` turn a list back.
+
 ## Tags
 
 A tag is a name that starts with `:`, with an optional payload that hugs it: `:None`, `:Some(5L)`,
@@ -284,34 +312,6 @@ non-exhaustive-match
 ```
 
 
-## Passing them to R
-
-R functions and C code do not know these values, so passing one to an R function is an error:
-
-```r
-point <- (x = 1, y = 2)
-sum(point)
-```
-
-```text
-type-mismatch
-
-  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
-```
-
-A few R functions do accept them, such as `length()`, `print()`, `format()`, `identical()` and
-`list()`, and so do the functions your own project defines. If the checker misses a case, the code
-still stops when it runs, with the same fix in the message:
-
-```text
-Error in sum(point) :
-  `point` is a ry record, not an R object; convert it with `as.list()`
-Execution halted
-```
-
-Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
-`as.record()`, `as.tuple()` and `as.tag()` turn a list back.
-
 ## Structural or nominal
 
 Each of these types comes in two flavors, as [custom types](/type-checking/custom-types) explains:
@@ -376,6 +376,22 @@ works as it does for the structural form: `$` reads a field, `match` checks ever
 union, a pattern binding keeps the nominal type, and a type can take parameters, as in
 `type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`. At run time `@Name(x)` is
 just `x`.
+
+## In the editor
+
+- Hover on a tag, in a value or in a pattern, shows its payload type, and go-to-definition,
+  references and rename follow a tag across the project. A tag spelled by the standard library, such
+  as `:Ok`, is not renamed. Inside a pattern, completion offers the tags the matched value can still
+  hold and the payload fields not yet named.
+- Hover on a field name, in a literal or in a pattern, shows the field's type, and `$` completes only
+  what the value really has.
+- Go-to-definition on a type name or a type parameter such as `T` jumps to its definition, and a type
+  parameter renames within its definition or function.
+- A type error points at the one field or item that is wrong, and a pattern that can never match
+  points at the misspelled field or tag.
+- Semantic highlighting colors type names, type parameters, tags, the `match` keyword and `=>`, in
+  inline annotations, `#:` comments and `.Rtypes` stub files alike. An inlay hint is left out where
+  the code already spells the type, as with a payload-free tag or an `@Name(...)` constructor.
 
 ## The standard library
 

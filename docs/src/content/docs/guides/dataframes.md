@@ -5,9 +5,11 @@ description: ry's built-in table, queried with a Polars-style API and run on the
 
 A `DataFrame` is ry's built-in table, for code where data.table is too slow or too hard to read.
 Each query runs inside the [Polars](https://pola.rs) engine instead of as R code, which on
-db-benchmark's questions at a million rows takes about half the time data.table does
+db-benchmark's questions at a million rows takes about a tenth of the time data.table does
 ([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
-column is reported before the query runs.
+column is reported before the query runs. Code you already wrote for data.table keeps working, and
+most of its queries run on the same engine
+([Existing data.table code](#existing-datatable-code)).
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
@@ -201,7 +203,8 @@ as.data.frame(sales)
 
 A DataFrame also answers data.table's `df[i, j, by]` queries, including `:=`, joins with `on =`,
 `.N` and `.SD`, so code written for data.table keeps working. This syntax is there for
-compatibility. New code should use the verbs above, which the checker and the editor understand
+compatibility, and the editor completes its query symbols (`.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and
+`.BY`) inside the brackets. New code should use the verbs above, which the checker and the editor understand
 better and which read in the order they run. The
 [typing reference](/reference/type-system/#datatable-queries) lists what the checker understands
 of the bracket syntax.
@@ -254,11 +257,9 @@ Key: <g>
 
 ## Speed
 
-`tools/bench/table/` times db-benchmark's group-by and join questions, `:=` update loops and a keyed
-rolling join, written once for data.table under GNU R and once for DataFrames under
-`ry run --runtime ry`, and `tools/bench/table/ops.R` times data.table's own functions (`fread`,
-`setkey`, `rbindlist`, `melt` and the rest), which run data.table's C code through ry's C API. At a
-million rows the db-benchmark questions take 2.4 s on DataFrames against 4.8 s on data.table (4
-threads), and DataFrames are behind only on the median and standard-deviation group-by and the keyed
-rolling join. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the full
-results.
+db-benchmark's ten group-by and five join questions, three `:=` update loops and a keyed rolling
+join, at a million rows on 4 cores, take 0.6 s on DataFrames and 5.0 s on data.table using every
+thread, best of two runs each, with the same checksums, and DataFrames are faster on every
+question. data.table's own functions (`fread`, `setkey`, `rbindlist`,
+`melt` and the rest) run data.table's C code, at the speed they have under GNU R. The
+[design notes](/contributing/design/r-runtime/#7-the-table-type) describe the benchmark.

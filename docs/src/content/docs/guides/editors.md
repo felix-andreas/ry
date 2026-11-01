@@ -25,28 +25,8 @@ get them on any R project.
 Rename edits the binding you picked and nothing else: a local `total`, a global `total`, and the
 word "total" in a string are three different things.
 
-## ry's own syntax
-
-Records, tags, `match`, type definitions and `DataFrame` get the same features as plain R:
-
-- **Tags and `match` patterns.** Hover on a tag, in a value or in a pattern, shows its payload type,
-  and go-to-definition, references and rename follow a tag across the project. A tag spelled by the
-  standard library, such as `:Ok`, is not renamed. Inside a pattern, completion offers the tags the
-  matched value can still hold and the payload fields not yet named.
-- **Records and tuples.** Hover on a field name, in a literal or in a pattern, shows the field's
-  type, and `$` completes only what the value really has.
-- **Type definitions and annotations.** Go-to-definition on a type name or a type parameter such as
-  `T` jumps to its definition, and a type parameter renames within its definition or function.
-  Hover on a standard-library alias such as `Result` shows its definition.
-- **DataFrames.** Inside `col("...")` or any column string of a verb, completion offers the columns
-  of the DataFrame at that step, and hover shows the column's type. Inside data.table's
-  `sales[i, j, by]`, it also offers the query symbols `.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and `.BY`.
-- **Highlighting.** Semantic tokens color type names, type parameters, tags, the `match` keyword and
-  `=>`, in inline annotations, `#:` comments and `.Rtypes` stub files alike.
-
-A type error in a record, tuple or tag points at the one field or item that is wrong. An inlay hint
-is left out where the code already spells the type, as with a payload-free tag or an `@Money(...)`
-constructor.
+ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
+[DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
 
 ## Settings
 

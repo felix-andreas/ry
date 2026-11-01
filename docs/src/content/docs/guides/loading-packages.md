@@ -39,7 +39,9 @@ Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
 [1] 3
 ```
 
-`ry load -f run.R` runs a script instead of an expression.
+`ry load -f run.R` runs a script instead of an expression. Unlike `ry repl`, `ry load` runs the
+package on ry's own runtime, which is still incomplete; add `--runtime gnu-r` if your package needs
+something it lacks ([Which R runs your package](#which-r-runs-your-package)).
 
 ## From RStudio or plain R
 
@@ -59,6 +61,8 @@ call it, as devtools' does.
 In `ry repl`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
 scratch when you want a clean slate, and `ry repl --no-load` starts the console without loading the
 package at all.
+
+## Differences from devtools
 
 Two things `devtools::load_all()` does are missing: `system.file()` does not find files under the
 package's `inst/`, and datasets in `data/` are not loaded.

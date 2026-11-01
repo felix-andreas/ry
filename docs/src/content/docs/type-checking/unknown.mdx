@@ -49,6 +49,4 @@ A base data frame's columns are not typed, so `df$amount` is `Unknown`. An annot
 `df: data.frame` checks that a data frame arrives, but not which columns it has. ry's built-in
 [`DataFrame`](/type-checking/dataframes) is the typed alternative, with every column, query and join checked.
 For analysis code this is the gap that matters most, and `data.frame()` is usually the first place
-strict mode reports. Bare column names
-inside dplyr verbs and the other data-masking functions are recognized, as
-[checking code](/guides/checking#names) shows.
+strict mode reports.

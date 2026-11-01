@@ -9,6 +9,8 @@ A `#:` comment repeats every parameter name of the function below it, so renamin
 means editing two places. Inline annotations put each type next to the name it belongs to, which is
 shorter to write and to read, and on ry's runtime they are also checked when the code runs. The
 cost is that plain `Rscript` cannot run a file that has them, which is why this is a separate step.
+They are on by default; a project that must stay runnable by `Rscript` can
+[turn them off](#turning-inline-annotations-off).
 
 You write a type right after a name, and a function's return type after its parameters:
 
@@ -161,8 +163,6 @@ annotation-mismatch
 ry's own runtime (`--runtime ry`) the annotations also become checks: an argument of the wrong kind
 fails where the function was called.
 
-Run-time checks are described in terms of inline annotations, so this example has a single spelling:
-
 ```r
 scale <- function(values: double, by: double) -> double values * by
 scale("a", 1)
@@ -182,16 +182,16 @@ also print the warnings above before the code runs. The
 
 ## Turning inline annotations off
 
-`Rscript` and other R tools cannot run code with inline annotations. Inline annotations are on by
-default, so if your project must also run under them, turn inline annotations off:
+Turn inline annotations off when every file must also run under `Rscript` and other R tools, which
+cannot parse them:
 
 ```toml
 [check]
 inline-annotations = false
 ```
 
-ry then warns once for the project and again at every inline annotation it finds, and keeps
-warning while the setting is off:
+ry then reports every inline annotation it finds, so none slips into a file that must stay plain R.
+It warns once for the project and again at each annotation:
 
 ```text
   ! inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds

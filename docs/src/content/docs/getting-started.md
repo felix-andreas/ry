@@ -28,8 +28,20 @@ unresolved
 1 problem in 1 file
 ```
 
-The same tool formats your code, powers your editor, and reloads your package in the console as you
-edit it, all configured by one `ry.toml`. This page takes you through the first two of the
+When you work on a package, `ry repl` started inside it reloads what you changed before each
+command, so you never call `load_all()` or restart R:
+
+```text
+$ ry repl
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+> count_words("the  quick fox")
+[1] 4
+> count_words("the  quick fox")     # after editing R/count.R
+Reloaded tally: 1 function rebound, in 3 ms.
+[1] 3
+```
+
+The same tool formats your code and powers your editor, all configured by one `ry.toml`. This page takes you through the first two of the
 [four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,
 then turning on types.
 
@@ -53,21 +65,9 @@ shares a namespace, as R loads them, and every other `.R` file is a script read 
 
 ## Reload your package as you edit
 
-When you work on a package, start `ry repl` anywhere inside it. Each time you save a file, the next
-command runs the new code, with no `load_all()` to call and no session to restart:
-
-```text
-$ ry repl
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
-> count_words("the  quick fox")
-[1] 4
-> count_words("the  quick fox")     # after editing R/count.R
-Reloaded tally: 1 function rebound, in 3 ms.
-[1] 3
-```
-
-In RStudio, put `source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as
-you do today.
+Start `ry repl` anywhere inside a package, as in the transcript above. The console runs the GNU R
+installed on your machine, so it needs R; checking does not. In RStudio, put
+`source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as you do today.
 [Loading packages](/guides/loading-packages) has the details.
 
 ## Step 2: turn on type checking
