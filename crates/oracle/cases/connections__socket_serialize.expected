@@ -1,0 +1,30 @@
+[stdout]
+| [1] "binary"
+| NULL
+| NULL
+| List of 2
+|  $ : num 1
+|  $ : chr "a"
+|  int [1:2] 2 3
+| [1] 42
+| [1] "error reading from connection"
+| integer(0)
+| NULL
+| NULL
+| NULL
+| NULL
+| NULL
+| List of 1
+|  $ x: num 1
+|  logi TRUE
+|  chr "ascii"
+|  int 3
+|  chr "end"
+| [1] 0a 07 00 00 00
+| [1] "error reading from connection"
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

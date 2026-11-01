@@ -1,0 +1,10 @@
+# A socket cluster: workers are separate processes that talk to this one over sockets.
+library(parallel)
+cl <- makeCluster(2)
+print(length(cl))
+print(unlist(parLapply(cl, 1:4, function(i) i^2)))
+print(unlist(clusterEvalQ(cl, 1 + 1)))
+clusterExport(cl, character(0))
+print(clusterApplyLB(cl, 1:3, function(x) x + 0.5))
+print(parSapply(cl, c(a = 1, b = 2), function(x) x * 10))
+stopCluster(cl)

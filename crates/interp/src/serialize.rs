@@ -5,6 +5,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal},
+        connections::Rconnection,
         eval,
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols},
@@ -65,32 +66,86 @@ pub enum Format {
 }
 
 struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
+    input: Input<'a>,
     format: Format,
     references: Vec<Sexp>,
     hook: Sexp,
 }
 
+/// Where a stream's bytes come from. A connection is read only as far as the object goes, so
+/// the next object on it, or a peer's next message on a socket, stays unread.
+enum Input<'a> {
+    Slice { bytes: &'a [u8], position: usize },
+    Connection { con: Rconnection, buffer: Vec<u8> },
+}
+
 impl Reader<'_> {
     fn take(&mut self, count: usize) -> R<&[u8]> {
-        if self.position + count > self.bytes.len() {
-            return Err(error("ReadItem: unexpected end of serialized data"));
+        match &mut self.input {
+            Input::Slice { bytes, position } => {
+                let end = position
+                    .checked_add(count)
+                    .filter(|&end| end <= bytes.len())
+                    .ok_or_else(|| error("ReadItem: unexpected end of serialized data"))?;
+                let slice = &bytes[*position..end];
+                *position = end;
+                Ok(slice)
+            }
+            Input::Connection { con, buffer } => {
+                // The buffer grows a block at a time, so a corrupt length runs into the end of
+                // the input instead of allocating it all at once.
+                const BLOCK: usize = 1 << 20;
+                buffer.clear();
+                while buffer.len() < count {
+                    let start = buffer.len();
+                    let step = (count - start).min(BLOCK);
+                    buffer.resize(start + step, 0);
+                    // SAFETY: the connection stays open while the reader runs.
+                    if unsafe { crate::connections::read_all(*con, &mut buffer[start..])? } != step
+                    {
+                        return Err(error("error reading from connection"));
+                    }
+                }
+                Ok(buffer)
+            }
         }
-        let slice = &self.bytes[self.position..self.position + count];
-        self.position += count;
-        Ok(slice)
     }
 
+    fn next_byte(&mut self) -> R<Option<u8>> {
+        match &mut self.input {
+            Input::Slice { bytes, position } => {
+                let byte = bytes.get(*position).copied();
+                *position += byte.is_some() as usize;
+                Ok(byte)
+            }
+            Input::Connection { con, .. } => {
+                let mut byte = [0u8];
+                // SAFETY: the connection stays open while the reader runs.
+                let count = unsafe { crate::connections::read_all(*con, &mut byte)? };
+                Ok((count == 1).then_some(byte[0]))
+            }
+        }
+    }
+
+    /// The next whitespace-separated word of an ASCII stream, consuming the whitespace that
+    /// ends it.
     fn ascii_word(&mut self) -> R<String> {
-        while self.position < self.bytes.len() && self.bytes[self.position].is_ascii_whitespace() {
-            self.position += 1;
+        let mut word = Vec::new();
+        while let Some(byte) = self.next_byte()? {
+            if !byte.is_ascii_whitespace() {
+                word.push(byte);
+                break;
+            }
         }
-        let start = self.position;
-        while self.position < self.bytes.len() && !self.bytes[self.position].is_ascii_whitespace() {
-            self.position += 1;
+        if !word.is_empty() {
+            while let Some(byte) = self.next_byte()? {
+                if byte.is_ascii_whitespace() {
+                    break;
+                }
+                word.push(byte);
+            }
         }
-        Ok(String::from_utf8_lossy(&self.bytes[start..self.position]).into_owned())
+        Ok(String::from_utf8_lossy(&word).into_owned())
     }
 
     fn integer(&mut self) -> R<i32> {
@@ -142,9 +197,67 @@ impl Reader<'_> {
 
     fn string(&mut self, length: usize) -> R<Vec<u8>> {
         if self.format == Format::Ascii {
-            return Ok(unescape_ascii(self.ascii_word()?.as_bytes()));
+            return self.ascii_string(length);
         }
         Ok(self.take(length)?.to_vec())
+    }
+
+    /// An escaped ASCII string of `length` bytes. Reading stops at the last byte, so the
+    /// newline after it stays unread, as it does in GNU R: an object that ends in a string
+    /// leaves that newline before whatever follows it on a connection.
+    fn ascii_string(&mut self, length: usize) -> R<Vec<u8>> {
+        let truncated = || error("ReadItem: unexpected end of serialized data");
+        let mut bytes = Vec::with_capacity(length.min(4096));
+        let mut next = loop {
+            match self.next_byte()? {
+                Some(byte) if byte.is_ascii_whitespace() => {}
+                Some(byte) => break Some(byte),
+                None if length == 0 => return Ok(bytes),
+                None => return Err(truncated()),
+            }
+        };
+        while bytes.len() < length {
+            let current = match next.take() {
+                Some(byte) => byte,
+                None => self.next_byte()?.ok_or_else(truncated)?,
+            };
+            if current != b'\\' {
+                bytes.push(current);
+                continue;
+            }
+            let escaped = self.next_byte()?.ok_or_else(truncated)?;
+            bytes.push(match escaped {
+                b'n' => b'\n',
+                b't' => b'\t',
+                b'v' => 0x0b,
+                b'b' => 0x08,
+                b'r' => b'\r',
+                b'f' => 0x0c,
+                b'a' => 0x07,
+                // Up to three octal digits; a byte that ends a shorter escape is the next one.
+                b'0'..=b'7' => {
+                    let mut value = u32::from(escaped - b'0');
+                    for _ in 0..2 {
+                        match self.next_byte()?.ok_or_else(truncated)? {
+                            digit @ b'0'..=b'7' => value = value * 8 + u32::from(digit - b'0'),
+                            other => {
+                                next = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                    value as u8
+                }
+                other => other,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// A byte count, which a corrupt stream may give as negative.
+    fn count(&mut self) -> R<usize> {
+        usize::try_from(self.integer()?)
+            .map_err(|_| error("negative length vectors are not allowed"))
     }
 
     fn length(&mut self) -> R<usize> {
@@ -334,7 +447,7 @@ impl Reader<'_> {
                 return Ok(weak);
             }
             7 | 8 => {
-                let count = self.integer()? as usize;
+                let count = self.count()?;
                 let name = self.string(count)?;
                 let name = String::from_utf8_lossy(&name).into_owned();
                 let primitive = crate::builtins::primitive(&name)
@@ -352,7 +465,9 @@ impl Reader<'_> {
                 if count == -1 {
                     return Ok(known.na_string);
                 }
-                let bytes = self.string(count as usize)?;
+                let count = usize::try_from(count)
+                    .map_err(|_| error("negative length vectors are not allowed"))?;
+                let bytes = self.string(count)?;
                 let encoding = if levels & gp::UTF8 != 0 {
                     Encoding::Utf8
                 } else if levels & gp::LATIN1 != 0 {
@@ -684,33 +799,61 @@ pub unsafe fn unserialize(bytes: &[u8], hook: Sexp) -> R<Sexp> {
             bytes = rest;
         }
     }
-    let format = match bytes.get(..2) {
-        Some(b"X\n") => Format::Xdr,
-        Some(b"B\n") => Format::Binary,
-        Some(b"A\n") => Format::Ascii,
-        _ => {
-            if bytes.first() == Some(&b'\n') && bytes.get(1..3) == Some(b"A\n") {
-                Format::Ascii
-            } else {
-                return Err(error("unknown input format"));
-            }
-        }
+    let (format, skip) = match bytes.get(..3) {
+        Some([b'\n', b'A', b'\n']) => (Format::Ascii, 3),
+        _ => (
+            stream_format(bytes.get(..2)).ok_or_else(|| error("unknown input format"))?,
+            2,
+        ),
     };
-    let skip = if bytes.first() == Some(&b'\n') { 3 } else { 2 };
-    let mut reader = Reader {
-        bytes,
-        position: skip,
+    read_object(Reader {
+        input: Input::Slice {
+            bytes,
+            position: skip,
+        },
         format,
         references: Vec::new(),
         hook,
+    })
+}
+
+/// Reads one object from an open connection, and no further.
+pub unsafe fn unserialize_connection(con: Rconnection, hook: Sexp) -> R<Sexp> {
+    let mut reader = Reader {
+        input: Input::Connection {
+            con,
+            buffer: Vec::new(),
+        },
+        format: Format::Xdr,
+        references: Vec::new(),
+        hook,
     };
+    let mut start = reader.take(2)?.to_vec();
+    if start == b"\nA" {
+        start = vec![b'A', reader.next_byte()?.unwrap_or(0)];
+    }
+    reader.format = stream_format(Some(&start)).ok_or_else(|| error("unknown input format"))?;
+    read_object(reader)
+}
+
+fn stream_format(start: Option<&[u8]>) -> Option<Format> {
+    match start? {
+        b"X\n" => Some(Format::Xdr),
+        b"B\n" => Some(Format::Binary),
+        b"A\n" => Some(Format::Ascii),
+        _ => None,
+    }
+}
+
+/// The rest of a stream after its format line: the version header, then the object.
+unsafe fn read_object(mut reader: Reader<'_>) -> R<Sexp> {
     let version = reader.integer()?;
     let _writer = reader.integer()?;
     let _reader_version = reader.integer()?;
     match version {
         2 => {}
         3 => {
-            let encoding_length = reader.integer()? as usize;
+            let encoding_length = reader.count()?;
             if reader.format == Format::Ascii {
                 reader.ascii_word()?;
             } else {
@@ -879,8 +1022,8 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
-    let bytes = crate::connections::read_binary(call.arg(0))?;
-    unserialize(&bytes, call.arg(1))
+    let hook = call.arg(1);
+    crate::connections::with_binary_input(call.arg(0), |con| unserialize_connection(con, hook))
 }
 
 /// `loadFromConn2(con, envir, verbose)`: reads a `save()` file, whose single object is a
@@ -1051,50 +1194,6 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
         let bytes = values::raws(source).to_vec();
         return unserialize(&bytes, call.arg(1));
     }
-    let bytes = crate::connections::read_binary(source)?;
-    unserialize(&bytes, call.arg(1))
-}
-
-/// Decodes a string of the ASCII format as GNU R's `InString` does: C escapes, up to three octal
-/// digits, and any other escaped byte (`\?`, `\"`, `\\`) standing for itself. R's string
-/// literal rules do not apply, because they reject `\?`, which the writer emits.
-fn unescape_ascii(word: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(word.len());
-    let mut index = 0;
-    while let Some(&current) = word.get(index) {
-        index += 1;
-        if current != b'\\' {
-            bytes.push(current);
-            continue;
-        }
-        let Some(&escaped) = word.get(index) else {
-            break;
-        };
-        index += 1;
-        let decoded = match escaped {
-            b'n' => b'\n',
-            b't' => b'\t',
-            b'v' => 0x0b,
-            b'b' => 0x08,
-            b'r' => b'\r',
-            b'f' => 0x0c,
-            b'a' => 0x07,
-            b'0'..=b'7' => {
-                let mut value = u32::from(escaped - b'0');
-                for _ in 0..2 {
-                    match word.get(index) {
-                        Some(&octal @ b'0'..=b'7') => {
-                            value = value * 8 + u32::from(octal - b'0');
-                            index += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                value as u8
-            }
-            other => other,
-        };
-        bytes.push(decoded);
-    }
-    bytes
+    let hook = call.arg(1);
+    crate::connections::with_binary_input(source, |con| unserialize_connection(con, hook))
 }

@@ -21,7 +21,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         http::{self, FetchError},
-        interp,
+        interp, platform,
         unwind::{R, Unwind, error},
         values::{self, nil, scalar_bool, scalar_integer, symbols},
         write_terminal,
@@ -38,8 +38,10 @@ use {
         ffi::{CStr, CString, c_char, c_int, c_void},
         fs::{File, OpenOptions},
         io::{BufReader, Read, Seek, SeekFrom, Write},
+        net::{Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs},
         path::PathBuf,
         ptr::null_mut,
+        time::Duration,
     },
 };
 
@@ -64,6 +66,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rawConnection", 3, do_raw_connection),
     internal("unz", 3, do_unz),
     internal("gzcon", 4, do_gzcon),
+    internal("socketConnection", 8, do_socket_connection),
+    internal("serverSocket", 1, do_server_socket),
+    internal("socketAccept", 6, do_socket_accept),
+    internal("sockSelect", 3, do_sock_select),
+    internal("socketTimeout", 2, do_socket_timeout),
     internal("rawConnectionValue", 1, |call| unsafe {
         raw_connection_value(call.arg(0))
     }),
@@ -528,6 +535,18 @@ pub unsafe fn read_binary(file: Sexp) -> R<Vec<u8>> {
     })
 }
 
+/// Runs `body` on a connection open for binary input, opening it for the call if needed, as
+/// `unserialize` reads one object.
+pub unsafe fn with_binary_input<T>(file: Sexp, body: impl FnOnce(Rconnection) -> R<T>) -> R<T> {
+    let con = resolve_con(file)?.1;
+    with_open(con, "rb", || {
+        if (*con).canread == 0 {
+            return Err(error("cannot read from this connection"));
+        }
+        body(con)
+    })
+}
+
 /// Writes bytes to a connection opened for binary output, as `serialize` does.
 pub unsafe fn write_binary(file: Sexp, bytes: &[u8]) -> R<()> {
     let con = resolve_con(file)?.1;
@@ -722,6 +741,342 @@ unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
     new_builtin(class, description.as_bytes(), &open, "rb", device, |_| {})
 }
 
+/// `socketConnection(host, port, server, blocking, open, encoding, timeout, options)`: a TCP
+/// client of `host:port`, or with `server = TRUE` the first client to connect to `port`. The
+/// socket connects or accepts when the connection opens.
+unsafe fn do_socket_connection(call: &Call<'_>) -> R<Sexp> {
+    let host = values::require_string(call.arg(0), "host")?;
+    let port = socket_port(call.arg(1))?;
+    let server = values::require_flag(call.arg(2), "server")?;
+    let blocking = values::require_flag(call.arg(3), "blocking")?;
+    let open = values::require_string(call.arg(4), "open")?;
+    let timeout = socket_timeout_seconds(call.arg(6));
+    let no_delay = socket_no_delay(call.arg(7));
+    let description = if server {
+        format!("<-localhost:{port}")
+    } else {
+        format!("->{host}:{port}")
+    };
+    let device = Device::Socket(SocketDevice {
+        peer: if server {
+            SocketPeer::Accept { port }
+        } else {
+            SocketPeer::Connect { host, port }
+        },
+        timeout,
+        no_delay,
+        stream: None,
+        input: Vec::new(),
+        input_position: 0,
+    });
+    new_builtin(
+        "sockconn",
+        description.as_bytes(),
+        &open,
+        "a+",
+        device,
+        |con| {
+            (*con).blocking = blocking as Rboolean;
+        },
+    )
+}
+
+/// `serverSocket(port)`: a listening socket that `socketAccept()` takes clients from. It is
+/// open from the start and cannot be read or written.
+unsafe fn do_server_socket(call: &Call<'_>) -> R<Sexp> {
+    let port = socket_port(call.arg(0))?;
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).map_err(|_| {
+        error(format!(
+            "creation of server socket failed: port {port} cannot be opened"
+        ))
+    })?;
+    let device = Device::ServerSocket(ServerSocketDevice {
+        listener: Some(listener),
+    });
+    new_builtin("servsockconn", b"localhost", "", "a+", device, |con| {
+        (*con).isopen = 1;
+        (*con).canread = 1;
+        (*con).canwrite = 1;
+        (*con).text = 1;
+    })
+}
+
+/// `socketAccept(socket, blocking, open, encoding, timeout, options)`: waits up to `timeout`
+/// seconds for a client of a server socket, and returns the open connection to it.
+unsafe fn do_socket_accept(call: &Call<'_>) -> R<Sexp> {
+    let con = resolve_con(call.arg(0))?.1;
+    let Device::ServerSocket(server) = device(con)? else {
+        return Err(error("'socket' is not a servsockconn"));
+    };
+    let blocking = values::require_flag(call.arg(1), "blocking")?;
+    let open = values::require_string(call.arg(2), "open")?;
+    let timeout = socket_timeout_seconds(call.arg(4));
+    let no_delay = socket_no_delay(call.arg(5));
+    let listener = server
+        .listener
+        .as_ref()
+        .ok_or_else(|| error("connection is not open"))?;
+    let port = listener.local_addr().map_err(io_error)?.port();
+    let Some(stream) = accept_within(listener, timeout)? else {
+        crate::conditions::warning("problem in accepting connections on this socket")?;
+        return Err(error("cannot open the connection"));
+    };
+    let device = Device::Socket(SocketDevice {
+        peer: SocketPeer::Accepted,
+        timeout,
+        no_delay,
+        stream: Some(stream),
+        input: Vec::new(),
+        input_position: 0,
+    });
+    let open = if open.is_empty() { "a+" } else { open.as_str() };
+    let description = format!("<-localhost:{port}");
+    new_builtin(
+        "sockconn",
+        description.as_bytes(),
+        open,
+        open,
+        device,
+        |con| {
+            (*con).blocking = blocking as Rboolean;
+        },
+    )
+}
+
+/// `socketSelect()`'s internal: for each socket, whether it can be read without waiting (or
+/// written, where `write` says so), after waiting up to `timeout` seconds (-1 waits forever)
+/// for at least one to be ready. A server socket is readable while a client waits to be
+/// accepted, and a socket with input already buffered is readable at once.
+unsafe fn do_sock_select(call: &Call<'_>) -> R<Sexp> {
+    let sockets = call.arg(0);
+    let count = values::length(sockets);
+    if sockets.kind() != SexpType::List || count == 0 {
+        return Err(error("not a list of sockets"));
+    }
+    let write = call.arg(1);
+    let timeout = values::as_real_scalar(call.arg(2));
+    let mut handles = Vec::with_capacity(count);
+    let mut buffered = vec![false; count];
+    for (index, ready) in buffered.iter_mut().enumerate() {
+        let con = resolve(values::list_elt(sockets, index), "not a socket connection")?.1;
+        let wants_write = matches!(write.kind(), SexpType::Logical | SexpType::Integer)
+            && values::ints(write).get(index) == Some(&1);
+        let handle = match device(con)? {
+            Device::Socket(socket) => match &socket.stream {
+                Some(stream) => {
+                    *ready = !wants_write && socket.input_position < socket.input.len();
+                    platform::stream_handle(stream)
+                }
+                None => return Err(error("not a socket connection")),
+            },
+            Device::ServerSocket(ServerSocketDevice {
+                listener: Some(listener),
+                ..
+            }) => platform::listener_handle(listener),
+            _ => return Err(error("not a socket connection")),
+        };
+        handles.push((handle, wants_write));
+    }
+    let timeout_milliseconds = if buffered.contains(&true) {
+        0
+    } else if timeout.is_nan() || timeout < 0.0 {
+        -1
+    } else {
+        (timeout * 1000.0).min(f64::from(i32::MAX)) as i32
+    };
+    let polled = wait_sockets(&handles, timeout_milliseconds)?;
+    let ready: Vec<i32> = polled
+        .iter()
+        .zip(&buffered)
+        .map(|(&polled, &buffered)| (polled || buffered) as i32)
+        .collect();
+    values::logical_vector(&ready)
+}
+
+/// `socketTimeout(socket, timeout)`: returns the socket's timeout in seconds, and sets it to
+/// `timeout` unless that is negative.
+unsafe fn do_socket_timeout(call: &Call<'_>) -> R<Sexp> {
+    let con = resolve(call.arg(0), "invalid 'socket' argument")?.1;
+    let timeout = values::as_real_scalar(call.arg(1));
+    let Device::Socket(SocketDevice {
+        timeout: current, ..
+    }) = device(con)?
+    else {
+        return Err(error("invalid 'socket' argument"));
+    };
+    let previous = *current;
+    if timeout >= 0.0 {
+        *current = timeout;
+    }
+    values::scalar_real(previous)
+}
+
+/// The timeout GNU R uses when `getOption("timeout")` is unset.
+const DEFAULT_SOCKET_TIMEOUT: f64 = 60.0;
+
+unsafe fn socket_port(port: Sexp) -> R<u16> {
+    let value = values::as_integer_scalar(port);
+    if value == NA_INTEGER {
+        return Err(error("invalid 'port' argument"));
+    }
+    u16::try_from(value).map_err(|_| error("invalid 'port' argument"))
+}
+
+unsafe fn socket_timeout_seconds(timeout: Sexp) -> f64 {
+    match values::as_real_scalar(timeout) {
+        seconds if seconds.is_nan() => DEFAULT_SOCKET_TIMEOUT,
+        seconds => seconds,
+    }
+}
+
+/// Whether `options` (`getOption("socketOptions")`) asks for `"no-delay"`, which turns off
+/// Nagle's algorithm so small writes go out at once.
+unsafe fn socket_no_delay(options: Sexp) -> bool {
+    values::strings(options)
+        .iter()
+        .any(|option| option.as_deref() == Some("no-delay"))
+}
+
+/// Accepts the next client of `listener`, or `None` when none comes within `timeout` seconds.
+fn accept_within(listener: &TcpListener, timeout: f64) -> R<Option<TcpStream>> {
+    let handle = platform::listener_handle(listener);
+    let ready = wait_sockets(&[(handle, false)], timeout_milliseconds(timeout))?;
+    if !ready.contains(&true) {
+        return Ok(None);
+    }
+    Ok(listener.accept().ok().map(|(stream, _)| stream))
+}
+
+/// Polls `sockets` for up to `timeout_milliseconds` (-1 waits forever). The wait goes in short
+/// slices, between which a user interrupt stops it.
+fn wait_sockets(
+    sockets: &[(platform::SocketHandle, bool)],
+    timeout_milliseconds: i32,
+) -> R<Vec<bool>> {
+    const SLICE_MILLISECONDS: i32 = 100;
+    let mut remaining = timeout_milliseconds;
+    loop {
+        let slice = if remaining < 0 {
+            SLICE_MILLISECONDS
+        } else {
+            remaining.min(SLICE_MILLISECONDS)
+        };
+        let ready = platform::poll_sockets(sockets, slice).map_err(io_error)?;
+        if ready.contains(&true) || remaining == 0 {
+            return Ok(ready);
+        }
+        if remaining > 0 {
+            remaining -= slice;
+        }
+        crate::unwind::poll_interrupt()?;
+    }
+}
+
+fn timeout_milliseconds(timeout: f64) -> i32 {
+    if timeout > 0.0 {
+        (timeout * 1000.0).min(f64::from(i32::MAX)) as i32
+    } else {
+        -1
+    }
+}
+
+fn socket_duration(timeout: f64) -> Option<Duration> {
+    (timeout > 0.0 && timeout.is_finite()).then(|| Duration::from_secs_f64(timeout))
+}
+
+/// Connects a socket connection's stream, warning as GNU R does when it cannot.
+unsafe fn socket_open(socket: &mut SocketDevice) -> R<bool> {
+    let stream = match &socket.peer {
+        SocketPeer::Accepted => return Ok(socket.stream.is_some()),
+        SocketPeer::Connect { host, port } => match connect_within(host, *port, socket.timeout) {
+            Some(stream) => stream,
+            None => {
+                crate::conditions::warning(format!("{host}:{port} cannot be opened"))?;
+                return Ok(false);
+            }
+        },
+        SocketPeer::Accept { port } => {
+            let Ok(listener) = TcpListener::bind((Ipv4Addr::UNSPECIFIED, *port)) else {
+                crate::conditions::warning(format!("port {port} cannot be opened"))?;
+                return Ok(false);
+            };
+            let Some(stream) = accept_within(&listener, socket.timeout)? else {
+                crate::conditions::warning("problem in listening on this socket")?;
+                return Ok(false);
+            };
+            stream
+        }
+    };
+    socket.stream = Some(stream);
+    Ok(true)
+}
+
+fn connect_within(host: &str, port: u16, timeout: f64) -> Option<TcpStream> {
+    let addresses = (host, port).to_socket_addrs().ok()?;
+    addresses.into_iter().find_map(|address| {
+        match socket_duration(timeout) {
+            Some(limit) => TcpStream::connect_timeout(&address, limit),
+            None => TcpStream::connect(address),
+        }
+        .ok()
+    })
+}
+
+/// Reads buffered socket input, receiving more when the buffer is empty. A non-blocking
+/// connection with nothing to read marks itself incomplete and reads nothing; a blocking one
+/// waits up to its timeout first, and reads nothing if the timeout passes.
+unsafe fn socket_read(con: Rconnection, socket: &mut SocketDevice, buffer: &mut [u8]) -> R<usize> {
+    if socket.input_position == socket.input.len() {
+        let stream = socket
+            .stream
+            .as_mut()
+            .ok_or_else(|| error("connection is not open"))?;
+        let wait = if (*con).blocking == 0 {
+            0
+        } else {
+            timeout_milliseconds(socket.timeout)
+        };
+        let handle = platform::stream_handle(stream);
+        if !wait_sockets(&[(handle, false)], wait)?.contains(&true) {
+            if (*con).blocking == 0 {
+                (*con).incomplete = 1;
+            }
+            return Ok(0);
+        }
+        socket.input.resize(SOCKET_READ_SIZE, 0);
+        socket.input_position = 0;
+        let received = loop {
+            match stream.read(&mut socket.input) {
+                Ok(count) => break count,
+                Err(failure) if failure.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(failure)
+                    if matches!(
+                        failure.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break 0;
+                }
+                // A peer that reset the connection ends the input, as an orderly close does.
+                Err(failure) if failure.kind() == std::io::ErrorKind::ConnectionReset => break 0,
+                Err(failure) => {
+                    socket.input.clear();
+                    return Err(io_error(failure));
+                }
+            }
+        };
+        socket.input.truncate(received);
+    }
+    let available = &socket.input[socket.input_position..];
+    let count = available.len().min(buffer.len());
+    buffer[..count].copy_from_slice(&available[..count]);
+    socket.input_position += count;
+    Ok(count)
+}
+
+/// How much one receive asks the operating system for.
+const SOCKET_READ_SIZE: usize = 64 * 1024;
+
 fn unsupported(class: &str) -> Unwind {
     error(format!("ry does not support {class} connections yet"))
 }
@@ -829,8 +1184,14 @@ unsafe fn url_connection(url: &str, open: &str, headers: Vec<String>) -> R<Sexp>
 }
 
 /// Request header lines from `url()`'s or `download.file()`'s `headers`: NULL, or strings that
-/// each hold one or more CRLF-terminated `Name: value` lines.
+/// each hold one or more CRLF-terminated `Name: value` lines. `url()` passes a list whose first
+/// element holds the lines one per string and whose second joins them, so only the first counts.
 pub(crate) unsafe fn header_lines(headers: Sexp) -> Vec<String> {
+    let headers = if headers.kind() == SexpType::List && values::length(headers) > 0 {
+        values::list_elt(headers, 0)
+    } else {
+        headers
+    };
     let mut lines = Vec::new();
     for index in 0..values::length(headers) {
         if let Some(text) = values::string_at(headers, index) {
@@ -2385,8 +2746,8 @@ fn utf8_continuation_bytes(lead: u8) -> usize {
     }
 }
 
-/// Reads until `buffer` is full or a read returns nothing.
-unsafe fn read_all(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
+/// Fills `buffer`, short only at the end of the input.
+pub(crate) unsafe fn read_all(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
     let mut filled = 0;
     while filled < buffer.len() {
         let count = method_read(con, &mut buffer[filled..])?;
@@ -2964,6 +3325,8 @@ enum Device {
     Pipe(PipeDevice),
     Loaded(LoadedDevice),
     Gzcon(GzconDevice),
+    Socket(SocketDevice),
+    ServerSocket(ServerSocketDevice),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3115,6 +3478,37 @@ impl Drop for PipeDevice {
     }
 }
 
+/// `socketConnection()` and `socketAccept()`: a TCP stream, and the input received but not
+/// yet read.
+struct SocketDevice {
+    peer: SocketPeer,
+    /// Seconds a blocking read, a connect or an accept waits.
+    timeout: f64,
+    no_delay: bool,
+    stream: Option<TcpStream>,
+    input: Vec<u8>,
+    input_position: usize,
+}
+
+/// Where a socket connection's stream comes from when it opens.
+enum SocketPeer {
+    Connect {
+        host: String,
+        port: u16,
+    },
+    /// `socketConnection(server = TRUE)`: the first client to connect to the port.
+    Accept {
+        port: u16,
+    },
+    /// `socketAccept()`: the stream exists before the connection does.
+    Accepted,
+}
+
+/// `serverSocket()`: the listener, until the connection closes.
+struct ServerSocketDevice {
+    listener: Option<TcpListener>,
+}
+
 unsafe fn device<'a>(con: Rconnection) -> R<&'a mut Device> {
     let device = (*con).private as *mut Device;
     if device.is_null() {
@@ -3232,6 +3626,25 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             (*con).canwrite = mode.write as Rboolean;
             (*con).text = (!mode.binary) as Rboolean;
             return Ok(true);
+        }
+        Device::Socket(socket) => {
+            if socket.stream.is_none() && !socket_open(socket)? {
+                return Ok(false);
+            }
+            if let Some(stream) = &socket.stream
+                && socket.no_delay
+            {
+                stream.set_nodelay(true).map_err(io_error)?;
+            }
+            (*con).isopen = 1;
+            (*con).canread = 1;
+            (*con).canwrite = 1;
+            (*con).canseek = 0;
+            (*con).text = (!mode.binary) as Rboolean;
+            return Ok(true);
+        }
+        Device::ServerSocket(server) => {
+            return Ok(server.listener.is_some());
         }
         Device::Raw(_) => {
             (*con).isopen = 1;
@@ -3581,6 +3994,16 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
             };
             written.and(closed)
         }
+        Device::Socket(socket) => {
+            socket.stream = None;
+            socket.input = Vec::new();
+            socket.input_position = 0;
+            Ok(())
+        }
+        Device::ServerSocket(server) => {
+            server.listener = None;
+            Ok(())
+        }
         Device::Standard(_) | Device::Raw(_) | Device::TextInput(_) => Ok(()),
     }
 }
@@ -3641,6 +4064,9 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
                 pipe.stream,
             ))
         }
+        Device::Socket(socket) => socket_read(con, socket, buffer),
+        // A server socket has no reading or printing methods in GNU R.
+        Device::ServerSocket(_) => Err(missing("getc")),
     }
 }
 
@@ -3803,6 +4229,18 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
                 pipe.stream,
             ))
         }
+        Device::Socket(socket) => {
+            let stream = socket
+                .stream
+                .as_mut()
+                .ok_or_else(|| error("connection is not open"))?;
+            stream
+                .set_write_timeout(socket_duration(socket.timeout))
+                .map_err(io_error)?;
+            stream.write_all(bytes).map_err(io_error)?;
+            Ok(bytes.len())
+        }
+        Device::ServerSocket(_) => Err(error("printing not enabled for this connection")),
     }
 }
 
@@ -3822,9 +4260,12 @@ unsafe fn device_seek(
 ) -> R<f64> {
     let query = position.is_nan();
     match device(con)? {
-        Device::Standard(_) | Device::Pipe(_) | Device::Loaded(_) | Device::Gzcon(_) => {
-            Err(missing("seek"))
-        }
+        Device::Standard(_)
+        | Device::Pipe(_)
+        | Device::Loaded(_)
+        | Device::Gzcon(_)
+        | Device::Socket(_)
+        | Device::ServerSocket(_) => Err(missing("seek")),
         Device::TextInput(_) | Device::TextOutput(_) => {
             if !query && position >= 0.0 {
                 return Err(error("seek is not relevant for text connection"));
