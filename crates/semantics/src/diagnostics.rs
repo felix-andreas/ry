@@ -2200,6 +2200,23 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 )
             }
         }
+        TypeErrorKind::MissingArguments { names } => {
+            let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+            let listed = match quoted.split_last() {
+                Some((last, [])) => last.clone(),
+                Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+                None => String::new(),
+            };
+            if names.len() == 1 {
+                format!(
+                    "this call leaves out {listed}, which has no default and which the function uses"
+                )
+            } else {
+                format!(
+                    "this call leaves out {listed}, which have no default and which the function uses"
+                )
+            }
+        }
         TypeErrorKind::NamedArgumentMismatch {
             argument,
             duplicate,

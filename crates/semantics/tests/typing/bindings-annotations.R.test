@@ -3,7 +3,7 @@
 #: fn(count: integer)
 log_count <- function(count) { }
 #++++
-log_count: fn(count: integer) -> NULL
+log_count: fn([count]: integer) -> NULL
 
 #---- compact_elided_return_is_inferred_from_the_body
 #: fn(count: integer)
@@ -68,7 +68,7 @@ passthrough: <T: numeric> fn(values: T) -> T
 #: @return {T}
 keep_left <- function(left, right) left
 #++++
-keep_left: <T, U> fn(left: T, right: U) -> T
+keep_left: <T, U> fn(left: T, [right]: U) -> T
 
 #---- nullable_return_function_binding
 #: fn(count: integer) -> integer | NULL

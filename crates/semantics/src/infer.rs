@@ -1157,7 +1157,7 @@ struct ParameterPair<'db> {
 
 /// Arity is a range: a function serves an interface when it accepts every call
 /// shape the interface allows, so extra parameters are fine when they default.
-/// Variadics pair only with variadics at the same formal position (conservative).
+/// A variadic interface pairs only with a variadic at the same formal position.
 fn pair_parameters<'db>(
     actual: &FunctionType<'db>,
     expected: &FunctionType<'db>,
@@ -1170,8 +1170,10 @@ fn pair_parameters<'db>(
             }
             rest.push((expected_variadic.element, actual_variadic.element));
         }
-        (None, None) => {}
-        _ => return None,
+        // An interface without `...` never passes extras, so the function's own `...`
+        // receives at most the leftovers paired below.
+        (Some(_), None) | (None, None) => {}
+        (None, Some(_)) => return None,
     }
     // R matches arguments to formals by name regardless of order; the rest pair
     // positionally.

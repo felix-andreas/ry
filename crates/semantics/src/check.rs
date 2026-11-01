@@ -58,6 +58,10 @@ pub enum TypeErrorKind<'db> {
         expected: usize,
         found: usize,
     },
+    /// Named formals with no default that the call leaves out and the body forces.
+    MissingArguments {
+        names: Vec<String>,
+    },
     NamedArgumentMismatch {
         argument: String,
         duplicate: bool,
@@ -851,6 +855,10 @@ struct CallArgument<'db> {
     /// The enclosing function's bare `...`: forwards an unknown number of arguments, so
     /// the call cannot be arity-checked.
     forwards_dots: bool,
+    /// What a character argument stands for where the callee expects a function: the
+    /// callee passes it through `match.fun`, so `"toupper"` means the function `toupper`.
+    /// `Unknown` when the string is not a literal or names no known function.
+    named_function: Option<Ty<'db>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -970,6 +978,25 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
     }
 }
 
+/// How a function body touches names, for deciding which no-default formals a call must
+/// supply. R evaluates arguments lazily, so omitting one is an error only when the body
+/// forces it.
+#[derive(Default)]
+struct FormalUses {
+    missing_tested: FxHashSet<Symbol>,
+    /// Names read before the body first assigns them, on some path.
+    forced: FxHashSet<Symbol>,
+    assigned: FxHashSet<Symbol>,
+}
+
+impl FormalUses {
+    /// A write on any branch counts as preceding every later read, so the walk can miss a
+    /// formal that some path forces but never reports one that no path forces.
+    fn makes_optional(&self, name: Symbol) -> bool {
+        self.missing_tested.contains(&name) || !self.forced.contains(&name)
+    }
+}
+
 enum ArgumentTarget {
     Positional(usize),
     /// Index into `named`, whether claimed by name or filled positionally.
@@ -1013,6 +1040,40 @@ fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
         NotEqual => "!=",
         _ => return None,
     })
+}
+
+/// Base functions that pass their function argument through `match.fun`.
+const MATCH_FUN_CALLERS: [&str; 20] = [
+    "lapply",
+    "sapply",
+    "vapply",
+    "mapply",
+    "Map",
+    "Filter",
+    "Find",
+    "Position",
+    "Reduce",
+    "do.call",
+    "outer",
+    "apply",
+    "tapply",
+    "sweep",
+    "rapply",
+    "eapply",
+    "Vectorize",
+    "Negate",
+    "aggregate",
+    "match.fun",
+];
+
+fn is_character(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Character) => true,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => {
+            matches!(element.kind(db), TyKind::Scalar(Atomic::Character))
+        }
+        _ => false,
+    }
 }
 
 /// The single source for both `operator_group`'s `Arith` and the method prefixes
@@ -1383,10 +1444,9 @@ impl<'db> Checker<'db, '_> {
                 let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
-                // `missing(name)` in the body makes a formal optional (R's optional-without-default
-                // idiom).
-                let mut missing_tested = FxHashSet::default();
-                self.collect_missing_tested(*body, &mut missing_tested);
+                let mut uses = FormalUses::default();
+                self.collect_formal_uses(*body, &mut uses);
+                self.collect_forced_default_uses(&parameters, &mut uses);
                 let mut named = Vec::new();
                 let mut variadic = None;
                 for parameter in &parameters {
@@ -1403,7 +1463,7 @@ impl<'db> Checker<'db, '_> {
                         name: Name::new(self.db, parameter.name.as_str()),
                         ty: parameter_ty,
                         optional: parameter.default.is_some()
-                            || missing_tested.contains(&parameter.name),
+                            || uses.makes_optional(parameter.name),
                         default: None,
                     });
                     let no_default = parameter.default.is_none();
@@ -3032,26 +3092,105 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Nested function bodies are excluded: their tests cover their own formals.
-    fn collect_missing_tested(&self, id: ExprId, tested: &mut FxHashSet<Symbol>) {
+    /// Walks in evaluation order, so a read counts as forcing a formal only before the body
+    /// first assigns that name. A nested function's `missing()` tests and writes cover its
+    /// own frame, but its reads of an outer formal count: the closure usually runs, and
+    /// when it does it forces the promise.
+    fn collect_formal_uses(&self, id: ExprId, uses: &mut FormalUses) {
         let kind = &self.module.expression(id).kind;
-        if matches!(kind, ExpressionKind::Function { .. }) {
-            return;
-        }
-        if let ExpressionKind::Call { callee, arguments } = kind
-            && matches!(
-                &self.module.expression(*callee).kind,
-                ExpressionKind::NameRef(name) if name == "missing"
-            )
-            && let [argument] = &arguments[..]
-            && argument.name.is_none()
-            && let Some(value) = argument.value
-            && let ExpressionKind::NameRef(name) = &self.module.expression(value).kind
-        {
-            tested.insert(*name);
+        match kind {
+            ExpressionKind::Function { parameters, body } => {
+                let mut nested = FormalUses {
+                    assigned: parameters.iter().map(|parameter| parameter.name).collect(),
+                    ..FormalUses::default()
+                };
+                self.collect_formal_uses(*body, &mut nested);
+                for name in nested.forced {
+                    if !uses.assigned.contains(&name) {
+                        uses.forced.insert(name);
+                    }
+                }
+                return;
+            }
+            ExpressionKind::NameRef(name) => {
+                if !uses.assigned.contains(name) {
+                    uses.forced.insert(*name);
+                }
+                return;
+            }
+            ExpressionKind::Assign { target, value, .. }
+                if let ExpressionKind::NameRef(name) = &self.module.expression(*target).kind =>
+            {
+                self.collect_formal_uses(*value, uses);
+                uses.assigned.insert(*name);
+                return;
+            }
+            ExpressionKind::Assign { target, value, .. } => {
+                self.collect_formal_uses(*value, uses);
+                self.collect_formal_uses(*target, uses);
+                return;
+            }
+            ExpressionKind::For {
+                variable,
+                sequence,
+                body,
+                ..
+            } => {
+                self.collect_formal_uses(*sequence, uses);
+                uses.assigned.extend(*variable);
+                self.collect_formal_uses(*body, uses);
+                return;
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                if let ExpressionKind::NameRef(callee_name) = &self.module.expression(*callee).kind
+                {
+                    if callee_name == "missing" {
+                        if let [argument] = &arguments[..]
+                            && argument.name.is_none()
+                            && let Some(value) = argument.value
+                            && let ExpressionKind::NameRef(name) =
+                                &self.module.expression(value).kind
+                        {
+                            uses.missing_tested.insert(*name);
+                        }
+                        return;
+                    }
+                    // These read their argument's expression, never its value, so a missing
+                    // formal passed to them is not forced.
+                    if callee_name == "substitute" || callee_name == "quote" {
+                        return;
+                    }
+                }
+            }
+            _ => {}
         }
         for child in kind.child_ids() {
-            self.collect_missing_tested(child, tested);
+            self.collect_formal_uses(child, uses);
+        }
+    }
+
+    /// A forced formal that the call omits evaluates its default, so the default's reads
+    /// force too (`function(x, y = x) y`). Repeats until no default adds a name, since a
+    /// default may read a formal whose own default reads another.
+    fn collect_forced_default_uses(&self, parameters: &[Formal], uses: &mut FormalUses) {
+        let mut visited = vec![false; parameters.len()];
+        loop {
+            let mut grew = false;
+            for (index, parameter) in parameters.iter().enumerate() {
+                if visited[index] || !uses.forced.contains(&parameter.name) {
+                    continue;
+                }
+                visited[index] = true;
+                if let Some(default) = parameter.default {
+                    let mut from_default = FormalUses::default();
+                    self.collect_formal_uses(default, &mut from_default);
+                    uses.forced.extend(from_default.forced);
+                    grew = true;
+                }
+            }
+            if !grew {
+                return;
+            }
         }
     }
 
@@ -3543,6 +3682,7 @@ impl<'db> Checker<'db, '_> {
             value: Some(value),
             whole_double: self.is_whole_double(value),
             forwards_dots: false,
+            named_function: None,
         }
     }
 
@@ -4066,10 +4206,15 @@ impl<'db> Checker<'db, '_> {
         };
         let range = expression.range;
 
-        let mut missing_tested = FxHashSet::default();
-        self.collect_missing_tested(*body, &mut missing_tested);
-        let is_optional = |parameter: &Formal| {
-            parameter.default.is_some() || missing_tested.contains(&parameter.name)
+        let mut uses = FormalUses::default();
+        self.collect_formal_uses(*body, &mut uses);
+        self.collect_forced_default_uses(parameters, &mut uses);
+        // A call may omit a formal the body never forces, but only a default or a
+        // `missing()` test makes optionality part of the formal's contract.
+        let is_optional =
+            |parameter: &Formal| parameter.default.is_some() || uses.makes_optional(parameter.name);
+        let is_declared_optional = |parameter: &Formal| {
+            parameter.default.is_some() || uses.missing_tested.contains(&parameter.name)
         };
 
         self.table.level += 1;
@@ -4166,7 +4311,7 @@ impl<'db> Checker<'db, '_> {
             if !field.optional
                 && parameters
                     .iter()
-                    .any(|parameter| parameter.name == name && is_optional(parameter))
+                    .any(|parameter| parameter.name == name && is_declared_optional(parameter))
             {
                 self.errors.push(TypeError {
                     range,
@@ -4430,7 +4575,8 @@ impl<'db> Checker<'db, '_> {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
-        let call_arguments = self.infer_call_arguments(range, arguments);
+        let mut call_arguments = self.infer_call_arguments(range, arguments);
+        self.resolve_match_fun_arguments(callee, &mut call_arguments);
         self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
     }
 
@@ -4849,7 +4995,8 @@ impl<'db> Checker<'db, '_> {
 
         // Arguments infer once, before any probe: the probe snapshot does not reverse
         // environment or recorded-type writes.
-        let call_arguments = self.infer_call_arguments(range, arguments);
+        let mut call_arguments = self.infer_call_arguments(range, arguments);
+        self.resolve_match_fun_arguments(callee, &mut call_arguments);
         Some(self.overloaded_call(id, range, callee, name, &schemes, &call_arguments))
     }
 
@@ -5115,9 +5262,59 @@ impl<'db> Checker<'db, '_> {
                     value: argument.value,
                     whole_double,
                     forwards_dots,
+                    named_function: None,
                 }
             })
             .collect()
+    }
+
+    /// R's functional helpers resolve their function argument with `match.fun`, which also
+    /// accepts the function's name as a string (`lapply(xs, "[[", "id")`). Only the base
+    /// helpers do this; a closure's own parameter called as a function must hold a function.
+    fn resolve_match_fun_arguments(
+        &mut self,
+        callee: ExprId,
+        call_arguments: &mut [CallArgument<'db>],
+    ) {
+        let name = match &self.module.expression(callee).kind {
+            ExpressionKind::NameRef(name) => {
+                let deferred = self.naming.deferred_non_locals.contains(&callee);
+                if self.naming.resolutions.contains_key(&callee)
+                    || self
+                        .globals
+                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                {
+                    return;
+                }
+                name.as_str()
+            }
+            ExpressionKind::Namespace {
+                package: Some(package),
+                name: Some(name),
+                ..
+            } if package.as_str() == STANDARD_LIBRARY => name.as_str(),
+            _ => return,
+        };
+        if !MATCH_FUN_CALLERS.contains(&name) {
+            return;
+        }
+        for argument in call_arguments.iter_mut() {
+            let (Some(value), Some(ty)) = (argument.value, argument.ty) else {
+                continue;
+            };
+            let resolved = self.table.resolve(self.db, ty);
+            if !is_character(self.db, resolved) {
+                continue;
+            }
+            let named = match &self.module.expression(value).kind {
+                ExpressionKind::Literal(LiteralKind::String(text)) => self
+                    .globals
+                    .and_then(|globals| globals.scheme(text, false))
+                    .map(|scheme| self.instantiate(&scheme)),
+                _ => None,
+            };
+            argument.named_function = Some(named.unwrap_or_else(|| unknown(self.db)));
+        }
     }
 
     fn is_whole_double(&self, value: ExprId) -> bool {
@@ -5152,9 +5349,11 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any | TyKind::Unknown => unknown(self.db),
             TyKind::Var(_) => {
                 let ret = self.fresh(Constraint::Unconstrained);
+                // A forwarded `...` may be empty, so it demands no parameter of the callee;
+                // what the dots carry is checked where the outer function is called.
                 let positional: Vec<Ty<'db>> = arguments
                     .iter()
-                    .filter(|argument| argument.name.is_none())
+                    .filter(|argument| argument.name.is_none() && !argument.forwards_dots)
                     .map(|argument| argument.ty.unwrap_or_else(|| unknown(self.db)))
                     .collect();
                 let expected = Ty::new(
@@ -5339,7 +5538,7 @@ impl<'db> Checker<'db, '_> {
             match target {
                 ArgumentTarget::Positional(slot) => {
                     if let Some(&expected) = function.positional.get(*slot)
-                        && let Some(ty) = argument.ty
+                        && let Some(ty) = self.argument_type_for(expected, argument)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -5353,7 +5552,7 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Named(formal) => {
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
-                        && let Some(ty) = argument.ty
+                        && let Some(ty) = self.argument_type_for(expected, argument)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -5374,7 +5573,7 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Rest => {
                     if let Some(element) = variadic_element
-                        && let Some(ty) = argument.ty
+                        && let Some(ty) = self.argument_type_for(element, argument)
                         && let Err(error) = self.check_argument(
                             element,
                             ty,
@@ -5397,12 +5596,24 @@ impl<'db> Checker<'db, '_> {
                 }
                 ArgumentTarget::Overflow => {
                     if !forwards_dots {
+                        let positional_arguments = arguments
+                            .iter()
+                            .filter(|argument| argument.name.is_none())
+                            .count();
+                        let claimed_by_name = targets
+                            .iter()
+                            .zip(arguments)
+                            .filter(|(target, argument)| {
+                                argument.name.is_some()
+                                    && matches!(target, Some(ArgumentTarget::Named(_)))
+                            })
+                            .count();
                         return vec![TypeError {
                             // The first argument with no formal left is the one to remove.
                             range: argument.range,
                             kind: TypeErrorKind::ArityMismatch {
-                                expected: total,
-                                found: arguments.len(),
+                                expected: total.saturating_sub(claimed_by_name),
+                                found: positional_arguments,
                             },
                         }];
                     }
@@ -5433,16 +5644,10 @@ impl<'db> Checker<'db, '_> {
             .iter()
             .filter(|target| matches!(target, Some(ArgumentTarget::Positional(_))))
             .count();
-        let missing_required = function.named.iter().enumerate().any(|(formal, field)| {
-            !field.optional
-                && !targets
-                    .iter()
-                    .any(|target| matches!(target, Some(ArgumentTarget::Named(filled)) if *filled == formal))
-        });
-        if !forwards_dots
-            && !unknown_name
-            && (positional_filled != function.positional.len() || missing_required)
-        {
+        if forwards_dots || unknown_name {
+            return findings;
+        }
+        if positional_filled != function.positional.len() {
             return vec![TypeError {
                 range: callee_range,
                 kind: TypeErrorKind::ArityMismatch {
@@ -5451,7 +5656,43 @@ impl<'db> Checker<'db, '_> {
                 },
             }];
         }
+        let missing: Vec<String> = function
+            .named
+            .iter()
+            .enumerate()
+            .filter(|(formal, field)| {
+                !field.optional
+                    && !targets.iter().any(
+                        |target| matches!(target, Some(ArgumentTarget::Named(filled)) if filled == formal),
+                    )
+            })
+            .map(|(_, field)| field.name.text(self.db).to_owned())
+            .collect();
+        if !missing.is_empty() {
+            return vec![TypeError {
+                range: callee_range,
+                kind: TypeErrorKind::MissingArguments { names: missing },
+            }];
+        }
         findings
+    }
+
+    /// A function name given as a string stands for the function only where a function is
+    /// expected; anywhere else it is the string it looks like.
+    fn argument_type_for(
+        &self,
+        expected: Ty<'db>,
+        argument: &CallArgument<'db>,
+    ) -> Option<Ty<'db>> {
+        if let Some(named) = argument.named_function
+            && matches!(
+                self.table.shallow_resolve(self.db, expected).kind(self.db),
+                TyKind::Function(_)
+            )
+        {
+            return Some(named);
+        }
+        argument.ty
     }
 
     /// R matches exact names before placing positionals, so `vapply(xs, character(1),
@@ -5487,6 +5728,26 @@ impl<'db> Checker<'db, '_> {
             Some(rest) => rest.preceding_named.min(function.named.len()),
             None => function.named.len(),
         };
+        // R then matches a name that abbreviates exactly one unclaimed formal before `...`;
+        // a formal after `...` matches only exactly.
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument.forwards_dots || targets[index].is_some() {
+                continue;
+            }
+            let Some(name) = &argument.name else { continue };
+            let mut candidates = function.named[..pre_rest]
+                .iter()
+                .enumerate()
+                .filter(|(formal, field)| {
+                    !claimed[*formal] && field.name.text(self.db).starts_with(name.as_str())
+                })
+                .map(|(formal, _)| formal);
+            if let (Some(formal), None) = (candidates.next(), candidates.next()) {
+                claimed[formal] = true;
+                targets[index] = Some(ArgumentTarget::Named(formal));
+            }
+        }
+
         let mut next_positional = 0usize;
         let mut next_named = 0usize;
         for (index, argument) in arguments.iter().enumerate() {
@@ -6619,6 +6880,7 @@ impl<'db> Checker<'db, '_> {
                 value: None,
                 whole_double: false,
                 forwards_dots: false,
+                named_function: None,
             }];
             call_arguments.extend(self.infer_call_arguments(range, &rest));
             for column in &columns {
@@ -8547,8 +8809,8 @@ mod tests {
             missing
                 .errors
                 .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::ArityMismatch { .. })),
-            "expected a missing-argument arity error, got {:?}",
+                .any(|error| matches!(error.kind, TypeErrorKind::MissingArguments { .. })),
+            "expected a missing-argument error, got {:?}",
             missing.errors
         );
         let defaulted = check_source(&db, "g <- function() {\n  f <- function(x = 1) x\n  f()\n}");

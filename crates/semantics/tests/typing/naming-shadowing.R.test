@@ -9,7 +9,7 @@ f <- function(x) {
 #++++
 == R/main.R
 x: integer
-f: <T> fn(x: T) -> character
+f: <T> fn([x]: T) -> character
 
 #==== cross_file_rebinding
 #---- later_file_rebinding_wins_for_later_files

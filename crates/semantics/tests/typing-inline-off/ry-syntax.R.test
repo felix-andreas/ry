@@ -29,7 +29,7 @@ f: fn(o: :Some(integer) | :None) -> integer
 #: fn(o: :Some(integer) | :None) -> logical
 f <- function(o) TRUE
 #++++
-f: fn(o: :Some(integer) | :None) -> logical
+f: fn([o]: :Some(integer) | :None) -> logical
 
 #---- plain_r_stays_quiet
 x <- list(a = 1)

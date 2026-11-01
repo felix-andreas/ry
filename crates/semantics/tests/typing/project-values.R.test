@@ -22,7 +22,7 @@ render <- function(count) "ok"
 == R/a.R
 result: character
 == R/b.R
-render: fn(count: integer) -> character
+render: fn([count]: integer) -> character
 
 #==== multiple_errors
 #---- several_errors_in_one_file_all_report

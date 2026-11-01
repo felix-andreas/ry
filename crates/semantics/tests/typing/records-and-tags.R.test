@@ -179,7 +179,7 @@ f <- function(o) TRUE
 a <- f(:Some(1L))
 b <- f(:None)
 #++++
-f: fn(o: :Some(integer) | :None) -> logical
+f: fn([o]: :Some(integer) | :None) -> logical
 a: logical
 b: logical
 
@@ -188,7 +188,7 @@ b: logical
 f <- function(o) TRUE
 a <- f(:Some("a"))
 #++++
-f: fn(o: :Some(integer) | :None) -> logical
+f: fn([o]: :Some(integer) | :None) -> logical
 a: Unknown
 73..83 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(character)`
 
@@ -197,7 +197,7 @@ a: Unknown
 f <- function(o) TRUE
 a <- f(:Other)
 #++++
-f: fn(o: :Some(integer) | :None) -> logical
+f: fn([o]: :Some(integer) | :None) -> logical
 a: Unknown
 73..79 error[type-mismatch] expected `:Some(integer) | :None`, found `:Other`
 
@@ -206,7 +206,7 @@ a: Unknown
 f <- function(o) TRUE
 a <- f(:Some(1L, 2L))
 #++++
-f: fn(o: :Some(integer) | :None) -> logical
+f: fn([o]: :Some(integer) | :None) -> logical
 a: Unknown
 73..86 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(integer, integer)`
 
@@ -234,7 +234,7 @@ f <- function(o) TRUE
 a <- f(:Some(1L))
 b <- f(:Some("a"))
 #++++
-f: fn(o: Option<integer>) -> logical
+f: fn([o]: Option<integer>) -> logical
 a: logical
 b: Unknown
 124..134 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(character)`
@@ -246,7 +246,7 @@ f <- function(r) TRUE
 a <- f(:Err("x"))
 b <- f(:Ok(1L))
 #++++
-f: fn(r: :Ok(integer) | ..) -> logical
+f: fn([r]: :Ok(integer) | ..) -> logical
 a: logical
 b: logical
 
@@ -255,7 +255,7 @@ b: logical
 f <- function(r) TRUE
 a <- f(:Ok("x"))
 #++++
-f: fn(r: :Ok(integer) | ..) -> logical
+f: fn([r]: :Ok(integer) | ..) -> logical
 a: Unknown
 68..76 error[type-mismatch] expected `:Ok(integer) | ..`, found `:Ok(character)`
 
@@ -266,7 +266,7 @@ f <- function(r) TRUE
 g <- function(flag) if (flag) :Ok(1L) else :Err("x")
 a <- f(g(TRUE))
 #++++
-f: fn(r: :Ok(integer) | ..) -> logical
+f: fn([r]: :Ok(integer) | ..) -> logical
 g: fn(flag: logical) -> :Ok(integer) | :Err(character)
 a: logical
 
@@ -276,7 +276,7 @@ f <- function(r) TRUE
 #: fn(r: :Ok(integer) | ..) -> logical
 g <- function(r) f(r)
 #++++
-f: fn(r: :Ok(integer) | :Err(character)) -> logical
+f: fn([r]: :Ok(integer) | :Err(character)) -> logical
 g: fn(r: :Ok(integer) | ..) -> logical
 132..133 error[type-mismatch] expected `:Ok(integer) | :Err(character)`, found `:Ok(integer) | ..`
 
@@ -286,7 +286,7 @@ f <- function(r) TRUE
 #: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
 g <- function(r) f(r)
 #++++
-f: fn(r: :Ok(integer) | ..) -> logical
+f: fn([r]: :Ok(integer) | ..) -> logical
 g: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
 
 #---- open_union_does_not_fit_an_open_one_listing_more_tags
@@ -295,7 +295,7 @@ f <- function(r) TRUE
 #: fn(r: :Ok(integer) | ..) -> logical
 g <- function(r) f(r)
 #++++
-f: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
+f: fn([r]: :Ok(integer) | :Err(character) | ..) -> logical
 g: fn(r: :Ok(integer) | ..) -> logical
 137..138 error[type-mismatch] expected `:Ok(integer) | :Err(character) | ..`, found `:Ok(integer) | ..`
 
@@ -613,7 +613,7 @@ s <- sum((x = 1,))
 #++++
 keep: <T> fn(v: T) -> T
 k: record{x: double}
-sum: <T> fn(v: T) -> double
+sum: <T> fn([v]: T) -> double
 s: double
 
 #---- a_value_that_may_be_r_data_is_not_reported

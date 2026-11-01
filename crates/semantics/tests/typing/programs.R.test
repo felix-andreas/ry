@@ -94,7 +94,7 @@ default_items <- function() list()
 read_local <- function(input) Result(label = input$path)
 
 #: fn(result: Result, item: Item) -> Result
-step_one <- function(result, item) result
+step_one <- function(result, item) if (item$enabled) result else result
 
 #: fn(input: RemoteInput, item: Item) -> Result
 eval_remote <- function(input, item) Result(label = input$url)
@@ -127,16 +127,16 @@ RemoteInput <- function(url) {
 run: fn(options: Options) -> Result
 local_provider: fn(input: LocalInput, options: Options) -> Result
 remote_provider: fn(input: RemoteInput, options: Options) -> Result
-csv_provider: fn(input: LocalInput, options: Options) -> Result
-tsv_provider: fn(input: LocalInput, options: Options) -> Result
-http_provider: fn(input: RemoteInput, options: Options) -> Result
-grpc_provider: fn(input: RemoteInput, options: Options) -> Result
+csv_provider: fn(input: LocalInput, [options]: Options) -> Result
+tsv_provider: fn(input: LocalInput, [options]: Options) -> Result
+http_provider: fn(input: RemoteInput, [options]: Options) -> Result
+grpc_provider: fn(input: RemoteInput, [options]: Options) -> Result
 run_local: fn(input: LocalInput, getItems: fn() -> list[Item], read: fn(LocalInput) -> Result, step: fn(Result, Item) -> Result, [finalize]: fn(Result) -> Result) -> Result
 run_remote: fn(input: RemoteInput, getItems: fn() -> list[Item], evaluate: fn(RemoteInput, Item) -> Result) -> Result
 default_items: fn() -> list[Item]
 read_local: fn(input: LocalInput) -> Result
 step_one: fn(result: Result, item: Item) -> Result
-eval_remote: fn(input: RemoteInput, item: Item) -> Result
+eval_remote: fn(input: RemoteInput, [item]: Item) -> Result
 identity_finalize: fn(result: Result) -> Result
 Result: fn([label]: character, [count]: integer) -> Result
 LocalInput: fn(path: character) -> LocalInput
@@ -174,7 +174,7 @@ default_items <- function() list()
 read_local <- function(input) Result(label = input$path)
 
 #: fn(result: Result, item: Item) -> Result
-step_one <- function(result, item) result
+step_one <- function(result, item) if (item$enabled) result else result
 
 #: fn(result: Result) -> Result
 identity_finalize <- function(result) result
@@ -211,7 +211,7 @@ missing_required <- function(input) run_local(input, default_items, read_local)
 
 # The injected reader has the wrong parameter shape.
 wrong_shape <- function(input) {
-  run_local(input, default_items, function(a, b) Result(), step_one)
+  run_local(input, default_items, function(a, b) Result(label = b), step_one)
 }
 
 # The injected reader returns the wrong nominal.
@@ -237,17 +237,17 @@ identity_finalize: fn(result: Result) -> Result
 Result: fn([label]: character) -> Result
 LocalInput: fn(path: character) -> LocalInput
 RemoteInput: fn(url: character) -> RemoteInput
-read_wrong_return: fn(input: LocalInput) -> Item
+read_wrong_return: fn([input]: LocalInput) -> Item
 missing_required: Unknown
 wrong_shape: Unknown
 wrong_return: Unknown
 wrong_nominal: Unknown
 wrong_optional: Unknown
-1672..1681 error[type-mismatch] this call supplies 3 arguments, but the function requires 4, so a required argument is missing
-1837..1860 error[type-mismatch] expected `fn(LocalInput) -> Result`, found `fn(a: T, b: U) -> Result`
-1992..2009 error[type-mismatch] this function must return `Result`, but it returns `Item`
-2142..2164 error[type-mismatch] expected `LocalInput`, found `RemoteInput`
-2370..2378 error[type-mismatch] expected `fn(Result) -> Result`, found `fn(result: Result, item: Item) -> Result`
+1702..1711 error[type-mismatch] this call leaves out `step`, which has no default and which the function uses
+1867..1899 error[type-mismatch] expected `fn(LocalInput) -> Result`, found `fn([a]: T, b: character) -> Result`
+2031..2048 error[type-mismatch] this function must return `Result`, but it returns `Item`
+2181..2203 error[type-mismatch] expected `LocalInput`, found `RemoteInput`
+2409..2417 error[type-mismatch] expected `fn(Result) -> Result`, found `fn(result: Result, item: Item) -> Result`
 
 #==== top_level_rewrites
 #---- a_later_top_level_write_is_visible_to_a_later_statement
