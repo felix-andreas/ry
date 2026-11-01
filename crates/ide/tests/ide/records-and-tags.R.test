@@ -217,7 +217,7 @@ action: Add inferred type annotation for `shape`
   edit 0..0 -> "#: :Circle(radius: double)\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: :Circle(radius: double)\n"
-completion (105): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
+completion (106): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
 hint @5: :Circle(radius: double)
 
 #---- tag_references_and_rename_cover_values_patterns_and_types

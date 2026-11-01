@@ -3,6 +3,7 @@
 
 use {
     crate::{
+        arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
         conditions, rmath,
@@ -107,40 +108,96 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }
         Ok(result)
     }),
-    builtin("+", -1, |call| unsafe { arithmetic(call, Op::Add) }).generic(Generic::Ops),
-    builtin("-", -1, |call| unsafe { arithmetic(call, Op::Subtract) }).generic(Generic::Ops),
-    builtin("*", 2, |call| unsafe { arithmetic(call, Op::Multiply) }).generic(Generic::Ops),
-    builtin("/", 2, |call| unsafe { arithmetic(call, Op::Divide) }).generic(Generic::Ops),
-    builtin("^", 2, |call| unsafe { arithmetic(call, Op::Power) }).generic(Generic::Ops),
-    builtin("%%", 2, |call| unsafe { arithmetic(call, Op::Modulo) }).generic(Generic::Ops),
+    builtin("+", -1, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Add)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("-", -1, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Subtract)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("*", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Multiply)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("/", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Divide)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("^", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Power)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("%%", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Modulo)
+        })
+    })
+    .generic(Generic::Ops),
     builtin("%/%", 2, |call| unsafe {
-        arithmetic(call, Op::IntegerDivide)
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::IntegerDivide)
+        })
     })
     .generic(Generic::Ops),
     builtin("==", 2, |call| unsafe {
-        comparison(call, Comparison::Equal)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::Equal)
+        })
     })
     .generic(Generic::Ops),
     builtin("!=", 2, |call| unsafe {
-        comparison(call, Comparison::NotEqual)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::NotEqual)
+        })
     })
     .generic(Generic::Ops),
-    builtin("<", 2, |call| unsafe { comparison(call, Comparison::Less) }).generic(Generic::Ops),
+    builtin("<", 2, |call| unsafe {
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::Less)
+        })
+    })
+    .generic(Generic::Ops),
     builtin(">", 2, |call| unsafe {
-        comparison(call, Comparison::Greater)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::Greater)
+        })
     })
     .generic(Generic::Ops),
     builtin("<=", 2, |call| unsafe {
-        comparison(call, Comparison::LessEqual)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::LessEqual)
+        })
     })
     .generic(Generic::Ops),
     builtin(">=", 2, |call| unsafe {
-        comparison(call, Comparison::GreaterEqual)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::GreaterEqual)
+        })
     })
     .generic(Generic::Ops),
-    builtin("&", 2, |call| unsafe { logic(call, true) }).generic(Generic::Ops),
-    builtin("|", 2, |call| unsafe { logic(call, false) }).generic(Generic::Ops),
-    builtin("!", 1, do_not).generic(Generic::Ops),
+    builtin("&", 2, |call| unsafe {
+        strict(call, OperatorClass::Logic, |call| logic(call, true))
+    })
+    .generic(Generic::Ops),
+    builtin("|", 2, |call| unsafe {
+        strict(call, OperatorClass::Logic, |call| logic(call, false))
+    })
+    .generic(Generic::Ops),
+    builtin("!", 1, |call| unsafe {
+        strict(call, OperatorClass::Logic, |call| do_not(call))
+    })
+    .generic(Generic::Ops),
     builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
     builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
     builtin("sqrt", 1, |call| unsafe { math1(call, Math::Sqrt) }).generic(Generic::Math),
@@ -602,6 +659,23 @@ impl Op {
             Op::IntegerDivide => "%/%",
         }
     }
+}
+
+/// Runs an operator, enforcing an Array's strict rules when an operand is one: R's own operator
+/// computes the plain result, which then becomes an Array again.
+unsafe fn strict(
+    call: &Call<'_>,
+    class: OperatorClass,
+    compute: impl FnOnce(&Call<'_>) -> R<Sexp>,
+) -> R<Sexp> {
+    if !call.args.iter().any(|arg| arg.value.is_array()) {
+        return compute(call);
+    }
+    let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
+    let name = call.name();
+    arrays::check_operands(call.call, &name, class, &operands)?;
+    let result = compute(call)?;
+    arrays::finish_result(call.call, &name, result)
 }
 
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {

@@ -691,7 +691,7 @@ impl Context<'_> {
                 }
             }
             ExpressionKind::Paren(inner) => self.resolve(*inner),
-            ExpressionKind::Tuple(items) => {
+            ExpressionKind::Tuple(items) | ExpressionKind::Array(items) => {
                 for &item in items {
                     self.resolve(item);
                 }

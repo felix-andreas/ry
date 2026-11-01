@@ -295,7 +295,7 @@ pick: <T> fn(x: T) -> T
 twice <- function<T: number>(x: T) -> T x + x
 #++++
 twice: <T: numeric> fn(x: T) -> T
-21..27 error[annotation] unknown type-parameter constraint `number`; the available constraints are `numeric`, `atomic`, `key`, or `scalar numeric`.
+21..27 error[annotation] unknown type-parameter constraint `number`; the available constraints are `numeric`, `atomic`, `key`, `scalar numeric`, or `item`.
 
 #---- syntax_error_in_a_type_is_a_syntax_error
 count: list[integer <- 1L

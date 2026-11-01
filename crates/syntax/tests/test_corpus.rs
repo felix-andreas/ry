@@ -11,7 +11,7 @@ use {
         time::Instant,
     },
     syntax::{
-        SyntaxKind::{MATCH_EXPR, RECORD_EXPR, TAG_EXPR, TUPLE_EXPR},
+        SyntaxKind::{ARRAY_EXPR, MATCH_EXPR, RECORD_EXPR, TAG_EXPR, TUPLE_EXPR},
         TextRange, TextSize, erase_inline_annotations, parse, reparse,
         testing::{corpus_dir, fixture_case_sources, program_corpus_sources},
     },
@@ -153,12 +153,12 @@ fn in_tree_acceptance() {
         // Inline annotations are ry syntax that R rejects by design, so tree-sitter
         // judges the plain R program they erase to.
         let parsed = parse(text);
-        // Records, tuples, tags and `match` are ry syntax chosen to be text R
+        // Records, tuples, Arrays, tags and `match` are ry syntax chosen to be text R
         // rejects, so a source that uses them has no R program to compare.
         if parsed.syntax_node().descendants().any(|node| {
             matches!(
                 node.kind(),
-                TUPLE_EXPR | RECORD_EXPR | TAG_EXPR | MATCH_EXPR
+                TUPLE_EXPR | RECORD_EXPR | ARRAY_EXPR | TAG_EXPR | MATCH_EXPR
             )
         }) {
             continue;
