@@ -36,6 +36,10 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub fn with_capacity(bindings: usize) -> Frame {
+        Frame { cells: SmallVec::with_capacity(bindings), ..Frame::default() }
+    }
+
     pub fn cells(&self) -> &[Sexp] {
         &self.cells
     }

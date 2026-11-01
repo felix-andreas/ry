@@ -370,25 +370,55 @@ only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\
 
 ## Open: the JIT
 
-`crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
+`crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
-- **Direct calls between compiled closures, with promise elision.** `micro/closures` is slower
-  under the JIT than under tier 0 because each iteration's generic call writes `s` and `i` back and
-  reloads them, and fib and lapply gain nothing. A call to a speculated closure whose arguments are
-  effect-free should evaluate them eagerly and enter the callee's compiled code without a promise.
+- **Compiled-to-compiled calls.** `micro/fib` is still about 10% behind GNU R. Callgrind puts a
+  call at about 3,300 instructions, of which about 750 are allocation and collection across about
+  seven allocations (frame, forced promises, argument cells), and about 280 are tier 0's entry into
+  the callee. A call from compiled code should enter the callee's compiled code directly, with
+  arguments in registers and no promise when the callee provably never reflects
+  (`substitute`, `missing`, `sys.call`).
+- **Calls dominate the benchmark packages' test suites.** A `perf` profile of full-size dsbench's
+  testthat suites (JIT on) puts 12% of samples under `jit::`, and about 85% of that is
+  `jit::runtime::jit_step` handing a call back to tier 0. Each closure call there still matches
+  arguments, allocates an environment, defines each formal and makes a promise per argument, which
+  together with the collections they trigger is most of the 13% spent in allocation and GC.
+  Global function lookups (`bytecode::lookup_function`, `eval::find_fun`) walk 3 to 5
+  environments with a hash probe each (`Heap::frame_cell`, 3.7% self): an inline cache checked
+  against the binding epoch, or a direct cell for namespace and import lookups, would make that
+  one load. `bytecode::step` dispatch is 6.6% self. Reproduce with `tools/bench/generate.py` and
+  `just bench-compare`.
+  Microbenchmarks against GNU R 4.3 (JIT on) show the per-call gap: 200k closure calls take
+  190 ms against 83 ms, 50k S3 dispatches 100 against 59, 20k `tryCatch` 415 against 102, and a
+  two-expectation `test_that` block about 60 ms against 28. The likely wins, in order: no binding
+  cell or promise per argument for a closure whose frame cannot escape, a cached global function
+  lookup, and less `Heap::root` and handle traffic per call.
 - **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
-  reads the checker's per-function summaries yet.
+  reads the checker's per-function summaries yet, and strict typing does not remove guards
+  (`decisions.md`, "Static types do not remove guards"). Typed code currently runs at the speed of
+  untyped code, minus the boundary checks.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
-- **Builtin-bound benchmarks** (vector_arith, jackknife, log_rank, vasicek) are 2.5 to 3 times
-  slower than GNU R in tier 0 and the JIT alike; the cost is in the builtins, not the dispatch.
-- **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
-  `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
-  so they are tier-0 or base gaps, not JIT ones.
-- **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
-  may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
-  while the environment still holds the old value; and an allocation failure inside `boxed()`
-  (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
+- **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
+  is defined in a function frame, so a program that reuses a common function name as a local
+  variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
+- **`.Random.seed` is reread on every RNG call** (`crates/interp/src/random.rs`, `from_words`, about
+  4,400 instructions per `rnorm` call), as GNU R does. Caching the state against the binding's
+  identity would make `vasicek` match GNU R; it is still about 10% behind, with `qnorm` and the
+  twister refill the rest of the cost.
+- **One oracle case fails under both `ry` and `ry-jit`** (`stats__lbfgsb` differs from GNU R
+  in late digits), so it is a native gap, not a JIT one. Run the oracle against a release build with `ORACLE_RY=target/release/ry` after building
+  both `ry-lang` and `libr`: the JIT lives in `libR`, so building `ry-lang` alone tests a stale JIT.
+- **Base gaps seen while benchmarking:** `sum()` of doubles does not follow GNU R's long-double
+  accumulation or its NaN-before-NA precedence exactly; a factor inside a list prints its codes;
+  `cov` and `sd` route through an R-level fallback instead of a native `C_cov`; `pkg::name` for a
+  name the namespace does not export gives a different message from GNU R.
+- **Strict users must annotate `seq()` results.** The `seq` stub returns `Any`, so
+  `x <- seq(...)` passes strict mode only with an annotation such as `x: double[]`. A precise
+  overload set for `seq` and `seq_len` would remove that.
+- **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
+  and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
+  `crates/ry/tests/test_repl_e2e.rs`). They pass alone; their timeouts need headroom.
 
 ## Open: data-oriented layouts and explicit allocators
 
@@ -2012,9 +2042,6 @@ The end-to-end guard rests on the corpus suites.
   evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
   runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
   leaves the IR built against the old schema.
-- **The bytecode compiles `[` as a generic call**, because it is a special, so a JIT-compiled loop
-  that subsets no longer runs `[` through `CallBuiltin`. Re-measure `tools/bench/jit` vector loops
-  and give plain subjects a fast path again if they regressed.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and

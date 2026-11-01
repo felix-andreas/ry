@@ -325,6 +325,14 @@ incrementality holds.
 
 Refusing an unsupported construct loudly is acceptable policy. Mistyping one silently is not.
 
+`stop(...)` types as `Any`, not `NULL` or `Unknown`. There is no bottom type, and `Any` is the one
+type that fits every branch and return position without strict mode reporting it, so a
+`if (bad) stop(...)` guard costs strict users nothing. `&` and `|` are typed elementwise (logical
+scalar or vector) rather than opaque, so their operands resolve normally in naming. An operand
+whose type is still a variable is not unified with scalar `logical`, as `!`'s operand is, because
+`&` is mostly used on vectors and the unification made `h(c(TRUE, FALSE), TRUE)` an error; the
+operator is opaque for it instead.
+
 ## A reported column counts characters, and caret art counts terminal cells
 
 The CLI reported byte columns in the rendered header and in `--output json` alike, and padded the
@@ -2679,10 +2687,47 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **The default mode compiles only bodies with loops.** Measured on `micro/closures`, compiling
-  `function(a, b) a + b` made each call slower, because entering compiled code and forcing two
-  promises through helpers cost more than tier 0's dispatch. Straight-line bodies wait for direct
-  calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
+- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
+  compiled code meant forcing every argument through a promise helper, which made
+  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
+  loop-only rule went with it.
+- **Function speculation is validated by the binding epoch alone.** Compiling marks each
+  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
+  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
+  speculated binding). A call site then checks one integer instead of re-walking the environment
+  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
+  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
+  re-resolved from the environment its lookup started in, which for a function looked up inside an
+  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
+  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
+  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
+  invisible when the callee cannot assign anything an argument reads before forcing it
+  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
+  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
+  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
+  the one accepted hole. A promise object is still
+  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
+  needs compiled-to-compiled calls that know the callee never reflects.
+- **Small local closures inline.** A call of a closure defined by a function expression in the same
+  body, whose arguments and body compute a scalar from scalars without effects, runs inline on
+  unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
+- **Environment frames live inline in the environment object.** Small binding sets are stored
+  without a separate allocation, which cut a call's allocations, the dominant per-call cost.
+- **A value boxed on an edge into a join is dirty.** A slot that is an unboxed local on one path and
+  boxed on another gets a fresh box the frame does not hold, so the slot must be written back before
+  an in-place element write is visible to the frame (`x[1] <- 9; get("x")`). The oracle case in
+  `bytecode__hot_loops.R` pins it.
+- **A helper that cannot allocate parks the error.** Compiled code does not branch on a nil box;
+  later helpers return their fallback while an error is parked, and the return from compiled code
+  raises it.
+- **Static types do not remove guards.** A static `double` still admits an integer or a logical
+  through promotion, and stubs claim scalar results for functions that can return vectors, so a
+  static type proves neither the storage type nor the length the compiled code specializes on.
+  Strict typing costs a little at run time instead (about 200 instructions per annotated call for
+  the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
+  is still the plan in `r-runtime.md`.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
 
@@ -2727,6 +2772,7 @@ first lines R had already read, leaving R mid-command.
 
 - **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
 - **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **Bytecode.** A call of a dispatch-or-eval special (`bytecode.rs`, `subject_call`) evaluates the subject into a register, branches on `BranchIfObject` to `DispatchSubject` (which runs `dispatch::dispatch_evaluated_subject`, so a method still gets promises and the subject's expression), and otherwise evaluates the rest into registers and runs `CallBuiltin`, which the JIT turns into its element intrinsic. A `BranchUnlessPrimitive` guard sends a rebound `[` to the generic call. A formal in an index position takes the generic path too, because a register cannot hold the empty argument a missing formal stands for. Without this shape `x[i]` in a loop ran as a generic call and compiled loops fell to tier-0 speed.
 - **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
 
 ## libr reads options from base's `.Options`
