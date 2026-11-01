@@ -402,3 +402,14 @@ first_link: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> xml
 texts: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> list[character]
 nodes_are_not_numbers: Unknown
 192..218 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[xml_node]`
+
+#---- extends_without_a_second_class_lists_the_superclasses
+#namespace import(methods)
+superclasses <- function(name) extends(getClass(name))
+is_child <- function(name) extends(name, "Parent")
+not_a_flag <- function(name) if (extends(name)) 1L else 2L
+#++++
+superclasses: <T> fn(name: T) -> character[]
+is_child: <T> fn(name: T) -> logical
+not_a_flag: Unknown
+166..179 error[type-mismatch] expected `logical`, found `character[]`

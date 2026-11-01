@@ -1192,6 +1192,10 @@ An unannotated `function(...)` expression gets its type from the definition itse
   parameters both by name and by position.
 - A parameter with a default is optional at call sites, and so is one the body never forces, as
   [lazy arguments](#lazy-arguments-and-required-formals) describes.
+- A default runs lazily in the function's own frame, so it sees the variables the body assigns.
+  In `function(n, ma, innov = rnorm(n + q)) { q <- length(ma); innov }`, the `q` in the default is
+  the body's local, not base R's `q()`. A name the body never assigns resolves outside the function
+  as usual. Such a read is not yet typed against the body's writes, so it reads as `Unknown`.
 - A `...` formal becomes a rest parameter with element type `Any`, at the position it holds among the
   formals, so `function(x, ...) …` is `fn(x: T, ...: Any) -> …`. The values that reach `...` are not
   tracked into the body, so forwarding `...` to another call gives `Unknown`.
@@ -2233,6 +2237,11 @@ a local variable or parameter, the recognized guards are:
 - `is.character(x)`, `is.logical(x)`, `is.integer(x)`, `is.double(x)`, `is.function(x)`, and
   `is.list(x)` keep only the members of that family in the true branch, and remove them in the false
   branch. `is.numeric(x)` does the same for the `integer` and `double` family.
+- `is.null(x$field)` removes from `x`'s union, in the false branch, each member that cannot carry
+  the field: `NULL`, the empty `list()` placeholder, and a record with no field the name partially
+  matches. The true branch keeps every member, because the field itself may hold `NULL`. So
+  `url <- list()`, a loop that fills `url`, and then `if (is.null(url$scheme)) stop(...)` leave
+  `url` as the filled record.
 - `!cond` swaps the two branches.
 
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists

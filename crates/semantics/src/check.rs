@@ -5009,6 +5009,16 @@ impl<'db> Checker<'db, '_> {
                     return None;
                 }
                 let value = argument.value?;
+                if name == "is.null"
+                    && let ExpressionKind::Field {
+                        at: false,
+                        target,
+                        name: Some(field),
+                    } = self.module.kind(value)
+                {
+                    let field = self.module.name(*field);
+                    return self.field_null_guard(*target, &field);
+                }
                 if !matches!(self.module.kind(value), ExpressionKind::NameRef(_)) {
                     return None;
                 }
@@ -5042,6 +5052,41 @@ impl<'db> Checker<'db, '_> {
             }
             _ => None,
         }
+    }
+
+    /// `is.null(x$field)` on a local `x`. A value that passes the test has the field, so the
+    /// false edge drops each member of `x` that cannot carry it: `NULL`, an empty `list()`
+    /// placeholder, and a record with no field the name could partially match. The true edge
+    /// keeps every member, since a field may itself hold `NULL`.
+    fn field_null_guard(&mut self, target: ExprId, field: &str) -> Option<GuardRefinement<'db>> {
+        if !matches!(self.module.kind(target), ExpressionKind::NameRef(_)) {
+            return None;
+        }
+        let &slot = self.naming.resolutions.get(&target)?;
+        let EnvEntry::Mono(current) = self.environment.get(slot)? else {
+            return None;
+        };
+        let resolved = self.table.resolve(self.db, current);
+        let members = guard_members(self.db, resolved);
+        let lacks_field = |member: Ty<'db>| match member.kind(self.db) {
+            TyKind::Null => true,
+            TyKind::Record(fields) => !fields
+                .iter()
+                .any(|candidate| candidate.name.text(self.db).starts_with(field)),
+            _ => is_empty_list(self.db, member),
+        };
+        let kept: Vec<Ty<'db>> = members
+            .iter()
+            .copied()
+            .filter(|&member| !lacks_field(member))
+            .collect();
+        if kept.is_empty() || kept.len() == members.len() {
+            return None;
+        }
+        Some(GuardRefinement {
+            true_edge: Vec::new(),
+            false_edge: vec![SlotRefinement::Narrow(slot, union_of(self.db, kept))],
+        })
     }
 
     /// Seeded with the observed type so the guard has a union to filter.
