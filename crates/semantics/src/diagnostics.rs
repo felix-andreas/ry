@@ -562,8 +562,8 @@ fn classify_non_local_read(
         )
     });
     if crate::package_scheme_exists(db, name)
-        || test_files.is_some_and(|files| {
-            let binding = crate::test_name(db, files, Name::new(db, name));
+        || test_files.is_some_and(|_| {
+            let binding = crate::test_name(db, Name::new(db, name));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
         || super_globals(db, file).contains(name)

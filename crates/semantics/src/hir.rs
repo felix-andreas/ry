@@ -2,6 +2,7 @@
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
 use rustc_hash::{FxHashMap, FxHasher};
+use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 use std::sync::{LazyLock, Mutex};
@@ -31,8 +32,25 @@ static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHAR
 /// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
 static SYMBOL_TEXT: LazyLock<boxcar::Vec<&'static str>> = LazyLock::new(boxcar::Vec::new);
 
+thread_local! {
+    /// Spellings this thread has interned. Lowering interns every identifier it meets, and
+    /// the shard lock's atomics bounce cache lines between analysis threads, so a repeat
+    /// spelling skips the shared table.
+    static LOCAL_SYMBOL_IDS: RefCell<FxHashMap<&'static str, Symbol>> =
+        RefCell::new(FxHashMap::default());
+}
+
 impl Symbol {
     pub fn new(text: &str) -> Symbol {
+        if let Some(symbol) = LOCAL_SYMBOL_IDS.with_borrow(|local| local.get(text).copied()) {
+            return symbol;
+        }
+        let symbol = Symbol::new_shared(text);
+        LOCAL_SYMBOL_IDS.with_borrow_mut(|local| local.insert(symbol.as_str(), symbol));
+        symbol
+    }
+
+    fn new_shared(text: &str) -> Symbol {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
         let shard = &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS];

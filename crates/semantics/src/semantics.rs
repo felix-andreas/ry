@@ -15,7 +15,7 @@ pub mod types;
 
 use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
@@ -891,11 +891,10 @@ pub struct PackageName<'db> {
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn package_name<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: types::Name<'db>,
-) -> PackageName<'db> {
+pub fn package_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName<'db> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return PackageName::default();
+    };
     let text = name.text(db);
     PackageName {
         winner: package_definitions(db, files).get(text).copied(),
@@ -908,11 +907,10 @@ pub fn package_name<'db>(
 
 /// The test files' counterpart of [`package_name`].
 #[salsa::tracked(returns(ref))]
-pub fn test_name<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: types::Name<'db>,
-) -> PackageName<'db> {
+pub fn test_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName<'db> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return PackageName::default();
+    };
     let text = name.text(db);
     PackageName {
         winner: test_definitions(db, files).get(text).copied(),
@@ -1478,6 +1476,7 @@ struct SalsaGlobals<'db> {
     // its key and verifying the memo, so a check looks each one up once.
     names: RefCell<FxHashMap<Box<str>, types::Name<'db>>>,
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
+    item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
     package_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
     test_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
@@ -1556,8 +1555,46 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
+    frame_binder_of(db, item, name.text(db), deferred)
+}
+
+/// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
+/// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
+/// which interned a key and kept a memo, and its value still changes only when a binder of
+/// one of the item's own names does.
+#[salsa::tracked(returns(ref))]
+fn item_frame_binders<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)> {
+    let mut binders = FxHashMap::default();
+    let Some(naming) = item_naming(db, item) else {
+        return binders;
+    };
+    let names = naming
+        .non_locals
+        .values()
+        .chain(naming.quiet_reads.values())
+        .chain(naming.quiet_operator_reads.iter());
+    for &name in names {
+        binders.entry(name).or_insert_with(|| {
+            (
+                frame_binder_of(db, item, name.as_str(), false),
+                frame_binder_of(db, item, name.as_str(), true),
+            )
+        });
+    }
+    binders
+}
+
+fn frame_binder_of<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    name: &str,
+    deferred: bool,
+) -> Option<Item<'db>> {
     let file = *item.file(db);
-    let binders = file_binders(db, file).get(name.text(db))?;
+    let binders = file_binders(db, file).get(name)?;
     if deferred
         && matches!(
             *file.kind(db),
@@ -1589,6 +1626,7 @@ impl<'db> SalsaGlobals<'db> {
             file: *item.file(db),
             names: RefCell::default(),
             schemes: RefCell::default(),
+            item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
             package_names: RefCell::default(),
             test_names: RefCell::default(),
@@ -1608,6 +1646,14 @@ impl<'db> SalsaGlobals<'db> {
         if deferred && *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
+        let text = name.text(self.db);
+        if let Some(&(immediate, later)) = self
+            .item_frame_binders
+            .get_or_init(|| item_frame_binders(self.db, self.item))
+            .get(&Symbol::new(text))
+        {
+            return if deferred { later } else { immediate };
+        }
         *self
             .frame_binders
             .borrow_mut()
@@ -1626,19 +1672,19 @@ impl<'db> SalsaGlobals<'db> {
                     DocumentKind::Test | DocumentKind::TestHelper
                 )
             })
-            .map(|files| {
+            .map(|_| {
                 *self
                     .test_names
                     .borrow_mut()
                     .entry(name)
-                    .or_insert_with(|| test_name(self.db, files, name))
+                    .or_insert_with(|| test_name(self.db, name))
             });
-        let package = files.map(|files| {
+        let package = files.map(|_| {
             *self
                 .package_names
                 .borrow_mut()
                 .entry(name)
-                .or_insert_with(|| package_name(self.db, files, name))
+                .or_insert_with(|| package_name(self.db, name))
         });
         test.into_iter().chain(package)
     }
@@ -1744,10 +1790,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return self.scheme(name, false);
         }
         let interned = self.intern(name);
-        if let Some(layer) = self
-            .files
-            .map(|files| package_name(self.db, files, interned))
-        {
+        if let Some(layer) = self.files.map(|_| package_name(self.db, interned)) {
             if let Some(item) = layer.winner {
                 return Some(global_scheme(self.db, item));
             }
