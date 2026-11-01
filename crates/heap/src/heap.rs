@@ -994,8 +994,21 @@ impl Heap {
             None => {
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
-                let memory = NonNull::new(std::alloc::alloc_zeroed(layout))
-                    .ok_or(HeapError::CannotAllocate { bytes: size })?;
+                // `alloc_vector` fills a handle vector's elements right away, so only its header
+                // needs zeroing; writing a large one twice costs as much as filling it.
+                let fills_elements = matches!(
+                    kind,
+                    SexpType::String | SexpType::List | SexpType::Expression
+                );
+                let memory = if fills_elements {
+                    let memory = NonNull::new(std::alloc::alloc(layout))
+                        .ok_or(HeapError::CannotAllocate { bytes: size })?;
+                    std::ptr::write_bytes(memory.as_ptr(), 0, VECTOR_DATA_OFFSET.min(size));
+                    memory
+                } else {
+                    NonNull::new(std::alloc::alloc_zeroed(layout))
+                        .ok_or(HeapError::CannotAllocate { bytes: size })?
+                };
                 (memory, LARGE_CLASS, gc_bits::LARGE)
             }
         };
