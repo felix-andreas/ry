@@ -649,8 +649,18 @@ macro_rules! typed_slice {
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
                 // The accessor cannot fail, so a method's error is parked, as for elements.
-                match materialize(object) {
-                    Ok(vector) => vector.slice::<$type>(),
+                // The class's own data pointer comes first, since materializing copies the
+                // whole vector on every read.
+                let data = match (interp().hooks.altrep_dataptr)(object) {
+                    Ok(Some(pointer)) if pointer.is_null() => Ok(&[][..]),
+                    Ok(Some(pointer)) => {
+                        Ok(std::slice::from_raw_parts(pointer.cast::<$type>(), length(object)))
+                    }
+                    Ok(None) => materialize(object).map(|vector| vector.slice::<$type>()),
+                    Err(unwind) => Err(unwind),
+                };
+                match data {
+                    Ok(slice) => slice,
                     Err(unwind) => {
                         crate::unwind::park(unwind);
                         &[]

@@ -507,6 +507,15 @@ unsafe fn escape_storage(object: Sexp, pointer: *mut u8) {
     }
 }
 
+/// `DATAPTR_RO`, or `None` for a class without a `Dataptr` method, whose data only its
+/// element and region methods reach.
+pub unsafe fn readable_dataptr(object: Sexp) -> ApiResult<Option<*const u8>> {
+    if matches!(methods(object).dataptr, Method::Default) {
+        return Ok(None);
+    }
+    Ok(Some(dataptr(object, false)?.cast_const()))
+}
+
 pub unsafe fn dataptr_or_null(object: Sexp) -> ApiResult<*const c_void> {
     match methods(object).dataptr_or_null {
         Method::Native(method) => native(std::ptr::null(), |result| {

@@ -3458,8 +3458,8 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
         && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
             <= i32::MAX as f64;
     if use_integer {
-        let increment = if end >= start { 1 } else { -1 };
-        return integer_sequence(count, start as i32, increment);
+        let increment = if end >= start { 1.0 } else { -1.0 };
+        return sequence(SexpType::Integer, count, start, increment);
     }
     let result = alloc(SexpType::Real, count)?;
     let step = if start <= end { 1.0 } else { -1.0 };
@@ -3481,24 +3481,36 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     if count.is_nan() || count < 0.0 {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
-    integer_sequence(count as usize, 1, 1)
+    // Past the integer range the sequence is doubles, as GNU R's is.
+    let kind = if count > i32::MAX as f64 {
+        SexpType::Real
+    } else {
+        SexpType::Integer
+    };
+    sequence(kind, count as usize, 1.0, 1.0)
 }
 
-/// The integers `first`, `first + increment`, ... of length `count`, for an increment of 1 or
-/// -1. A sequence this long is compact when the host supports it, as GNU R's `1:n` is: code such
-/// as vctrs builds `seq_len(2^31 - 1)` only to read its length, and expanding that would allocate
-/// 8 GB. A shorter one is cheaper to expand at once than to read through ALTREP dispatch later.
-unsafe fn integer_sequence(count: usize, first: i32, increment: i32) -> R<Sexp> {
+/// The integers or doubles `first`, `first + increment`, ... of length `count`, for an
+/// increment of 1 or -1, which the caller keeps in the kind's range. A sequence this long is
+/// compact when the host supports it, as GNU R's `1:n` is: code such as vctrs builds
+/// `seq_len(2^31 - 1)` only to read its length, and expanding that would allocate 8 GB. A
+/// shorter one is cheaper to expand at once than to read through ALTREP dispatch later.
+unsafe fn sequence(kind: SexpType, count: usize, first: f64, increment: f64) -> R<Sexp> {
     const COMPACT_LENGTH: usize = 1 << 20;
     if count >= COMPACT_LENGTH
-        && let Some(sequence) = (interp().hooks.compact_intseq)(count, first, increment)?
+        && let Some(sequence) = (interp().hooks.compact_sequence)(kind, count, first, increment)?
     {
         return Ok(sequence);
     }
-    let result = alloc(SexpType::Integer, count)?;
-    let (first, increment) = (first as i64, increment as i64);
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = (first + increment * index as i64) as i32;
+    let result = alloc(kind, count)?;
+    if kind == SexpType::Integer {
+        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+            *slot = (first + increment * index as f64) as i32;
+        }
+    } else {
+        for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
+            *slot = first + increment * index as f64;
+        }
     }
     Ok(result)
 }
@@ -3740,7 +3752,18 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .filter(|&value| value != NA_INTEGER)
         .unwrap_or(1)
         .max(0) as usize;
-    if !is_replicable(object) && !matches!(object.kind(), SexpType::Nil | SexpType::Pairlist) {
+    if object.kind() == SexpType::Pairlist {
+        return Err(call.error("replication of pairlists is defunct"));
+    }
+    // GNU R returns an empty `x` before it checks the type, so `rep(new.env(), 2)` is the
+    // environment itself.
+    if !is_replicable(object) && object != nil() && length(object) == 0 {
+        if length_out.is_some_and(|out| out > 0.0) {
+            return Err(call.error("cannot set length of non-(vector or list)"));
+        }
+        return Ok(object);
+    }
+    if !is_replicable(object) && object != nil() {
         return Err(call.error(format!(
             "attempt to replicate an object of type '{}'",
             object.kind().name()

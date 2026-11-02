@@ -134,9 +134,14 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
-    /// A compact integer sequence (GNU R's `compact_intseq`) of a length, a first element and
-    /// an increment of 1 or -1, or `None` when the host has no compact sequences.
-    pub compact_intseq: unsafe fn(usize, i32, i32) -> R<Option<Sexp>>,
+    /// A compact sequence (GNU R's `compact_intseq` or `compact_realseq`) of an integer or
+    /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
+    /// host has no compact sequences.
+    pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
+    /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
+    /// when the class has none. A class may expand into storage it keeps, as compact sequences
+    /// do, so repeated reads do not copy the vector each time.
+    pub altrep_dataptr: unsafe fn(Sexp) -> R<Option<*const u8>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -388,7 +393,8 @@ pub fn default_hooks() -> Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
-        compact_intseq: |_, _, _| Ok(None),
+        compact_sequence: |_, _, _, _| Ok(None),
+        altrep_dataptr: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),

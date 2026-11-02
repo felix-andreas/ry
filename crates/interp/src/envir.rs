@@ -981,6 +981,12 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
         for symbol in env_symbols(what, true, false) {
             if let Some(cell) = heap.frame_cell(what, symbol) {
                 heap.define(env, symbol, cell.cdr())?;
+                // An active binding stays active, so reading the copy still calls its function.
+                if cell.has_gp(gp::ACTIVE_BINDING)
+                    && let Some(copy) = heap.frame_cell(env, symbol)
+                {
+                    copy.set_gp_bits(gp::ACTIVE_BINDING, true);
+                }
             }
         }
     }

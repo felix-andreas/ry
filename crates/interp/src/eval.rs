@@ -1918,8 +1918,10 @@ pub struct LoopContext {
     /// The number of call frames when the loop started. A jump at the same depth was written
     /// in the loop's body, or in an `if` or `{` inside it.
     depth: usize,
-    /// Whether a jump from another call, such as `eval(quote(break))`, reaches the loop.
-    foreign_jumps: bool,
+    /// The loop's body, which decides whether a jump from another call, such as
+    /// `eval(quote(break))`, reaches the loop. Such jumps are rare, so the body is only scanned
+    /// when one happens.
+    body: Sexp,
 }
 
 /// Runs a loop of the tree-walking interpreter with its environment on the stack of loops a
@@ -1929,7 +1931,7 @@ unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Se
     let context = LoopContext {
         env: call.env,
         depth: interp().frames.len(),
-        foreign_jumps: !skips_loop_context(body, true),
+        body,
     };
     interp().loops.push(context);
     let result = run(call);
@@ -1937,11 +1939,6 @@ unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Se
     result
 }
 
-/// GNU R's compiler (`checkSkipLoopCntxt`) gives a loop a context, which a `break` or `next`
-/// from another call can find, only when the body calls `eval`, `evalq` or `source`, or writes
-/// `break` or `next` inside a call other than `{`, `(` and `if`. Rscript compiles top-level
-/// loops too, so a jump from a called function into a loop without one is an error there, and
-/// ry follows the compiled behavior everywhere.
 /// Whether `expression` holds a loop, outside nested functions, that GNU R's compiler gives a
 /// context.
 unsafe fn has_loop_context(expression: Sexp) -> bool {
@@ -1974,6 +1971,12 @@ unsafe fn has_loop_context(expression: Sexp) -> bool {
     false
 }
 
+/// Whether a loop with this body runs without a context. GNU R's compiler
+/// (`checkSkipLoopCntxt`) gives a loop a context, which a `break` or `next`
+/// from another call can find, only when the body calls `eval`, `evalq` or `source`, or writes
+/// `break` or `next` inside a call other than `{`, `(` and `if`. Rscript compiles top-level
+/// loops too, so a jump from a called function into a loop without one is an error there, and
+/// ry follows the compiled behavior everywhere.
 unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
     if expression.kind() != SexpType::Language {
         return true;
@@ -2026,7 +2029,10 @@ unsafe fn reachable_loop(env: Sexp) -> R<()> {
     let in_loop = state
         .loops
         .iter()
-        .any(|context| context.env == env && (context.foreign_jumps || context.depth == depth));
+        .any(|context| {
+            context.env == env
+                && (context.depth == depth || !skips_loop_context(context.body, true))
+        });
     let in_closure_body = state.frames.iter().enumerate().any(|(index, frame)| {
         frame.env == env
             && frame.function.kind() == SexpType::Closure
