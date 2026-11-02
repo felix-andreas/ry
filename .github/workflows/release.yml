@@ -1,0 +1,136 @@
+# Staged here because the agents' token cannot write .github/workflows. Activate it, together with
+# the CI workflow beside it, from the repository root:
+#
+#   git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
+#
+# A release runs when a version tag is pushed (`git tag 0.4.0-beta && git push origin 0.4.0-beta`)
+# or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
+# and smoke-tests every archive without publishing anything. The checklist and the one-time
+# Marketplace setup are in docs/src/content/docs/contributing/releasing.md. Past runner setup,
+# every step runs a `just` recipe or tools/smoke-test.sh, so each one also runs locally.
+name: Release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without a leading v (must equal workspace.package.version)"
+        required: true
+      publish:
+        description: "Publish the GitHub release and the VS Code extension (unticked builds and smoke-tests only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported runner, so the Linux archive needs no newer glibc than 2.35.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          # gnullvm links the UCRT, as Rtools-built packages do, so ry.exe, R.dll and package DLLs
+          # share one C runtime.
+          - { os: windows-latest, target: x86_64-pc-windows-gnullvm }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: versions match the release
+        run: just release-check "$VERSION"
+      # Reads rust-toolchain.toml, so the release builds with the pinned nightly. An empty
+      # `rustflags` keeps the action's `-D warnings` from failing a release over a warning.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          target: ${{ matrix.target }}
+      # GNU R for the smoke test: ry's runtime reads base R from an installation.
+      - uses: r-lib/actions/setup-r@v2
+      # The gnullvm target needs an LLVM mingw toolchain: clang to compile libr's C and drive lld,
+      # the UCRT import libraries, llvm-objdump for `just package`'s import check, and windres for
+      # ry.exe's UTF-8 manifest (crates/ry/build.rs). MSYS2's clang64 environment is that
+      # toolchain. It goes on PATH after setup-r, so its clang comes before anything Rtools puts
+      # there.
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        if: runner.os == 'Windows'
+        with:
+          msystem: CLANG64
+          update: false
+          install: mingw-w64-clang-x86_64-toolchain
+      - name: mingw toolchain
+        if: runner.os == 'Windows'
+        run: |
+          printf '%s\n' '${{ steps.msys2.outputs.msys2-location }}\clang64\bin' >> "$GITHUB_PATH"
+          {
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=clang"
+            echo "CC_x86_64_pc_windows_gnullvm=clang"
+            echo "AR_x86_64_pc_windows_gnullvm=llvm-ar"
+            echo "WINDRES=llvm-windres"
+          } >> "$GITHUB_ENV"
+      # libR links zlib, bzip2 and xz on Linux, as GNU R's does (crates/libr/build.rs).
+      - name: link libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+      - name: package
+        run: just package "$VERSION" ${{ matrix.target }}
+      # RY_SMOKE_PACKAGES installs jsonlite with GNU R and loads it under `ry run`: a CRAN binary on
+      # macOS, which proves ry rebinds a GNU R package's libR to its own runtime, a CRAN binary
+      # built with Rtools on Windows, which proves such a DLL binds to ry's R.dll, and a source
+      # build on Linux.
+      - name: smoke test
+        env:
+          RY_SMOKE_PACKAGES: "1"
+        run: tools/smoke-test.sh "release/$VERSION/ry-${{ matrix.target }}".*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ry-${{ matrix.target }}
+          path: |
+            release/${{ env.VERSION }}/ry-${{ matrix.target }}.tar.gz
+            release/${{ env.VERSION }}/ry-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      # Creates the GitHub release (and its tag, for a run started by hand).
+      contents: write
+      # Lets vsce trade a GitHub OIDC token for a short-lived Marketplace credential (trusted
+      # publishing), so no Marketplace token is stored in the repository.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: oven-sh/setup-bun@v2
+      # vsce 4.1, which publishes with trusted publishing, needs node 22.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          path: release/${{ env.VERSION }}
+          merge-multiple: true
+      - name: package the VS Code extension
+        run: just release-assets "$VERSION"
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: just release-publish "$VERSION"

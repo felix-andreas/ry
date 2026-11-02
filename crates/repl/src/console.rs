@@ -36,7 +36,7 @@ use {
     },
     syntax::{
         SyntaxKind::{self, *},
-        TextSize, lex,
+        input_is_unfinished, lex, parse,
     },
 };
 
@@ -187,8 +187,8 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
         *lock_console() = Some(Console {
             editor,
             pending,
-            typeahead: VecDeque::new(),
-            typeahead_partial: String::new(),
+            typeahead: Typeahead::default(),
+            keys: KeyDecoder::default(),
             hook_bytes: 0,
             batch: options.batch,
             completer,
@@ -230,10 +230,10 @@ struct Console {
     /// Accepted input R has not consumed; handed over in buffer-sized chunks.
     pending: VecDeque<u8>,
     /// Lines typed while no prompt was up, run in order before the editor prompts again.
-    typeahead: VecDeque<String>,
-    /// The unfinished last typed-ahead line. It stays here, not in the editor, until the editor
-    /// prompts, so text typed after it joins it instead of running ahead of it.
-    typeahead_partial: String,
+    typeahead: Typeahead,
+    /// Decodes the bytes typed while the editor did not hold the terminal. It lives across
+    /// reads, so a key or a CRLF split between two reads still decodes as one.
+    keys: KeyDecoder,
     /// How many bytes at the front of `pending` are a hook's code, which R must receive as a
     /// chunk of its own: ry's runtime parses a chunk whole, so a syntax error in the typed line
     /// would otherwise cancel the hook's code too, and shift the line's error position.
@@ -318,18 +318,24 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 // input this console holds the same way.
                 if take_interrupt(console.ry_runtime) {
                     console.typeahead.clear();
-                    console.typeahead_partial.clear();
+                    console.keys.clear();
                 }
-                if console.typeahead.is_empty() {
-                    match take_typed_line() {
-                        Some(text) => queue_typeahead(console, &text),
-                        None => console.typeahead_partial.clear(),
+                if !console.typeahead.has_line() {
+                    match take_typed_line(&mut console.keys) {
+                        Some(text) => console.typeahead.push(&text),
+                        None => console.typeahead.clear(),
                     }
                 }
             }
             let signal = if console.piped {
+                // `R --no-echo` shows the prompt of `readline()` or `menu()` on a pipe too, and
+                // gives its own prompts as empty. ry's runtime reads only at the top level.
+                if !console.ry_runtime && !prompt_text.is_empty() && !console.held {
+                    print!("{prompt_text}");
+                    stdout().flush().ok();
+                }
                 Ok(read_piped_line())
-            } else if let Some(line) = console.typeahead.pop_front() {
+            } else if let Some(line) = console.typeahead.pop_line() {
                 // R prints its output in cooked mode, where `\n` returns the carriage. A failure
                 // leaves output misaligned and nothing to report it to.
                 terminal::disable_raw_mode().ok();
@@ -345,7 +351,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                     .ok();
                 Ok(Signal::Success(line))
             } else {
-                let partial = std::mem::take(&mut console.typeahead_partial);
+                let partial = console.typeahead.take_partial();
                 if !partial.is_empty() {
                     console
                         .editor
@@ -356,11 +362,8 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 // runs, so they run after it.
                 if matches!(signal, Ok(Signal::Success(_))) {
                     match take_editor_events() {
-                        Some(text) => queue_typeahead(console, &text),
-                        None => {
-                            console.typeahead.clear();
-                            console.typeahead_partial.clear();
-                        }
+                        Some(text) => console.typeahead.push(&text),
+                        None => console.typeahead.clear(),
                     }
                 }
                 signal
@@ -407,31 +410,162 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 Ok(Signal::CtrlD) | Err(_) => return 0,
             }
         }
-        let mut written = capacity.min(console.pending.len());
-        if console.hook_bytes > 0 {
-            written = written.min(console.hook_bytes);
-            console.hook_bytes -= written;
-        }
-        for (index, byte) in console.pending.drain(..written).enumerate() {
-            unsafe { *buffer.add(index) = byte };
-        }
+        // SAFETY: R's buffer holds `length` bytes, and `capacity` leaves room for the NUL.
+        let chunk = unsafe { slice::from_raw_parts_mut(buffer, capacity) };
+        let written = take_chunk(&mut console.pending, &mut console.hook_bytes, chunk);
         unsafe { *buffer.add(written) = 0 };
         1
     }
 }
 
-/// Splits typed-ahead text into the lines that run at the coming prompts and the unfinished
-/// rest, which joins the unfinished line already held.
-fn queue_typeahead(console: &mut Console, text: &str) {
-    let text = std::mem::take(&mut console.typeahead_partial) + text;
-    // A pasted `\r\n` ends one line, not two.
-    let mut lines: Vec<String> = text
-        .replace("\r\n", "\n")
-        .split(['\n', '\r'])
-        .map(str::to_owned)
-        .collect();
-    console.typeahead_partial = lines.pop().unwrap_or_default();
-    console.typeahead.extend(lines);
+/// Moves the next chunk of accepted input into `buffer` and returns its length. A hook's code,
+/// the first `hook_bytes` of `pending`, goes in chunks of its own.
+pub fn take_chunk(pending: &mut VecDeque<u8>, hook_bytes: &mut usize, buffer: &mut [u8]) -> usize {
+    let mut written = buffer.len().min(pending.len());
+    if *hook_bytes > 0 {
+        written = written.min(*hook_bytes);
+        *hook_bytes -= written;
+    }
+    for (slot, byte) in buffer.iter_mut().zip(pending.drain(..written)) {
+        *slot = byte;
+    }
+    written
+}
+
+/// Text typed ahead of the prompt, split into the lines that run at the coming prompts and the
+/// unfinished rest.
+#[derive(Debug, Default)]
+pub struct Typeahead {
+    lines: VecDeque<String>,
+    /// The unfinished last line. It stays here, not in the editor, until the editor prompts, so
+    /// text typed after it joins it instead of running ahead of it.
+    partial: String,
+    /// The last text ended in `\r`, so a `\n` that starts the next one completes that CRLF
+    /// instead of ending an empty line.
+    after_carriage_return: bool,
+}
+
+impl Typeahead {
+    /// Adds typed text, which continues the unfinished line held so far.
+    pub fn push(&mut self, text: &str) {
+        let mut rest = text;
+        if std::mem::take(&mut self.after_carriage_return) {
+            rest = rest.strip_prefix('\n').unwrap_or(rest);
+        }
+        self.after_carriage_return = rest.ends_with('\r');
+        while let Some(end) = rest.find(['\n', '\r']) {
+            let mut line = std::mem::take(&mut self.partial);
+            line.push_str(&rest[..end]);
+            self.lines.push_back(line);
+            let ending = if rest[end..].starts_with("\r\n") {
+                2
+            } else {
+                1
+            };
+            rest = &rest[end + ending..];
+        }
+        self.partial.push_str(rest);
+    }
+
+    pub fn has_line(&self) -> bool {
+        !self.lines.is_empty()
+    }
+
+    pub fn pop_line(&mut self) -> Option<String> {
+        self.lines.pop_front()
+    }
+
+    /// Hands the unfinished line to the editor.
+    pub fn take_partial(&mut self) -> String {
+        std::mem::take(&mut self.partial)
+    }
+
+    pub fn clear(&mut self) {
+        *self = Typeahead::default();
+    }
+}
+
+/// Decodes the bytes a raw-mode terminal delivers into the line they type, keeping printable
+/// text and dropping arrow and function keys whole.
+#[derive(Debug, Default)]
+pub struct KeyDecoder {
+    line: Vec<u8>,
+    escape: Escape,
+    /// The last line ended at `\r`, so a `\n` right after it is the rest of that CRLF.
+    after_carriage_return: bool,
+}
+
+/// What a byte did to the line a [`KeyDecoder`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedKey {
+    /// The line continues.
+    Pending,
+    /// The line ended; [`KeyDecoder::take_line`] returns it with a final `\n`.
+    LineEnd,
+    /// Ctrl-C: the decoder dropped what it held.
+    Interrupt,
+}
+
+impl KeyDecoder {
+    pub fn push(&mut self, byte: u8) -> TypedKey {
+        // A control byte cannot be part of a sequence, so a stray ESC never swallows a line end
+        // or a Ctrl-C.
+        if !matches!(self.escape, Escape::None) && byte < 0x20 {
+            self.escape = Escape::None;
+        }
+        let after_carriage_return = std::mem::take(&mut self.after_carriage_return);
+        self.escape = match (self.escape, byte) {
+            // An arrow or function key pressed ahead of the prompt is dropped whole instead of
+            // leaving `[A` in the line.
+            (Escape::None, 0x1b) => Escape::Start,
+            (Escape::Start, b'[') => Escape::Csi,
+            (Escape::Start, b'O') => Escape::Ss3,
+            (Escape::Start | Escape::Ss3, _) => Escape::None,
+            (Escape::Csi, 0x40..=0x7e) => Escape::None,
+            (Escape::Csi, _) => Escape::Csi,
+            (Escape::None, b'\n') if after_carriage_return => Escape::None,
+            (Escape::None, b'\n' | b'\r') => {
+                self.line.push(b'\n');
+                self.after_carriage_return = byte == b'\r';
+                return TypedKey::LineEnd;
+            }
+            (Escape::None, 0x03) => {
+                self.clear();
+                return TypedKey::Interrupt;
+            }
+            (Escape::None, 0x7f | 0x08) => {
+                while self.line.pop().is_some_and(|byte| byte & 0xc0 == 0x80) {}
+                Escape::None
+            }
+            (Escape::None, b'\t' | 0x20..) => {
+                self.line.push(byte);
+                Escape::None
+            }
+            (Escape::None, _) => Escape::None,
+        };
+        TypedKey::Pending
+    }
+
+    /// The text decoded since the last call: a whole line ending in `\n`, or the unfinished one.
+    pub fn take_line(&mut self) -> String {
+        let line = String::from_utf8_lossy(&self.line).into_owned();
+        self.line.clear();
+        line
+    }
+
+    pub fn clear(&mut self) {
+        *self = KeyDecoder::default();
+    }
+}
+
+/// Where a typed escape sequence has got to, so its bytes are dropped together.
+#[derive(Debug, Clone, Copy, Default)]
+enum Escape {
+    #[default]
+    None,
+    Start,
+    Csi,
+    Ss3,
 }
 
 /// Takes one line typed while the editor did not hold the terminal, or the unfinished line if
@@ -447,60 +581,24 @@ fn queue_typeahead(console: &mut Console, text: &str) {
 /// end in `\n` again, and the editor submits only the first line of a batch that arrives
 /// together.
 #[cfg(unix)]
-fn take_typed_line() -> Option<String> {
+fn take_typed_line(keys: &mut KeyDecoder) -> Option<String> {
     if terminal::enable_raw_mode().is_err() {
         return Some(String::new());
     }
-    let mut line = Vec::new();
-    let mut escape = Escape::None;
     while let Some(byte) = read_ready_byte() {
-        // A control byte cannot be part of a sequence, so a stray ESC never swallows a line end
-        // or a Ctrl-C.
-        if matches!(escape, Escape::Csi) && byte < 0x20 {
-            escape = Escape::None;
-        }
-        escape = match (escape, byte) {
-            // An arrow or function key pressed ahead of the prompt is dropped whole instead of
-            // leaving `[A` in the line.
-            (Escape::None, 0x1b) => Escape::Start,
-            (Escape::Start, b'[') => Escape::Csi,
-            (Escape::Start, b'O') => Escape::Ss3,
-            (Escape::Start | Escape::Ss3, _) => Escape::None,
-            (Escape::Csi, 0x40..=0x7e) => Escape::None,
-            (Escape::Csi, _) => Escape::Csi,
-            (Escape::None, b'\n' | b'\r') => {
-                line.push(b'\n');
-                break;
-            }
-            (Escape::None, 0x03) => {
+        match keys.push(byte) {
+            TypedKey::Pending => {}
+            TypedKey::LineEnd => break,
+            TypedKey::Interrupt => {
                 // The terminal's own Ctrl-C flushes its input; a Ctrl-C typed while it was raw
                 // reaches here as a key instead, and cancels the same input.
                 // SAFETY: `tcflush` only discards the terminal's pending input.
                 unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
                 return None;
             }
-            (Escape::None, 0x7f | 0x08) => {
-                while line.pop().is_some_and(|byte| byte & 0xc0 == 0x80) {}
-                Escape::None
-            }
-            (Escape::None, b'\t' | 0x20..) => {
-                line.push(byte);
-                Escape::None
-            }
-            (Escape::None, _) => Escape::None,
-        };
+        }
     }
-    Some(String::from_utf8_lossy(&line).into_owned())
-}
-
-/// Where a typed escape sequence has got to, so its bytes are dropped together.
-#[cfg(unix)]
-#[derive(Clone, Copy)]
-enum Escape {
-    None,
-    Start,
-    Csi,
-    Ss3,
+    Some(keys.take_line())
 }
 
 /// One byte the terminal already holds, without waiting for more.
@@ -523,7 +621,7 @@ fn read_ready_byte() -> Option<u8> {
 
 /// Windows delivers keys as console events rather than bytes, so typeahead is taken whole.
 #[cfg(not(unix))]
-fn take_typed_line() -> Option<String> {
+fn take_typed_line(_keys: &mut KeyDecoder) -> Option<String> {
     if terminal::enable_raw_mode().is_err() {
         return Some(String::new());
     }
@@ -806,71 +904,108 @@ impl Validator for LexerValidator {
     }
 }
 
-/// Incomplete only when provably unfinished; a false "complete" is safe because
-/// R's parser asks for continuation itself.
-fn input_is_complete(text: &str) -> bool {
-    if text.trim().is_empty() {
-        return true;
-    }
-    let (tokens, errors) = lex(text);
-    let length = TextSize::of(text);
-    if errors
+/// Whether the editor submits `text` rather than open a continuation line: R's console rule,
+/// so a command R would report as an error is submitted too, and R reports it.
+pub fn input_is_complete(text: &str) -> bool {
+    // R's lexer reads an unterminated quote to the end of the input, and R then asks for more
+    // unless the code before the quote is already an error. The syntax crate's lexer cuts such
+    // a quote at its line break instead, which suits an editor but not this question.
+    let Some(start) = open_quote_start(text) else {
+        return !input_is_unfinished(text);
+    };
+    let code = &text[..start];
+    let has_error = parse(code)
+        .errors()
         .iter()
-        .any(|error| error.range.end() == length && !error.range.is_empty())
-    {
-        return false;
-    }
-    let mut depth: i64 = 0;
-    let mut last_significant: Option<SyntaxKind> = None;
-    for token in &tokens {
-        match token.kind {
-            L_PAREN | L_BRACE | L_BRACKET | L_BRACKET2 => depth += 1,
-            R_PAREN | R_BRACE | R_BRACKET => depth -= 1,
+        .any(|error| !error.in_annotation);
+    has_error && !input_is_unfinished(code)
+}
+
+/// Where the string, backtick name or raw string still open at the end of `text` starts, read
+/// as R's lexer reads it: comments and `%op%` operators hide quotes, and a backslash escapes
+/// the character after it.
+fn open_quote_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let start = index;
+        index += 1;
+        match byte {
+            b'#' => {
+                while bytes.get(index).is_some_and(|&byte| byte != b'\n') {
+                    index += 1;
+                }
+            }
+            b'%' => {
+                while bytes
+                    .get(index)
+                    .is_some_and(|&byte| byte != b'%' && byte != b'\n')
+                {
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'r' | b'R'
+                if matches!(bytes.get(index), Some(b'"' | b'\''))
+                    && !start
+                        .checked_sub(1)
+                        .and_then(|previous| bytes.get(previous))
+                        .is_some_and(|&byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_')
+                        }) =>
+            {
+                let quote = bytes[index];
+                let mut cursor = index + 1;
+                let dashes = bytes[cursor..]
+                    .iter()
+                    .take_while(|&&byte| byte == b'-')
+                    .count();
+                cursor += dashes;
+                let close = match bytes.get(cursor) {
+                    Some(b'(') => b')',
+                    Some(b'[') => b']',
+                    Some(b'{') => b'}',
+                    // A malformed raw string is R's error, not an open quote.
+                    _ => {
+                        index = cursor;
+                        continue;
+                    }
+                };
+                let mut closer = vec![close];
+                closer.extend(std::iter::repeat_n(b'-', dashes));
+                closer.push(quote);
+                match bytes[cursor..]
+                    .windows(closer.len())
+                    .position(|window| window == closer)
+                {
+                    Some(offset) => index = cursor + offset + closer.len(),
+                    None => return Some(start),
+                }
+            }
+            // An identifier can contain `r` followed by a quote only at its end, so skipping the
+            // whole identifier keeps `bar"x"` from reading as a raw string.
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_') => {
+                while bytes.get(index).is_some_and(|&byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_')
+                }) {
+                    index += 1;
+                }
+            }
+            b'"' | b'\'' | b'`' => loop {
+                match bytes.get(index) {
+                    None => return Some(start),
+                    Some(b'\\') => index += 2,
+                    Some(&closing) if closing == byte => {
+                        index += 1;
+                        break;
+                    }
+                    Some(_) => index += 1,
+                }
+            },
             _ => {}
         }
-        if !matches!(token.kind, WHITESPACE | NEWLINE | COMMENT) {
-            last_significant = Some(token.kind);
-        }
     }
-    if depth > 0 {
-        return false;
-    }
-    !matches!(
-        last_significant,
-        Some(
-            PLUS | MINUS
-                | STAR
-                | SLASH
-                | CARET
-                | SPECIAL
-                | PIPE_GREATER
-                | COLON
-                | LESS
-                | GREATER
-                | LESS_EQ
-                | GREATER_EQ
-                | EQ2
-                | BANG_EQ
-                | AMP
-                | AMP2
-                | PIPE
-                | PIPE2
-                | TILDE
-                | QUESTION
-                | BANG
-                | LESS_MINUS
-                | LESS2_MINUS
-                | EQ
-                | MINUS_GREATER
-                | MINUS_GREATER2
-                | COLON_EQ
-                | COMMA
-                | DOLLAR
-                | AT
-                | COLON2
-                | COLON3
-        )
-    )
+    None
 }
 
 #[cfg(test)]
@@ -890,6 +1025,11 @@ mod tests {
             "# just a comment",
             "return x", // broken, but FINISHED, so R gets to report it
             "]",        // stray closer: R's error, not an endless prompt
+            // R's errors, which the console once kept prompting for.
+            "<-",
+            "1,",
+            ")((",
+            "x <- \"abc\ndef\" , (",
         ] {
             assert!(input_is_complete(text), "expected complete: {text:?}");
         }
@@ -908,6 +1048,12 @@ mod tests {
             "x$",
             "dplyr::",
             "\"unterminated",
+            // R reads an open quote to the end of the input, across line breaks.
+            "s <- \"line one\nline two",
+            "x <- 'it''s",
+            "r\"(raw\n",
+            "`odd\nname",
+            "# a ' quote\nf(\"a",
         ] {
             assert!(!input_is_complete(text), "expected incomplete: {text:?}");
         }

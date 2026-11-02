@@ -111,9 +111,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_source_helpers(state, helpers)
   }
   applied <- TRUE
-  # The names this load rebound or removed, which `ry test` reruns the tests of first. `NULL`
-  # when the load ran code, which may have changed anything.
-  state$changed <- if (plan$full) NULL else plan$touched
+  # The names this load rebound, removed or changed the S3 dispatch of, which `ry test` reruns
+  # the tests of first. `NULL` when the load ran code, which may have changed anything.
+  state$changed <- if (plan$full) NULL else plan$changed
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {

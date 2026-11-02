@@ -126,7 +126,11 @@ unsafe fn paste(
     let recycle_zero = flag(recycle_zero);
     let mut columns = Vec::with_capacity(length(list));
     for index in 0..length(list) {
-        columns.push(as_character(list.element(index), call.env)?);
+        // Every element of a column is read, so a deferred column converts in one batch.
+        columns.push(values::materialize(as_character(
+            list.element(index),
+            call.env,
+        )?)?);
     }
     let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
     let mut count = lengths.iter().copied().max().unwrap_or(0);
@@ -271,6 +275,11 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_nzchar(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "keepNA"])?;
+    // The empty symbol, as `lapply` hands over an empty argument taken from a call, evaluates to
+    // `R_MissingArg`, which GNU R coerces to `""` rather than reporting a missing argument.
+    if matched[0] == Some(values::missing_arg()) {
+        return values::scalar_logical(0);
+    }
     let x = require(matched[0], "x")?;
     let keep_na = matched[1].is_some_and(|value| flag(value));
     if values::inherits(x, "factor") {

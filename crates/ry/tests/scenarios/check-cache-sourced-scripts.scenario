@@ -1,0 +1,59 @@
+# A file that `source()`s a script reads the script's definitions, so the check record must
+# recheck it when the script changes, even when the script is not among the files a run checks:
+# a single-file check of the sourcing script, or a package-only check that skips the tests.
+
+file ry.toml
+| [check]
+| strict = true
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file R/area.R
+| #: fn(x: double) -> double
+| area <- function(x) x * x
+file scripts/main.R
+| source("helpers.R")
+| print(doubled(2))
+file scripts/helpers.R
+| #: fn(x: double) -> double
+| doubled <- function(x) x * 2
+file tests/testthat/test-area.R
+| source("../../scripts/helpers.R")
+| stopifnot(area(doubled(1)) == 4)
+
+run ry check scripts/main.R
+expect exit 0
+
+run ry check
+expect exit 0
+
+# The sourced script loses the name both readers use.
+file scripts/helpers.R
+| #: fn(x: double) -> double
+| tripled <- function(x) x * 3
+
+run ry check scripts/main.R
+expect exit 1
+expect stderr "doubled"
+
+run ry check R
+expect exit 0
+
+run ry check
+expect exit 1
+expect stderr "test-area.R"
+
+# The name comes back while only package checks run, and each reader sees it.
+file scripts/helpers.R
+| #: fn(x: double) -> double
+| doubled <- function(x) x * 2
+
+run ry check R
+expect exit 0
+
+run ry check scripts/main.R
+expect exit 0
+
+run ry check
+expect exit 0
+expect stdout "no problems"

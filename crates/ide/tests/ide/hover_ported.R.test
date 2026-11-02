@@ -777,12 +777,13 @@ f <- function(a, b) {
   x <- $0c(a, b)
 }
 #++++
-hover 29..30: c
-hover-definition: installed c from base, stats, utils, methods, graphics, grDevices, datasets
-definition: installed c from base, stats, utils, methods, graphics, grDevices, datasets
+hover 29..30: c: fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
+hover-definition: package base (1 declaration(s), declared in stub source base at `c`)
+definition: stub source base at `c`
 references: none
 rename: none
-signature: none
+signature: fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
+parameters: [...: Any] | [recursive]: logical | [use.names]: logical
 completion (128+): c, a, b, x, f, function, break, else
 
 #---- base_argument_name

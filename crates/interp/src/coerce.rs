@@ -545,21 +545,9 @@ pub unsafe fn coerce_atomic(
                 };
             }
         }
-        SexpType::String if source == SexpType::Real => {
+        SexpType::String if matches!(source, SexpType::Real | SexpType::Integer) => {
             let object = values::materialize(object)?;
-            let scipen = crate::format::Settings::current_scipen();
-            for index in 0..count {
-                let value = values::reals(object)[index];
-                if is_na_real(value) {
-                    values::set_elt(result, index, na_string());
-                } else {
-                    values::set_mkchar(result, index, &real_as_text(value, scipen))?;
-                }
-            }
-        }
-        SexpType::String if source == SexpType::Integer => {
-            let object = values::materialize(object)?;
-            integers_as_strings(values::ints(object), result)?;
+            write_number_strings(object, result, crate::format::Settings::current_scipen())?;
         }
         SexpType::String => {
             for index in 0..count {
@@ -622,6 +610,38 @@ pub unsafe fn coerce_atomic(
         }
     }
     Ok(result)
+}
+
+/// Writes `as.character` of the integer or double vector `numbers` into the string vector
+/// `result`, of the same length, formatting doubles under scientific-notation penalty `scipen`.
+pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> R<()> {
+    if numbers.kind() == SexpType::Real {
+        for (index, &value) in values::reals(numbers).iter().enumerate() {
+            if is_na_real(value) {
+                values::set_elt(result, index, na_string());
+            } else {
+                values::set_mkchar(result, index, &real_as_text(value, scipen))?;
+            }
+        }
+        return Ok(());
+    }
+    integers_as_strings(values::ints(numbers), result)
+}
+
+/// Element `index` of the integer or double vector `numbers` as `as.character` gives it, with
+/// doubles formatted under scientific-notation penalty `scipen`.
+pub unsafe fn number_as_charsxp(numbers: Sexp, index: usize, scipen: i32) -> R<Sexp> {
+    if numbers.kind() == SexpType::Real {
+        real_as_charsxp(values::reals(numbers)[index], scipen)
+    } else {
+        match values::ints(numbers)[index] {
+            NA_INTEGER => Ok(na_string()),
+            value => {
+                Ok(crate::heap()
+                    .mk_char(integer_digits(value, &mut [0_u8; 11]), Encoding::Native)?)
+            }
+        }
+    }
 }
 
 fn parse_complex(text: &str) -> Option<Rcomplex> {
@@ -798,8 +818,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("is.logical", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Logical)
     }),
+    // A factor is stored as integers, but GNU R does not count it as an integer vector.
     builtin("is.integer", 1, |call| unsafe {
-        scalar_bool(call.arg(0).kind() == SexpType::Integer)
+        let x = call.arg(0);
+        scalar_bool(x.kind() == SexpType::Integer && !values::inherits(x, "factor"))
     }),
     builtin("is.double", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Real)
@@ -917,6 +939,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
 ];
 
+/// The shortest number vector `as.character` converts lazily. Below it, the conversion costs
+/// less than the deferred vector's own allocations.
+const DEFERRED_STRINGS_MINIMUM: usize = 256;
+
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
     let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
@@ -932,6 +958,17 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         return factor_as_character(object).inspect(|&result| {
             values::clear_attributes(result);
         });
+    }
+    // As in GNU R, a long number vector without attributes converts to character lazily, so
+    // the strings are made only when something reads them.
+    if kind == SexpType::String
+        && matches!(object.kind(), SexpType::Integer | SexpType::Real)
+        && !values::has_attributes(object)
+        && !object.is_altrep()
+        && length(object) >= DEFERRED_STRINGS_MINIMUM
+        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+    {
+        return Ok(deferred);
     }
     let result = match object.kind() {
         SexpType::Symbol | SexpType::Language | SexpType::Pairlist if kind == SexpType::String => {
