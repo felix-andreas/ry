@@ -754,8 +754,10 @@ pub fn escaped_byte(character: char) -> Option<u8> {
 /// `text` with every private-use stand-in turned back into its byte, or `None` when it holds
 /// none.
 pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
-    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8.
-    if !text.as_bytes().contains(&0xEF)
+    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8, so ASCII text, the common
+    // case, needs only the vectorized ASCII scan rather than a `memchr`.
+    if text.is_ascii()
+        || !text.as_bytes().contains(&0xEF)
         || !text
             .chars()
             .any(|character| escaped_byte(character).is_some())

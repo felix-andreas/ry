@@ -751,11 +751,18 @@ impl Heap {
         if bytes.len() > i32::MAX as usize {
             return Err(HeapError::StringTooLong);
         }
-        if bytes.contains(&0) {
+        // One pass answers both questions. Most strings are a few bytes long, where `memchr`'s
+        // setup costs more than this loop, which the compiler vectorizes.
+        let (mut any_nul, mut high_bits) = (false, 0u8);
+        for &byte in bytes {
+            any_nul |= byte == 0;
+            high_bits |= byte;
+        }
+        if any_nul {
             let text = String::from_utf8_lossy(bytes).replace('\0', "\\0");
             return Err(HeapError::EmbeddedNul { text });
         }
-        let ascii = bytes.is_ascii();
+        let ascii = high_bits < 0x80;
         let bits = if ascii { gp::ASCII } else { encoding.gp_bits() };
         let hash = strings::hash(bytes, bits & gp::ENCODING);
         if let Some(found) = self.strings.find(hash, bytes, bits & gp::ENCODING) {
