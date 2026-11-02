@@ -110,6 +110,18 @@ pub enum BrowseInput {
     Attach(Box<dyn Transport>, Value),
 }
 
+/// Blocks until the console has handled the close of `count` connections in all, so a client
+/// that dropped one knows when the console has let go of it, the debugger included, without
+/// polling a clock.
+pub fn wait_for_closed_connections(count: u64) {
+    platform::wait_for_closed_connections(count);
+}
+
+/// The number of connections whose close the console has handled.
+pub fn closed_connections() -> u64 {
+    platform::closed_connections()
+}
+
 /// Wakes the console's wait for input, so it answers the help server's queued requests.
 pub fn wake() {
     platform::wake();
@@ -411,6 +423,21 @@ mod platform {
     static STASHED_INPUT: Mutex<Option<Option<String>>> = Mutex::new(None);
     /// The connection that owns the debugger, while one is attached.
     static DEBUG_CONNECTION: Mutex<Option<u64>> = Mutex::new(None);
+    static CLOSED: Mutex<u64> = Mutex::new(0);
+    static CLOSED_CHANGED: Condvar = Condvar::new();
+
+    pub fn wait_for_closed_connections(count: u64) {
+        let mut closed = lock(&CLOSED);
+        while *closed < count {
+            closed = CLOSED_CHANGED
+                .wait(closed)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    pub fn closed_connections() -> u64 {
+        *lock(&CLOSED)
+    }
 
     /// What the console asked the input thread for: `prompt` is the line it should read next,
     /// and `outstanding` stays set from the request until the interpreter takes the line, so a
@@ -921,6 +948,8 @@ mod platform {
             interp().debugger = None;
             *lock(&DEBUG_CONNECTION) = None;
         }
+        *lock(&CLOSED) += 1;
+        CLOSED_CHANGED.notify_all();
     }
 
     /// The attached debugger's side of its connection.
@@ -986,6 +1015,12 @@ mod platform {
     }
 
     pub fn finish() {}
+
+    pub fn wait_for_closed_connections(_count: u64) {}
+
+    pub fn closed_connections() -> u64 {
+        0
+    }
 
     pub fn wake() {}
 

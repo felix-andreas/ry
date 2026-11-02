@@ -254,9 +254,9 @@ struct Session<'a> {
     next_peer: usize,
     /// The peer whose `initialize` made it the debugger's connection.
     owner: Option<usize>,
-    /// Set when the debugger's connection was dropped without waiting for the console to notice,
-    /// which it does on its own time; until then a new `initialize` may still be refused.
-    owner_closing: bool,
+    /// How many connections the console will have closed once it handles every one this
+    /// session ended, counting those of earlier sessions too.
+    closed: u64,
     /// Every view opened, oldest first.
     views: Vec<u64>,
     released: BTreeSet<u64>,
@@ -280,7 +280,7 @@ impl Session<'_> {
             peers: Vec::new(),
             next_peer: 1,
             owner: None,
-            owner_closing: false,
+            closed: console_server::closed_connections(),
             views: Vec::new(),
             released: BTreeSet::new(),
         }
@@ -366,6 +366,7 @@ impl Session<'_> {
         if self.owner == Some(peer.name) {
             self.owner = None;
         }
+        self.closed += 1;
     }
 
     /// Sends a request, or half of one, and goes away without reading the answer, so the
@@ -387,14 +388,15 @@ impl Session<'_> {
         }
         // The console may already have dropped a connection it could not write to.
         peer.reader.get_mut().write_all(&framed).ok();
-        if self.owner == Some(peer.name) {
+        let name = peer.name;
+        drop(peer);
+        // The console notices the close on its own thread, and an `initialize` that reached it
+        // first may have made this connection the debugger's, so the next `initialize` waits
+        // until the console has let go of it.
+        self.closed += 1;
+        console_server::wait_for_closed_connections(self.closed);
+        if self.owner == Some(name) {
             self.owner = None;
-            self.owner_closing = true;
-        }
-        // An `initialize` that reached the console may make this connection the debugger's
-        // before the console notices it is gone.
-        if command == "initialize" && self.owner.is_none() {
-            self.owner_closing = true;
         }
     }
 
@@ -531,32 +533,23 @@ impl Session<'_> {
     /// it.
     fn initialize(&mut self, index: usize) {
         let name = self.peers[index].name;
-        for _ in 0..200 {
-            let answer = self.call(index, "initialize", json!({ "adapterID": "ry" }));
-            match (self.owner, answer["success"].as_bool()) {
-                (Some(owner), Some(false)) if owner != name => {
-                    assert_eq!(
-                        answer["message"],
-                        "a debugger is already attached to this console"
-                    );
-                    return;
-                }
-                (Some(owner), Some(true)) if owner != name => {
-                    panic!("peer {name} took the debugger from peer {owner}: {answer}")
-                }
-                (_, Some(true)) => {
-                    self.owner = Some(name);
-                    self.owner_closing = false;
-                    self.expect_event(index, "initialized");
-                    return;
-                }
-                (None, Some(false)) if self.owner_closing => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                _ => panic!("peer {name} could not take a free debugger: {answer}"),
+        let answer = self.call(index, "initialize", json!({ "adapterID": "ry" }));
+        match (self.owner, answer["success"].as_bool()) {
+            (Some(owner), Some(false)) if owner != name => {
+                assert_eq!(
+                    answer["message"],
+                    "a debugger is already attached to this console"
+                );
             }
+            (Some(owner), Some(true)) if owner != name => {
+                panic!("peer {name} took the debugger from peer {owner}: {answer}")
+            }
+            (_, Some(true)) => {
+                self.owner = Some(name);
+                self.expect_event(index, "initialized");
+            }
+            _ => panic!("peer {name} could not take a free debugger: {answer}"),
         }
-        panic!("the console never noticed the debugger's connection was gone");
     }
 
     /// A message with no request in it, which the console must not answer: the next answer on
