@@ -574,6 +574,9 @@ colMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 # the return stays `Any`; the callback position still checks, and forwarded arguments complete
 # callbacks with more formals.
 apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
+# `sweep` keeps its input's dimensions, so a matrix in is a matrix out.
+sweep : fn(x: matrix, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> matrix
+sweep : fn(x: Any, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> Any
 # `lapply` keeps its input's names, so a named list in is a named list out. The
 # named candidate comes first because it is the narrower one: a plain list or a
 # vector does not fit it at all and takes the general form below, which also takes
@@ -600,6 +603,7 @@ invisible : @pure <T> fn([x]: T) -> T
 list : @pure fn(...: Any) -> list[Any]
 c : @pure fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
 force : <T> fn(x: T) -> T
+withVisible : <T> fn(x: T) -> list{value: T, visible: logical}
 # `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
 # results (value-dependent), so their results stay `Any`; `apply` and friends also forward named
 # arguments to the callee. `Negate` needs a variadic-generic signature.
@@ -826,3 +830,4 @@ standardGeneric : fn(f: character, [fdef]: Any) -> Any
 getwd : fn() -> character
 system.file : fn(...: Any, [package]: character, [lib.loc]: Any, [mustWork]: logical) -> character
 asNamespace : fn(ns: Any, [base.OK]: logical) -> environment
+loadNamespace : fn(package: character, ...: Any) -> environment

@@ -6512,6 +6512,22 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
 
+## Strict-proven types do not drop JIT guards yet
+
+- **Rule.** No runtime guard drops because of a strict-mode proof until a per-function strict-clean
+  verdict reaches the runtime. Once it does, only a base SEXP-type or scalar/vector-kind guard on a
+  non-escaping local or parameter, after its force point, may drop, and only when the type derives
+  from checked sources alone. Guards on `Any`, stub returns, cross-package values, `@trust` and
+  `@if-unknown` bindings, class, attributes, the object bit, length beyond a checked scalar, `NA`,
+  and global lookups always stay.
+- **Why.** A tier-1 parameter read forces the promise and then runs one fused check (SEXP type,
+  no attributes, no object/ALTREP bit, length 1), so dropping only the type compare saves one
+  compare per read; every other guard is a lookup guard that the rule keeps. Native functions
+  already skip annotation checks, because the specialization's types decide them at compile time.
+  Typed and untyped warm times are equal on every why-ry row, so compile latency, not guards, is
+  where the time goes.
+- **Consequence.** The verdict plumbing is not built. Revisit it when a profile shows guard cost.
+
 ## Completion pushes down names whose declared type cannot fit, and never promotes
 
 - **Before.** Completion ranked equally good matches by source and use counts only, so in
