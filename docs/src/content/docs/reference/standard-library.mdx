@@ -87,10 +87,13 @@ These rules hold in every module:
   `List.sum` or `List.product` that overflows stops with an R error that names the problem. So
   does an unchecked `Num` operation whose result does not exist, such as `Num.div(1, 0)`, where
   Roc would crash; its `_checked` variant returns the failure as a tag instead.
+- **No function returns `NaN`.** A result that would be `NaN`, as `Num.sin(Inf)`,
+  `Num.pow(-1, 0.5)` and `List.sum(list(Inf, -Inf))` would be, is an error, and a `_checked`
+  function returns `:Err(:Undefined)` for it instead.
 - **Failure is a tag.** A function that can fail returns `:Ok(value)` or `:Err(tag)`, typed
   `Result<T, E>`, and the tag names the reason: `:OutOfBounds`, `:NotFound`, `:ListWasEmpty`,
-  `:KeyNotFound`, `:InvalidNumStr`, `:BadUtf8`, `:BadUtf16`, `:BadUtf32`, `:Overflow`, `:DivByZero`, `:SqrtOfNegative` or
-  `:LogNeedsPositive`.
+  `:KeyNotFound`, `:InvalidNumStr`, `:BadUtf8`, `:BadUtf16`, `:BadUtf32`, `:Overflow`, `:DivByZero`, `:Undefined`,
+  `:SqrtOfNegative` or `:LogNeedsPositive`.
 - **Equality is `identical()`**, wherever a function compares values (`List.contains`,
   `Dict.keep_shared`).
 - **Orderings are tags.** `Num.compare` returns `:LT`, `:EQ` or `:GT`, and `List.sort_with` takes a
@@ -592,6 +595,23 @@ List.repeat("x", 3L)
 #> list("x", "x", "x")
 ```
 
+
+#### `List.range`
+
+```
+fn(start: integer, end: integer) -> list[integer]
+```
+
+The integers from `start` up to and including `end`, or an empty list when `end` is smaller. Unlike
+R's `:`, it never counts down.
+
+```r ry run runtime=ry dput
+List.range(2L, 5L)
+#> list(2L, 3L, 4L, 5L)
+List.range(3L, 1L)
+#> list()
+```
+
 #### `List.with_capacity`
 
 ```
@@ -733,6 +753,22 @@ The elements for which `predicate` is `TRUE`.
 ```r ry run runtime=ry dput
 List.keep_if(list(1L, 5L, 2L), function(x) x > 1L)
 #> list(5L, 2L)
+```
+
+
+#### `List.keep_if_try`
+
+```
+<T, E> fn(list: list[T], predicate: fn(T) -> Result<logical, E>) -> Result<list[T], E>
+```
+
+The elements for which `predicate` returns `:Ok(TRUE)`, or the first `:Err` it returns.
+
+```r ry run runtime=ry dput
+List.keep_if_try(list("1", "20", "3"), function(s) Result.map(Str.to_integer(s), function(n) n > 2L))
+#> :Ok(list("20", "3"))
+List.keep_if_try(list("1", "x"), function(s) Result.map(Str.to_integer(s), function(n) n > 2L))
+#> :Err(:InvalidNumStr)
 ```
 
 #### `List.drop_if`
@@ -1825,7 +1861,7 @@ Str.from_utf32_lossy(list(82L, 121L))
 
 ### Num
 
-Functions over single numbers, `integer` or `double`, and three constants. A checked operation returns the failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning; its unchecked twin (`Num.add` beside `Num.add_checked`) stops with an error in that case, and so does it for a `NaN` result such as `Num.sub(Inf, Inf)`. The bit operations take integers as 32-bit two's complement.
+Functions over single numbers, `integer` or `double`, and seven constants (`Num.pi`, `Num.tau`, `Num.e` and the integer and double limits). A checked operation returns the failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning; its unchecked twin (`Num.add` beside `Num.add_checked`) stops with an error in that case. A `NaN` result, such as `Inf - Inf` or `Num.sin(Inf)`, is `:Err(:Undefined)` from a checked operation and an error from any other. The bit operations take integers as 32-bit two's complement.
 
 #### `Num.to_str`
 
@@ -2132,7 +2168,7 @@ Num.round(2.5)
 <T: scalar numeric> fn(base: T, exponent: T) -> double
 ```
 
-`base` raised to `exponent`.
+`base` raised to `exponent`. A result that is not a real number, as for `Num.pow(-1, 0.5)`, is an error.
 
 ```r
 Num.pow(2L, 10L)
@@ -2145,7 +2181,7 @@ Num.pow(2L, 10L)
 <T: scalar numeric> fn(number: T) -> double
 ```
 
-The sine of an angle in radians.
+The sine of an angle in radians. An infinite angle is an error, because its sine is undefined; the same holds for `Num.cos` and `Num.tan`.
 
 ```r
 Num.sin(0)
@@ -2194,10 +2230,10 @@ Num.atan(1) * 4
 #### `Num.add_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+<T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 ```
 
-The sum, or `:Err(:Overflow)`.
+The sum, or `:Err(:Overflow)`; a `NaN` sum such as `Inf + -Inf` is `:Err(:Undefined)`.
 
 ```r ry run runtime=ry dput
 Num.add_checked(.Machine$integer.max, 1L)
@@ -2207,7 +2243,7 @@ Num.add_checked(.Machine$integer.max, 1L)
 #### `Num.sub_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+<T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 ```
 
 The difference, or `:Err(:Overflow)`.
@@ -2220,7 +2256,7 @@ Num.sub_checked(10L, 3L)
 #### `Num.mul_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+<T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 ```
 
 The product, or `:Err(:Overflow)`; a finite double that would become infinite overflows too.
@@ -2272,7 +2308,7 @@ Num.mul_saturated(100000L, 100000L)
 #### `Num.div_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero>
+<T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero | :Undefined>
 ```
 
 The quotient as a double, or `:Err(:DivByZero)`.
@@ -2285,20 +2321,22 @@ Num.div_checked(7L, 2L)
 #### `Num.div_trunc_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+<T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 ```
 
-The quotient rounded toward zero, or `:Err(:DivByZero)`.
+The quotient rounded toward zero, or `:Err(:DivByZero)`; `Inf` divided by `Inf` is `:Err(:Undefined)`.
 
 ```r ry run runtime=ry dput
 Num.div_trunc_checked(-7L, 2L)
 #> :Ok(-3L)
+Num.div_trunc_checked(Inf, Inf)
+#> :Err(:Undefined)
 ```
 
 #### `Num.div_ceil_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+<T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 ```
 
 Divides and rounds up, or `:Err(:DivByZero)`.
@@ -2311,7 +2349,7 @@ Num.div_ceil_checked(7L, 2L)
 #### `Num.rem_checked`
 
 ```
-<T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+<T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 ```
 
 The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`.
@@ -2371,6 +2409,21 @@ The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it 
 ```r
 Num.to_integer_checked(-3.7)
 #> :Ok(-3L)
+```
+
+
+#### `Num.to_integer`
+
+```
+<T: scalar numeric> fn(number: T) -> integer
+```
+
+The number truncated toward zero as an integer. A number that does not fit an integer is an error;
+`Num.to_integer_checked` returns `:Err(:OutOfBounds)` instead.
+
+```r ry run runtime=ry dput
+Num.to_integer(-3.7)
+#> -3L
 ```
 
 #### `Num.add`
@@ -2709,6 +2762,59 @@ Euler's number, the base of the natural logarithm.
 ```r ry run runtime=ry dput
 Num.e
 #> 2.71828182845905
+```
+
+#### `Num.max_integer`
+
+```
+integer
+```
+
+The largest integer, `2147483647L`. It is a value, not a function.
+
+```r ry run runtime=ry dput
+Num.max_integer
+#> 2147483647L
+```
+
+#### `Num.min_integer`
+
+```
+integer
+```
+
+The smallest integer, `-2147483647L`. R stores `NA` in the one value below it, so that value is not
+an integer here.
+
+```r ry run runtime=ry dput
+Num.min_integer
+#> -2147483647L
+```
+
+#### `Num.max_double`
+
+```
+double
+```
+
+The largest finite double.
+
+```r ry run runtime=ry dput
+Num.max_double
+#> 1.79769313486232e+308
+```
+
+#### `Num.min_double`
+
+```
+double
+```
+
+The most negative finite double, the negation of `Num.max_double`.
+
+```r ry run runtime=ry dput
+Num.min_double
+#> -1.79769313486232e+308
 ```
 
 ### Bool

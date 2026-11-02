@@ -93,6 +93,8 @@ List.concat : <T> fn(first: list[T], second: list[T]) -> list[T]
 List.single : <T> fn(value: T) -> list[T]
 #' A list of `count` copies of `value`.
 List.repeat : <T> fn(value: T, count: integer) -> list[T]
+#' The integers from `start` up to and including `end`, or an empty list when `end` is smaller.
+List.range : fn(start: integer, end: integer) -> list[integer]
 #' The elements in reverse order.
 List.reverse : <T> fn(list: Array<T>) -> Array<T>
 List.reverse : <T> fn(list: list[T]) -> list[T]
@@ -120,6 +122,9 @@ List.join_map : <A, B> fn(list: list[A], f: fn(A) -> list[B]) -> list[B]
 #' The elements for which `predicate` is `TRUE`.
 List.keep_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.keep_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+#' The elements for which `predicate` returns `:Ok(TRUE)`, stopping at the first `:Err`.
+List.keep_if_try : <T, E> fn(list: Array<T>, predicate: fn(T) -> Result<logical, E>) -> Result<Array<T>, E>
+List.keep_if_try : <T, E> fn(list: list[T], predicate: fn(T) -> Result<logical, E>) -> Result<list[T], E>
 #' The elements for which `predicate` is `FALSE`.
 List.drop_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.drop_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
@@ -416,26 +421,26 @@ Num.cos : <T: scalar numeric> fn(number: T) -> double
 Num.tan : <T: scalar numeric> fn(number: T) -> double
 #' The arctangent, in radians.
 Num.atan : <T: scalar numeric> fn(number: T) -> double
-#' Adds two numbers, or `:Err(:Overflow)`.
-Num.add_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
-#' Subtracts `second` from `first`, or `:Err(:Overflow)`.
-Num.sub_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
-#' Multiplies two numbers, or `:Err(:Overflow)`.
-Num.mul_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+#' Adds two numbers, or `:Err(:Overflow)` (`:Err(:Undefined)` for a `NaN` result).
+Num.add_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+#' Subtracts `second` from `first`, or `:Err(:Overflow)` (`:Err(:Undefined)` for a `NaN` result).
+Num.sub_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+#' Multiplies two numbers, or `:Err(:Overflow)` (`:Err(:Undefined)` for a `NaN` result).
+Num.mul_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 #' Adds two numbers, clamping an integer result to the largest or smallest integer.
 Num.add_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
 #' Subtracts `second` from `first`, clamping an integer result.
 Num.sub_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
 #' Multiplies two numbers, clamping an integer result.
 Num.mul_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
-#' Divides `first` by `second` as doubles, or `:Err(:DivByZero)`.
-Num.div_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero>
-#' Divides and rounds toward zero, or `:Err(:DivByZero)`.
-Num.div_trunc_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
-#' Divides and rounds up, or `:Err(:DivByZero)`.
-Num.div_ceil_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
-#' The remainder of truncating division, with the sign of `first`, or `:Err(:DivByZero)`.
-Num.rem_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+#' Divides `first` by `second` as doubles, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.div_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero | :Undefined>
+#' Divides and rounds toward zero, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.div_trunc_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#' Divides and rounds up, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.div_ceil_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#' The remainder of truncating division, with the sign of `first`, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.rem_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 #' The square root, or `:Err(:SqrtOfNegative)`.
 Num.sqrt_checked : <T: scalar numeric> fn(number: T) -> Result<double, :SqrtOfNegative>
 #' The natural logarithm, or `:Err(:LogNeedsPositive)`.
@@ -444,6 +449,8 @@ Num.log_checked : <T: scalar numeric> fn(number: T) -> Result<double, :LogNeedsP
 Num.to_double : <T: scalar numeric> fn(number: T) -> double
 #' The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it does not fit.
 Num.to_integer_checked : <T: scalar numeric> fn(number: T) -> Result<integer, :OutOfBounds>
+#' The number truncated toward zero as an integer. A number that does not fit is an error; `Num.to_integer_checked` returns a tag.
+Num.to_integer : <T: scalar numeric> fn(number: T) -> integer
 #' Adds two numbers. An integer result that overflows is an error; `Num.add_checked` returns a tag.
 Num.add : <T: scalar numeric> fn(first: T, second: T) -> T
 #' Subtracts `second` from `first`. An integer result that overflows is an error.
@@ -496,6 +503,14 @@ Num.pi : double
 Num.tau : double
 #' Euler's number, the base of the natural logarithm.
 Num.e : double
+#' The largest integer, `2147483647L`.
+Num.max_integer : integer
+#' The smallest integer, `-2147483647L`; R uses the one below it for `NA`.
+Num.min_integer : integer
+#' The largest finite double.
+Num.max_double : double
+#' The most negative finite double, `-Num.max_double`.
+Num.min_double : double
 
 # Bool
 

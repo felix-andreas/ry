@@ -75,6 +75,17 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.to_vector(List.concat(xs, list(7L)))", "[1] 3 1 2 7\n"),
     ("List.single(\"a\")", "[[1]]\n[1] \"a\"\n\n"),
     ("List.to_vector(List.repeat(0L, 3L))", "[1] 0 0 0\n"),
+    ("List.to_vector(List.range(2L, 5L))", "[1] 2 3 4 5\n"),
+    ("List.to_vector(List.range(-1, 1))", "[1] -1  0  1\n"),
+    ("List.range(3L, 2L)", "list()\n"),
+    (
+        "List.keep_if_try(xs, function(x) :Ok(x > 1L))",
+        ":Ok(list(3L, 2L))\n",
+    ),
+    (
+        "List.keep_if_try(xs, function(x) if (x == 1L) :Err(:One) else :Ok(TRUE))",
+        ":Err(:One)\n",
+    ),
     ("List.to_vector(List.reverse(xs))", "[1] 2 1 3\n"),
     (
         "List.to_vector(List.join(list(list(1L), list(), list(2L, 3L))))",
@@ -271,6 +282,14 @@ const PRINTS: &[(&str, &str)] = &[
     ("Num.sqrt_checked(-1)", ":Err(:SqrtOfNegative)\n"),
     ("Num.log_checked(1)", ":Ok(0)\n"),
     ("Num.log_checked(0)", ":Err(:LogNeedsPositive)\n"),
+    // No library function returns `NaN`: a checked operation returns `:Err(:Undefined)`.
+    ("Num.add_checked(Inf, -Inf)", ":Err(:Undefined)\n"),
+    ("Num.mul_checked(0, Inf)", ":Err(:Undefined)\n"),
+    ("Num.div_checked(Inf, Inf)", ":Err(:Undefined)\n"),
+    ("Num.div_trunc_checked(Inf, Inf)", ":Err(:Undefined)\n"),
+    ("Num.div_ceil_checked(-Inf, Inf)", ":Err(:Undefined)\n"),
+    ("Num.rem_checked(Inf, 2)", ":Err(:Undefined)\n"),
+    ("Num.add_checked(Inf, 1)", ":Ok(Inf)\n"),
     // Dict.
     ("Dict.empty()", "Dict.empty()\n"),
     (
@@ -821,6 +840,16 @@ const PRINTS: &[(&str, &str)] = &[
         "c(Num.pi, Num.tau / 2, Num.e)",
         "[1] 3.141593 3.141593 2.718282\n",
     ),
+    (
+        "c(Num.max_integer, Num.min_integer)",
+        "[1]  2147483647 -2147483647\n",
+    ),
+    (
+        "c(Num.max_double, Num.min_double)",
+        "[1]  1.797693e+308 -1.797693e+308\n",
+    ),
+    ("Num.to_integer(-3.7)", "[1] -3\n"),
+    ("Num.to_integer(7L)", "[1] 7\n"),
     // Bool.
     ("c(Bool.true, Bool.false)", "[1]  TRUE FALSE\n"),
     (
@@ -939,6 +968,14 @@ const ERRORS: &[(&str, &str)] = &[
         "`f` must be a function, not a double value",
     ),
     (
+        "Num.to_integer(1e10)",
+        "`number` must fit an integer, not 1e+10; `Num.to_integer_checked()` returns `:Err(:OutOfBounds)` instead",
+    ),
+    (
+        "List.range(1L, NA)",
+        "`end` must be a whole number, not `NA`",
+    ),
+    (
         "List.keep_if(xs, function(x) NA)",
         "`predicate` must return `TRUE` or `FALSE`, not `NA`",
     ),
@@ -1050,6 +1087,20 @@ const ERRORS: &[(&str, &str)] = &[
         "the integer result overflows; `Num.mul_checked()` returns `:Err(:Overflow)` instead",
     ),
     ("Num.sub(Inf, Inf)", "the result is undefined (`NaN`)"),
+    ("Num.sin(Inf)", "the result is undefined (`NaN`)"),
+    ("Num.cos(-Inf)", "the result is undefined (`NaN`)"),
+    ("Num.tan(Inf)", "the result is undefined (`NaN`)"),
+    ("Num.pow(-1, 0.5)", "the result is undefined (`NaN`)"),
+    ("Num.abs_diff(Inf, Inf)", "the result is undefined (`NaN`)"),
+    (
+        "Num.add_saturated(Inf, -Inf)",
+        "the result is undefined (`NaN`)",
+    ),
+    ("Num.rem(Inf, 2)", "the result is undefined (`NaN`)"),
+    (
+        "List.sum(list(Inf, -Inf))",
+        "the result is undefined (`NaN`)",
+    ),
     (
         "Num.div(1, 0)",
         "`second` is zero; `Num.div_checked()` returns `:Err(:DivByZero)` instead",
