@@ -8878,7 +8878,9 @@ impl<'db> Checker<'db, '_> {
             if module
                 .argument_name(argument)
                 .as_deref()
-                .is_some_and(|name| matches!(name, "how" | "suffix" | "strategy" | "descending" | "n"))
+                .is_some_and(|name| {
+                    matches!(name, "how" | "suffix" | "strategy" | "descending" | "n")
+                })
             {
                 continue;
             }
@@ -9721,7 +9723,11 @@ impl<'db> Checker<'db, '_> {
             Some(_) => return None,
         };
         let layout = self.data_file(&path)?;
-        Some(frame_of(self.db, kind, sniffed_columns(self.db, &layout, factors)))
+        Some(frame_of(
+            self.db,
+            kind,
+            sniffed_columns(self.db, &layout, factors),
+        ))
     }
 
     fn data_file(&self, path: &str) -> Option<sniff::Layout> {

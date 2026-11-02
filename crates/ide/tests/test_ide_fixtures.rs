@@ -66,10 +66,9 @@ fn render(source: &str) -> String {
             .collect(),
     };
     // A file whose path does not end in `.R` is a data file, sniffed as hosts sniff `.csv` files.
-    let (data_files, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|(path, _)| {
-        path.as_deref()
-            .is_some_and(|path| !path.ends_with(".R"))
-    });
+    let (data_files, files): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(path, _)| path.as_deref().is_some_and(|path| !path.ends_with(".R")));
     let data_files = data_files
         .into_iter()
         .filter_map(|(path, text)| Some((path?, text)))

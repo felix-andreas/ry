@@ -21,9 +21,9 @@ use {
         check::ItemCheck,
         diagnostics::TypeRenderer,
         hir::{ExprId, Symbol},
-        item_check, item_hir, item_naming, item_node, item_tree, parse,
+        item_check, item_hir, item_naming, item_node, item_tree,
         naming::ItemNaming,
-        project_global_names,
+        parse, project_global_names,
         types::{FrameKind, TyKind},
     },
     std::collections::{HashMap, HashSet},
@@ -96,7 +96,10 @@ pub fn data_table_rewrites(db: &dyn Db, file: SourceFile) -> Vec<DataTableRewrit
             range: alone.range,
             replacement: match fate {
                 Fate::Keep => Some(together.replacement),
-                Fate::Wrap => Some(format!("data.table::as.data.table({})", together.replacement)),
+                Fate::Wrap => Some(format!(
+                    "data.table::as.data.table({})",
+                    together.replacement
+                )),
                 Fate::Drop => None,
             },
             standalone: alone.replacement,
@@ -121,7 +124,11 @@ enum Fate {
 fn fate(root: &SyntaxNode, rewrite: &Rewrite, kept: &[TextRange]) -> Fate {
     let safe = |name: &str, scope: &SyntaxNode| uses_are_safe(scope, name, kept);
     if let Some(name) = &rewrite.rebinds {
-        return if safe(name, root) { Fate::Keep } else { Fate::Drop };
+        return if safe(name, root) {
+            Fate::Keep
+        } else {
+            Fate::Drop
+        };
     }
     let element = root.covering_element(rewrite.range);
     let Some(mut value) = element
@@ -159,9 +166,9 @@ fn fate(root: &SyntaxNode, rewrite: &Rewrite, kept: &[TextRange]) -> Fate {
         Some((name, assigned))
             if assigned == value
                 && name.kind() == NAME
-                && parent
-                    .parent()
-                    .is_some_and(|statement| matches!(statement.kind(), SOURCE_FILE | BRACE_EXPR))
+                && parent.parent().is_some_and(|statement| {
+                    matches!(statement.kind(), SOURCE_FILE | BRACE_EXPR)
+                })
                 && !is_returned(&parent) =>
         {
             let scope = parent
@@ -188,9 +195,10 @@ fn uses_are_safe(scope: &SyntaxNode, name: &str, kept: &[TextRange]) -> bool {
         .all(|node| {
             let range = node.text_range();
             kept.iter().any(|kept| kept.contains_range(range))
-                || node.parent().and_then(|parent| assignment(&parent)).is_some_and(
-                    |(target, _)| target == node,
-                )
+                || node
+                    .parent()
+                    .and_then(|parent| assignment(&parent))
+                    .is_some_and(|(target, _)| target == node)
                 || is_read(&outermost_parentheses(node))
         })
 }
@@ -260,11 +268,14 @@ fn is_returned(node: &SyntaxNode) -> bool {
         BRACE_EXPR => {
             parent.children().last().as_ref() == Some(node)
                 && parent.parent().is_some_and(|grand| {
-                    grand.kind() == FUNCTION_DEF || (grand.kind() != SOURCE_FILE && is_returned(&outermost_parentheses(parent.clone())))
+                    grand.kind() == FUNCTION_DEF
+                        || (grand.kind() != SOURCE_FILE
+                            && is_returned(&outermost_parentheses(parent.clone())))
                 })
         }
         IF_EXPR => {
-            parent.first_child().as_ref() != Some(node) && is_returned(&outermost_parentheses(parent.clone()))
+            parent.first_child().as_ref() != Some(node)
+                && is_returned(&outermost_parentheses(parent.clone()))
         }
         ARGUMENT => parent
             .parent()
