@@ -113,13 +113,15 @@ impl Platform {
             &fs::read_to_string(&path).map_err(io_error(&path))?,
             &home.display().to_string(),
         );
+        let get = |name: &str| {
+            expand_make(variables.get(name).map_or("", String::as_str), &variables)
+                .trim()
+                .to_owned()
+        };
         Ok(
-            match (
-                variables.get("SHLIB_EXT").map(String::as_str),
-                variables.get("DYLIB_EXT").map(String::as_str),
-            ) {
-                (Some(".dll"), _) => Platform::Windows,
-                (_, Some(".dylib")) => Platform::MacOs,
+            match (get("SHLIB_EXT").as_str(), get("DYLIB_EXT").as_str()) {
+                (".dll", _) => Platform::Windows,
+                (_, ".dylib") => Platform::MacOs,
                 _ => Platform::Linux,
             },
         )

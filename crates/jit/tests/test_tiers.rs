@@ -593,7 +593,11 @@ fn traversals_agree_across_tiers() {
         for (case, (body, fails)) in cases.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled) = unsafe { outcomes(3_000_000 + case, body, "()") };
-            assert_eq!(reference == "error", *fails, "case {case} gave {reference}");
+            assert_eq!(
+                reference.starts_with("error: "),
+                *fails,
+                "case {case} gave {reference}"
+            );
             for (run, outcome) in compiled.iter().enumerate() {
                 assert_eq!(&reference, outcome, "case {case}, call {}: {body}", run + 1);
             }

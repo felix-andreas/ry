@@ -748,8 +748,33 @@ mod platform {
             return;
         }
         // R code run for one editor's request at the prompt is not the user's command: the
-        // console is idle, and the prompt answers the other requests as soon as it returns.
+        // console is idle, and the prompt answers the other requests as soon as it returns, so
+        // they stay queued. The debugger's requests and closed connections cannot wait for it,
+        // since a `pause` or a `disconnect` is how a long evaluation is stopped.
         if SERVING_REQUEST.load(Ordering::Relaxed) {
+            let debugger = *lock(&DEBUG_CONNECTION);
+            let now = {
+                let mut events = lock(&EVENTS);
+                let (now, later): (VecDeque<Event>, VecDeque<Event>) = std::mem::take(&mut *events)
+                    .into_iter()
+                    .partition(|event| match event {
+                        Event::Request(connection, _) => Some(*connection) == debugger,
+                        Event::Closed(_) => true,
+                        Event::Help | Event::Input(_) => false,
+                    });
+                *events = later;
+                now
+            };
+            if !now.is_empty() {
+                TAKEN.notify_all();
+            }
+            for event in now {
+                match event {
+                    Event::Request(connection, message) => busy_request(connection, message),
+                    Event::Closed(connection) => closed(connection),
+                    Event::Help | Event::Input(_) => {}
+                }
+            }
             return;
         }
         while let Some(event) = pop(false) {
