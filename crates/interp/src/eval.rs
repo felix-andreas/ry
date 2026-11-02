@@ -963,6 +963,9 @@ pub unsafe fn bind_arguments(
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
     let formals = function.car();
+    // Most calls pass every argument by position to a function without `...`, which needs no
+    // matching table: argument `i` binds formal `i`, and the formals past the last argument are
+    // missing.
     let actuals = if supplied.is_none() && positional(formals, args) {
         None
     } else {
@@ -973,9 +976,6 @@ pub unsafe fn bind_arguments(
     let mut formal = formals;
     let mut index = 0;
     while formal.kind() == SexpType::Pairlist {
-        // Most calls pass every argument by position to a function without `...`, which needs
-        // no matching table: argument `i` binds formal `i`, and the formals past the last
-        // argument are missing.
         let actual = match &actuals {
             Some(actuals) => actuals.get(index).copied().unwrap_or(missing_arg()),
             None => args.get(index).map_or(missing_arg(), |arg| arg.value),

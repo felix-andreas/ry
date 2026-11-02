@@ -2928,6 +2928,7 @@ unsafe fn step(
     let operand = |index: usize| *code.get_unchecked(at + 1 + index) as usize;
     let register = |index: usize| *registers.add(index);
     let set = |index: usize, value: Sexp| *registers.add(index) = value;
+    debug_assert!(at < code.len() && (code[at] as usize) < OPS.len());
     let op = *OPS.get_unchecked(*code.get_unchecked(at) as usize);
     let next = at + 1 + operand_count(op);
     match op {
