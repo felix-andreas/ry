@@ -69,6 +69,22 @@ fn lint_style_fixtures() {
         shadows_namespace: LintLevel::Warn,
         commented_code: LintLevel::Warn,
         redundant_return: LintLevel::Warn,
+        any_is_na: LintLevel::Warn,
+        duplicate_argument: LintLevel::Warn,
+        paste_sep: LintLevel::Warn,
+        lengths: LintLevel::Warn,
+        literal_coercion: LintLevel::Warn,
+        testthat_expectation: LintLevel::Warn,
+        condition_message: LintLevel::Warn,
+        comparison_negation: LintLevel::Warn,
+        outer_negation: LintLevel::Warn,
+        fixed_regex: LintLevel::Warn,
+        which_grepl: LintLevel::Warn,
+        length_levels: LintLevel::Warn,
+        browser_call: LintLevel::Warn,
+        numeric_leading_zero: LintLevel::Warn,
+        redundant_equals: LintLevel::Warn,
+        single_quotes: LintLevel::Warn,
         ..LintConfig::default()
     };
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints-style");

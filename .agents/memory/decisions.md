@@ -4738,6 +4738,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `return(x <- 1)` and a trailing `x <- 1` are both invisible.
 - The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
   the contract.
+- `unreachable-code` and `sprintf-arguments` are on by default (each is a bug; a CRAN corpus sweep
+  found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
+  bug, because a callee that collects `...` keeps both on purpose (cli bullets in `c()`, repeated
+  HTML `class` attributes) and a syntax lint cannot see the callee's formals. Moving it to a
+  semantic lint that reads the callee's signature would let it default on.
+- The other lintr ports (`any-is-na`, `paste-sep`, `lengths`, `literal-coercion`,
+  `redundant-equals`, `single-quotes`, `testthat-expectation`, `condition-message`,
+  `comparison-negation`, `outer-negation`, `fixed-regex`, `which-grepl`, `length-levels`,
+  `browser-call`, `numeric-leading-zero`) are opt-in taste or speed lints. lintr's whitespace and
+  layout linters are not ported, because `ry format` owns layout.
+- Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
+  reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their
+  opt-in lints are off. A fix whose replacement binds more loosely than what it replaces goes
+  through `in_place_of`, which adds parentheses unless the position stands alone.
 
 ## `ry check` keeps an on-disk record of its findings
 
