@@ -1289,6 +1289,14 @@ negated: Unknown
 107..120 error[type-mismatch] `*` needs numbers, but the column `region` is `character[]`
 164..177 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
 
+#---- a_negated_string_column_is_reported_once
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
+wider <- sales |> DataFrame.with_columns(y = -col("region") * 2)
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+wider: Unknown
+108..121 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
+
 #---- a_number_compared_with_a_string_column_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
 kept <- sales |> DataFrame.filter(col("region") > 1L)
@@ -1297,8 +1305,8 @@ same <- sales |> DataFrame.filter(col("units") == col("region"))
 sales: DataFrame{region: character[], units: integer[]}
 kept: Unknown
 same: Unknown
-96..114 error[type-mismatch] `>` compares `character[]` with `integer`. An expression compares strings and factors only with strings and factors
-150..179 error[type-mismatch] `==` compares `integer[]` with `character[]`. An expression compares strings and factors only with strings and factors
+96..114 error[type-mismatch] `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
+150..179 error[type-mismatch] `==` compares `integer[]` with `character[]`, text with a number, which almost always means the wrong column
 
 #---- a_numeric_aggregation_of_strings_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))

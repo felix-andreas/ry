@@ -2086,10 +2086,14 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **A CSV read peaks far above the table it makes.** A 5e7-row `groupby.csv` (2.6 GB) peaks at
-  10 GB resident, 2.6 GB of it the mapped file, for a 1.7 GB table: Polars parses the three id
-  columns as strings (16-byte views per row) before `strings_as_factors` codes them. Parsing a
-  column that will become a factor straight into codes would cut the peak by about 2.4 GB.
+- **A factor column with a missing value costs a second whole-file parse.** The sliced reader
+  (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
+  `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
+  missing value is read again as text, unsliced, which faults the released file back in and
+  holds a full string column. Parsing such a column as text within the sliced pass, once a slice
+  shows a null, would keep the peak at one slice.
+- **A text column is joined from its slices at the end**, which copies its strings once
+  (`Builder::Text`); building the final `Utf8View` buffers directly would avoid it.
 - **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
   a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
   the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s

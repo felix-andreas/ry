@@ -2862,7 +2862,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             left,
             right,
         } => format!(
-            "`{operator}` compares `{}` with `{}`. An expression compares strings and factors only with strings and factors",
+            "`{operator}` compares `{}` with `{}`, text with a number, which almost always means the wrong column",
             renderer.render(db, *left),
             renderer.render(db, *right)
         ),

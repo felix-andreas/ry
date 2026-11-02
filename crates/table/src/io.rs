@@ -19,7 +19,7 @@
 use {
     crate::{
         Error, Result, Table,
-        convert::{categorical_codes_to_factor, categorical_to_factor, string_to_factor},
+        convert::{categorical_codes_to_factor, string_to_factor},
     },
     memmap2::{Mmap, UncheckedAdvice},
     polars::prelude::{
@@ -107,12 +107,19 @@ pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
 }
 
 /// Any bytes either read into a table whose columns are the ones the sniffer promised, in its
-/// order, or fail with an error; a table that reads also writes. Nothing panics. Shared with the
-/// coverage-guided `fuzz/` target.
+/// order, or fail with an error; a table that reads also writes, and reads the same in slices of
+/// a few bytes as whole. Nothing panics. Shared with the coverage-guided `fuzz/` target.
 pub fn check_csv_input(bytes: &[u8]) {
     let Ok(table) = read_csv_bytes(bytes) else {
         return;
     };
+    match read_bytes(bytes, &ReadOptions::default(), 16, &|_| Ok(())) {
+        Ok(sliced) => assert!(
+            sliced.frame().equals_missing(table.frame()),
+            "a read in slices differs from a whole read for {bytes:?}"
+        ),
+        Err(error) => panic!("{bytes:?} reads whole but not in slices: {error}"),
+    }
     let promised: Vec<String> = sniff::sniff(bytes)
         .columns
         .into_iter()
@@ -161,14 +168,20 @@ fn read_bytes(
     }
     let mut frame = match read_sliced(bytes, &layout, options, slice_bytes, release) {
         Ok(frame) => frame,
-        Err(_) => {
+        // A value the sniffer's sample missed fails the typed parse, so the file is read again
+        // with every column as text, each then typed from all of its values.
+        Err(Error::Polars(_)) => {
             let schema = schema(&layout, options, true);
-            type_columns(
-                parse(bytes, &layout, options, &schema, layout.header)?,
-                &layout,
-                true,
-            )?
+            let frame = parse(bytes, &layout, options, &schema, layout.header)?;
+            let height = frame.height();
+            let columns: Vec<Column> = frame
+                .into_columns()
+                .into_par_iter()
+                .map(|column| type_text_column(column, None))
+                .collect::<Result<_>>()?;
+            DataFrame::new(height, columns)?
         }
+        Err(error) => return Err(error),
     };
     let undecided: Vec<PlSmallStr> = frame
         .columns()
@@ -197,8 +210,9 @@ fn read_bytes(
 }
 
 /// Parses the file slice by slice with the sniffed types, appending each slice's columns to the
-/// table's final column buffers before the next slice is parsed, so the file is never held as
-/// parsed pieces and a copy of them. A factor's column numbers its strings with one mapping
+/// table's final column buffers before the next slice is parsed, so a typed column is never held
+/// as parsed pieces and a copy of them. A text column keeps Polars' pieces and joins them at the
+/// end, which copies its strings once. A factor's column numbers its strings with one mapping
 /// across the slices, so the codes of every slice agree and are renumbered into levels in place.
 fn read_sliced(
     bytes: &[u8],
@@ -211,11 +225,20 @@ fn read_sliced(
     let ranges = match options.rows {
         // A leading `head` reads only the first rows, so it parses the file whole.
         Some(_) => vec![0..bytes.len()],
-        None => slices(bytes, slice_bytes),
+        None => slices(bytes, slice_bytes, layout.separator),
     };
     let mut builders: Vec<(PlSmallStr, Builder)> = Vec::new();
     let mut height = 0;
     for (index, range) in ranges.iter().enumerate() {
+        // A last slice of blank lines, such as a file's trailing line breaks, holds no rows.
+        if index > 0
+            && bytes[range.clone()]
+                .iter()
+                .all(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            release(range.clone())?;
+            continue;
+        }
         let header = index == 0 && layout.header;
         let frame = parse(&bytes[range.clone()], layout, options, &schema, header)?;
         if index == 0 {
@@ -363,54 +386,95 @@ fn bitmap(validity: Option<MutableBitmap>) -> Option<Bitmap> {
 }
 
 /// Row-aligned byte ranges of about `slice_bytes` each, covering `bytes`. A range ends just
-/// after a line break outside quotes, which is a line break preceded by an even number of quote
-/// characters, since an escaped quote is written twice. The quotes are counted in parallel, one
-/// stretch of the file per task.
-fn slices(bytes: &[u8], slice_bytes: usize) -> Vec<Range<usize>> {
+/// after a line break outside quotes. Where quoting stands at each stretch's start comes from
+/// tracking every stretch from each of the three states in parallel, then chaining the results.
+fn slices(bytes: &[u8], slice_bytes: usize, separator: u8) -> Vec<Range<usize>> {
     let stretches = bytes.len().div_ceil(slice_bytes).max(1);
     if stretches == 1 {
         return vec![0..bytes.len()];
     }
-    let odd: Vec<bool> = (0..stretches)
+    let ends: Vec<[Quoting; 3]> = (0..stretches)
         .into_par_iter()
         .map(|stretch| {
             let start = stretch * slice_bytes;
-            let end = (start + slice_bytes).min(bytes.len());
-            bytes[start..end]
-                .iter()
-                .filter(|byte| **byte == sniff::QUOTE)
-                .count()
-                % 2
-                == 1
+            let range = start..(start + slice_bytes).min(bytes.len());
+            Quoting::ALL.map(|state| quoting_after(bytes, range.clone(), state, separator))
         })
         .collect();
     let mut ranges = Vec::with_capacity(stretches);
     let mut start = 0;
-    let mut quoted = false;
-    for (stretch, odd) in odd.iter().enumerate().take(stretches - 1) {
-        // `quoted` is the quote parity at the start of the next stretch.
-        quoted ^= odd;
+    let mut state = Quoting::Outside;
+    for (stretch, ends) in ends.iter().enumerate().take(stretches - 1) {
+        // `state` becomes the quoting at the start of the next stretch.
+        state = ends[state as usize];
         let boundary = (stretch + 1) * slice_bytes;
         if boundary <= start {
             continue;
         }
-        let mut inside = quoted;
-        let Some(offset) = bytes[boundary..].iter().position(|byte| {
-            if *byte == sniff::QUOTE {
-                inside = !inside;
-            }
-            *byte == b'\n' && !inside
+        let mut scan = state;
+        let Some(end) = (boundary..bytes.len()).find(|position| {
+            scan = quoting_step(bytes, *position, scan, separator);
+            bytes[*position] == b'\n' && scan == Quoting::Outside
         }) else {
             break;
         };
-        let end = boundary + offset + 1;
-        ranges.push(start..end);
-        start = end;
+        ranges.push(start..end + 1);
+        start = end + 1;
     }
     if start < bytes.len() || ranges.is_empty() {
         ranges.push(start..bytes.len());
     }
     ranges
+}
+
+/// Where a byte stands in the CSV quoting grammar. A quote opens a quoted field only at a field's
+/// start, so a stray quote inside an unquoted value, such as `5" pipe`, is text, and a doubled
+/// quote inside a quoted field is an escaped quote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quoting {
+    Outside = 0,
+    Inside = 1,
+    /// Just after a quote that may close the field or, doubled, escape a quote.
+    JustClosed = 2,
+}
+
+impl Quoting {
+    const ALL: [Quoting; 3] = [Quoting::Outside, Quoting::Inside, Quoting::JustClosed];
+}
+
+/// The quoting after the bytes in `range`, from `state` at its start. A stretch without a quote
+/// leaves a quoted field open and an unquoted one closed, so only stretches with quotes are
+/// walked byte by byte.
+fn quoting_after(bytes: &[u8], range: Range<usize>, state: Quoting, separator: u8) -> Quoting {
+    if !bytes[range.clone()].contains(&sniff::QUOTE) {
+        return match state {
+            Quoting::JustClosed if !range.is_empty() => Quoting::Outside,
+            state => state,
+        };
+    }
+    range.fold(state, |state, position| {
+        quoting_step(bytes, position, state, separator)
+    })
+}
+
+fn quoting_step(bytes: &[u8], position: usize, state: Quoting, separator: u8) -> Quoting {
+    let quote = bytes[position] == sniff::QUOTE;
+    match (state, quote) {
+        (Quoting::Inside, true) => Quoting::JustClosed,
+        (Quoting::Inside, false) => Quoting::Inside,
+        (Quoting::JustClosed, true) => Quoting::Inside,
+        (Quoting::Outside | Quoting::JustClosed, false) => Quoting::Outside,
+        (Quoting::Outside, true) => {
+            let field_start = position.checked_sub(1).is_none_or(|before| {
+                matches!(bytes[before], b'\n' | b'\r') || bytes[before] == separator
+            });
+            if field_start {
+                Quoting::Inside
+            } else {
+                Quoting::Outside
+            }
+        }
+    }
 }
 
 /// Writes a table as comma-separated text, as `fwrite(x, path)` does.
@@ -496,10 +560,15 @@ fn schema(layout: &Layout, options: &ReadOptions, as_text: bool) -> Arc<PolarsSc
             (false, TextColumn::Integer) => DataType::Int32,
             (false, TextColumn::Double) => DataType::Float64,
             // A factor's column parses straight into codes, so its strings never exist row by
-            // row. Each column numbers its own strings.
-            (false, TextColumn::Character) if options.factors => DataType::from_categories(
-                Categories::random(PlSmallStr::from_static("ry"), CategoricalPhysical::U32),
-            ),
+            // row. Each column numbers its own strings. A read of the first rows parses them as
+            // text, because Polars may number strings from rows past the last one it keeps, which
+            // would become levels no row has.
+            (false, TextColumn::Character) if options.factors && options.rows.is_none() => {
+                DataType::from_categories(Categories::random(
+                    PlSmallStr::from_static("ry"),
+                    CategoricalPhysical::U32,
+                ))
+            }
             // Polars reads only `true` and `false` as booleans, so a logical column reads as
             // text and is converted with `fread`'s three spellings.
             _ => DataType::String,
@@ -540,34 +609,6 @@ fn parse(
         })
         .into_reader_with_file_handle(Cursor::new(bytes))
         .finish()?)
-}
-
-/// Gives each parsed column its R type: a factor read without a missing value becomes a
-/// factor, and a column read as text is typed from its values.
-fn type_columns(frame: DataFrame, layout: &Layout, as_text: bool) -> Result<DataFrame> {
-    let height = frame.height();
-    let columns: Vec<Column> = frame
-        .into_columns()
-        .into_par_iter()
-        .map(|column| {
-            let sniffed = layout
-                .columns
-                .iter()
-                .find(|sniffed| sniffed.name == column.name().as_str());
-            let declared = if as_text {
-                None
-            } else {
-                sniffed.map(|sniffed| sniffed.kind)
-            };
-            match column.dtype() {
-                DataType::Categorical(..) if column.null_count() == 0 => {
-                    Ok(categorical_to_factor(column.as_materialized_series())?.into_column())
-                }
-                _ => type_text_column(column, declared),
-            }
-        })
-        .collect::<Result<_>>()?;
-    Ok(DataFrame::new(height, columns)?)
 }
 
 /// Types a column Polars read as text. A column sniffed as character stays text. Any other
@@ -735,7 +776,9 @@ pub fn strings_as_factors(table: &mut Table) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use {
-        super::{ReadOptions, SLICE_BYTES, read_bytes, read_sliced, slices},
+        super::{
+            Quoting, ReadOptions, SLICE_BYTES, quoting_after, read_bytes, read_sliced, slices,
+        },
         crate::Result,
     };
 
@@ -747,6 +790,8 @@ mod tests {
                 0 => "\"line\nbreak\"".to_string(),
                 1 => "\"say \"\"hi\"\", ok\"".to_string(),
                 2 => String::new(),
+                // A quote inside an unquoted value is text, not the start of a quoted field.
+                _ if row % 8 == 3 => format!("{row}\" pipe"),
                 _ => format!("n{row}"),
             };
             text.push_str(&format!("{row},k{},{note},{}.5\n", row % 7, row));
@@ -758,16 +803,20 @@ mod tests {
     fn slices_end_at_line_breaks_outside_quotes() {
         let text = text();
         let bytes = text.as_bytes();
+        assert!(text.matches("\" pipe").count() > 0);
         for size in [1, 7, 64, 1000] {
-            let ranges = slices(bytes, size);
+            let ranges = slices(bytes, size, b',');
             assert_eq!(ranges.first().map(|range| range.start), Some(0));
             assert_eq!(ranges.last().map(|range| range.end), Some(bytes.len()));
             for pair in ranges.windows(2) {
                 assert_eq!(pair[0].end, pair[1].start);
                 let before = &bytes[..pair[0].end];
                 assert_eq!(before.last(), Some(&b'\n'));
-                let quotes = before.iter().filter(|byte| **byte == sniff::QUOTE).count();
-                assert_eq!(quotes % 2, 0, "a slice of {size} bytes ends inside quotes");
+                let state = quoting_after(bytes, 0..pair[0].end, Quoting::Outside, b',');
+                assert!(
+                    state == Quoting::Outside,
+                    "a slice of {size} bytes ends inside quotes"
+                );
             }
         }
     }

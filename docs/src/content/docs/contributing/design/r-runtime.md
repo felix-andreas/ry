@@ -789,26 +789,27 @@ without R.
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.131 | 0.062 | 0.152 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.186 | 0.063 | 0.151 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.289 | 0.148 | 0.289 |
-| groupby q4: three means by `id4` | 0.319 | 0.181 | 0.281 |
-| groupby q5: three sums by `id6` | 0.319 | 0.171 | 0.247 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.668 | 0.186 | 0.291 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.749 | 0.090 | 0.158 |
-| groupby q8: the two largest `v3` by `id6` | 0.666 | 0.253 | 0.322 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.932 | 0.105 | 0.199 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.909 | 0.856 | 0.902 |
-| `:=` on a whole column, 100 times | 5.204 | 0.310 | 2.005 |
-| `:=` on 1% of rows, 100 times | 3.857 | 0.809 | 0.906 |
-| `:=` adding a column, 100 times | 4.997 | 0.773 | 1.428 |
-| join q1: small, on `id1` | 0.372 | 0.219 | 0.133 |
-| join q2: medium, on `id2` | 0.486 | 0.250 | 0.238 |
-| join q3: medium, left, on `id2` | 0.622 | 0.266 | 0.188 |
-| join q4: medium, on factor `id5` | 0.489 | 0.221 | 0.241 |
-| join q5: big, on `id3` | 3.588 | 1.193 | 0.947 |
-| keyed rolling join | 0.127 | 0.115 | 0.083 |
-| total | 25.91 | 6.27 | 9.16 |
+| groupby q1: `sum(v1)` by `id1` | 0.172 | 0.034 | 0.026 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.204 | 0.035 | 0.024 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.252 | 0.105 | 0.112 |
+| groupby q4: three means by `id4` | 0.391 | 0.145 | 0.125 |
+| groupby q5: three sums by `id6` | 0.376 | 0.126 | 0.126 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.637 | 0.151 | 0.158 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.727 | 0.068 | 0.065 |
+| groupby q8: the two largest `v3` by `id6` | 0.753 | 0.291 | 0.241 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.871 | 0.081 | 0.081 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.998 | 0.671 | 0.558 |
+| `:=` on a whole column, 100 times | 5.432 | 0.301 | 0.296 |
+| `:=` on 1% of rows, 100 times | 3.722 | 0.915 | 0.872 |
+| `:=` adding a column, 100 times | 5.865 | 1.074 | 0.770 |
+| join q1: small, on `id1` | 0.340 | 0.129 | 0.102 |
+| join q2: medium, on `id2` | 0.469 | 0.142 | 0.113 |
+| join q3: medium, left, on `id2` | 0.623 | 0.149 | 0.138 |
+| join q4: medium, on factor `id5` | 0.446 | 0.135 | 0.113 |
+| join q5: big, on `id3` | 3.592 | 0.889 | 0.832 |
+| keyed rolling join | 0.137 | 0.100 | 0.109 |
+| total | 27.01 | 5.54 | 4.86 |
+| peak memory (GB) | 6.7 | 7.8 | 7.4 |
 <!-- /bench-table:1e7 -->
 
 At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten

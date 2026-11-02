@@ -334,28 +334,6 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
     )
 }
 
-/// A `Categorical` column, which numbers its strings in order of first appearance, as a factor
-/// whose levels are those strings sorted in byte order. The CSV reader parses a column that will
-/// become a factor straight into a `Categorical`, so no row's string is ever materialized.
-pub fn categorical_to_factor(series: &Series) -> Result<Series> {
-    let DataType::Categorical(_, mapping) = series.dtype() else {
-        return Err(Error::UnsupportedType {
-            name: series.name().to_string(),
-            found: series.dtype().to_string(),
-        });
-    };
-    let physical = series.to_physical_repr().cast(&DataType::UInt32)?.rechunk();
-    let codes = physical.u32()?;
-    let empty = PrimitiveArray::<u32>::new_empty(ArrowDataType::UInt32);
-    let array = codes.downcast_iter().next().unwrap_or(&empty);
-    categorical_codes_to_factor(
-        series.name().clone(),
-        mapping,
-        array.values().as_slice().to_vec(),
-        array.validity().cloned(),
-    )
-}
-
 /// The factor of a `Categorical` column given as its `mapping` and its rows' `codes`, which are
 /// renumbered into level order in place.
 pub fn categorical_codes_to_factor(

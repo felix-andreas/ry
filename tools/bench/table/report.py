@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Runs the table benchmark under data.table, as R code on ry's DataFrame, and on the ry engine from
-Rust, one engine after the other so they never share the CPU, and prints a Markdown table of the
-faster of each question's two runs and of each engine's peak resident memory. With --write, the table replaces the one between the
-`bench-table:<rows>` markers in docs/src/content/docs/contributing/design/r-runtime.md.
+Rust, one engine after the other so they never share the CPU, and prints a Markdown table of
+the faster of each question's two runs and of each engine's peak resident memory. With --write,
+the table replaces the one between the `bench-table:<rows>` markers in
+docs/src/content/docs/contributing/design/r-runtime.md.
 
 The data is generated on first use. data.table must be installed in the library named by
 RY_BENCH_RLIB (default ~/R/library). Build ry, libR and the Rust driver first (`just bench-table`
@@ -10,7 +11,7 @@ does).
 
 Usage: tools/bench/table/report.py <data-dir> [--rows 1e7] [--groupby-only] [--write]
 """
-import argparse, json, math, os, pathlib, re, subprocess, sys
+import argparse, json, math, os, pathlib, re, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -61,10 +62,10 @@ def main():
     peaks = {}
     for name, command in engines:
         print(f"== {name}", file=sys.stderr, flush=True)
-        stdout, status, peak = run(command, env)
+        stdout, errors, status, peak = run(command, env)
         sys.stderr.write(stdout)
         if status != 0:
-            sys.exit(f"{name} failed with status {status}")
+            sys.exit(f"{name} failed with status {status}:\n{errors}")
         results[name] = parse(stdout)
         peaks[name] = peak
 
@@ -94,14 +95,19 @@ def main():
 
 
 def run(command, env):
-    """Runs one engine and returns its output, its exit status, and its peak resident memory in
-    GB. `wait4` reports the peak of this child alone, where `getrusage` would give the largest
-    of every engine run so far."""
-    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, text=True, cwd=root)
-    stdout = process.stdout.read()
-    _, status, usage = os.wait4(process.pid, 0)
-    process.returncode = os.waitstatus_to_exitcode(status)
-    return stdout, process.returncode, usage.ru_maxrss / 1e6
+    """Runs one engine and returns its output, its error output, its exit status, and its peak
+    resident memory in GB. `wait4` reports the peak of this child alone, where `getrusage` would
+    give the largest of every engine run so far. Linux reports it in KiB."""
+    with tempfile.TemporaryFile(mode="w+") as errors:
+        process = subprocess.Popen(
+            command, env=env, stdout=subprocess.PIPE, stderr=errors, text=True, cwd=root
+        )
+        with process.stdout:
+            stdout = process.stdout.read()
+        _, status, usage = os.wait4(process.pid, 0)
+        process.returncode = os.waitstatus_to_exitcode(status)
+        errors.seek(0)
+        return stdout, errors.read(), process.returncode, usage.ru_maxrss * 1024 / 1e9
 
 
 def prepare(data, rows, only, env):

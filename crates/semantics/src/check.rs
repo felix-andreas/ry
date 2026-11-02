@@ -8115,13 +8115,15 @@ impl<'db> Checker<'db, '_> {
                         } else {
                             "+"
                         };
+                        // A negated string keeps its text type, so a reported operand ends the walk
+                        // rather than being reported again by every enclosing operator.
                         self.check_expression_operand(
                             spelling,
                             *operand,
                             &column,
                             ExpressionNeeds::Numbers,
-                        );
-                        Some(column)
+                        )
+                        .then_some(column)
                     }
                     _ => None,
                 }
@@ -8242,17 +8244,17 @@ impl<'db> Checker<'db, '_> {
         self.check_expression_operand(spelling, rhs, right, needs);
     }
 
-    /// Reports an operand whose known column type `operation` does not take. An operand of
-    /// unknown type stays silent.
+    /// Reports an operand whose known column type `operation` does not take, and returns whether
+    /// the operand fits. An operand of unknown type stays silent and fits.
     fn check_expression_operand(
         &mut self,
         operation: &str,
         value: ExprId,
         operand: &ComputedColumn<'db>,
         needs: ExpressionNeeds,
-    ) {
+    ) -> bool {
         let Some(class) = join_class(self.db, operand.ty) else {
-            return;
+            return true;
         };
         let fits = match needs {
             ExpressionNeeds::Numbers | ExpressionNeeds::LogicalOrNumbers => {
@@ -8261,7 +8263,7 @@ impl<'db> Checker<'db, '_> {
             ExpressionNeeds::Logical => class == JoinClass::Logical,
         };
         if fits {
-            return;
+            return true;
         }
         let kind = TypeErrorKind::ExpressionOperand {
             operation: operation.to_owned(),
@@ -8273,6 +8275,7 @@ impl<'db> Checker<'db, '_> {
             range: self.blame_range(value),
             kind,
         });
+        false
     }
 
     /// The type a diagnostic shows for an operand: a column's vector type, or a plain R value's

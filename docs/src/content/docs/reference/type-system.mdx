@@ -3070,7 +3070,7 @@ and text is a `character` or `factor` one:
 
 | Operation | Operands |
 | --- | --- |
-| `+`, `-`, `*`, `/`, `^`, `%%`, `%/%`, unary `-`, `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | numbers or `logical`, never text |
+| `+`, `-`, `*`, `/`, `^`, `%%`, `%/%`, unary `-` and `+`, `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | numbers or `logical`, never text |
 | `&`, `\|`, `!` | `logical` or numbers, never text |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | never text on one side and a number on the other |
 | the test of `Expr.if_else` | `logical` |
@@ -3081,7 +3081,7 @@ comparison:
 ```text
 type-mismatch
 
-  x `>` compares `character[]` with `integer`. An expression compares strings and factors only with strings and factors
+  x `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
    --[a.R:2:35]
  1 | sales <- DataFrame(region = ["eu", "us"], units = [1L, 2L])
  2 | kept <- sales |> DataFrame.filter(col("region") > 1L)
