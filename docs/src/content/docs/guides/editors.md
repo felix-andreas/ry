@@ -72,7 +72,8 @@ The VS Code extension runs your code on ry's runtime.
 - **Attaching to the console**: "ry: Attach to Console" attaches the debugger to the `ry run`
   console running in your workspace, starting one if none runs. Breakpoints in your files then stop
   the commands you type, and `debug(f)` or `debugonce(f)` stops when `f` is next called, even for a
-  function you typed at the prompt. Stopping the debug session leaves the console running.
+  function you typed at the prompt. Attaching while the console waits at a `browser()` stop's
+  `Browse[1]>` prompt takes that stop over. Stopping the debug session leaves the console running.
 - **Viewing data**: right-click a data frame, matrix, vector or `DataFrame` in the debugger's
   variables view and choose "View Data", or call `View(x)` in the console. The viewer fetches
   100 rows at a time, so a large table opens instantly.

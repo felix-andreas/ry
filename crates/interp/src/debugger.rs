@@ -17,7 +17,7 @@
 
 use {
     crate::{
-        deparse, envir, eval, interp, lower, session,
+        deparse, envir, eval, interp, lower, print, session,
         unwind::{Jump, R, Unwind},
         values::{self, global_env, length, nil, symbol_name, symbols},
     },
@@ -38,6 +38,11 @@ pub trait Transport {
     /// Sends a response or event. The transport gives it its `seq`, because the host also
     /// sends console output as `output` events that share the numbering.
     fn send(&mut self, message: Value);
+    /// Whether a person at the console's terminal drives the adapter, as at a `Browse[1]>`
+    /// prompt, rather than an editor. Such an adapter ends with the command it stopped.
+    fn is_terminal(&self) -> bool {
+        false
+    }
 }
 
 /// What the client asked to run, from its `launch` request.
@@ -119,6 +124,8 @@ struct Stopped {
     /// Each reference's object and the expression that evaluates to it in the selected frame,
     /// from which its children's `evaluateName`s are built.
     references: Vec<(Sexp, Option<String>)>,
+    /// The `stopped` event's body, sent again to an editor that attaches during the stop.
+    event: Value,
 }
 
 struct StackFrame {
@@ -142,8 +149,15 @@ pub unsafe fn statement() -> R<()> {
     with_adapter(|adapter| adapter.at_statement(None))
 }
 
-/// `browser()` with an adapter attached: stop where the call is.
+/// `browser()`: stop where the call is. With no editor attached, an interactive console stops at
+/// a `Browse[1]>` prompt, which drives an adapter of its own; a script continues, as in a
+/// non-interactive GNU R session.
 pub unsafe fn browser() -> R<()> {
+    let state = interp();
+    if state.debugger.is_none() && crate::console_server::interactive() {
+        let terminal = Box::new(crate::console_server::Browse::default());
+        state.debugger = Some(Box::new(Adapter::for_console(terminal)));
+    }
     with_adapter(|adapter| adapter.at_statement(Some("breakpoint")))
 }
 
@@ -215,6 +229,11 @@ impl Adapter {
     /// Whether the client of a console session left or ended it, so the adapter should go.
     pub fn is_detached(&self) -> bool {
         self.detached
+    }
+
+    /// Whether the console's terminal drives the adapter, which then ends with its command.
+    pub fn is_browse(&self) -> bool {
+        self.transport.is_terminal()
     }
 
     pub fn is_terminating(&self) -> bool {
@@ -329,31 +348,36 @@ impl Adapter {
             self.mode = Mode::Run;
         }
         let srcref = interp().srcref;
-        let Some((source, line, _)) = self.location(srcref) else {
-            return;
+        // `browser()` stops even in code with no source to show, such as a function built by
+        // `eval(parse(...))` without srcrefs; other stops need a statement the client can show.
+        let reason = match (forced, self.location(srcref)) {
+            (Some(reason), _) => reason,
+            (None, None) => return,
+            (None, Some((source, line, _))) => {
+                let at_breakpoint = match &source {
+                    Source::File(path) => self
+                        .breakpoints
+                        .get(path)
+                        .is_some_and(|lines| lines.contains(&line)),
+                    Source::Text(_) => false,
+                };
+                let reason = match () {
+                    _ if self.pause_requested => Some("pause"),
+                    _ if at_breakpoint => Some("breakpoint"),
+                    _ => match self.mode {
+                        Mode::Run => None,
+                        Mode::Entry => Some("entry"),
+                        Mode::StepIn => Some("step"),
+                        Mode::StepOver(limit) => (depth <= limit).then_some("step"),
+                        Mode::StepOut(limit) => (depth < limit).then_some("step"),
+                        Mode::FunctionEntry(_) => Some("function breakpoint"),
+                    },
+                };
+                let Some(reason) = reason else { return };
+                reason
+            }
         };
-        let at_breakpoint = match &source {
-            Source::File(path) => self
-                .breakpoints
-                .get(path)
-                .is_some_and(|lines| lines.contains(&line)),
-            Source::Text(_) => false,
-        };
-        let reason = forced.or_else(|| match () {
-            _ if self.pause_requested => Some("pause"),
-            _ if at_breakpoint => Some("breakpoint"),
-            _ => match self.mode {
-                Mode::Run => None,
-                Mode::Entry => Some("entry"),
-                Mode::StepIn => Some("step"),
-                Mode::StepOver(limit) => (depth <= limit).then_some("step"),
-                Mode::StepOut(limit) => (depth < limit).then_some("step"),
-                Mode::FunctionEntry(_) => Some("function breakpoint"),
-            },
-        });
-        if let Some(reason) = reason {
-            self.stop(reason, None, srcref);
-        }
+        self.stop(reason, None, srcref);
     }
 
     unsafe fn stop(&mut self, reason: &str, text: Option<&str>, srcref: Sexp) {
@@ -364,23 +388,27 @@ impl Adapter {
         let mut frames = stack(srcref);
         // An error stops inside base R's own `stop` or `signalCondition`, which have no source
         // to show; the client lands on the innermost frame it can show instead.
-        let hidden = frames
-            .iter()
-            .take(frames.len().saturating_sub(1))
-            .take_while(|frame| self.location(frame.srcref).is_none())
-            .count();
-        frames.drain(..hidden);
-        let mut stopped = Stopped {
-            frames,
-            references: Vec::new(),
+        let hidden = match text {
+            Some(_) => frames
+                .iter()
+                .take(frames.len().saturating_sub(1))
+                .take_while(|frame| self.location(frame.srcref).is_none())
+                .count(),
+            None => 0,
         };
+        frames.drain(..hidden);
         let mut body =
             json!({ "reason": reason, "threadId": THREAD_ID, "allThreadsStopped": true });
         if let (Some(text), Some(object)) = (text, body.as_object_mut()) {
             object.insert("description".to_owned(), json!("Error"));
             object.insert("text".to_owned(), json!(text.trim_end()));
         }
-        self.event("stopped", body);
+        self.event("stopped", body.clone());
+        let mut stopped = Stopped {
+            frames,
+            references: Vec::new(),
+            event: body,
+        };
         loop {
             let Some(message) = self.transport.receive(true) else {
                 match self.console {
@@ -447,9 +475,21 @@ impl Adapter {
                 self.respond(request, body);
                 Resume::Stay
             }
+            "evaluate" if request.arguments["context"] == "ryBrowse" => {
+                let body = evaluate_and_print(&request.arguments, stopped);
+                self.respond(request, body);
+                Resume::Stay
+            }
             "evaluate" => {
                 let body = evaluate(&request.arguments, stopped);
                 self.respond(request, body);
+                Resume::Stay
+            }
+            // An editor that attached during a `Browse[1]>` stop learns of the stop once it has
+            // set its breakpoints.
+            "configurationDone" => {
+                self.respond(request, Ok(json!({})));
+                self.event("stopped", stopped.event.clone());
                 Resume::Stay
             }
             "ryView" => {
@@ -1164,6 +1204,24 @@ unsafe fn evaluate(arguments: &Value, stopped: &mut Stopped) -> Result<Value, St
         _ => 0,
     };
     Ok(json!({ "result": summary(value), "variablesReference": reference }))
+}
+
+/// An expression typed at a `Browse[1]>` prompt: evaluated in the selected frame and printed as
+/// the console prints a visible value at the top level.
+unsafe fn evaluate_and_print(arguments: &Value, stopped: &mut Stopped) -> Result<Value, String> {
+    interp().visible = true;
+    let value = evaluate_in_frame(arguments, stopped)?;
+    if interp().visible {
+        let env = match arguments.get("frameId") {
+            Some(_) => frame_of(arguments, stopped)?.env,
+            None => global_env(),
+        };
+        print::print_value_top(value, env).map_err(|unwind| match unwind {
+            Unwind::Error(failure) => failure.message,
+            _ => "printing the value was interrupted".to_owned(),
+        })?;
+    }
+    Ok(json!({ "result": "", "variablesReference": 0 }))
 }
 
 /// `ryView`: opens a data viewer on the value of an expression in the selected frame.
