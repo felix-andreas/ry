@@ -707,8 +707,9 @@ corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace
 Run optimized tests with `cargo test-release`, an alias for `cargo test --profile bench`, which is
 what `just perf` and `cargo bench` use. The `bench` profile keeps `opt-level = 3` but uses thin
 local LTO and 16 codegen units. Plain `cargo test --release` builds with the release profile's fat
-LTO, and its link of libr's `test_linpack` peaked at 11.1 GiB, which a 16 GB machine running
-anything else cannot spare (it was OOM-killed once). Shipped binaries and every benchmark number in
+LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS and takes 30 minutes on
+four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and 11 minutes under
+`cargo test-release`. Shipped binaries and every benchmark number in
 the docs come from `cargo build --release`, so a budget measured under `cargo test-release` can be
 slightly slower than a release binary. Debug builds keep line tables only (`[profile.dev] debug =
 "line-tables-only"`), which keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to
