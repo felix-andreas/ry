@@ -1196,6 +1196,17 @@ step <- function(f, pars, arglist) {
 #++++
 step: <T: numeric, U, V: numeric> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> V
 
+#---- a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed
+# AzureRMR calls `api_func(op, options = ...)` and then `api_func(op)`, relying on the callee's
+# default for `options`.
+fetch <- function(op, api) {
+  listed <- api(op, options = list(filter = "x"), version = "v1")
+  single <- api(op, version = "v1")
+  list(listed, single)
+}
+#++++
+fetch: <T, U> fn(op: T, api: fn(T, options: list{filter: character}, version: character) -> U) -> list{U, U}
+
 #---- a_callback_called_by_name_still_takes_no_extra_argument
 step <- function(f, pars, arglist) {
   base <- f(pars, arglist)

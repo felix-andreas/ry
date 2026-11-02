@@ -26,12 +26,12 @@ use {
         stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
-            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, NullUnless, ReduceForward, FunctionType, InferenceVar,
-            Name, NativeField, Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty,
-            TyKind, TypeScheme, any, array, array_element, column_type, conflicting_tags,
-            contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
-            map_child_types, native_record, null, scalar, substitute_rigid, type_size, union_of,
-            unknown,
+            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
+            Name, NativeField, NullUnless, Parameter, RecordField, ReduceForward, RestParameter,
+            TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, array, array_element, column_type,
+            conflicting_tags, contains_inference_var, erase_vars, for_each_child_type,
+            is_ry_value_type, is_tag_type, map_child_types, native_record, null, scalar,
+            substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -707,6 +707,7 @@ fn check_item_in<'db>(
         operator_method_depth: 0,
         call_first_var: 0,
         return_frames: Vec::new(),
+        bare_na_returns: FxHashSet::default(),
         pending_enclosing_writes: Vec::new(),
         forward_captured: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         capture_joins: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
@@ -1239,6 +1240,9 @@ struct Checker<'db, 'a> {
     /// Per enclosing function, each early `return` value with its range, so a
     /// declared-return mismatch blames the offending `return`.
     return_frames: Vec<Vec<(Ty<'db>, TextRange)>>,
+    /// The ranges of `return(NA)` values, whose `logical` type stands for a missing value of
+    /// whatever atomic type the function's other returns have.
+    bare_na_returns: FxHashSet<TextRange>,
     /// `<<-` writes to enclosing slots, re-applied after each enclosing body's rollback
     /// so the join survives at the definition site.
     pending_enclosing_writes: Vec<(BindingId, Ty<'db>)>,
@@ -2780,6 +2784,7 @@ impl<'db> Checker<'db, '_> {
                             .collect(),
                         null_unless,
                         reduces,
+                        from_calls: false,
                     }),
                 )
             }
@@ -4115,7 +4120,9 @@ impl<'db> Checker<'db, '_> {
         };
         let probed = &self.module[text];
         self.globals.is_some_and(|globals| {
-            globals.library_candidates(probed).is_some_and(|candidates| !candidates.is_empty())
+            globals
+                .library_candidates(probed)
+                .is_some_and(|candidates| !candidates.is_empty())
                 && !globals.defined_in_project(Symbol::new(probed), false)
         })
     }
@@ -5512,6 +5519,14 @@ impl<'db> Checker<'db, '_> {
             Some(value) => self.blame_range(value),
             None => range,
         };
+        if let Some(value) = arguments.first().and_then(|argument| argument.value)
+            && matches!(
+                self.module.kind(value),
+                ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+            )
+        {
+            self.bare_na_returns.insert(blamed);
+        }
         if let Some(frame) = self.return_frames.last_mut() {
             frame.push((resolved, blamed));
         }
@@ -5520,7 +5535,9 @@ impl<'db> Checker<'db, '_> {
 
     fn recognize_guard(&mut self, condition: ExprId) -> Option<GuardRefinement<'db>> {
         if let Some((pair, differ)) = self.null_states_compared(condition) {
-            let edge = vec![SlotRefinement::Establish(Fact::NullTogether(pair.0, pair.1))];
+            let edge = vec![SlotRefinement::Establish(Fact::NullTogether(
+                pair.0, pair.1,
+            ))];
             return Some(if differ {
                 GuardRefinement {
                     true_edge: Vec::new(),
@@ -7592,6 +7609,7 @@ impl<'db> Checker<'db, '_> {
             condition_only: Vec::new(),
             null_unless: None,
             reduces: None,
+            from_calls: false,
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -8322,9 +8340,39 @@ impl<'db> Checker<'db, '_> {
         if early_returns.is_empty() {
             return trailing;
         }
-        let mut members: Vec<Ty<'db>> = early_returns.iter().map(|(ty, _)| *ty).collect();
+        let mut members: Vec<Ty<'db>> = early_returns
+            .iter()
+            .filter(|(_, range)| !self.bare_na_returns.contains(range))
+            .map(|(ty, _)| *ty)
+            .collect();
         if !self.diverges(body) {
             members.push(self.table.resolve(self.db, trailing));
+        }
+        // `return(NA)` beside returns of one atomic type is a missing value of that type, as
+        // `c(NA, "a")` is a character vector.
+        let atom = |ty: Ty<'db>| match ty.kind(self.db) {
+            TyKind::Scalar(atom) => Some(*atom),
+            TyKind::Vector(element) => match element.kind(self.db) {
+                TyKind::Scalar(atom) => Some(*atom),
+                _ => None,
+            },
+            _ => None,
+        };
+        let shared = members
+            .first()
+            .and_then(|&first| atom(self.table.resolve(self.db, first)))
+            .filter(|&first| {
+                members
+                    .iter()
+                    .all(|&member| atom(self.table.resolve(self.db, member)) == Some(first))
+            });
+        if shared.is_none() {
+            members.extend(
+                early_returns
+                    .iter()
+                    .filter(|(_, range)| self.bare_na_returns.contains(range))
+                    .map(|(ty, _)| *ty),
+            );
         }
         union_of(self.db, members)
     }
@@ -11791,7 +11839,17 @@ impl<'db> Checker<'db, '_> {
                 {
                     return folded;
                 }
-                let findings = self.match_arguments(callee_range, function, arguments);
+                let mut findings = self.match_arguments(callee_range, function, arguments);
+                // `api_func(op, options = o)` then `api_func(op)`: what one call passes, the real
+                // callee may give a default, so a later call may leave it out. A later call that
+                // adds an argument is still reported.
+                if function.from_calls {
+                    findings.retain(|finding| match finding.kind {
+                        TypeErrorKind::MissingArguments { .. } => false,
+                        TypeErrorKind::ArityMismatch { expected, found } => found > expected,
+                        _ => true,
+                    });
+                }
                 let narrowed = findings.is_empty() && function.inferred;
                 self.errors.extend(findings);
                 if narrowed {
@@ -11842,6 +11900,7 @@ impl<'db> Checker<'db, '_> {
                         condition_only: Vec::new(),
                         null_unless: None,
                         reduces: None,
+                        from_calls: true,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -12170,7 +12229,10 @@ impl<'db> Checker<'db, '_> {
             value = *inner;
         }
         let slot = *self.naming.resolutions.get(&value)?;
-        if !self.environment.holds_of(slot, Symbol::new(guard.predicate.text(self.db))) {
+        if !self
+            .environment
+            .holds_of(slot, Symbol::new(guard.predicate.text(self.db)))
+        {
             return None;
         }
         let ret = self.table.resolve(self.db, function.ret);

@@ -1957,6 +1957,7 @@ mod tests {
                 condition_only: Vec::new(),
                 null_unless: None,
                 reduces: None,
+                from_calls: false,
             }),
         );
         let positional_interface = Ty::new(
@@ -1974,6 +1975,7 @@ mod tests {
                 condition_only: Vec::new(),
                 null_unless: None,
                 reduces: None,
+                from_calls: false,
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));

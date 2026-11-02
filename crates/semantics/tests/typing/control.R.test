@@ -168,6 +168,19 @@ nullable_callback: (fn(integer) -> character) | NULL
 returns_nullable: fn(x: integer) -> character | NULL
 
 #==== returns
+#---- a_bare_na_return_takes_the_type_of_the_other_returns
+curly_package <- function(x) {
+  if (!grepl("^[{][a-z]+[}]$", x)) return(NA)
+  gsub("[{}]", "", x)
+}
+mixed <- function(x) {
+  if (x) return(NA)
+  list(1)
+}
+#++++
+curly_package: <T> fn(x: T) -> character
+mixed: fn(x: logical) -> list{double} | logical
+
 #---- early_return_unions
 f <- function(c) {
   if (c) return("foo")

@@ -348,6 +348,10 @@ pub struct FunctionType<'db> {
     /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
     /// accumulator may widen past the start. Inferred only.
     pub reduces: Option<ReduceForward<'db>>,
+    /// Built from a call on a value of unknown type, so its parameters are the arguments that
+    /// call passed rather than formals: another call may pass a different set of names, which
+    /// the real callee's defaults or `...` may accept.
+    pub from_calls: bool,
 }
 
 /// purrr's `reduce(.x, .f, ..., .init)` calling `Reduce(function(x, y) .f(x, y, ...), .x,
@@ -831,6 +835,7 @@ fn mapped_kind<'db>(
             condition_only: function.condition_only.clone(),
             null_unless: function.null_unless,
             reduces: function.reduces,
+            from_calls: function.from_calls,
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -1073,6 +1078,7 @@ mod tests {
                 condition_only: Vec::new(),
                 null_unless: None,
                 reduces: None,
+                from_calls: false,
             }),
         );
 
@@ -1106,6 +1112,7 @@ mod tests {
                 condition_only: Vec::new(),
                 null_unless: None,
                 reduces: None,
+                from_calls: false,
             }),
         );
         let f2 = Ty::new(
@@ -1123,6 +1130,7 @@ mod tests {
                 condition_only: Vec::new(),
                 null_unless: None,
                 reduces: None,
+                from_calls: false,
             }),
         );
         assert_eq!(f1, f2);
