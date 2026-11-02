@@ -3298,6 +3298,26 @@ fn fuzz_csv_reading() {
     });
 }
 
+/// The `csv` fuzz target's own decoding, `io::check_csv_bytes`, on random option bytes in front of
+/// random and mutated text, so the default suite compiles and runs exactly what the target runs.
+#[test]
+fn fuzz_csv_target_bytes() {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
+        let text = random_csv(&mut rng);
+        let mut data: Vec<u8> = (0..4).map(|_| rng.next_u64() as u8).collect();
+        if rng.chance(1, 3) {
+            data.extend(syntax::testing::mutate_bytes(&mut rng, &text));
+        } else {
+            data.extend(text.into_bytes());
+        }
+        if rng.chance(1, 10) {
+            data.truncate(rng.below(5));
+        }
+        io::check_csv_bytes(&data);
+    });
+}
+
 /// A comma-separated file of a few dozen rows whose columns each hold one kind of value, with
 /// quoted fields that hold separators, doubled quotes and line breaks, missing values, and now
 /// and then a value deep in the file that the sniffer's sample may miss.
