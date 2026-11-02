@@ -89,3 +89,62 @@ bad <- increment("oops")
 increment: <T: numeric> fn(x: T) -> T
 bad: Unknown
 49..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_shared_parameter_joins_tags_in_either_order
+#: :Red | :Green
+light <- :Red
+first <- Bool.is_eq(light, :Red)
+second <- Bool.is_eq(:Red, light)
+#++++
+light: :Red | :Green
+first: logical
+second: logical
+
+#---- a_shared_parameter_returns_the_joined_tags
+#: <T> fn(a: T, b: T) -> T
+pick <- function(a, b) if (runif(1) < 0.5) a else b
+color <- pick(:Red, :Green)
+result <- pick(:Ok(1L), :Err(:Missing))
+#++++
+pick: <T> fn(a: T, b: T) -> T
+color: :Red | :Green
+result: :Ok(integer) | :Err(:Missing)
+
+#---- a_shared_parameter_promotes_numbers_like_r
+add <- function(a, b) a + b
+a <- add(1L, 1.5)
+b <- add(1.5, 1L)
+c <- Num.add(TRUE, 2L)
+d <- Num.max(1L, 2.5)
+#++++
+add: <T: numeric> fn(a: T, b: T) -> T
+a: double
+b: double
+c: integer
+d: double
+
+#---- a_shared_item_parameter_promotes_numbers
+both <- List.concat(list(1L), list(2.5))
+#++++
+both: list[double]
+
+#---- a_shared_parameter_still_rejects_unrelated_types
+same <- Bool.is_eq(1L, "one")
+mixed <- List.concat(list(1L), list("a"))
+#++++
+same: Unknown
+mixed: Unknown
+23..28 error[type-mismatch] expected `integer`, found `character`
+61..70 error[type-mismatch] expected `list[integer]`, found `list{character}`
+
+#---- a_joined_parameter_checks_a_callback_against_the_join
+#: <T> fn(f: fn(T) -> logical, a: T, b: T) -> logical
+both_hold <- function(f, a, b) f(a) && f(b)
+#: fn(x: :Red) -> logical
+is_red <- function(x) TRUE
+checked <- both_hold(is_red, :Red, :Green)
+#++++
+both_hold: <T> fn(f: fn(T) -> logical, a: T, b: T) -> logical
+is_red: fn(x: :Red) -> logical
+checked: Unknown
+172..178 error[type-mismatch] this function is passed `:Red | :Green`, but its parameter `x` accepts `:Red`
