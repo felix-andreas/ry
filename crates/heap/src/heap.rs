@@ -30,8 +30,8 @@ use {
     crate::{
         env::Frame,
         object::{
-            NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
-            VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
+            EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
+            TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
         },
         records::Layouts,
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
@@ -46,6 +46,12 @@ use {
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
 /// GNU R's default `PROTECT` stack size, `R_PPSSIZE`.
 pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
+/// The bytes one pairlist cell, promise, closure or binding cell takes, for sizing a
+/// [`Heap::reserve`].
+pub const TRIPLE_BYTES: usize = size_of::<TripleObject>();
+/// The bytes one environment takes, for sizing a [`Heap::reserve`]. Its frame's table is
+/// allocated outside the heap and not counted.
+pub const ENVIRONMENT_BYTES: usize = size_of::<EnvironmentObject>();
 
 pub struct Heap {
     space: Space,
@@ -715,19 +721,61 @@ impl Heap {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
         let keep = [first, second, third, extra.unwrap_or(first)];
         let object = self.allocate_with(kind, size, &keep, 0)?;
-        object.set_car_unbarriered(first);
-        object.set_cdr_unbarriered(second);
-        object.set_tag_unbarriered(third);
-        first.increment_refcount();
-        second.increment_refcount();
-        third.increment_refcount();
-        if kind == SexpType::Symbol {
-            let symbol = object.as_ptr().cast::<SymbolObject>();
-            std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
-            std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
-            std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
-        }
+        fill_triple(object, kind, first, second, third);
         Ok(object)
+    }
+
+    /// Runs the collection check for `bytes` of small objects at once, keeping `keep` alive
+    /// across the collection it may run. The `_uncollected` allocators never collect, so a
+    /// caller that builds a known batch of objects, such as a closure call's environment,
+    /// binding cells and promises, pays for one check instead of one per object, and the
+    /// objects it builds need no root until its next allocation that can collect.
+    ///
+    /// The reservation is a budget, not memory set aside: allocating past it is allowed and
+    /// only moves the next collection earlier. Size it with [`TRIPLE_BYTES`] and
+    /// [`ENVIRONMENT_BYTES`].
+    #[inline]
+    pub unsafe fn reserve(&mut self, bytes: usize, keep: &[Sexp]) {
+        if self.young_bytes + bytes > self.small_trigger {
+            self.reserve_slow(bytes, keep);
+        }
+    }
+
+    /// [`Heap::alloc_triple`] without the collection check, after a [`Heap::reserve`].
+    #[inline]
+    pub unsafe fn alloc_triple_uncollected(
+        &mut self,
+        kind: SexpType,
+        first: Sexp,
+        second: Sexp,
+        third: Sexp,
+    ) -> HeapResult<Sexp> {
+        let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
+        let object = self.allocate_uncollected(kind, size, 0)?;
+        fill_triple(object, kind, first, second, third);
+        Ok(object)
+    }
+
+    /// [`Heap::cons`] without the collection check, after a [`Heap::reserve`].
+    #[inline]
+    pub unsafe fn cons_uncollected(&mut self, car: Sexp, cdr: Sexp) -> HeapResult<Sexp> {
+        self.alloc_triple_uncollected(SexpType::Pairlist, car, cdr, self.known.nil)
+    }
+
+    /// [`Heap::alloc_compiled_promise`] without the collection check, after a
+    /// [`Heap::reserve`].
+    pub unsafe fn alloc_compiled_promise_uncollected(
+        &mut self,
+        unforced: Sexp,
+        expression: Sexp,
+        env: Sexp,
+        code: Sexp,
+    ) -> HeapResult<Sexp> {
+        let promise =
+            self.alloc_triple_uncollected(SexpType::Promise, unforced, expression, env)?;
+        promise.set_attrib_unbarriered(code);
+        code.increment_refcount();
+        Ok(promise)
     }
 
     #[inline]
@@ -765,9 +813,19 @@ impl Heap {
         enclosure: Sexp,
         bindings: usize,
     ) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
+        self.reserve(ENVIRONMENT_BYTES, &[enclosure]);
+        self.alloc_environment_uncollected(enclosure, bindings)
+    }
+
+    /// [`Heap::alloc_environment_with_capacity`] without the collection check, after a
+    /// [`Heap::reserve`].
+    pub unsafe fn alloc_environment_uncollected(
+        &mut self,
+        enclosure: Sexp,
+        bindings: usize,
+    ) -> HeapResult<Sexp> {
         // Every field is written below, so zeroing the slot first would store it twice.
-        let object = self.allocate_with(SexpType::Environment, size, &[enclosure], 0)?;
+        let object = self.allocate_uncollected(SexpType::Environment, ENVIRONMENT_BYTES, 0)?;
         std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
         self.space.set_finalizable(object);
         object.set_enclosure_unbarriered(enclosure);
@@ -1192,22 +1250,31 @@ impl Heap {
     /// matched formals. The cells are allocated as one batch, with a single collection check
     /// that keeps every value alive, so the values need no other root.
     pub unsafe fn define_formals(&mut self, env: Sexp, bindings: &[Formal]) -> HeapResult<()> {
-        debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
-        let size = object_size(SexpType::Binding, 0).ok_or(HeapError::TooLong)?;
-        let request = size * bindings.len();
-        if self.collection_due(request, false) {
+        let request = TRIPLE_BYTES * bindings.len();
+        if self.young_bytes + request > self.small_trigger {
             let keep: SmallVec<[Sexp; 16]> = bindings
                 .iter()
                 .map(|binding| binding.value)
                 .chain([env])
                 .collect();
-            self.maybe_collect(request, false, &keep);
+            self.reserve_slow(request, &keep);
         }
+        self.define_formals_uncollected(env, bindings)
+    }
+
+    /// [`Heap::define_formals`] without the collection check, after a [`Heap::reserve`] that
+    /// counted one [`TRIPLE_BYTES`] per binding.
+    pub unsafe fn define_formals_uncollected(
+        &mut self,
+        env: Sexp,
+        bindings: &[Formal],
+    ) -> HeapResult<()> {
+        debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let nil = self.known.nil;
         let frame = &mut *env.frame_ptr();
         let mut first = true;
         for binding in bindings {
-            let cell = self.allocate_uncollected(SexpType::Binding, size, 0)?;
+            let cell = self.allocate_uncollected(SexpType::Binding, TRIPLE_BYTES, 0)?;
             cell.set_car_unbarriered(binding.symbol);
             cell.set_cdr_unbarriered(binding.value);
             cell.set_tag_unbarriered(nil);
@@ -1218,9 +1285,9 @@ impl Heap {
                 cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
             frame.insert(binding.symbol, cell);
-            // A collection above may have made `env` old, and the cells are all young, so the
-            // first cell's barrier check covers every one, including when a later allocation
-            // fails and leaves the cells before it in the frame.
+            // A collection may have made `env` old since it was allocated, and the cells are
+            // all young, so the first cell's barrier check covers every one, including when a
+            // later allocation fails and leaves the cells before it in the frame.
             if first {
                 self.write_barrier(env, cell);
                 first = false;
@@ -1538,6 +1605,12 @@ impl Heap {
         Ok(self.init_small(memory, kind, class, zeroed))
     }
 
+    #[cold]
+    #[inline(never)]
+    unsafe fn reserve_slow(&mut self, bytes: usize, keep: &[Sexp]) {
+        self.maybe_collect(bytes, false, keep);
+    }
+
     #[inline(never)]
     unsafe fn allocate_large(
         &mut self,
@@ -1552,7 +1625,7 @@ impl Heap {
 
     /// [`Heap::allocate_with`] without the collection check, for a caller that ran it once for
     /// a batch of objects.
-    #[inline]
+    #[inline(always)]
     unsafe fn allocate_uncollected(
         &mut self,
         kind: SexpType,
@@ -2447,4 +2520,22 @@ fn memory_ceiling() -> usize {
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
+}
+
+/// Writes a fresh triple-shaped object's three fields, which a fresh object needs no write
+/// barrier for, and a symbol's extra fields.
+#[inline(always)]
+unsafe fn fill_triple(object: Sexp, kind: SexpType, first: Sexp, second: Sexp, third: Sexp) {
+    object.set_car_unbarriered(first);
+    object.set_cdr_unbarriered(second);
+    object.set_tag_unbarriered(third);
+    first.increment_refcount();
+    second.increment_refcount();
+    third.increment_refcount();
+    if kind == SexpType::Symbol {
+        let symbol = object.as_ptr().cast::<SymbolObject>();
+        std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
+        std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
+        std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
+    }
 }

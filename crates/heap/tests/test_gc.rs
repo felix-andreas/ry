@@ -4,7 +4,7 @@
 
 use {
     heap::{
-        Collection, GcStress, Heap, HeapError,
+        Collection, ENVIRONMENT_BYTES, GcStress, Heap, HeapError, TRIPLE_BYTES,
         arena::Arena,
         object::{NA_REAL, Sexp, SexpType, Slot, gp, is_na_real},
         records::{Fields, Layout},
@@ -800,6 +800,40 @@ fn bump_runs_fill_the_holes_a_collection_leaves() {
         for index in 0..count {
             assert_eq!(kept.element(index).slice::<i32>(), &[(index * 2) as i32]);
             assert_eq!(fresh.element(index).slice::<i32>(), &[-(index as i32) - 1]);
+        }
+    }
+}
+
+#[test]
+fn a_reserved_batch_survives_the_collections_that_follow_it() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.update_policy(|policy| {
+            policy.stress = GcStress::EveryAllocation;
+            policy.verify = true;
+        });
+        let count = 200;
+        let kept = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.root(kept);
+        for index in 0..count {
+            let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            value.slice_mut::<i32>()[0] = index as i32;
+            // Only `value` and `kept` are rooted while the batch is built, so the reservation's
+            // own collection must keep `value` and nothing in the batch may collect.
+            heap.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES, &[value]);
+            let nil = heap.nil();
+            let env = heap.alloc_environment_uncollected(nil, 1).expect("alloc");
+            let inner = heap.cons_uncollected(value, nil).expect("alloc");
+            let outer = heap.cons_uncollected(env, inner).expect("alloc");
+            heap.set_element(kept, index, outer);
+        }
+        heap.collect(Collection::Major);
+        for index in 0..count {
+            let outer = kept.element(index);
+            assert_eq!(outer.car().kind(), SexpType::Environment);
+            assert_eq!(outer.cdr().car().slice::<i32>(), &[index as i32]);
         }
     }
 }
