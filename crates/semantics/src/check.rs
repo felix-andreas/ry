@@ -7102,6 +7102,7 @@ impl<'db> Checker<'db, '_> {
         if (self.condition_coerces(resolved) && !self.is_long_combine(condition))
             || self.reads_open_defaulted_formal(condition, resolved)
             || self.reads_null_placeholder(condition, resolved)
+            || self.tests_a_shipped_function(condition, resolved)
         {
             return;
         }
@@ -8879,6 +8880,38 @@ impl<'db> Checker<'db, '_> {
             .resolutions
             .get(&value)
             .is_none_or(|slot| !self.valued_slots.contains(slot))
+    }
+
+    /// A function stored into a field at top level (`generator_funs$new <- function(...)`) is
+    /// a template that the package copies into another environment, the way R6 rebinds its
+    /// generator methods. A condition in it that names a shipped function, such as `if
+    /// (class)`, reads a flag that environment binds, since no R code tests a function for
+    /// truth. The same read in an ordinary function is a missing formal and stays reported,
+    /// as does a name the project defines.
+    fn tests_a_shipped_function(&self, condition: ExprId, ty: Ty<'db>) -> bool {
+        let stored_in_field = self.module.root.is_some_and(|root| {
+            matches!(
+                self.module.kind(root),
+                ExpressionKind::Assign { target, value, .. }
+                    if matches!(self.module.kind(*target), ExpressionKind::Field { .. })
+                        && matches!(self.module.kind(*value), ExpressionKind::Function { .. })
+            )
+        });
+        if !stored_in_field {
+            return false;
+        }
+        let mut condition = condition;
+        while let ExpressionKind::Paren(inner) = self.module.kind(condition) {
+            condition = *inner;
+        }
+        let Some(name) = self.naming.non_locals.get(&condition) else {
+            return false;
+        };
+        let deferred = self.naming.deferred_non_locals.contains(&condition);
+        matches!(ty.kind(self.db), TyKind::Function(_))
+            && !self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project(*name, deferred))
     }
 
     fn binds_parameter(&self, callee: ExprId) -> bool {

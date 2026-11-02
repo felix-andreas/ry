@@ -2266,3 +2266,13 @@ render <- function(script) {
 }
 #++++
 render: <T> fn(script: T) -> list[T]
+
+#---- a_condition_naming_a_shipped_function_reads_an_installed_binding
+# R6 copies `new` into a generator environment that binds `class` to a flag.
+generator_funs <- list()
+generator_funs$new <- function() {
+  if (class) "a" else "b"
+}
+#++++
+generator_funs: list{}
+fn() -> character
