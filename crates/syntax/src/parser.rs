@@ -139,14 +139,24 @@ impl TreeBuilder<'_> {
 /// Interned tokens, keyed by kind and text.
 #[derive(Default)]
 struct TokenCache {
+    /// The last token of each kind. Most tokens repeat the previous one of their kind (an
+    /// operator, a space, a newline), and comparing one slot is far cheaper than hashing.
+    last: Vec<Option<GreenToken>>,
     tokens: HashTable<GreenToken>,
 }
 
 impl TokenCache {
     fn token(&mut self, kind: SyntaxKind, text: &str) -> GreenToken {
         let raw = rowan::SyntaxKind::from(kind);
+        let slot = usize::from(raw.0);
+        if let Some(Some(last)) = self.last.get(slot)
+            && last.text() == text
+        {
+            return last.clone();
+        }
         let hash = token_hash(raw, text);
-        self.tokens
+        let token = self
+            .tokens
             .entry(
                 hash,
                 |token| token.kind() == raw && token.text() == text,
@@ -154,7 +164,12 @@ impl TokenCache {
             )
             .or_insert_with(|| GreenToken::new(raw, text))
             .get()
-            .clone()
+            .clone();
+        if self.last.len() <= slot {
+            self.last.resize(slot + 1, None);
+        }
+        self.last[slot] = Some(token.clone());
+        token
     }
 }
 
