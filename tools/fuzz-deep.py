@@ -2,22 +2,24 @@
 """Deep fuzz campaign: every seeded harness in the workspace at a deep budget, within a time limit.
 
 A seeded harness is a `#[test]`, or the `main` of a `harness = false` test binary, that loops
-through `syntax::testing::for_each_seed` or `fuzz_seeds`, directly or through a function of the
-same file. They are found by reading the sources, so a new harness joins the campaign without an
-entry here. Each round runs every harness once on its next window of seeds, through
-`FUZZ_SEED=<start> FUZZ_ITERS=<count>`, so successive rounds and successive campaigns with
-different `--base` values cover new seeds. A window is `--depth` times the harness's default
-seed count, and four times that for the harnesses the campaign weights most: the language-server
-simulation, the C API sequences and the collector. The oracle's GC torture joins the rotation
-too, choosing its cases by seed.
+through `syntax::testing::for_each_seed`, `fuzz_seeds` or `fuzz_iterations`, directly or through a
+function of the same file. They are found by reading the sources, so a new harness joins the
+campaign without an entry here, and each is resolved against the test binary's own `--list`, so a
+test inside a module is run by its full path. Each round runs every harness once with
+`FUZZ_SEED=<start> FUZZ_DEPTH=<depth>`, which makes the harness run `depth` times its own default
+seed count from `start`. Rounds start `STRIDE` seeds apart and campaigns with different `--base`
+values start apart too, so every round covers new seeds. The harnesses the campaign weights most
+(the language-server simulation, the C API sequences and the collector) run at four times the
+depth. The oracle's GC torture joins the rotation too, choosing its cases by seed.
 
 Before the first round, the libr test suites that build and run the vendored packages' native
 code run once under `RY_GC_STRESS=startup` with `RY_GC_VERIFY=1`, which collects on every
 allocation and checks the write barrier before each minor collection.
 
 A failure does not stop the campaign. Each one is logged with the command that replays it, and
-the script exits 1 if anything failed. The wall clock bounds the campaign only; the harnesses
-themselves draw every random choice from their seed.
+the script exits 1 if anything failed. A run the campaign's own deadline cuts short is logged as
+cut, not as a failure. The wall clock bounds the campaign only; the harnesses themselves draw
+every random choice from their seed.
 
 Usage:
     python3 -I tools/fuzz-deep.py [--minutes 120] [--base 1000000] [--depth 10]
@@ -30,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -50,16 +53,17 @@ GC_STRESS_SUITES = [
     "test_connections",
     "test_fuzz_native",
 ]
+# Far more seeds than any round runs at a deep budget, so rounds never overlap.
+STRIDE = 10_000_000
 # The oracle's torture chooses this many cases per window; each case is two ry processes.
 TORTURE_CASES = 24
 RUN_LIMIT = 3600
 TEST = re.compile(r"#\[test\]\s*((?:#\[[^\]]*\]\s*)*)fn (\w+)\(\)\s*\{")
 # A `harness = false` test binary's own `main`, which runs its seeds when started bare.
 MAIN = re.compile(r"\bfn (main)\(\)[^{]*\{")
-FUNCTION = re.compile(r"\bfn (\w+)\s*(?:<[^>]*>)?\(([^)]*)\)[^{;]*\{")
-SEEDED = re.compile(r"\b(?:for_each_seed|fuzz_seeds)\(")
-# The seed count a harness passes when it is not a literal, such as a scaled `fuzz_iterations`.
-FALLBACK_SEEDS = 100
+FUNCTION = re.compile(r"\bfn (\w+)\s*(?:<[^>]*>)?\([^)]*\)[^{;]*\{")
+SEEDED = re.compile(r"\b(?:for_each_seed|fuzz_seeds|fuzz_iterations)\(")
+REPLAY = re.compile(r"replay with\n\s+(.+)")
 
 
 def main():
@@ -77,7 +81,34 @@ def main():
         log.write(line + "\n")
         log.flush()
 
-    record(f"== fuzz-deep: {len(harnesses)} harnesses, base {options.base}, depth {options.depth}")
+    def report(outcome, label, replay_command, output):
+        nonlocal failures
+        if outcome == "ok":
+            record(f"ok {label}")
+        elif outcome == "cut":
+            record(f"cut {label} (the campaign deadline stopped it)")
+        else:
+            failures += 1
+            record(f"FAIL {label}\n  replay: {replay_command}\n{indent(output)}")
+
+    resolved = []
+    for harness in harnesses:
+        executable = executables.get((harness["package"], harness["target"]))
+        if executable is None:
+            failures += 1
+            record(f"FAIL {harness['package']} {harness['target']} {harness['test']}: no test binary was built")
+            continue
+        if harness["test"] == "main":
+            resolved.append({**harness, "executable": executable, "path": None})
+            continue
+        path = resolve(executable, harness)
+        if path is None:
+            failures += 1
+            record(f"FAIL {harness['package']} {harness['target']} {harness['test']}: the test binary lists no such test")
+            continue
+        resolved.append({**harness, "executable": executable, "path": path})
+
+    record(f"== fuzz-deep: {len(resolved)} harnesses, base {options.base}, depth {options.depth}")
     if not options.only:
         for suite in GC_STRESS_SUITES:
             if time.monotonic() >= deadline:
@@ -86,53 +117,40 @@ def main():
             if executable is None:
                 continue
             environment = {"RY_GC_STRESS": "startup", "RY_GC_VERIFY": "1"}
-            ok, output = run(executable, [], environment, "crates/libr", deadline)
-            if ok:
-                record(f"ok gc-stress {suite}")
-            else:
-                failures += 1
-                record(f"FAIL gc-stress {suite}\n  replay: RY_GC_STRESS=startup RY_GC_VERIFY=1 "
-                       f"cargo test -p libr --test {suite}\n{indent(output)}")
+            outcome, output = run(executable, [], environment, "crates/libr", deadline)
+            report(outcome, f"gc-stress {suite}",
+                   f"RY_GC_STRESS=startup RY_GC_VERIFY=1 cargo test -p libr --test {suite}", output)
 
     rounds = 0
     while time.monotonic() < deadline:
-        for harness in harnesses:
+        start = options.base + rounds * STRIDE
+        for harness in resolved:
             if time.monotonic() >= deadline:
                 break
-            executable = executables.get((harness["package"], harness["target"]))
-            if executable is None:
-                continue
-            count = harness["default"] * options.depth * (4 if harness["test"] in HEAVY else 1)
-            start = options.base + rounds * count
-            environment = {"FUZZ_SEED": str(start), "FUZZ_ITERS": str(count)}
+            depth = options.depth * (4 if harness["test"] in HEAVY else 1)
+            environment = {"FUZZ_SEED": str(start), "FUZZ_DEPTH": str(depth)}
             if harness["test"] == "simulated_sessions_match_a_fresh_start":
                 environment["SIMULATION_ACTIONS"] = "150"
-            if harness["test"] == "main":
+            if harness["path"] is None:
                 arguments = []
             else:
-                arguments = [harness["test"], "--exact"] + (["--ignored"] if harness["ignored"] else [])
-            ok, output = run(executable, arguments, environment, harness["directory"], deadline)
-            label = f"{harness['package']} {harness['target']} {harness['test']} seeds {start}..{start + count}"
-            if ok:
-                record(f"ok {label}")
-            else:
-                failures += 1
-                replays = sorted(set(re.findall(r"FUZZ_SEED=\d+ [^\n]*", output)))
-                record(f"FAIL {label}\n  replay: {' | '.join(replays) or replay(harness, environment)}\n{indent(output)}")
+                arguments = [harness["path"], "--exact"] + (["--ignored"] if harness["ignored"] else [])
+            outcome, output = run(harness["executable"], arguments, environment, harness["directory"], deadline)
+            if outcome == "ok" and harness["path"] is not None and "running 1 test" not in output:
+                outcome, output = "fail", f"the filter ran no test\n{output}"
+            label = f"{harness['package']} {harness['target'] or 'lib'} {harness['path'] or 'main'} from seed {start} at depth {depth}"
+            replays = sorted(set(REPLAY.findall(output)))
+            report(outcome, label, " | ".join(replays) or replay(harness, environment), output)
         if time.monotonic() < deadline and not options.only:
             executable = executables.get(("oracle", "test_cases"))
             if executable is not None:
-                start = options.base + rounds
-                environment = {"FUZZ_SEED": str(start), "FUZZ_ITERS": str(TORTURE_CASES)}
-                ok, output = run(executable, ["cases_survive_gc_torture", "--exact", "--nocapture"],
-                                 environment, "crates/oracle", deadline)
-                if ok:
-                    record(f"ok oracle gc torture seed {start}")
-                else:
-                    failures += 1
-                    record(f"FAIL oracle gc torture seed {start}\n  replay: FUZZ_SEED={start} "
-                           f"FUZZ_ITERS={TORTURE_CASES} cargo test -p oracle --test test_cases "
-                           f"cases_survive_gc_torture -- --nocapture\n{indent(output)}")
+                seed = options.base + rounds
+                environment = {"FUZZ_SEED": str(seed), "FUZZ_ITERS": str(TORTURE_CASES)}
+                outcome, output = run(executable, ["cases_survive_gc_torture", "--exact", "--nocapture"],
+                                      environment, "crates/oracle", deadline)
+                report(outcome, f"oracle gc torture seed {seed}",
+                       f"FUZZ_SEED={seed} FUZZ_ITERS={TORTURE_CASES} cargo test -p oracle --test test_cases "
+                       f"cases_survive_gc_torture -- --nocapture", output)
         rounds += 1
     record(f"== fuzz-deep: {rounds} rounds, {failures} failures")
     sys.exit(1 if failures else 0)
@@ -149,7 +167,7 @@ def parse_arguments():
 
 
 def discover():
-    """Every seeded `#[test]` with its package, test target, crate directory and default seeds."""
+    """Every seeded `#[test]` with its package, test target and crate directory."""
     harnesses = []
     crates = os.path.join(ROOT, "crates")
     for crate in sorted(os.listdir(crates)):
@@ -168,97 +186,38 @@ def discover():
                     continue
                 path = os.path.join(directory, name)
                 source = open(path, encoding="utf-8").read()
-                if "for_each_seed" not in source and "fuzz_seeds" not in source:
+                if not SEEDED.search(source):
                     continue
                 # A test file directly under `tests/` is its own target; everything else is in the
                 # library's test target.
                 target = name[:-3] if relative == "tests" else None
-                functions = parse_functions(source)
+                functions = {match.group(1): function_body(source, match.end()) for match in FUNCTION.finditer(source)}
                 tests = [(match, match.group(2), "#[ignore" in match.group(1)) for match in TEST.finditer(source)]
                 if relative == "tests":
                     tests += [(match, "main", False) for match in MAIN.finditer(source)]
                 for match, test, ignored in tests:
-                    default = budget(function_body(source, match.end()), functions, source, set())
-                    if default is None:
+                    if not seeded(function_body(source, match.end()), functions, {test}):
                         continue
                     harnesses.append({
                         "package": package.group(1),
                         "target": target,
                         "test": test,
                         "ignored": ignored,
-                        "default": default,
                         "directory": os.path.join("crates", crate),
                     })
     return harnesses
 
 
-def parse_functions(source):
-    """Each function of a file by name: its parameter names and its body."""
-    functions = {}
-    for match in FUNCTION.finditer(source):
-        parameters = [part.split(":")[0].strip() for part in match.group(2).split(",") if ":" in part]
-        functions.setdefault(match.group(1), (parameters, function_body(source, match.end())))
-    return functions
-
-
-def budget(body, functions, source, visiting, bindings=None):
-    """The default seed count of the first seed loop `body` reaches, directly or through a
-    helper of the same file, or `None` when it reaches none."""
-    candidates = [(match.start(), match.end(), None) for match in SEEDED.finditer(body)]
-    for name, (parameters, _) in functions.items():
-        if name in visiting:
+def seeded(body, functions, visiting):
+    """Whether `body` reaches a seed loop, directly or through a function of the same file."""
+    if SEEDED.search(body):
+        return True
+    for name, helper in functions.items():
+        if name in visiting or not re.search(rf"(?<![\w.]){re.escape(name)}\(", body):
             continue
-        for match in re.finditer(rf"(?<![\w.]){re.escape(name)}\(", body):
-            candidates.append((match.start(), match.end(), name))
-    for _, end, helper in sorted(candidates):
-        arguments = call_arguments(body, end)
-        if helper is None:
-            return evaluate(arguments[0] if arguments else "", source, bindings or {})
-        parameters, helper_body = functions[helper]
-        local = dict(zip(parameters, (evaluate(argument, source, bindings or {}) for argument in arguments)))
-        found = budget(helper_body, functions, source, visiting | {helper}, local)
-        if found is not None:
-            return found
-    return None
-
-
-def call_arguments(text, start):
-    """The top-level arguments of the call whose `(` ends at `start`."""
-    depth, index, arguments, current = 1, start, [], ""
-    while index < len(text) and depth:
-        character = text[index]
-        if character in "([{":
-            depth += 1
-        elif character in ")]}":
-            depth -= 1
-        if depth == 1 and character == ",":
-            arguments.append(current.strip())
-            current = ""
-        elif depth:
-            current += character
-        index += 1
-    if current.strip():
-        arguments.append(current.strip())
-    return arguments
-
-
-def evaluate(expression, source, bindings):
-    """A seed count written as integer arithmetic over literals, the file's constants and the
-    helper's parameters; anything else, such as a scaled `fuzz_iterations`, falls back."""
-    def substitute(match):
-        word = match.group(0)
-        if word in bindings and bindings[word] is not None:
-            return str(bindings[word])
-        constant = re.search(rf"const {re.escape(word)}: \w+ = ([0-9_]+);", source)
-        return constant.group(1).replace("_", "") if constant else word
-    text = re.sub(r"[A-Za-z_]\w*", substitute, expression.replace("_", "") if re.fullmatch(r"[0-9_]+", expression) else expression)
-    text = re.sub(r"(?<=\d)_(?=\d)", "", text)
-    if not re.fullmatch(r"[0-9\s*/+()-]+", text):
-        return FALLBACK_SEEDS
-    try:
-        return max(1, int(eval(text.replace("/", "//"), {"__builtins__": {}}, {})))
-    except (SyntaxError, ZeroDivisionError):
-        return FALLBACK_SEEDS
+        if seeded(helper, functions, visiting | {name}):
+            return True
+    return False
 
 
 def function_body(source, start):
@@ -305,31 +264,49 @@ def build(harnesses):
     return executables
 
 
+def resolve(executable, harness):
+    """The full libtest name of a harness, such as `tests::foo` for a test inside a module."""
+    command = [executable, "--list", "--format=terse"] + (["--ignored"] if harness["ignored"] else [])
+    listed = subprocess.run(command, cwd=os.path.join(ROOT, harness["directory"]),
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    names = [line[: -len(": test")] for line in listed.stdout.splitlines() if line.endswith(": test")]
+    matches = [name for name in names if name == harness["test"] or name.endswith("::" + harness["test"])]
+    return matches[0] if len(matches) == 1 else None
+
+
 def run(executable, arguments, environment, directory, deadline):
-    limit = max(1, min(RUN_LIMIT, deadline - time.monotonic() + 60))
+    """Runs one harness in its own process group, so a timeout kills every process it started.
+    Returns `ok`, `fail`, or `cut` when the campaign deadline, not the run limit, stopped it."""
+    remaining = deadline - time.monotonic() + 60
+    limit = max(1, min(RUN_LIMIT, remaining))
+    process = subprocess.Popen(
+        [executable] + arguments,
+        cwd=os.path.join(ROOT, directory),
+        env={**os.environ, **environment},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
     try:
-        finished = subprocess.run(
-            [executable] + arguments,
-            cwd=os.path.join(ROOT, directory),
-            env={**os.environ, **environment},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            timeout=limit,
-        )
-    except subprocess.TimeoutExpired as expired:
-        output = expired.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode(errors="replace")
-        return False, f"timed out after {limit:.0f}s\n{output}"
-    return finished.returncode == 0, finished.stdout
+        output, _ = process.communicate(timeout=limit)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        output, _ = process.communicate()
+        if limit < RUN_LIMIT:
+            return "cut", output
+        return "fail", f"timed out after {limit:.0f}s\n{output}"
+    return ("ok" if process.returncode == 0 else "fail"), output
 
 
 def replay(harness, environment):
     target = "--lib" if harness["target"] is None else f"--test {harness['target']}"
     settings = " ".join(f"{key}={value}" for key, value in environment.items())
-    return f"{settings} cargo test -p {harness['package']} {target} {harness['test']} -- --exact"
+    if harness["path"] is None:
+        return f"{settings} cargo test -p {harness['package']} {target}"
+    ignored = " --ignored" if harness["ignored"] else ""
+    return f"{settings} cargo test -p {harness['package']} {target} -- {harness['path']} --exact{ignored}"
 
 
 def indent(output):

@@ -1354,8 +1354,10 @@ impl Worker {
         let (file, text) = self.document(&item.uri)?;
         let offset = self.to_offset(&text, item.selection_range.start);
         let files = ProjectFiles::get(&self.db);
-        // An item's call ranges are relative to its own document, so an item whose name
-        // resolves to a function defined in another file has no answer to give in that one.
+        // Every item this server hands out sits at its function's own definition, so its name
+        // resolves back into the same file. One that resolves elsewhere is stale (the function
+        // moved since the answer), and both directions decline it: outgoing call ranges are
+        // relative to the item's document, and incoming calls would describe a different item.
         self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
             .ok()
             .flatten()

@@ -394,7 +394,10 @@ impl Session<'_> {
         // first may have made this connection the debugger's, so the next `initialize` waits
         // until the console has let go of it.
         self.closed += 1;
-        console_server::wait_for_closed_connections(self.closed);
+        assert!(
+            console_server::wait_for_closed_connections(self.closed, Duration::from_secs(60)),
+            "the console never handled the close of connection {name}"
+        );
         if self.owner == Some(name) {
             self.owner = None;
         }

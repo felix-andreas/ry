@@ -71,7 +71,8 @@ docs-test page="":
 docs-bless page="":
     RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
 
-# Every seeded harness at a deep budget for `minutes`, rotating seed windows from `base`, plus the
+# Every seeded harness at `depth` times its default seeds (`FUZZ_DEPTH`) for `minutes`, each round
+# starting at a fresh seed from `base`, plus the
 # libr package suites under collection stress; failures are logged with their replay commands to
 # target/fuzz-deep.log. A scheduled run passes a fresh base, e.g. `just fuzz-deep 480 $(date +%s)`.
 fuzz-deep minutes="120" base="1000000" depth="10" *args:

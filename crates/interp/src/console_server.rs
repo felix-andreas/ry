@@ -30,6 +30,7 @@ use {
             Mutex, MutexGuard, PoisonError,
             atomic::{AtomicBool, Ordering},
         },
+        time::Duration,
     },
 };
 
@@ -111,10 +112,11 @@ pub enum BrowseInput {
 }
 
 /// Blocks until the console has handled the close of `count` connections in all, so a client
-/// that dropped one knows when the console has let go of it, the debugger included, without
-/// polling a clock.
-pub fn wait_for_closed_connections(count: u64) {
-    platform::wait_for_closed_connections(count);
+/// that dropped one knows when the console has let go of it, the debugger included. `false`
+/// when `limit` passed first, which only bounds a hang: the wait wakes on each close, never on
+/// a clock.
+pub fn wait_for_closed_connections(count: u64, limit: Duration) -> bool {
+    platform::wait_for_closed_connections(count, limit)
 }
 
 /// The number of connections whose close the console has handled.
@@ -426,13 +428,11 @@ mod platform {
     static CLOSED: Mutex<u64> = Mutex::new(0);
     static CLOSED_CHANGED: Condvar = Condvar::new();
 
-    pub fn wait_for_closed_connections(count: u64) {
-        let mut closed = lock(&CLOSED);
-        while *closed < count {
-            closed = CLOSED_CHANGED
-                .wait(closed)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
+    pub fn wait_for_closed_connections(count: u64, limit: Duration) -> bool {
+        let (closed, _) = CLOSED_CHANGED
+            .wait_timeout_while(lock(&CLOSED), limit, |closed| *closed < count)
+            .unwrap_or_else(PoisonError::into_inner);
+        *closed >= count
     }
 
     pub fn closed_connections() -> u64 {
@@ -536,7 +536,7 @@ mod platform {
                     push(Event::Closed(id));
                 });
             if spawned.is_err() {
-                lock(&CONNECTIONS).remove(&id);
+                forget(id);
             }
         }
     }
@@ -943,11 +943,17 @@ mod platform {
     }
 
     unsafe fn closed(connection: u64) {
-        lock(&CONNECTIONS).remove(&connection);
         if *lock(&DEBUG_CONNECTION) == Some(connection) {
             interp().debugger = None;
             *lock(&DEBUG_CONNECTION) = None;
         }
+        forget(connection);
+    }
+
+    /// Drops a connection the console is done with. Every path that ends one comes through here,
+    /// so `closed_connections` counts each connection exactly once.
+    fn forget(connection: u64) {
+        lock(&CONNECTIONS).remove(&connection);
         *lock(&CLOSED) += 1;
         CLOSED_CHANGED.notify_all();
     }
@@ -974,12 +980,10 @@ mod platform {
                         }
                     },
                     Some(Event::Closed(connection)) if connection == self.connection => {
-                        lock(&CONNECTIONS).remove(&connection);
+                        forget(connection);
                         return None;
                     }
-                    Some(Event::Closed(connection)) => {
-                        lock(&CONNECTIONS).remove(&connection);
-                    }
+                    Some(Event::Closed(connection)) => forget(connection),
                     // A stopped program waits like a prompt, so it answers the help server too.
                     Some(Event::Help) if wait => serve_help(),
                     Some(Event::Help) => {}
@@ -1008,7 +1012,7 @@ mod platform {
 
 #[cfg(not(unix))]
 mod platform {
-    use heap::object::Sexp;
+    use {heap::object::Sexp, std::time::Duration};
 
     pub fn start() -> Option<String> {
         None
@@ -1016,7 +1020,9 @@ mod platform {
 
     pub fn finish() {}
 
-    pub fn wait_for_closed_connections(_count: u64) {}
+    pub fn wait_for_closed_connections(_count: u64, _limit: Duration) -> bool {
+        true
+    }
 
     pub fn closed_connections() -> u64 {
         0

@@ -215,6 +215,14 @@ const SPLICE_REGRESSIONS: &[(&str, &str, (u32, u32), u32)] = &[
         (59, 59),
         1,
     ),
+    (
+        // The first line's `[[` is closed by one `]` only, which the parser reports at the `[[`
+        // rather than as an unclosed group, so the splice guard must recognize that message too.
+        "x[[1]\ny <- 2\nz <- 3\n",
+        "x[[1]\ny <- 2\nz <- 3]\n",
+        (19, 19),
+        1,
+    ),
 ];
 
 #[test]

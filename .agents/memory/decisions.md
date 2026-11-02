@@ -6112,5 +6112,5 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## Every seeded harness rotates through `FUZZ_SEED`
 
-- **Shape.** Each case of a harness is one seed of `for_each_seed`, and a harness that shares one generator across cases builds it as `SplitMix64(CONST ^ seed)`. `tools/fuzz-deep.py` finds harnesses by reading the sources and runs each on fresh seed windows.
+- **Shape.** Each case of a harness is one seed of `for_each_seed`, and a harness that shares one generator across cases builds it as `SplitMix64(CONST ^ seed)`. `tools/fuzz-deep.py` finds harnesses by reading the sources, resolves each against its binary's `--list`, and runs it with `FUZZ_SEED` at a fresh start and `FUZZ_DEPTH`, which scales each loop's own default count. A scaled depth, rather than one `FUZZ_ITERS` count, keeps the proportions of a test with several loops of different sizes and needs no budget read out of the source.
 - **Why.** A single stream drawn across iterations neither replays one case nor moves to new inputs, so a deep campaign over it repeats the default run. Discovery from the sources means a new harness joins the campaign without being registered.

@@ -39,9 +39,11 @@ reaches the output.
 `Entropy` trait), print the seed and a replay command when they fail, and never consult the
 wall clock or the OS's randomness. Running the same seed twice must produce the same transcript, and
 the simulator pins that property with a test. A seeded battery loops through
-`syntax::testing::for_each_seed`, which runs seeds `0..N`, or `0..FUZZ_ITERS` when that is set, replays only
-the seed in `FUZZ_SEED` when it is set (with `FUZZ_ITERS`, that many seeds from it), and on a failure prints the exact command, such as
+`syntax::testing::for_each_seed`, which runs seeds `0..N` and on a failure prints the exact command, such as
 `FUZZ_SEED=14 cargo test -p loader --test test_reload_fuzz a_reload_matches_a_fresh_load -- --exact`.
+Three variables move the window. `FUZZ_SEED` alone replays that one seed. `FUZZ_ITERS` sets the
+count, starting at `FUZZ_SEED` or 0. `FUZZ_DEPTH` multiplies each loop's own default count instead,
+so a test with several loops keeps their proportions when a campaign deepens it.
 
 **Invariants are always on in simulation.** Cross-checks that are too expensive for production run
 whenever a harness asks for them, and panic at the step that broke them with the inputs that
@@ -230,18 +232,22 @@ does. A stricter checker that catches an unprotected object at the moment it is 
 ### The deep campaign
 
 `just fuzz-deep` runs `tools/fuzz-deep.py`, which reads the sources for every `#[test]` (and every
-`harness = false` `main`) that loops through `for_each_seed` or `fuzz_seeds`, directly or through a
-function in its file, so a new harness joins without an entry anywhere. It then works in three steps:
+`harness = false` `main`) that loops through `for_each_seed`, `fuzz_seeds` or `fuzz_iterations`,
+directly or through a function in its file, so a new harness joins without an entry anywhere. Each
+test is then looked up in its binary's `--list`, which gives a test inside a module its full path; a
+test the binary does not list, or a run that runs no test, is a failure. It then works in three steps:
 
 1. The libr suites that run vendored packages' native code run once under `RY_GC_STRESS=startup`
    with `RY_GC_VERIFY=1`.
-2. Each round runs every harness on its next window of seeds, `DEPTH` times its default count, and
-   four times that for the language-server simulation (at 150 actions), the C API sequences and the
-   collector. The oracle's GC torture runs on a fresh sample of cases each round.
+2. Each round runs every harness with `FUZZ_SEED` at the round's start and `FUZZ_DEPTH=DEPTH`, and
+   four times that depth for the language-server simulation (at 150 actions), the C API sequences
+   and the collector. Rounds start ten million seeds apart. The oracle's GC torture runs on a fresh
+   sample of cases each round.
 3. Rounds repeat until `MINUTES` have passed.
 
 A failure does not stop the campaign: it is logged to `target/fuzz-deep.log` with its replay command,
-and the run exits 1 at the end. Successive rounds and a different `BASE` cover new seeds, so a
+and the run exits 1 at the end. A run the campaign's deadline cuts short is logged as `cut`, not as a
+failure, and a timed-out run is killed with every process it started. Successive rounds and a different `BASE` cover new seeds, so a
 scheduled run passes a fresh base, for example `just fuzz-deep 480 $(date +%s)`. The wall clock bounds
 the campaign only; every harness still draws its choices from its seed.
 
@@ -254,7 +260,8 @@ the campaign only; every harness still draws its choices from its seed.
   (GNU R's own, threads in packages) is controlled only by running them single-threaded.
 - The simulator interrupts a step only with a notification, so a request preempting idle work is not
   simulated.
-- The console's completeness check (`syntax::input_is_unfinished`) treats a string left open across
-  lines as finished, and treats `pkg::`, a trailing `\`, a leading `;`, `f(1\n2` and a bare `[` as
+- The parser's completeness check (`syntax::input_is_unfinished`) treats a string left open across
+  lines as finished; the console's `repl::input_is_complete` holds such a string back itself. Both
+  treat `pkg::`, a trailing `\`, a leading `;`, `f(1\n2` and a bare `[` as
   unfinished where GNU R reports an error. The differential against GNU R skips the `pkg::` and `\`
   endings.

@@ -64,9 +64,10 @@ fn assign(makefile: &mut Makefile, text: &str, depth: usize) {
         if let Some(files) = ["include", "-include", "sinclude"]
             .iter()
             .find_map(|keyword| statement.trim_start().strip_prefix(keyword))
+            .map(|rest| rest.split('#').next().unwrap_or(""))
             .filter(|rest| rest.starts_with([' ', '\t']) && !rest.contains('='))
         {
-            let files = expand_make(files.split('#').next().unwrap_or(""), &makefile.variables);
+            let files = expand_make(files, &makefile.variables);
             if depth < INCLUDE_DEPTH {
                 for name in files.split_whitespace() {
                     if let Some(included) = (makefile.read)(name) {

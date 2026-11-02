@@ -2294,9 +2294,10 @@ SHLIB_OPENMP_CFLAGS =
             .args(["-e", "cat(R.home('share'))"])
             .output()
             .ok()
+            .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         else {
-            eprintln!("skipping: Rscript is not installed");
+            eprintln!("skipping: Rscript is not installed or failed");
             return;
         };
         let text = format!(
@@ -2321,6 +2322,16 @@ SHLIB_OPENMP_CFLAGS =
         )
         .expect("make reads GNU R's Makeconf");
         assert_eq!(ours, theirs);
+    }
+
+    /// An `=` in the comment after an `include` does not turn the line into an assignment.
+    #[test]
+    fn an_include_with_an_assignment_in_its_comment_still_includes() {
+        let text = "include a.mk # sets A=1\n";
+        let variables = make_assignments(text, "/r", &mut |name| {
+            (name == "a.mk").then(|| "A = 1\n".to_owned())
+        });
+        assert_eq!(expand_make("$(A)", &variables), "1");
     }
 
     /// A file that includes itself ends at the depth bound instead of recursing forever.
