@@ -34,9 +34,11 @@
 | [4] "2.7755575615628914e-17"
 | [1] 97141
 | [1] 1
+| [1] -Inf  Inf -Inf
+| [1]  Inf -Inf  Inf
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 1L
+double
+| c(Inf, -Inf, Inf)

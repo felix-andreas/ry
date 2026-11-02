@@ -17,3 +17,14 @@ cat(values, "\n")
 print(round(c(1.23456, 1.23456, 1.23456), c(1, 2, 3)))
 print(signif(c(a = 1.23456, b = 1.23456), 1:2))
 print(round(2.5678, c(0, 1, 2)))
+
+# Zero is written in scientific notation once the penalty favors it.
+options(scipen = -5)
+print(as.character(c(0, -0, 1))); print(paste(0)); cat(0, "\n")
+options(scipen = 0)
+
+# Digits follow math2: NA beats NaN, and digits round half up.
+print(round(c(1.2345, 2.3456), c(NaN, 1)))
+print(round(c(NA, NaN, 1.5, NaN), c(1, NA, NaN, NA)))
+print(round(12345.678, c(-1.5, -0.5))); print(round(12345.678, -0.5)); print(round(1.5, NaN)); print(signif(123.456, NaN))
+print(tryCatch(round(1.5, "a"), error = conditionMessage))

@@ -2420,9 +2420,20 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "digits"])?;
     let operand = present(matched[0])
         .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    if let Some(digits) = present(matched[1])
+        && !matches!(
+            digits.kind(),
+            SexpType::Integer | SexpType::Logical | SexpType::Real
+        )
+    {
+        return Err(call.error("non-numeric argument to mathematical function"));
+    }
     let digits = match present(matched[1]) {
+        // `NaN` digits give `NaN` where the value is not `NA`, which only the elementwise path
+        // tells apart from `NA` digits.
         Some(digits)
-            if length(digits) > 1
+            if (length(digits) > 1
+                || length(digits) == 1 && values::as_real_scalar(digits).is_nan())
                 && matches!(
                     operand.kind(),
                     SexpType::Integer | SexpType::Logical | SexpType::Real
@@ -2439,7 +2450,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             if value.is_nan() {
                 i32::MIN
             } else {
-                value.round().clamp(-1e6, 1e6) as i32
+                round_digit_count(value)
             }
         }
         None => {
@@ -2525,12 +2536,13 @@ unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Se
     for index in 0..count {
         let x = real_at(operand, index % operand_count);
         let digit = values::reals(digits)[index % digits_count];
-        values::reals_mut(result)[index] = if digit.is_nan() {
+        // GNU R's `math2`: `NA` in either argument gives `NA`, and otherwise `NaN` gives `NaN`.
+        values::reals_mut(result)[index] = if is_na_real(x) || is_na_real(digit) {
             NA_REAL
-        } else if x.is_nan() {
-            x
+        } else if x.is_nan() || digit.is_nan() {
+            f64::NAN
         } else {
-            let digit = digit.round().clamp(-1e6, 1e6) as i32;
+            let digit = round_digit_count(digit);
             if significant {
                 signif_digits(x, digit)
             } else {
@@ -2545,6 +2557,11 @@ unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Se
     };
     values::copy_most_attributes(source, result, true)?;
     Ok(result)
+}
+
+/// A `digits` argument as an integer count, rounded half up as GNU R's `floor(digits + 0.5)`.
+fn round_digit_count(digits: f64) -> i32 {
+    (digits + 0.5).floor().clamp(-1e6, 1e6) as i32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2620,16 +2637,24 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             } else {
                 f64::INFINITY
             };
-            // From the first NaN on every result is NaN, and from the first NA on it is NA.
+            // From the first NaN on every result is NaN, and from the first NA on it is NA. The
+            // comparisons are GNU R's, which keep the new element on a tie, so a signed zero
+            // follows it on every target.
             for (&value, out) in data.iter().zip(out.iter_mut()) {
                 accumulator = if is_na_real(value) || is_na_real(accumulator) {
                     NA_REAL
                 } else if value.is_nan() || accumulator.is_nan() {
                     f64::NAN
                 } else if kind == Cumulative::Max {
-                    accumulator.max(value)
+                    if accumulator > value {
+                        accumulator
+                    } else {
+                        value
+                    }
+                } else if accumulator < value {
+                    accumulator
                 } else {
-                    accumulator.min(value)
+                    value
                 };
                 *out = accumulator;
             }

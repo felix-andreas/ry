@@ -331,10 +331,8 @@ pub fn format_real_alone_scipen(value: f64, digits: usize, scipen: i32) -> Strin
 /// and what either notation prints, so one shortest conversion replaces the significance pass
 /// and the second, fixed-precision conversion. `None` when the digits do not fit.
 fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
-    if value == 0.0 {
-        return Some("0".into());
-    }
-    if digits > SHORTEST_EXACT_DIGITS || !value.is_normal() {
+    // Zero goes through the width comparison too: under `scipen <= -5` GNU R writes `0e+00`.
+    if digits > SHORTEST_EXACT_DIGITS || !(value.is_normal() || value == 0.0) {
         return None;
     }
     let mut text = StackText::new();
