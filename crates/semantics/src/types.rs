@@ -23,15 +23,61 @@ pub struct Name<'db> {
 }
 
 impl<'db> Name<'db> {
-    pub fn new<D: ?Sized>(_db: &'db D, text: impl AsRef<str>) -> Name<'db> {
+    pub fn new<D: ?Sized>(_db: &'db D, text: impl IntoSymbol) -> Name<'db> {
         Name {
-            symbol: Symbol::new(text.as_ref()),
+            symbol: text.into_symbol(),
             db: PhantomData,
         }
     }
 
+    pub fn symbol(self) -> Symbol {
+        self.symbol
+    }
+
     pub fn text<D: ?Sized>(self, _db: &D) -> &'static str {
         self.symbol.as_str()
+    }
+}
+
+/// A spelling, or a symbol that already interns one: a symbol passes through without the
+/// hash and table probe that interning its text again would cost.
+pub trait IntoSymbol {
+    fn into_symbol(self) -> Symbol;
+}
+
+impl IntoSymbol for Symbol {
+    fn into_symbol(self) -> Symbol {
+        self
+    }
+}
+
+impl IntoSymbol for &Symbol {
+    fn into_symbol(self) -> Symbol {
+        *self
+    }
+}
+
+impl IntoSymbol for &str {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(self)
+    }
+}
+
+impl IntoSymbol for &&str {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(self)
+    }
+}
+
+impl IntoSymbol for String {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(&self)
+    }
+}
+
+impl IntoSymbol for &String {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(self)
     }
 }
 

@@ -34,7 +34,7 @@ use {
         cmp::Reverse,
         collections::{BTreeMap, BTreeSet, HashMap},
         env, fmt, fs,
-        io::Read,
+        io::{self, Read},
         iter, mem,
         num::NonZero,
         path::{Path, PathBuf},
@@ -180,17 +180,10 @@ pub fn check(
             n_diagnostics +=
                 render_findings(output, min_severity, path, source, problems, &|_| None);
         }
-        let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
-        for file in analysis.files.iter().filter(|file| file.requested) {
+        for (text, rendered) in render_project_findings(&analysis, output, min_severity) {
             n_files += 1;
-            n_diagnostics += render_findings(
-                output,
-                min_severity,
-                &file.path,
-                analysis.source(file),
-                &file.diagnostics,
-                &resolve_note,
-            );
+            n_diagnostics += rendered;
+            print_findings(output, &text);
         }
         if let Some((path, source, problems)) = &analysis.namespace {
             n_diagnostics +=
@@ -469,9 +462,9 @@ fn analyze_project_with(
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
-    for path in paths {
-        let source = match fs::read_to_string(&path) {
-            Ok(source) => analysable_source(&path, source),
+    for (path, read) in read_sources(paths) {
+        let source = match read {
+            Ok(source) => source,
             Err(err) => {
                 failures += 1;
                 error_because(&format!("failed to read: {}", path.display()), &err);
@@ -506,26 +499,33 @@ fn analyze_project_with(
         .durability(Durability::HIGH)
         .new(&db);
     let data_files = scan_data_files(root);
-    let executable = env::current_exe().unwrap_or_default();
-    let key = check_cache::key(
-        &executable,
-        &config,
-        root,
-        &data_files,
-        namespace_source.as_deref(),
-        description_source.as_deref(),
-        project_stubs
-            .iter()
-            .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
-    );
+    // Hashing the binary and every source only pays when a record is read or written.
+    let (key, contents) = match cache {
+        CacheUse::ReadWrite => {
+            let executable = env::current_exe().unwrap_or_default();
+            let key = check_cache::key(
+                &executable,
+                &config,
+                root,
+                &data_files,
+                namespace_source.as_deref(),
+                description_source.as_deref(),
+                project_stubs
+                    .iter()
+                    .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
+            );
+            let contents: Vec<Fingerprint> = files
+                .iter()
+                .map(|&file| check_cache::fingerprint(file.text(&db)))
+                .collect();
+            (key, contents)
+        }
+        CacheUse::Off => (Fingerprint::default(), Vec::new()),
+    };
     let _: DataFiles = DataFiles::builder(data_files)
         .durability(Durability::HIGH)
         .new(&db);
     let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
-    let contents: Vec<Fingerprint> = files
-        .iter()
-        .map(|&file| check_cache::fingerprint(file.text(&db)))
-        .collect();
     let mut plan = match cache {
         CacheUse::Off => Plan::Fresh,
         CacheUse::ReadWrite => {
@@ -811,6 +811,36 @@ fn analyzed_files(
             diagnostics,
         })
         .collect()
+}
+
+/// Reads every source across cores, in `paths` order. A cold check reads a thousand files
+/// before anything else can start, so a serial read is a visible slice of its wall time.
+fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<String>)> {
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(paths.len())
+        .max(1);
+    let chunk = paths.len().div_ceil(workers).max(1);
+    let read: Vec<io::Result<String>> = thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|path| {
+                            fs::read_to_string(path).map(|source| analysable_source(path, source))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("read worker should not panic"))
+            .collect()
+    });
+    paths.into_iter().zip(read).collect()
 }
 
 /// Runs `work` for every index in `order` across `workers` threads.
@@ -1125,8 +1155,109 @@ pub(crate) fn project_order<'a>(
     }
 }
 
-/// Renders the findings at or above the floor and returns how many it rendered.
+/// Renders each requested file's findings, in file order, with how many each rendered. A
+/// check that reports thousands of findings spends most of its tail in the renderer, so the
+/// files render across cores.
+fn render_project_findings(
+    analysis: &ProjectAnalysis,
+    output: OutputFormat,
+    min_severity: MinSeverity,
+) -> Vec<(String, usize)> {
+    let files = &analysis.files;
+    let sources: Vec<&str> = files.iter().map(|file| analysis.source(file)).collect();
+    let positions: FxHashMap<SourceFile, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (file.file, index))
+        .collect();
+    let resolve_note = |related: &RelatedLocation| {
+        let &index = positions.get(&related.file)?;
+        Some(RelatedNote {
+            path: &files.get(index)?.path,
+            source: sources.get(index)?,
+            range: related.range,
+            message: related.message,
+        })
+    };
+    let requested: Vec<usize> = (0..files.len())
+        .filter(|&index| files[index].requested)
+        .collect();
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(requested.len())
+        .max(1);
+    let next = AtomicUsize::new(0);
+    let mut rendered: Vec<(usize, String, usize)> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (next, requested, resolve_note) = (&next, &requested, &resolve_note);
+                let (files, sources) = (files, &sources);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    while let Some(&index) = requested.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let file = &files[index];
+                        let mut text = String::new();
+                        let count = render_findings_into(
+                            &mut text,
+                            output,
+                            min_severity,
+                            &file.path,
+                            sources[index],
+                            &file.diagnostics,
+                            resolve_note,
+                        );
+                        done.push((index, text, count));
+                    }
+                    done
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("render worker should not panic"))
+            .collect()
+    });
+    rendered.sort_unstable_by_key(|&(index, _, _)| index);
+    rendered
+        .into_iter()
+        .map(|(_, text, count)| (text, count))
+        .collect()
+}
+
+/// Renders the findings at or above the floor, prints them, and returns how many it rendered.
 pub(crate) fn render_findings<'a>(
+    output: OutputFormat,
+    min_severity: MinSeverity,
+    path: &Path,
+    source: &str,
+    diagnostics: &[Diagnostic],
+    resolve_note: &dyn Fn(&RelatedLocation) -> Option<RelatedNote<'a>>,
+) -> usize {
+    let mut text = String::new();
+    let rendered = render_findings_into(
+        &mut text,
+        output,
+        min_severity,
+        path,
+        source,
+        diagnostics,
+        resolve_note,
+    );
+    print_findings(output, &text);
+    rendered
+}
+
+/// Human findings go to stderr, JSON records to stdout.
+fn print_findings(output: OutputFormat, text: &str) {
+    match output {
+        OutputFormat::Human => eprint!("{text}"),
+        OutputFormat::Json => print!("{text}"),
+    }
+}
+
+/// Appends the findings at or above the floor to `out` and returns how many it rendered.
+fn render_findings_into<'a>(
+    out: &mut String,
     output: OutputFormat,
     min_severity: MinSeverity,
     path: &Path,
@@ -1153,11 +1284,11 @@ pub(crate) fn render_findings<'a>(
         match output {
             OutputFormat::Human => {
                 let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
-                render_human_diagnostic(path, source, lines, diagnostic, &related, fixable)
+                render_human_diagnostic(out, path, source, lines, diagnostic, &related, fixable)
             }
             OutputFormat::Json => {
                 let index = line_index.get_or_insert_with(|| LineIndex::new(source));
-                render_json_diagnostic(path, source, index, diagnostic, &related)
+                render_json_diagnostic(out, path, source, index, diagnostic, &related)
             }
         }
     }
@@ -1173,6 +1304,7 @@ pub(crate) struct RelatedNote<'a> {
 }
 
 fn render_human_diagnostic(
+    out: &mut String,
     path: &Path,
     source: &str,
     lines: &LineStarts,
@@ -1184,7 +1316,7 @@ fn render_human_diagnostic(
         .iter()
         .map(|note| LineStarts::new(note.source))
         .collect();
-    report(&Report {
+    out.push_str(&report_text(&Report {
         // A suppression comment must spell the code, so the human output leads with it.
         code: Some(diagnostic.code),
         severity: match diagnostic.severity {
@@ -1226,8 +1358,8 @@ fn render_human_diagnostic(
             }
         }),
         ..Report::default()
-    });
-    eprintln!();
+    }));
+    out.push('\n');
 }
 
 /// Clamped to the first line when the range spans more: drawing a whole
@@ -1264,6 +1396,7 @@ fn primary_label(source: &str, range: TextRange) -> LabeledSpan {
 
 /// Positions are 1-based like the human renderer; field names are a documented contract.
 fn render_json_diagnostic(
+    out: &mut String,
     path: &Path,
     source: &str,
     index: &LineIndex,
@@ -1319,7 +1452,8 @@ fn render_json_diagnostic(
             })
         }),
     });
-    println!("{record}");
+    out.push_str(&record.to_string());
+    out.push('\n');
 }
 
 /// Config errors and type errors share one reporter so they never look like two tools.
@@ -1408,6 +1542,10 @@ impl miette::Diagnostic for Report<'_> {
 /// Colour and unicode on an attended terminal, monochrome unicode when colour is
 /// refused, plain ASCII into a pipe or file.
 pub fn report(diagnostic: &dyn miette::Diagnostic) {
+    eprint!("{}", report_text(diagnostic));
+}
+
+fn report_text(diagnostic: &dyn miette::Diagnostic) -> String {
     let reporter = &*REPORTER;
     let mut rendered = String::new();
     if reporter
@@ -1416,8 +1554,7 @@ pub fn report(diagnostic: &dyn miette::Diagnostic) {
         .is_err()
     {
         // Cannot fail; the fallback degrades a reporter bug rather than swallowing the finding.
-        eprintln!("{diagnostic}");
-        return;
+        return format!("{diagnostic}\n");
     }
     let mut kept = String::with_capacity(rendered.len());
     for line in rendered.lines() {
@@ -1427,7 +1564,7 @@ pub fn report(diagnostic: &dyn miette::Diagnostic) {
         kept.push_str(line);
         kept.push('\n');
     }
-    eprint!("{kept}");
+    kept
 }
 
 struct Reporter {

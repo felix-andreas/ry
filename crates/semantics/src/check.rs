@@ -2,7 +2,6 @@
 //! back through an undo log instead of cloning the environment.
 
 use {
-    bumpalo::{Bump, collections::Vec as BumpVec},
     crate::{
         DataPath, Db, TypeDefinitions,
         annotations::Annotation,
@@ -33,6 +32,7 @@ use {
             native_record, null, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
+    bumpalo::{Bump, collections::Vec as BumpVec},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         borrow::Cow,
@@ -539,19 +539,19 @@ pub enum StrictOriginKind {
 pub trait GlobalEnv<'db> {
     /// `deferred`: a read inside a nested function runs after the document frame
     /// settled, so the LAST binding wins; an immediate read sees only earlier ones.
-    fn scheme(&self, name: &str, deferred: bool) -> Option<TypeScheme<'db>>;
+    fn scheme(&self, name: Symbol, deferred: bool) -> Option<TypeScheme<'db>>;
 
     /// `None` when the name has at most one candidate or a package/local definition
     /// shadows the stub set.
-    fn overloads(&self, name: &str, deferred: bool) -> Option<&'db [TypeScheme<'db>]>;
+    fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [TypeScheme<'db>]>;
 
     /// A project definition has its own attributable site, so a reference propagates
     /// its `Unknown` instead of re-originating one.
-    fn defined_in_project(&self, name: &str, deferred: bool) -> bool;
+    fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool;
 
     /// Never a stub, and never the project-wide conditional slot, whose join includes
     /// this item's own write.
-    fn earlier_binding(&self, name: &str) -> Option<TypeScheme<'db>>;
+    fn earlier_binding(&self, name: Symbol) -> Option<TypeScheme<'db>>;
 
     /// Every stub candidate for `name`, ignoring project definitions: what `pkg::name` or a
     /// call that skipped the project's non-function binding reaches. Empty for an export
@@ -562,11 +562,11 @@ pub trait GlobalEnv<'db> {
     /// a function, the library aside. A package file's frame is the namespace itself, so it
     /// reaches nothing; a test or helper file's frame encloses in the helpers' environment and
     /// the namespace, and a script's in the namespace.
-    fn enclosing_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+    fn enclosing_scheme(&self, name: Symbol) -> Option<TypeScheme<'db>>;
 
     /// What the project's own `pkg::name` reads: the package namespace, then the library.
     /// A test file's or a script's own bindings and the helpers' are not in the namespace.
-    fn namespace_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+    fn namespace_scheme(&self, name: Symbol) -> Option<TypeScheme<'db>>;
 
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
@@ -2315,7 +2315,7 @@ impl<'db> Checker<'db, '_> {
                     && !self.naming.resolutions.contains_key(&callee)
                     && !self
                         .globals
-                        .is_some_and(|globals| globals.defined_in_project(name.as_str(), true))
+                        .is_some_and(|globals| globals.defined_in_project(*name, true))
                 {
                     return any(self.db);
                 }
@@ -2361,7 +2361,7 @@ impl<'db> Checker<'db, '_> {
                 match validated.as_ref().and_then(|name| {
                     let globals = self.globals?;
                     if reaches_project {
-                        globals.namespace_scheme(name)
+                        globals.namespace_scheme(Symbol::new(name))
                     } else {
                         globals.library_candidates(name)?.last().cloned()
                     }
@@ -2443,7 +2443,7 @@ impl<'db> Checker<'db, '_> {
                     };
                     let entry = named.len();
                     named.push(Parameter {
-                        name: Name::new(self.db, parameter.name.as_str()),
+                        name: Name::new(self.db, &parameter.name),
                         ty: parameter_ty,
                         optional: parameter.default.is_some()
                             || uses.makes_optional(parameter.name),
@@ -2587,7 +2587,7 @@ impl<'db> Checker<'db, '_> {
                 let fields = module[fields]
                     .iter()
                     .map(|field| NativeField {
-                        name: Name::new(self.db, field.name.as_str()),
+                        name: Name::new(self.db, &field.name),
                         ty: self.infer(field.value),
                     })
                     .collect();
@@ -2636,7 +2636,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee)
                     || self
                         .globals
-                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                        .is_some_and(|globals| globals.defined_in_project(*name, deferred))
                 {
                     return;
                 }
@@ -2900,7 +2900,7 @@ impl<'db> Checker<'db, '_> {
                 .is_ok()
             && !self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                .is_some_and(|globals| globals.defined_in_project(*name, deferred))
         {
             self.record_strict_origin(
                 id,
@@ -2911,7 +2911,7 @@ impl<'db> Checker<'db, '_> {
         if let Some(name) = naming.non_locals.get(&id)
             && let Some(scheme) = self
                 .globals
-                .and_then(|globals| globals.scheme(name, naming.deferred_non_locals.contains(&id)))
+                .and_then(|globals| globals.scheme(*name, naming.deferred_non_locals.contains(&id)))
         {
             let instantiated = self.instantiate(&scheme);
             // A project-defined name owns its `Unknown` at its defining site, so reading it
@@ -2921,7 +2921,7 @@ impl<'db> Checker<'db, '_> {
                 TyKind::Unknown
             ) && !self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                .is_some_and(|globals| globals.defined_in_project(*name, deferred))
             {
                 self.record_strict_origin(
                     id,
@@ -3113,7 +3113,7 @@ impl<'db> Checker<'db, '_> {
         let deferred = naming.deferred_quiet_reads.contains(&id);
         let scheme = self
             .globals
-            .and_then(|globals| globals.scheme(name, deferred));
+            .and_then(|globals| globals.scheme(Symbol::new(name), deferred));
         Some(match scheme {
             Some(scheme) => self.instantiate(&scheme),
             None => unknown(self.db),
@@ -3131,9 +3131,9 @@ impl<'db> Checker<'db, '_> {
         }
         let globals = self.globals?;
         let scheme = if earlier {
-            globals.earlier_binding(&binding.name)?
+            globals.earlier_binding(binding.name)?
         } else {
-            globals.scheme(&binding.name, false)?
+            globals.scheme(binding.name, false)?
         };
         let instantiated = self.instantiate(&scheme);
         // An `Unknown` binding adds nothing over the tolerant read, and materializing it
@@ -3966,7 +3966,7 @@ impl<'db> Checker<'db, '_> {
                 let fields = self.module[fields]
                     .iter()
                     .map(|field| NativeField {
-                        name: Name::new(self.db, field.name.as_str()),
+                        name: Name::new(self.db, &field.name),
                         ty: self.fresh(Constraint::Unconstrained),
                     })
                     .collect();
@@ -4841,7 +4841,10 @@ impl<'db> Checker<'db, '_> {
     /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
     /// optional targets, so its arguments stay forced.
     fn optional_argument_targets(&self, name: &str, arguments: &[Argument]) -> Vec<bool> {
-        let Some(scheme) = self.globals.and_then(|globals| globals.scheme(name, true)) else {
+        let Some(scheme) = self
+            .globals
+            .and_then(|globals| globals.scheme(Symbol::new(name), true))
+        else {
             return Vec::new();
         };
         let TyKind::Function(function) = scheme.body.kind(self.db) else {
@@ -5520,9 +5523,9 @@ impl<'db> Checker<'db, '_> {
         ["-", "Arith", "Ops"].iter().any(|prefix| {
             let method = format!("{prefix}.{class}");
             globals
-                .overloads(&method, false)
+                .overloads(Symbol::new(&method), false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(&method, false).is_some()
+                || globals.scheme(Symbol::new(&method), false).is_some()
         })
     }
 
@@ -5540,9 +5543,9 @@ impl<'db> Checker<'db, '_> {
         ["!", "Ops"].iter().any(|prefix| {
             let method = format!("{prefix}.{class}");
             globals
-                .overloads(&method, false)
+                .overloads(Symbol::new(&method), false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(&method, false).is_some()
+                || globals.scheme(Symbol::new(&method), false).is_some()
         })
     }
 
@@ -5911,11 +5914,11 @@ impl<'db> Checker<'db, '_> {
         }
         if self
             .globals
-            .is_some_and(|globals| globals.defined_in_project(name, false))
+            .is_some_and(|globals| globals.defined_in_project(Symbol::new(name), false))
         {
             return None;
         }
-        let scheme = self.globals?.scheme(name, false)?;
+        let scheme = self.globals?.scheme(Symbol::new(name), false)?;
         let instantiated = self.instantiate(&scheme);
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
@@ -6063,11 +6066,11 @@ impl<'db> Checker<'db, '_> {
                 format!("Ops.{class}"),
             ] {
                 let Some(candidates) = globals
-                    .overloads(&method, false)
+                    .overloads(Symbol::new(&method), false)
                     .map(Cow::Borrowed)
                     .or_else(|| {
                         globals
-                            .scheme(&method, false)
+                            .scheme(Symbol::new(&method), false)
                             .map(|scheme| Cow::Owned(vec![scheme]))
                     })
                     .filter(|candidates| !candidates.is_empty())
@@ -6806,7 +6809,7 @@ impl<'db> Checker<'db, '_> {
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
             signature.named.push(Parameter {
-                name: Name::new(self.db, parameter.name.as_str()),
+                name: Name::new(self.db, &parameter.name),
                 ty: parameter_ty,
                 optional,
                 default: parameter.default.map(|default| self.infer(default)),
@@ -7142,7 +7145,7 @@ impl<'db> Checker<'db, '_> {
             || self.naming.resolutions.contains_key(&callee)
             || self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project("seq", deferred))
+                .is_some_and(|globals| globals.defined_in_project(Symbol::new("seq"), deferred))
         {
             return None;
         }
@@ -7450,7 +7453,7 @@ impl<'db> Checker<'db, '_> {
             let deferred = self.naming.deferred_non_locals.contains(&callee);
             let Some(scheme) = self
                 .globals
-                .and_then(|globals| globals.scheme(non_local, deferred))
+                .and_then(|globals| globals.scheme(*non_local, deferred))
             else {
                 return FunctionLookup::Ordinary;
             };
@@ -7459,7 +7462,7 @@ impl<'db> Checker<'db, '_> {
             }
             if let Some(enclosing) = self
                 .globals
-                .and_then(|globals| globals.enclosing_scheme(non_local))
+                .and_then(|globals| globals.enclosing_scheme(*non_local))
                 && self.callable(enclosing.body) != Callable::No
             {
                 self.callee_targets.insert(callee, CalleeTarget::Project);
@@ -7503,8 +7506,8 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let project = self.globals.and_then(|globals| match reaches_top_level {
-            false => globals.scheme(&name, deferred),
-            true => globals.enclosing_scheme(&name),
+            false => globals.scheme(Symbol::new(&name), deferred),
+            true => globals.enclosing_scheme(Symbol::new(&name)),
         });
         if let Some(scheme) = project
             && self.callable(scheme.body) != Callable::No
@@ -7614,9 +7617,9 @@ impl<'db> Checker<'db, '_> {
     ) -> Option<Ty<'db>> {
         let deferred = self.naming.deferred_non_locals.contains(&callee);
         if self.naming.resolutions.contains_key(&callee)
-            || self
-                .globals
-                .is_some_and(|globals| globals.defined_in_project("DataFrame", deferred))
+            || self.globals.is_some_and(|globals| {
+                globals.defined_in_project(Symbol::new("DataFrame"), deferred)
+            })
         {
             return None;
         }
@@ -7682,8 +7685,8 @@ impl<'db> Checker<'db, '_> {
         let deferred = self.naming.deferred_non_locals.contains(&callee);
         self.globals.is_some_and(|globals| {
             !self.naming.resolutions.contains_key(&callee)
-                && !globals.defined_in_project(name, deferred)
-                && globals.scheme(name, deferred).is_some()
+                && !globals.defined_in_project(*name, deferred)
+                && globals.scheme(*name, deferred).is_some()
         })
     }
 
@@ -8862,11 +8865,11 @@ impl<'db> Checker<'db, '_> {
         };
         let method = format!("c.{}", name.text(self.db));
         self.globals?
-            .scheme(&method, false)
+            .scheme(Symbol::new(&method), false)
             .map(|_| nominal)
             .or_else(|| {
                 self.globals?
-                    .overloads(&method, false)
+                    .overloads(Symbol::new(&method), false)
                     .filter(|candidates| !candidates.is_empty())
                     .map(|_| nominal)
             })
@@ -9093,7 +9096,7 @@ impl<'db> Checker<'db, '_> {
             };
             match self.module.argument_name(argument) {
                 Some(name) => fields.push(RecordField {
-                    name: Name::new(self.db, name.as_str()),
+                    name: Name::new(self.db, &name),
                     ty,
                     optional: false,
                 }),
@@ -9357,9 +9360,10 @@ impl<'db> Checker<'db, '_> {
             }
             _ => return None,
         };
-        let schemes = self
-            .globals?
-            .overloads(&name, self.naming.deferred_non_locals.contains(&callee))?;
+        let schemes = self.globals?.overloads(
+            Symbol::new(&name),
+            self.naming.deferred_non_locals.contains(&callee),
+        )?;
         if schemes.len() < 2 {
             return None;
         }
@@ -9399,11 +9403,11 @@ impl<'db> Checker<'db, '_> {
             .find_map(|generic| {
                 let method = format!("{generic}.{class}");
                 globals
-                    .overloads(&method, false)
+                    .overloads(Symbol::new(&method), false)
                     .map(Cow::Borrowed)
                     .or_else(|| {
                         globals
-                            .scheme(&method, false)
+                            .scheme(Symbol::new(&method), false)
                             .map(|scheme| Cow::Owned(vec![scheme]))
                     })
                     .filter(|candidates| !candidates.is_empty())
@@ -10142,7 +10146,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee)
                     || self
                         .globals
-                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                        .is_some_and(|globals| globals.defined_in_project(*name, deferred))
                 {
                     return;
                 }
@@ -10191,7 +10195,7 @@ impl<'db> Checker<'db, '_> {
             let named = match self.module.kind(value) {
                 ExpressionKind::Literal(LiteralKind::String(text)) => self
                     .globals
-                    .and_then(|globals| globals.scheme(&self.module[text], false))
+                    .and_then(|globals| globals.scheme(Symbol::new(&self.module[text]), false))
                     .map(|scheme| self.instantiate(&scheme)),
                 _ => None,
             };
@@ -10472,7 +10476,8 @@ impl<'db> Checker<'db, '_> {
         let total = function.positional.len() + function.named.len();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let arena = self.arena;
-        let targets = &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+        let targets =
+            &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
 
         // A function-typed argument may be checked against arguments forwarded to it later
         // (`lapply(x, gsub, pattern = "a")`), so the rest intake must be known up front.
@@ -11151,7 +11156,7 @@ impl<'db> Checker<'db, '_> {
 
     fn subset_method_result(&mut self, operator: &str, class: &str) -> Option<Ty<'db>> {
         let method = format!("{operator}.{class}");
-        let scheme = self.globals?.scheme(&method, false)?;
+        let scheme = self.globals?.scheme(Symbol::new(&method), false)?;
         let instantiated = self.instantiate(&scheme);
         match self
             .table
@@ -12350,7 +12355,7 @@ impl<'db> Checker<'db, '_> {
             return None;
         }
         let deferred = self.naming.deferred_non_locals.contains(&function);
-        let schemes = self.globals?.overloads(name, deferred)?;
+        let schemes = self.globals?.overloads(*name, deferred)?;
         (schemes.len() >= 2).then(|| Callback {
             function,
             name: name.to_string(),

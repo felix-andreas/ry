@@ -8,24 +8,29 @@ use {
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
     },
-    rowan::{Checkpoint, GreenNodeBuilder, NodeCache, TextRange, TextSize},
-    std::cell::RefCell,
+    hashbrown::HashTable,
+    rowan::{GreenNode, GreenToken, NodeOrToken, TextRange, TextSize},
+    rustc_hash::FxHasher,
+    std::{
+        cell::RefCell,
+        hash::{Hash, Hasher},
+    },
 };
 
-/// Parses that share one node cache before it is dropped. Sharing makes identical tokens
-/// and small nodes (whitespace, punctuation, common names) one allocation across files;
-/// the cache keeps its entries alive, so the bound stops a long-running server from
-/// pinning the garbage of trees it has already replaced.
-const NODE_CACHE_PARSES: u32 = 256;
+/// Parses that share one token cache before it is dropped. Sharing makes identical tokens
+/// (whitespace, punctuation, common names) one allocation across files; the cache keeps its
+/// entries alive, so the bound stops a long-running server from pinning the tokens of trees
+/// it has already replaced.
+const TOKEN_CACHE_PARSES: u32 = 256;
 
 thread_local! {
-    static NODE_CACHE: RefCell<(NodeCache, u32)> = RefCell::new((NodeCache::default(), 0));
+    static TOKEN_CACHE: RefCell<(TokenCache, u32)> = RefCell::new((TokenCache::default(), 0));
 }
 
 pub fn parse(text: &str) -> Parse {
-    NODE_CACHE.with_borrow_mut(|(cache, parses)| {
-        if *parses >= NODE_CACHE_PARSES {
-            *cache = NodeCache::default();
+    TOKEN_CACHE.with_borrow_mut(|(cache, parses)| {
+        if *parses >= TOKEN_CACHE_PARSES {
+            *cache = TokenCache::default();
             *parses = 0;
         }
         *parses += 1;
@@ -33,7 +38,7 @@ pub fn parse(text: &str) -> Parse {
     })
 }
 
-fn parse_with_cache(text: &str, cache: &mut NodeCache) -> Parse {
+fn parse_with_cache(text: &str, cache: &mut TokenCache) -> Parse {
     let (tokens, lexer_errors) = lex(text);
     let mut offsets = Vec::with_capacity(tokens.len() + 1);
     let mut offset = 0usize;
@@ -48,7 +53,11 @@ fn parse_with_cache(text: &str, cache: &mut NodeCache) -> Parse {
         tokens,
         offsets,
         pos: 0,
-        builder: GreenNodeBuilder::with_cache(cache),
+        builder: TreeBuilder {
+            cache,
+            children: Vec::new(),
+            parents: Vec::new(),
+        },
         errors: lexer_errors,
         groups: vec![0],
         depth: 0,
@@ -67,6 +76,95 @@ fn parse_with_cache(text: &str, cache: &mut NodeCache) -> Parse {
     Parse::new(green, parser.errors)
 }
 
+/// Builds the green tree bottom-up. Unlike rowan's builder it shares only tokens, not
+/// nodes: hashing every small node to find a twin costs more than allocating it, while
+/// tokens repeat often enough (a space, `<-`, `x`) that sharing them pays.
+struct TreeBuilder<'cache> {
+    cache: &'cache mut TokenCache,
+    children: Vec<NodeOrToken<GreenNode, GreenToken>>,
+    /// Each open node's kind and where its first child sits in `children`.
+    parents: Vec<(SyntaxKind, usize)>,
+}
+
+/// A position in the child list where a node can later be opened around what follows.
+#[derive(Clone, Copy)]
+struct Checkpoint(usize);
+
+impl TreeBuilder<'_> {
+    fn token(&mut self, kind: SyntaxKind, text: &str) {
+        let token = self.cache.token(kind, text);
+        self.children.push(NodeOrToken::Token(token));
+    }
+
+    fn start_node(&mut self, kind: SyntaxKind) {
+        self.parents.push((kind, self.children.len()));
+    }
+
+    fn start_node_at(&mut self, Checkpoint(first): Checkpoint, kind: SyntaxKind) {
+        assert!(
+            first <= self.children.len(),
+            "checkpoint is past the current child"
+        );
+        if let Some(&(_, parent_first)) = self.parents.last() {
+            assert!(
+                first >= parent_first,
+                "checkpoint is outside the current node"
+            );
+        }
+        self.parents.push((kind, first));
+    }
+
+    fn finish_node(&mut self) {
+        let (kind, first) = self
+            .parents
+            .pop()
+            .expect("finish_node without an open node");
+        let node = GreenNode::new(kind.into(), self.children.drain(first..));
+        self.children.push(NodeOrToken::Node(node));
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint(self.children.len())
+    }
+
+    fn finish(mut self) -> GreenNode {
+        assert!(self.parents.is_empty(), "every node is finished");
+        match (self.children.pop(), self.children.is_empty()) {
+            (Some(NodeOrToken::Node(root)), true) => root,
+            _ => panic!("a parse builds exactly one root node"),
+        }
+    }
+}
+
+/// Interned tokens, keyed by kind and text.
+#[derive(Default)]
+struct TokenCache {
+    tokens: HashTable<GreenToken>,
+}
+
+impl TokenCache {
+    fn token(&mut self, kind: SyntaxKind, text: &str) -> GreenToken {
+        let raw = rowan::SyntaxKind::from(kind);
+        let hash = token_hash(raw, text);
+        self.tokens
+            .entry(
+                hash,
+                |token| token.kind() == raw && token.text() == text,
+                |token| token_hash(token.kind(), token.text()),
+            )
+            .or_insert_with(|| GreenToken::new(raw, text))
+            .get()
+            .clone()
+    }
+}
+
+fn token_hash(kind: rowan::SyntaxKind, text: &str) -> u64 {
+    let mut hasher = FxHasher::default();
+    kind.0.hash(&mut hasher);
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Deeper nesting reports an error instead of overflowing the stack.
 const MAX_DEPTH: u32 = 500;
 
@@ -76,7 +174,7 @@ struct Parser<'a, 'cache> {
     /// One extra trailing entry: the total length.
     offsets: Vec<usize>,
     pos: usize,
-    builder: GreenNodeBuilder<'cache>,
+    builder: TreeBuilder<'cache>,
     errors: Vec<SyntaxError>,
     /// `{` pushes 0, `(`/`[`/`[[` increment the top, closers undo; newlines are
     /// significant iff the top is 0.
@@ -187,13 +285,13 @@ impl Parser<'_, '_> {
             }
         }
         let text = &self.text[self.offsets[self.pos]..self.offsets[self.pos + 1]];
-        self.builder.token(kind.into(), text);
+        self.builder.token(kind, text);
         self.pos += 1;
     }
 
     fn start(&mut self, kind: SyntaxKind) {
         self.flush_deferred_trivia();
-        self.builder.start_node(kind.into());
+        self.builder.start_node(kind);
     }
 
     fn flush_deferred_trivia(&mut self) {
@@ -201,13 +299,13 @@ impl Parser<'_, '_> {
             for pos in start..self.pos {
                 let kind = self.tokens[pos].kind;
                 let text = &self.text[self.offsets[pos]..self.offsets[pos + 1]];
-                self.builder.token(kind.into(), text);
+                self.builder.token(kind, text);
             }
         }
     }
 
     fn start_at(&mut self, checkpoint: Checkpoint, kind: SyntaxKind) {
-        self.builder.start_node_at(checkpoint, kind.into());
+        self.builder.start_node_at(checkpoint, kind);
     }
 
     fn finish(&mut self) {

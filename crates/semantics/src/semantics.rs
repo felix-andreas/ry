@@ -1385,7 +1385,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder(db, item, types::Name::new(db, name.as_str()), deferred),
+            None => frame_binder(db, item, types::Name::new(db, &name), deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -1484,7 +1484,7 @@ fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'db>>
     // Through the per-name projections, not the project-wide maps: a new top-level name
     // anywhere changes those maps, and reading them here would re-run every item's edges.
     let projections = |name: Symbol| {
-        let name = types::QueryName::new(db, types::Name::new(db, name.as_str()));
+        let name = types::QueryName::new(db, types::Name::new(db, &name));
         (test.then(|| test_name(db, name)), package_name(db, name))
     };
     let reads = item_interface_reads(db, item);
@@ -2129,7 +2129,7 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
-    frame_binder_of(db, item, Symbol::new(name.text(db)), deferred)
+    FrameBinders::of(db, item).binder(Symbol::new(name.text(db)), deferred)
 }
 
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
@@ -2145,50 +2145,58 @@ fn item_frame_binders<'db>(
     let Some(naming) = item_naming(db, item) else {
         return binders;
     };
+    let frame = FrameBinders::of(db, item);
     let names = naming
         .non_locals
         .values()
         .chain(naming.quiet_reads.values())
         .chain(naming.quiet_operator_reads.iter());
     for &name in names {
-        binders.entry(name).or_insert_with(|| {
-            (
-                frame_binder_of(db, item, name, false),
-                frame_binder_of(db, item, name, true),
-            )
-        });
+        binders
+            .entry(name)
+            .or_insert_with(|| (frame.binder(name, false), frame.binder(name, true)));
     }
     binders
 }
 
-fn frame_binder_of<'db>(
-    db: &'db dyn Db,
+/// What every binder lookup of one item reads, fetched once: each salsa read records a
+/// dependency edge, and an item looks up dozens of names.
+struct FrameBinders<'db> {
     item: Item<'db>,
-    name: Symbol,
-    deferred: bool,
-) -> Option<Item<'db>> {
-    let file = *item.file(db);
-    let binders = file_binders(db, file).get(&name)?;
-    if deferred
-        && matches!(
-            *file.kind(db),
-            DocumentKind::Test | DocumentKind::TestHelper
-        )
-        && binders.iter().any(|&(_, binder)| binder == item)
-    {
-        return Some(item);
-    }
-    let visible = match deferred {
-        true => &binders[..],
-        false => {
-            let index = item_tree_positions(db, file)
+    binders: &'db FxHashMap<Symbol, Vec<(usize, Item<'db>)>>,
+    test: bool,
+    /// The item's position in its file's item tree.
+    position: usize,
+}
+
+impl<'db> FrameBinders<'db> {
+    fn of(db: &'db dyn Db, item: Item<'db>) -> FrameBinders<'db> {
+        let file = *item.file(db);
+        FrameBinders {
+            item,
+            binders: file_binders(db, file),
+            test: matches!(
+                *file.kind(db),
+                DocumentKind::Test | DocumentKind::TestHelper
+            ),
+            position: item_tree_positions(db, file)
                 .get(&item)
                 .copied()
-                .unwrap_or_else(|| item_tree(db, file).len());
-            &binders[..binders.partition_point(|&(at, _)| at < index)]
+                .unwrap_or_else(|| item_tree(db, file).len()),
         }
-    };
-    visible.last().map(|&(_, item)| item)
+    }
+
+    fn binder(&self, name: Symbol, deferred: bool) -> Option<Item<'db>> {
+        let binders = self.binders.get(&name)?;
+        if deferred && self.test && binders.iter().any(|&(_, binder)| binder == self.item) {
+            return Some(self.item);
+        }
+        let visible = match deferred {
+            true => &binders[..],
+            false => &binders[..binders.partition_point(|&(at, _)| at < self.position)],
+        };
+        visible.last().map(|&(_, item)| item)
+    }
 }
 
 impl<'db, 'a> SalsaGlobals<'db, 'a> {
@@ -2361,19 +2369,19 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 }
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
-    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
+    fn scheme(&self, name: Symbol, deferred: bool) -> Option<types::TypeScheme<'db>> {
         let interned = types::Name::new(self.db, name);
         if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
             return scheme.clone();
         }
-        let scheme = self.lookup_scheme(name, interned, deferred);
+        let scheme = self.lookup_scheme(name.as_str(), interned, deferred);
         self.schemes
             .borrow_mut()
             .insert((interned, deferred), scheme.clone());
         scheme
     }
 
-    fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
+    fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool {
         let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
             || self
@@ -2381,7 +2389,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
                 .any(|binding| binding.winner.is_some() || !binding.conditional_writers.is_empty())
     }
 
-    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+    fn earlier_binding(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
@@ -2389,7 +2397,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         Some(self.item_scheme(self.winner(interned)?))
     }
 
-    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+    fn namespace_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return self.scheme(name, false);
         }
@@ -2401,10 +2409,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         {
             return Some(scheme);
         }
-        self.library?.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name.as_str())?.last().cloned()
     }
 
-    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+    fn enclosing_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
@@ -2421,8 +2429,8 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         }
     }
 
-    fn overloads(&self, name: &str, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
-        let candidates = self.library?.schemes.get(name)?;
+    fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
+        let candidates = self.library?.schemes.get(name.as_str())?;
         if candidates.len() < 2 {
             return None;
         }
