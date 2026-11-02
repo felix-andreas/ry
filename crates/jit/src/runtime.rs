@@ -648,6 +648,24 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
     unsafe { boxed(activation, || values::scalar_real(value)) }
 }
 
+/// Boxes a [`crate::analysis::Ty::Num`]: an integer when `integer` is nonzero, else a double.
+pub unsafe extern "C" fn jit_box_num(
+    activation: *mut Activation,
+    value: f64,
+    integer: i32,
+) -> *mut Header {
+    if integer == 0 {
+        return unsafe { boxed(activation, || values::scalar_real(value)) };
+    }
+    // The double came from an integer, so it converts back exactly; `NA` became NaN.
+    let value = if value.is_nan() {
+        NA_INTEGER
+    } else {
+        value as i32
+    };
+    unsafe { boxed(activation, || values::scalar_integer(value)) }
+}
+
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
 }

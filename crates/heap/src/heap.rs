@@ -663,6 +663,22 @@ impl Heap {
         self.alloc_triple_keeping(kind, first, second, third, None)
     }
 
+    /// A promise over `expression` in `env` whose attribute slot holds the compiled `code`.
+    /// Setting the slot on the fresh object needs no write barrier, which `set_attrib` would run.
+    pub unsafe fn alloc_compiled_promise(
+        &mut self,
+        unforced: Sexp,
+        expression: Sexp,
+        env: Sexp,
+        code: Sexp,
+    ) -> HeapResult<Sexp> {
+        let promise =
+            self.alloc_triple_keeping(SexpType::Promise, unforced, expression, env, Some(code))?;
+        promise.set_attrib_unbarriered(code);
+        code.increment_refcount();
+        Ok(promise)
+    }
+
     /// `alloc_triple` that also keeps `extra` alive across the allocation.
     unsafe fn alloc_triple_keeping(
         &mut self,
@@ -1326,10 +1342,12 @@ impl Heap {
         self.roots.handles.push(object);
     }
 
+    #[inline]
     pub fn handle_mark(&self) -> usize {
         self.roots.handles.len()
     }
 
+    #[inline]
     pub fn release_handles(&mut self, mark: usize) {
         self.roots.handles.truncate(mark);
     }
@@ -2229,7 +2247,11 @@ impl RootStack {
         self.entries.push(object);
     }
 
+    #[inline]
     fn truncate(&mut self, length: usize) {
+        if length >= self.entries.len() {
+            return;
+        }
         self.entries.truncate(length);
         self.scanned = self.scanned.min(self.entries.len());
     }
