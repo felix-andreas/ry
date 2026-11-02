@@ -501,6 +501,61 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
 }
 
 #[test]
+fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_needs_it() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: squares\nVersion: 1.0\n"),
+        ("NAMESPACE", "exportPattern(\".\")\n"),
+        (
+            "R/a.R",
+            "Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
+             setMethod(\"show\", \"Sq\", function(object) cat(\"square\", object@side, \"\\n\"))\n",
+        ),
+    ]);
+    let saved = root.path().join("sq.rds");
+    let load = |lazy: &str, probe: &str| {
+        let reload = format!(
+            "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
+            root.path().display().to_string()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root.path())
+            .args(["-e", &reload, "-e", probe])
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .output()
+            .expect("run ry load");
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    load("FALSE", &format!("saveRDS(Sq(side = 3), {saved:?})"));
+    // Each probe reaches the method first through a different door: a lookup of the generic,
+    // a dispatch on an object read back from disk, which needs no class lookup, and printing.
+    for probe in [
+        "cat('probe:', existsMethod('show', 'Sq'), '\\n')".to_owned(),
+        format!("x <- readRDS({saved:?}); cat('probe: '); show(x)"),
+        "cat('probe: '); print(Sq(side = 2))".to_owned(),
+    ] {
+        let lazy = load("TRUE", &probe);
+        let eager = load("FALSE", &probe);
+        assert!(
+            lazy.contains("2 S4 definitions held back until first use"),
+            "{lazy}"
+        );
+        let line = |text: &str| {
+            text.lines()
+                .find(|line| line.starts_with("probe:"))
+                .unwrap_or_else(|| panic!("no probe line in {text}"))
+                .to_owned()
+        };
+        assert_eq!(line(&lazy), line(&eager), "lazy:\n{lazy}\neager:\n{eager}");
+    }
+}
+
+#[test]
 fn a_reload_while_s4_definitions_are_held_back_keeps_them_working() {
     if !r_available() {
         return;

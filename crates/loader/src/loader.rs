@@ -187,9 +187,11 @@ pub struct Plan {
 ///   registration (`setRefClass`, or `setClassUnion`, which changes the classes it unites)
 ///   keeps them all eager.
 /// - Each method belongs to a generic the package defines, so nothing reaches it except
-///   through that generic. A method for another package's generic, such as `show`, is found
-///   through that generic's own tables, which the methods package reads without a lookup the
-///   backend can see.
+///   through that generic, or its signature names a class the package defines, so it applies
+///   only to objects of that class. A method of the second kind on another package's generic,
+///   such as `show`, is listed in [`DeferredS4::foreign_generics`]: the backend must run the
+///   definitions before that generic dispatches or is looked up, and keeps them eager unless
+///   the generic is a standard generic that does not stand for a primitive.
 /// - Each validity method is for a class the package defines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredS4 {
@@ -198,6 +200,8 @@ pub struct DeferredS4 {
     pub classes: Vec<String>,
     /// The generics the definitions create.
     pub generics: Vec<String>,
+    /// The generics of other packages the definitions add methods to.
+    pub foreign_generics: Vec<String>,
     /// Every namespace binding the definitions make.
     pub names: Vec<String>,
     /// A key for the S4 metadata the definitions produce, when running them depends on nothing
@@ -1429,11 +1433,16 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
             S4Definition::Method { .. } | S4Definition::Validity { .. } => {}
         }
     }
+    let mut foreign_generics = Vec::new();
     let mut names = Vec::new();
     for (_, position, item, definition) in &definitions {
         let reaches_own = match definition {
             S4Definition::Class { .. } | S4Definition::Generic { .. } => true,
-            S4Definition::Method { generic, .. } => generics.contains(generic),
+            S4Definition::Method { generic, .. } if generics.contains(generic) => true,
+            S4Definition::Method { generic, signature } => {
+                foreign_generics.push(generic.clone());
+                signature.iter().any(|class| classes.contains(class))
+            }
             S4Definition::Validity { class } => classes.contains(class),
         };
         let reads_settled = item.reads.iter().all(|name| {
@@ -1478,10 +1487,13 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     );
     names.sort_unstable();
     names.dedup();
+    foreign_generics.sort_unstable();
+    foreign_generics.dedup();
     Some(DeferredS4 {
         run: definitions.iter().map(|(position, ..)| *position).collect(),
         classes,
         generics,
+        foreign_generics,
         names,
         cache_key,
     })

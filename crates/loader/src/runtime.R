@@ -279,9 +279,16 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 # loader's `DeferredS4` documents) until code first reaches one of them: each name they bind is
 # a promise that runs them all, and so is looking up one of their classes or generics by name.
 .ry_defer_s4 <- function(state, deferred) {
+  # A method for another package's generic is stored under that package's name, which only the
+  # generic itself knows.
+  for (name in deferred$foreign_generics) {
+    package <- attr(get(name, envir = state$ns, mode = "function"), "package")
+    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, package))
+  }
   state$s4_deferred <- deferred
   force <- function() .ry_force_s4(state)
-  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, deferred$generics, force))
+  generics <- c(deferred$generics, deferred$foreign_generics)
+  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, generics, force))
   for (name in deferred$names) {
     .ry_s4_placeholder(state, name)
   }

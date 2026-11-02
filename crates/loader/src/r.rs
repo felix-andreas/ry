@@ -169,6 +169,10 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                     ("classes".into(), strings(&deferred.classes)),
                     ("generics".into(), strings(&deferred.generics)),
                     (
+                        "foreign_generics".into(),
+                        strings(&deferred.foreign_generics),
+                    ),
+                    (
                         "cache_key".into(),
                         deferred
                             .cache_key
