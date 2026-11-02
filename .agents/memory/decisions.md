@@ -2962,10 +2962,15 @@ first lines R had already read, leaving R mid-command.
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
-- **Compile thresholds are 1000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
+- **Compile thresholds are 3000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
   At 10 and 500, a package load compiled the methods package's bodies that each `setClass` runs a
   few dozen times, and compiling took half of a large package's S4 definitions (callgrind) and
-  about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
+  about 200 ms of its cold `ry run`. finbench test slices then picked 3000 over 1000
+  (callgrind instructions against `RY_JIT=off`): on 2 files, entries 300 cost +2.9%, 1000 +1.4%,
+  3000 +0.6% and 10,000 +1.0%; on 21 files, 1000 cost +2.7% and 3000 +1.5%, and raising back
+  edges to 30,000 changed nothing. The
+  remaining overhead is per-call tier bookkeeping (`enter`, `compiled_for`, `valid`) and
+  Cranelift, not deoptimization. Hot code crosses 3000 calls within milliseconds, so the
   benchmarks time the same. Lower them only together with a cheaper first tier or background
   compilation.
 - **A fully typed closure compiles at its first call** (`jit.rs`, `fully_typed` and
@@ -3025,14 +3030,19 @@ first lines R had already read, leaving R mid-command.
   such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
   callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
   on top of the higher entry threshold's 280M.
-- **Function speculation is validated by the binding epoch alone.** Compiling marks each
-  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
-  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
-  speculated binding). A call site then checks one integer instead of re-walking the environment
-  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
-  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
-  re-resolved from the environment its lookup started in, which for a function looked up inside an
-  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **Function speculation is validated by the binding epoch, then by per-symbol stamps.**
+  Compiling marks each speculated symbol and binding cell `WATCHED`, and the heap bumps one global
+  epoch, and the symbol's lookup stamp, when a watched cell is assigned or a watched symbol is
+  defined in any function frame (which could shadow the speculated binding). An unchanged epoch
+  proves every speculation with one compare. The epoch also moves on every binding outside a
+  function frame, which a test suite does constantly, so `valid` (`crates/jit/src/runtime.rs`)
+  then compares each speculated symbol's `Heap::lookup_stamp` with the one recorded at its last
+  check; re-walking every lookup on each epoch move cost a finbench test slice more than the
+  compiled code saved. Only when a stamp moved is each speculation re-resolved from the
+  environment its lookup started in, which for a function looked up inside an inlined or directly
+  called closure is that closure's environment, not the compiled body's. A lookup that passes a
+  non-function binding is not speculated (`resolve_function`), because only the binding found is
+  watched, as for the tier-0 inline caches.
 - **A call to a speculated closure is direct and binds plain values.** Arguments that are
   effect-free are evaluated eagerly in the caller and bound as values into the callee's frame,
   skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early

@@ -59,14 +59,15 @@ impl Mode {
 /// Calls a body makes before it compiles, in the default mode. Compiling a body costs about as
 /// much as interpreting it a few thousand times, and loading a package runs many bodies (the
 /// methods package's, for each `setClass`) only a few dozen times: at 10 calls, compiling them
-/// took half the time of a large package's S4 definitions. Code that is really hot passes 1000
-/// calls within milliseconds, so the benchmarks lose nothing.
-const ENTRY_THRESHOLD: i32 = 1000;
+/// took half the time of a large package's S4 definitions. On a test suite, where most bodies
+/// run a few hundred to a few thousand times, compiling at 1000 calls cost 2.7% more
+/// instructions than not compiling at all and 3000 calls cost 1.5%; a sweep from 300 to 10,000
+/// had its minimum at 3000. Code that is really hot passes 3000 calls within milliseconds.
+const ENTRY_THRESHOLD: i32 = 3000;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
 
 thread_local! {
-    static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
     static MODE: Cell<Mode> = const { Cell::new(Mode::On) };
     /// The arena every compilation's plan lives in. It is reset after each compilation, which
     /// keeps its largest chunk, so a compilation usually allocates nothing from the system.
@@ -89,10 +90,10 @@ pub fn install_mode(mode: Mode) {
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
         Mode::Force => (2, 1),
     };
-    ENTRY_LIMIT.with(|limit| limit.set(entries));
     MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
+        entry_threshold: entries,
         back_edge,
         back_edge_threshold: back_edges,
     }));
@@ -102,7 +103,8 @@ unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
         let counters = values::ints(machine.code.cdr().element(PROFILE));
         let entries = counters[profile::ENTRIES];
-        let compiled = if entries >= ENTRY_LIMIT.with(Cell::get) {
+        let threshold = bytecode::tier().map_or(i32::MAX, |tier| tier.entry_threshold);
+        let compiled = if entries >= threshold {
             compiled_for(machine, true, false)?
         } else if entries == 1 && counters[profile::TIER_STATE] == 0 && fully_typed(machine) {
             first_call(machine)?
@@ -325,8 +327,14 @@ unsafe fn compile_in<'a>(
             slots: plan.slots.to_vec(),
             loops: plan.loops,
             speculations: plan.speculations.to_vec(),
-            // No epoch matches, so the first run checks the compiling activation's own frame.
+            // No epoch or stamp matches, so the first run checks the compiling activation's own
+            // frame.
             epoch: Cell::new(u64::MAX),
+            stamps: plan
+                .speculations
+                .iter()
+                .map(|_| Cell::new(u64::MAX))
+                .collect(),
             osr,
         });
         // Everything the machine code and the speculations point to stays reachable from the
