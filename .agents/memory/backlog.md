@@ -95,9 +95,6 @@ False reports on correct R, worst first:
   values, so calls to them give `Unknown`. `data.frame()` now returns `data.frame` through an
   `...: Any` rest; the same shape (`-> data.frame` for `subset` and `transform` on a data frame,
   `-> Any` for `with`) would make these results deliberate too.
-- **`source()` is not followed.** `source("utils.R"); util_fn(1)` reports `util_fn` as unresolved in
-  the caller and unused in `utils.R`. Following a literal `source()` path would remove both; until
-  then, limitations.md recommends moving shared helpers into `R/`.
 - **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
   c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
@@ -1407,10 +1404,6 @@ The message says to add a type annotation, and no annotation form silences it. `
 - **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
   a wider template, which the tester confirmed with `ry run` on
   `vapply(1:3, function(i) i, numeric(1))`.
-- **`source()` is not followed**, so a helpers file is pure noise in both directions. All ten helper
-  functions reported `unused`, and every correct call to them reported `unresolved`, which is
-  indistinguishable from the planted typo. It also killed the wrong-arity catch, which works well
-  within a file.
 - **A function name inside `mutate` and `filter` is swallowed** along with the column names.
 
 ### Two lints need a model change rather than a patch

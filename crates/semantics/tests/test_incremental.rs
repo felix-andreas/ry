@@ -2,6 +2,7 @@ use {
     salsa::{Database, Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
+        SourcePaths,
         diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
         global_scheme,
         hir::Symbol,
@@ -223,6 +224,46 @@ fn a_new_helper_definition_rediagnoses_no_test_file_that_does_not_read_it() {
         [1],
         "only the edited helper's diagnostics re-run"
     );
+}
+
+#[test]
+fn a_sourced_helper_edit_rechecks_only_the_script_reads_it_changes() {
+    let mut db = ProbeDatabase::default();
+    let helpers = SourceFile::new(
+        &db,
+        "scale_to <- function(x) x * 2L\n".to_owned(),
+        DocumentKind::Script,
+    );
+    let script = SourceFile::new(
+        &db,
+        "source(\"lib/helpers.R\")\nresult <- scale_to(1L)\nunrelated <- 3L\n".to_owned(),
+        DocumentKind::Script,
+    );
+    SourcePaths::new(
+        &db,
+        [
+            ("lib/helpers.R".to_owned(), helpers),
+            ("run.R".to_owned(), script),
+        ]
+        .into(),
+    );
+    ProjectFiles::new(&db, vec![helpers, script]);
+    settle(&db, &[helpers, script]);
+    db.checked_since();
+
+    db.edit(
+        helpers,
+        "scale_to <- function(x) x * 2L\nfresh <- function() 2L\n".to_owned(),
+    );
+    settle(&db, &[helpers, script]);
+    assert_eq!(db.checked_since(), ["fresh"]);
+
+    db.edit(
+        helpers,
+        "scale_to <- function(x) x * 2.5\nfresh <- function() 2L\n".to_owned(),
+    );
+    settle(&db, &[helpers, script]);
+    assert_eq!(db.checked_since(), ["result", "scale_to"]);
 }
 
 #[test]

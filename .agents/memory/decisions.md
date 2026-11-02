@@ -5549,3 +5549,24 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Unknown classes bind everything.** A superclass the project does not define, or a generator the
   project does not bind to `setRefClass`, hides the members, so every name binds rather than
   guessing. The file-level R6 guard stays for helper functions placed in an R6 list by name.
+
+## A literal `source()` path is followed for resolution
+
+- **Before.** A script saw only its own definitions and the package's, so every call to a helper it
+  `source()`d was unresolved and every helper was unused.
+- **Shape.** `semantics::file_source_calls` collects the literal paths of `source`, `sys.source` and
+  `base::source` calls anywhere in a non-package file. A `SourcePaths` input maps project-relative
+  paths to files; `sourced_files` resolves each literal against the sourcing file's directory, then
+  the project root (R's usual working directory), transitively. `sourced_definition(file, name)` is
+  a per-name projection layered after the file's own scope and before the test and package layers,
+  so the last sourced binding wins and an edit to a helper rechecks only the reads whose answer
+  changes (`test_incremental`, `a_sourced_helper_edit_rechecks_only_the_script_reads_it_changes`).
+  A sourced file reports no unused assignments (`file_is_sourced`).
+- **Position is ignored.** A sourced name is visible anywhere in the script, not only after the
+  `source()` call, because a call inside a function or a branch runs at an unknown time.
+- **The server loads sourced scripts from disk.** It otherwise holds only `R/` and open documents,
+  so `Worker::sync_sourced_files` keeps the loaded scripts exactly the open documents plus what they
+  and the package transitively source, dropping a helper nobody sources any more, which keeps a
+  session equal to a fresh start. Its read of `file_source_calls` retries on cancellation, because
+  the set must be complete before the project file list is rebuilt.
+- **Package files' `source()` calls are ignored**, since a package's namespace is its `R/` files.

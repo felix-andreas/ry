@@ -797,6 +797,7 @@ fn classify_non_local_read(
     if crate::package_scheme_exists_in(db, files, context.library, name)
         || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
+        || crate::sourced_definition(db, file, symbol).is_some()
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -2312,6 +2313,10 @@ fn edit_distance_within(
 /// A script's top level is one frame run in order, so the unused check spans
 /// items. A read inside a nested function keeps every write to the name live.
 fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    // A sourced file's bindings land in the sourcing frame, which reads them.
+    if ProjectFiles::try_get(db).is_some_and(|files| *crate::file_is_sourced(db, files, file)) {
+        return Vec::new();
+    }
     let error_ranges = file_error_ranges(db, file);
     struct Definer {
         item_index: usize,

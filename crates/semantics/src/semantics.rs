@@ -1076,6 +1076,143 @@ pub fn data_file_layout<'db>(db: &'db dyn Db, path: DataPath<'db>) -> Option<sni
     files.layouts(db).get(path.text(db).as_str()).cloned()
 }
 
+/// Every project file by its path relative to the project root, with `/` separators. Hosts set
+/// it so a literal `source("utils.R")` names the file it reads; without it nothing is followed.
+#[salsa::input(singleton, debug)]
+pub struct SourcePaths {
+    #[returns(ref)]
+    pub paths: BTreeMap<String, SourceFile>,
+}
+
+/// The literal paths a file passes to `source()` or `sys.source()`, in source order. A call
+/// inside a function counts too, because `source()` evaluates into the global environment
+/// unless told otherwise.
+#[salsa::tracked(returns(ref))]
+pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
+    let mut paths = Vec::new();
+    for span in item_spans(db, file) {
+        let Some(module) = item_hir(db, span.item) else {
+            continue;
+        };
+        for id in module.expression_ids() {
+            let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
+                continue;
+            };
+            let callee = match module.kind(*callee) {
+                ExpressionKind::NameRef(name) => *name,
+                ExpressionKind::Namespace {
+                    package: Some(package),
+                    name: Some(name),
+                    ..
+                } if package == "base" => *name,
+                _ => continue,
+            };
+            if callee != "source" && callee != "sys.source" {
+                continue;
+            }
+            let arguments = &module[arguments];
+            let path = arguments
+                .iter()
+                .find(|argument| module.argument_name(argument).as_deref() == Some("file"))
+                .or_else(|| arguments.iter().find(|argument| argument.name.is_none()))
+                .and_then(|argument| argument.value);
+            if let Some(path) = path
+                && let ExpressionKind::Literal(hir::LiteralKind::String(text)) = module.kind(path)
+            {
+                paths.push(module[text].to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// The project files a script or test reads through `source()` with a literal path,
+/// transitively, in the order the calls appear. R resolves the path against the working
+/// directory, which is usually the project root or the sourcing file's own directory, so both
+/// are tried. A package file is skipped: the namespace already holds every `R/` file.
+#[salsa::tracked(returns(ref))]
+pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
+    if *file.kind(db) == DocumentKind::Package || file_source_calls(db, file).is_empty() {
+        return Vec::new();
+    }
+    let Some(paths) = SourcePaths::try_get(db) else {
+        return Vec::new();
+    };
+    let paths = paths.paths(db);
+    let path_of = |target: SourceFile| {
+        paths
+            .iter()
+            .find(|(_, candidate)| **candidate == target)
+            .map(|(path, _)| path.as_str())
+    };
+    let mut sourced = Vec::new();
+    let mut pending = vec![file];
+    let mut visited = FxHashSet::from_iter([file]);
+    while let Some(current) = pending.pop() {
+        let directory = path_of(current)
+            .and_then(|path| path.rsplit_once('/'))
+            .map(|(directory, _)| directory);
+        for literal in file_source_calls(db, current) {
+            let candidates = directory
+                .map(|directory| normalize_relative_path(&format!("{directory}/{literal}")))
+                .into_iter()
+                .chain([normalize_relative_path(literal)]);
+            let Some(target) = candidates
+                .flatten()
+                .find_map(|candidate| paths.get(&candidate).copied())
+            else {
+                continue;
+            };
+            if visited.insert(target) {
+                sourced.push(target);
+                pending.push(target);
+            }
+        }
+    }
+    sourced
+}
+
+/// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root.
+fn normalize_relative_path(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// The item a sourced file binds `name` with. Per name, so a sourced file's edit re-checks only
+/// the reads whose definition changes; the last sourced file to bind it wins, as at run time.
+#[salsa::tracked]
+pub fn sourced_definition<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    name: Symbol,
+) -> Option<Item<'db>> {
+    sourced_files(db, file).iter().rev().find_map(|&sourced| {
+        file_definitions(db, sourced)
+            .iter()
+            .rev()
+            .find(|(defined, _)| *defined == name)
+            .map(|(_, item)| *item)
+    })
+}
+
+/// Whether some project file sources `file`, whose bindings are then read elsewhere.
+#[salsa::tracked]
+pub fn file_is_sourced(db: &dyn Db, files: ProjectFiles, file: SourceFile) -> bool {
+    files
+        .files(db)
+        .iter()
+        .any(|&other| sourced_files(db, other).contains(&file))
+}
+
 /// Set by a file's `# typing:` comments and `#: @strict` directives, the last winning.
 /// It changes only which diagnostics a host publishes, never inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -2690,7 +2827,15 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                 )
             })
             .map(|files| self.layer(&self.test_layers, files, name, true));
-        test.into_iter().chain(self.package_layer(name))
+        let sourced =
+            sourced_definition(self.db, self.file, name.symbol()).map(|winner| NameLayer {
+                winner: Some(winner),
+                conditional_writers: &[],
+            });
+        sourced
+            .into_iter()
+            .chain(test)
+            .chain(self.package_layer(name))
     }
 
     fn package_layer(&self, name: types::Name<'db>) -> Option<NameLayer<'db>> {
