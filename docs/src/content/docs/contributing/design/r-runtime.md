@@ -361,7 +361,9 @@ object. Long vectors use `R_xlen_t` lengths throughout.
 
 - **Interned strings.** `CHARSXP`s live in a global, weakly held intern table keyed by bytes and
   encoding, so pointer equality means string equality, as native code expects. Encoding flags
-  (`IS_UTF8`, `IS_ASCII`) are stored at interning time.
+  (`IS_UTF8`, `IS_ASCII`) are stored at interning time. The table is one open-addressed array of
+  slots that pack each address with hash bits, so a lookup touches a string only when the hash
+  bits match and its cost does not grow with the number of live strings.
 - **Symbols** are interned `SYMSXP`s with a cached global binding cell, which is what makes base
   function lookup and JIT watchpoints cheap.
 - **Pairlists** are kept for language objects, attributes and `.External` arguments, because native
@@ -1146,8 +1148,11 @@ Each step ends with something real running, and each one is a large, whole chang
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
-   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
-   helpers to it is next. On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
+   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine.
+   data.table's readers, writers and helpers (`fread`, `fwrite`, `rbindlist`, `setkey`, `dcast`,
+   `melt` and the rest) run data.table's own C, which under ry is at or below GNU R's time; a
+   helper moves to the engine only where the engine wins end to end, including the conversion
+   back to R vectors (`decisions.md`, "data.table's helpers run data.table's own C"). On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
    faster than data.table on every one (section 7 has the table).
 
 9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name

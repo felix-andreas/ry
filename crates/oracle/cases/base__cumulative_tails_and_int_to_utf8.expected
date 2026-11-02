@@ -1,0 +1,27 @@
+[stdout]
+| [1]   1   3   3 NaN NaN  NA  NA
+| [1]   1   1   1 NaN NaN  NA  NA
+| [1]  2 NA NA NA
+| [1] 0 0
+| [1]  Inf -Inf
+| [1]  1 NA NA
+| [1] 2147483647         NA
+| [1] "bcd" "ij"  NA   
+| $a
+| [1] "x" "1" "y"
+| 
+| $b
+| [1] "z" ""  "w"
+| 
+| $c
+| [1] NA
+| 
+| [1] 1113984 1114111   63360
+| [1] 1113984 1114111   63360
+[messages]
+[warnings]
+- integer overflow in 'cumsum'; use 'cumsum(as.numeric(.))' (in print(cumsum(c(.Machine$integer.max, 1L))))
+[errors]
+[value]
+integer
+| c(1113984L, 1114111L, 63360L)

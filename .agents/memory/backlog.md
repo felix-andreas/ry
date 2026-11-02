@@ -26,20 +26,20 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **Byte strings print with GNU R's padding.** In a printed character vector, GNU R pads a `"bytes"` string by the width of its `\xNN` spelling before the backslash is escaped, one column narrower than ry. `formatC` on one pads by its byte count. Both are cosmetic.
-- **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
+- **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
 
-- **Strings:** `paste(collapse =)` 1.7x, `format` 1.25x, `sub` 1.2x, `gsub(perl = TRUE)` 1.15x. `as.character(double)` looks infinitely slower because GNU R defers it through ALTREP. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings takes 1.1 s against GNU R's 0.46 s (one thread), whatever the collection budget.
-- **Grouping:** `order` on two keys is at parity. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
+- **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings took 1.1 s against GNU R's 0.46 s (one thread); re-measure.
+- **Grouping:** `order` on two keys runs at 0.88 of GNU R's time at 1e6 rows. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
 - **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes about 1.3 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s, so code layout is the lever here: profile-guided optimization or BOLT on the release binary, and keeping cold paths out of `execute_code` and the call path. The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
-- **Heap-state dependence (heap work):** with 1e7 live strings already in the session, `formatC` went from 5.9 s to 7.8 s on ry while GNU R stays level, because the session-wide string table's probes miss cache. `values::StringMemo` hides this per call in `substr` and `formatC`, but every other string producer still pays it. ry's `gc.time()` returns zeros, so collector time cannot be attributed from R.
-- **Peak memory** (`run.py --memory`) is 1.0 to 1.4 times GNU R's at 1e6 rows (`format` 1.40, `paste0` 1.30, the rest mostly 1.0 to 1.15), and kernels that allocate little sit about 13 MB above GNU R, which is the start-up gap in file-backed code pages (`decisions.md`, "Peak memory comes from what the heap keeps alive"). Allocator retention is not the cause: the peaks are the same with glibc `malloc` in libR. Still open:
-  - **Base `order` on several keys** peaks about 13% above GNU R at 1e6 rows (166 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
+- **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows: `rollmean`, `rollapply`, `na.locf`, `endpoints`, `to.period`, `str_detect`, `str_replace_all` and `read_csv` are at or below GNU R. Still slower: `str_split` 1.54x, xts `period.apply` 1.39x (per-call interpreter cost, tier-0 work), `ymd` 1.29x, `fromJSON` 1.26x and `toJSON` 1.20x. `str_split` executes only 1.14x GNU R's instructions, so the rest of its gap is memory traffic in `allocVector` and `mkCharLenCE` (the heap's allocation path and string table). The jsonlite simplify step and lubridate's format training are R-level interpreter cost. At 1e6 rows these ratios swing by 30% between runs.
+- **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.1 times GNU R's for `paste0` (1.07), `format` (1.10), `sprintf`, `formatC` and most kernels, and kernels that allocate little sit about 4 MB above GNU R (`decisions.md`, "Start-up memory: release relocation tables and preflight code pages"). Still above 1.15:
+  - `paste(collapse =)` 1.37, `xts period.apply` 1.36, `order(chr)` 1.26, `gsub(perl = TRUE)` 1.20, `sort`/`order` on doubles 1.18 to 1.19, `unsplit` 1.18, `merge` and `as.character(double)` 1.17.
+  - Base `order` on two keys is at 1.07 (157 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
 
 ## Open: the package loader
 
@@ -912,24 +912,20 @@ wants the generated arms shrunk across the board. This one measures per-arm cost
 and `format` grown, at 0.19 to 0.31 ms per input, while `ide` and `semantics` shrink, at 257 to
 644 ms per input. Both conclude independently that `format::fuzz_random_bytes` should be deleted.
 
-### CI runs 171 of the workspace's 712 tests, and its second job runs none
+### The live CI runs 171 of the workspace's tests
 
-The root `Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow omits `--workspace`.
-`cargo test --all-targets --all-features -- --list` therefore reports 171 tests, all in `crates/ry`,
-against the workspace's 712. Every fuzz arm lives in another crate. The second job runs
-`-- --ignored`, which lists no tests for the same reason, so it is a full release build with
-`lto = true` followed by an empty test run, on every push, under a 45-minute timeout.
+The live workflow tests only `crates/ry` (`default-members`). Its staged replacement in
+`.github/pending/workflows/ci.yml` runs `just gate`'s recipes over the whole workspace and no
+ignored suite, so a human moving it into place closes this (`decisions.md`, "CI runs `just gate`
+against GNU R 4.3.3").
 
-### `ide::fuzz_deep` makes a workspace-wide CI run time out
+### `ide::fuzz_deep` cannot be shortened
 
 `ide::fuzz_deep` runs `iterations().max(5000)` sweeps. That `.max` floor means `FUZZ_ITERS` cannot
 lower it, which is the bug. Measured in release on that exact input shape, which is 1 to 12
-concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms. Five
-thousand sweeps is 55.4 minutes on 4 cores, against the job's 45-minute timeout on a 2-to-4 vCPU
-runner. That is before `semantics::fuzz_deep`, projected at about 4 minutes.
-
-Fix the floor and raise the timeout with measured headroom. Both come before the human moves
-`.github/pending-ci.yml` into place.
+concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms, so five
+thousand sweeps take 55.4 minutes on 4 cores. CI no longer runs ignored suites, so this blocks a
+future scheduled deep-fuzz job, not the CI move.
 
 ### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
 
@@ -1054,9 +1050,8 @@ An agent can land all of these today: completion sampling, the release profile i
 syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
 type-check guard, the `fuzz_deep` floor that unblocks the CI move, and the dead-arm cleanup.
 
-A human is required for three things: the `git mv` of `.github/pending-ci.yml`, which needs workflow
-scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
-corpus cache, and an OSS-Fuzz submission.
+A human is required for three things: moving the staged workflows in `.github/pending/` into place,
+which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.
 
 ## Open: robustness harnesses
 
@@ -1951,9 +1946,9 @@ tagging fences `r` for Zed if that proves distant.
   0.80 s even in the throttled container. And same-query blocking is negligible, at 53 blocks per
   5,657 executions, while the interface graph is wide, with ggplot2 at 1,198 items and depth 22, so
   no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
-- **CI gates only the product crate.** The widened whole-workspace workflow is staged in
-  `.github/pending-ci.yml`, and a human must `git mv` it into `.github/workflows/`, because an
-  automated token lacks workflow scope. Until then the workspace battery runs locally per change.
+- **CI gates only the product crate.** The whole-workspace workflow is staged in
+  `.github/pending/workflows/ci.yml`, and a human must move it into `.github/workflows/`, because
+  an automated token lacks workflow scope. Until then the workspace battery runs locally per change.
   Authoritative performance numbers need the CI runner.
 
 ## Open: website and docs
@@ -2253,10 +2248,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
     of i is -10" warning), froll misses the warnings of 6000.114 and 6000.115, nafill fails
     3.07, and `programming.Rraw` stops on "invalid type/length (symbol/0) in vector allocation".
-  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
-    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
-    group, order, runs, split, expand and slice-chop files also fail; run them with
-    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -2300,8 +2291,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
-- **Compact sequences are not ALTREP.** `1:2e9` allocates the whole vector; GNU R's compact
-  intseq does not.
+- **Indexing a compact sequence materializes it.** `1:n`, `seq_len` and `seq_along` of at least
+  2^20 elements are compact ALTREP objects, but `x[i]` and `x[[i]]` on one expand the whole
+  vector, because subsetting does not call `Elt` or `Extract_subset` (the item above).
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
@@ -2319,22 +2311,53 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.
-  - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey
-    fonts fall back to ordinary text, and the Adobe symbol conversions pass text through.
+  - Hershey fonts fall back to ordinary text, and a symbol-face string that is not valid UTF-8
+    (`symbol("\256")`) is measured as replacement characters, where GNU R reads the bytes as
+    Adobe Symbol codes.
   - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
     points); open splines match GNU R value for value.
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
     (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
   - Bitmap pages are written when the device closes rather than per page.
-  - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
+  - The plot gallery (`oracle gallery`) passes on every device, and three figures are not
+    pixel-exact on agg: `pch_table` (the join at pch 11's apex), `ts_decomposition` (rotated
+    side-2 axis labels one pixel off) and `margin_text_and_titles`.
+  - GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
+  - Rendering speed (release build, `ORACLE_RY=target/release/ry oracle gallery --repeats 4`):
+    the whole gallery takes 23.7 s on GNU R and 29.1 s on ry. Base graphics (2.8 s against 2.2 s)
+    and grid (0.60 s against 0.39 s) are faster on ry, but ggplot2 (12.4 s against 15.8 s),
+    lattice (5.8 s against 8.1 s) and PerformanceAnalytics (2.1 s against 2.7 s) are 1.2 to 1.9
+    times slower, worst on `lattice_wireframe` and `pa_rolling_performance`. The devices are not
+    the cost (`pdf(NULL)` is as slow): the time is in the packages' R code, and callgrind shows a
+    flat profile of closure calls, frame setup, argument binding, allocation and builtin dispatch.
+    Measured per call against GNU R: a closure call 0.75 µs against 0.35, `pmin` 15.7 against 6.2,
+    `vapply` 8.2 against 3.4, `mostattributes<-` 10.6 against 4.0, `diff` 8.1 against 4.8. The JIT
+    makes it worse on these bodies: it compiles functions that are mostly tier-0 steps, so `pmin`
+    runs in about 10 µs with `RY_JIT=off`, and `vapply` over an anonymous function takes 306 µs
+    under `RY_JIT=force`. A gate on the ratio of native to tier-0 steps was tried without a clear
+    win. Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
+    path), not a graphics fix.
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
-  build: 63 of 66 end with GNU R's exit status, 26 print exactly its output). Two divergences are
-  accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`
-  bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
-  out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
-  with a release build.
+  build: 64 of 66 end with GNU R's exit status, 35 print exactly its output). Two divergences are
+  accepted. d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e stops at a
+  `fisher.test` table where GNU R's FEXACT overflows its hash keys and errors but ry computes the
+  exact p-value; it also prints `env.profile` bucket counts that depend on GNU R's string hash.
+  reg-large needs tens of gigabytes and times out at debug speed, and utf8 and reg-examples1
+  come close to the 300 s limit, so confirm them with a release build. The remaining output
+  differences are mostly accepted noise (timings, unseeded random numbers, `runmed` and `kmeans`
+  debug traces) plus these gaps:
+  - A parse error message lacks GNU R's `<text>:1:3: unexpected ...` layout with the source line
+    and caret.
+  - A finalizer error prints no `Calls:` traceback, and `gc()` errors name `gc(...)` where GNU R
+    names `.Internal(gc(...))`.
+  - Deparsing a long pairlist breaks lines at different places, and `dput` of an S4 generator
+    call prints the class name with its `package` attribute.
+  - `memCompress(type = "gzip")` output differs byte for byte at level 9 (zlib-rs picks
+    different matches than zlib), though it decompresses to the same data.
+  - `serialize` writes a compact integer sequence (`1:n`) expanded, where GNU R writes the
+    ALTREP form, so the bytes differ though both unserialize to the same vector.
 - **The help server is not implemented** (`tools::startDynamicHelp`). `Rprof` samples only the
   call stack, without memory, GC or line profiling.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
@@ -2347,9 +2370,13 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   asymptotic expansions or argument limits when a package hits them.
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
-- **`pgamma` is a few ulps off GNU R for small shapes** (for example shape 0.5 or 0.01, where
-  GNU R is exact against mpmath), and `qgamma` inherits that error times `1/shape`. This, not
-  `qgamma` itself, is why about half of `qgamma`'s answers differ from GNU R in the last bits.
+- **`pgamma` loses up to about 200 ulps for a large shape far above `x`** (shape 15 at `x` below
+  0.1, where GNU R loses 14): `exp(-stirlerr - deviance)` amplifies the exponent's rounding by
+  its size, and below shape 9 the direct product `x^shape e^-x / Gamma(shape + 1)` avoids it,
+  but above, `gammafn` itself is an exponential. A double-double deviance would fix it. For
+  small shapes ry is now closer to mpmath than GNU R (mean 4.5 ulps against 2.8 over a grid
+  that includes these large-shape cases, and 26 points above 2 ulps against GNU R's 39); the
+  remaining `qgamma` differences from GNU R are GNU R's own last-bit errors times `1/shape`.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
   follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
   `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
@@ -2998,6 +3025,8 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
 - Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
 - Joins without `on =` (key joins) and `x[]`.
+- `roll = "nearest"`: at a tie data.table takes the earlier row and Polars' as-of join the later one, so the bridge declines it. Accepting it needs a tie-break toward the earlier key.
+- `.EACHI` over a non-equi join, or with a `j` that reads a join column: data.table reports `i`'s bounds there, so these decline.
 - The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
 
 ## Open: findings from the records, library and frame round
@@ -3104,8 +3133,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
     callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
     build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
+  - Done: a cold check holds one parse tree per worker, skips the per-item syntax memos and the
+    editor-only check facts, and purges freed memory after 10 ms (`decisions.md`, "A cold check
+    holds one parse tree per worker"). Peak RSS is 298-306 MiB on the three benches, under the
+    300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
+    1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
   - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
-    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut.
+    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut. It is also
+    the next memory cut: salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
+  - `collect_used_tokens` slices every token through `token_ref` (about 318 M instructions on
+    finance); skipping trivia before slicing is a cheap CPU cut.
   - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
     and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k

@@ -1,0 +1,63 @@
+[stdout]
+| stack.loss ~ Air.Flow + Water.Temp + Acid.Conc.
+| lm(formula = stack.loss ~ ., data = dd)
+| Air.Flow + Water.Temp + Acid.Conc.
+| stack.loss ~ Air.Flow + Water.Temp + Acid.Conc.
+| stack.loss ~ (Air.Flow + Water.Temp + Acid.Conc.) - Air.Flow
+| stack.loss ~ (Air.Flow + Water.Temp + Acid.Conc.)^2
+| y ~ a + b + log(a + b)
+| y ~ a + b
+| stack.loss ~ Air.Flow + Water.Temp + Acid.Conc. + 0
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| y ~ a * a
+| y ~ a:a
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+| [1] "object 'd' not found"
+[messages]
+[warnings]
+[errors]
+- object 'd' not found
+[value]
