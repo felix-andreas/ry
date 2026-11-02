@@ -4882,6 +4882,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## Bug lints are on by default, style lints are opt-in
 
+- lintr parity is not a goal. A lint is added only when it catches real bugs (as `length-test`
+  did: every corpus hit was a bug) or when it fits the existing lint architecture and costs little.
+  Lints already ported stay; nobody works through lintr's list for completeness.
 - A lint is on by default when the code it flags behaves differently from how it reads
   (`equals-na`, `vector-logic`, `length-sequence`, `class-equals`, `trailing-comma`, `T`/`F`), and
   off when it only flags taste (`redundant-return`, `commented-code`, naming, shadowing). lintr turns
