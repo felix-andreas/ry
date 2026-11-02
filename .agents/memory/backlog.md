@@ -424,9 +424,10 @@ protects construction but nothing after it.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
-  saves its state around each call. Adding them is safe (none runs R code) once the JIT's
-  intrinsic table is settled.
+- A function that takes a callback (`List.map`, `List.walk`, `Dict.update` and the rest) calls
+  the closure through `eval::apply` once per element, and compiled code treats the whole call as
+  opaque. Compiling such a call with a closure known at the call site into a loop over the
+  elements, with the closure inlined, is the fast path these functions still lack.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.

@@ -3027,14 +3027,17 @@ first lines R had already read, leaving R mid-command.
     `Num.max_integer`, `min_integer`, `max_double`, `min_double`, plus `Num.infinity`; Roc's
     `nan_f64` is skipped because no library function takes or returns `NaN` on purpose.
   - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
-  - `Str` capacity functions: R strings are immutable.
-  - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
-    first key fixes the key type.
+  - `Str` capacity functions: R strings are immutable and interned, so there is no buffer to
+    reserve or release.
 - **Taken later:** `List.range` (`seq` returns a vector, not a `list[integer]`),
   `List.keep_if_try`, `Num.to_integer`, and `Dict.capacity`, `Set.capacity` and
   `release_excess_capacity` on `List`, `Dict` and `Set`. They were first skipped on the claim
   that the heap shrinks collections, but it never shrinks a resizable vector, so after a
-  `reserve` the room stays until the value dies.
+  `reserve` the room stays until the value dies. `Dict.with_capacity` and `Set.with_capacity`
+  came last: an empty collection has no key vector until its first key fixes the key type, so
+  its open-addressing index, sized for the requested room, carries the room
+  (`standard_library::empty_room`), and the first insert allocates the key and value vectors
+  with that capacity. `Dict.reserve` on an empty dictionary works the same way.
 - **`NaN` is never a result.** A `NaN` from an unchecked function (`Num.sin(Inf)`,
   `Num.pow(-1, 0.5)`, a `List.sum` of `Inf` and `-Inf`) is an error, and a `_checked` function
   returns `:Err(:Undefined)`, which its signature names.
@@ -4255,9 +4258,13 @@ check` releases its trees once, and memoized records are compact" below).
   argument is positional with no `...`, and emits a guard on the symbol's binding, the builtin as
   a constant and a direct `CallBuiltin`. A failed guard (someone rebound `Dict.len`) falls back to
   the general call, so redefinition still works.
-- **Leaves.** `standard_library::is_leaf` names the functions that never call back into R
-  (`len`, `is_empty`, `get`, `contains` of `List`, `Dict` and `Set`). The JIT treats a leaf as an
-  opaque step with `Effect::PureUnlessObserved`, so it flushes nothing around it.
+- **Leaves.** `standard_library::is_leaf` names the functions that never call back into R:
+  every `Result`, `List`, `Dict` and `Set` function that takes no callback and does not update
+  its first argument in place, and every `Num`, `Bool` and `Str` function except the `Str` walks.
+  The JIT treats a leaf as an opaque step with `Effect::PureUnlessObserved`, so it flushes nothing
+  around it. An in-place update is excluded because compiled code may hold its argument in a
+  register that no reference count sees, so the update could change a value still in use. The
+  test `leaves_are_the_functions_without_callbacks` derives the rule from the stub signatures.
 - **Intrinsics.** `Dict.len`, `Set.len`, their `is_empty`, `Dict.contains`, `Set.contains` and
   `Dict.get` compile to calls of small runtime helpers (`jit_collection_count`,
   `jit_collection_position`, `jit_dict_get`) that take the key unboxed and return an unboxed

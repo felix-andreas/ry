@@ -538,6 +538,8 @@ Bool.is_not_eq : <T> fn(first: T, second: T) -> logical
 
 #' A dictionary with no entries.
 Dict.empty : <K: key, V> fn() -> Dict<K, V>
+#' An empty dictionary with room for `capacity` entries, so inserting that many never grows it.
+Dict.with_capacity : <K: key, V> fn(capacity: integer) -> Dict<K, V>
 #' A dictionary with one entry.
 Dict.single : <K: key, V> fn(key: K, value: V) -> Dict<K, V>
 #' A dictionary from `(key, value)` tuples; a later pair wins over an earlier one.
@@ -580,7 +582,7 @@ Dict.insert_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<
 Dict.keep_shared : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 #' The entries of `first` whose key `second` lacks.
 Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
-#' The dictionary with room for `spare` more entries. An empty dictionary reserves nothing.
+#' The dictionary with room for `spare` more entries.
 Dict.reserve : <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
 #' How many entries the dictionary holds before its storage must grow.
 Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> integer
@@ -593,6 +595,8 @@ Dict.clear : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 
 #' A set with no elements.
 Set.empty : <T: key> fn() -> Set<T>
+#' An empty set with room for `capacity` elements, so inserting that many never grows it.
+Set.with_capacity : <T: key> fn(capacity: integer) -> Set<T>
 #' A set of one element.
 Set.single : <T: key> fn(element: T) -> Set<T>
 #' A set of a list's distinct elements.
@@ -627,7 +631,7 @@ Set.join_map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> Set<B>) -> Set<B>
 Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 #' The elements for which `predicate` is `FALSE`.
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
-#' The set with room for `spare` more elements. An empty set reserves nothing.
+#' The set with room for `spare` more elements.
 Set.reserve : <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
 #' How many elements the set holds before its storage must grow.
 Set.capacity : <T: key> fn(set: Set<T>) -> integer
