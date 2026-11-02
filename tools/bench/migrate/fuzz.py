@@ -24,7 +24,7 @@ data.table and lubridate must be installed in the library named by RY_BENCH_RLIB
 Usage: tools/bench/migrate/fuzz.py [--lines 300000] [--seed 7] [--rows 2e4] [--instances N]
                                    [--domain NAME|all] [--corpus DIR]... [--keep DIR]
 """
-import argparse, json, math, os, pathlib, random, re, shutil, subprocess, sys, tempfile
+import argparse, collections, json, math, os, pathlib, random, re, shutil, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -117,7 +117,7 @@ def migrate_and_check(ry, env, label, original, migrated, strict):
         failures.append(f"{label}: migrated code GNU R cannot parse:\n"
                         + "\n".join(f"{path}: {broken[path]}" for path in sorted(broken)[:20]))
     after = errors(ry, env, migrated)
-    added = sorted(after - before)
+    added = sorted((after - before).elements())
     if added:
         failures.append(f"{label}: migration added {len(added)} errors:\n" + "\n".join(added[:20]))
     return failures
@@ -144,17 +144,18 @@ def gnu_unparsable(env, package, files):
 
 def errors(ry, env, package):
     """The package's error-level diagnostics (syntax errors always, strict type errors in a typed
-    package), keyed by file, code and message so that a rewrite moving a line changes nothing."""
+    package), counted by file, code and message so that a rewrite moving a line changes nothing
+    while a second copy of an existing error still counts."""
     output = subprocess.run([ry, "check", "--output", "json", "--min-severity", "error"],
                             cwd=package, env=env, capture_output=True, text=True)
     if output.returncode == 2:
         sys.exit(f"`ry check` failed in {package}:\n{output.stderr}")
-    found = set()
+    found = collections.Counter()
     for line in output.stdout.splitlines():
         diagnostic = json.loads(line)
         path = pathlib.Path(diagnostic["path"])
         name = path.relative_to(package) if path.is_relative_to(package) else path
-        found.add(f"{name}: {diagnostic['code']}: {diagnostic['message']}")
+        found[f"{name}: {diagnostic['code']}: {diagnostic['message']}"] += 1
     return found
 
 
@@ -182,8 +183,11 @@ def compare_checksums(args, env, label, original, migrated, scratch, rng):
         if len(results) < 2:
             continue
         for step, reference in results[0].items():
-            checksum = results[1].get(step)
-            if checksum is None or not math.isclose(checksum, reference, rel_tol=1e-9, abs_tol=1e-6):
+            checksum = results[1].get(step, "missing")
+            same = (checksum is None and reference is None) or (
+                isinstance(checksum, float) and reference is not None
+                and math.isclose(checksum, reference, rel_tol=1e-9, abs_tol=1e-6))
+            if not same:
                 failures.append(f"{label}: {module} {identifier} ({path}) step {step}: migrated gives {checksum!r}, original {reference!r}")
     print(f"{label}: compared {len(instances)} table module instances", file=sys.stderr, flush=True)
     return failures
@@ -194,7 +198,8 @@ def parse_steps(stdout):
     for line in stdout.splitlines():
         parts = line.split()
         if len(parts) == 4 and parts[0] == "step":
-            steps[parts[1]] = float(parts[2])
+            # R prints a missing checksum as `NA`, which must match only another `NA`.
+            steps[parts[1]] = None if parts[2] == "NA" else float(parts[2])
     return steps
 
 

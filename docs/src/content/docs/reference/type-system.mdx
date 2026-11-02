@@ -3401,9 +3401,10 @@ The engine compares an `integer` with a string by formatting the number, as R do
 comparison runs, but it is still an error here: a schema that puts text against a number almost
 always means the wrong column. The rules check only operands of known type, so an expression over
 a frame whose columns are unknown is never an error. In strict mode, a verb that names a column of
-such a frame, with a string or `col("x")`, is an error on the verb's subject. A verb whose subject
-is another verb over unknown columns is not reported again, so a chain is reported once, at its
-first step.
+such a frame, with a string or `col("x")`, is an error on the verb's subject. A chain is
+reported once, at its first step that names a column: a later step is not reported again, while a
+step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
+hides a report.
 
 #### data.table queries
 

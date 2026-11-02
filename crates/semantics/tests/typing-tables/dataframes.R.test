@@ -144,6 +144,17 @@ first: DataFrame
 232..237 warning[unused] `first` is assigned but never used.
 98..103 error[strict] strict mode: the columns of `sales` are unknown, so the column names and types this query uses are not checked. Give `sales` a type that lists its columns, as in `sales: DataFrame{units: TYPE}`
 
+#---- strict_mode_reports_a_chain_whose_first_steps_name_no_column
+# typing: strict
+path <- file.path("data", "sales.csv")
+sales <- DataFrame.read_csv(path)
+kept <- sales |>
+  DataFrame.head(5L) |>
+  DataFrame.lazy() |>
+  LazyFrame.filter(col("units") > 1L) |>
+  LazyFrame.select("units")
+#++++
+
 #---- strict_mode_reports_a_bare_frame_parameter
 # typing: strict
 #: fn(df: DataFrame) -> DataFrame

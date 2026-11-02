@@ -9697,47 +9697,41 @@ impl<'db> Checker<'db, '_> {
 
     /// Strict mode reports a query that names columns of a frame whose columns are unknown,
     /// because nothing checks those names and types. A chain is reported once, at its first
-    /// such step: a subject that is itself a verb over a frame with unknown columns was already
-    /// reported there.
+    /// step that names a column.
     fn note_unchecked_columns(&mut self, subject: ExprId, rest: &[Argument]) {
         let module = self.module;
-        let mut first_column = None;
-        for argument in rest {
-            let Some(value) = argument.value else {
-                continue;
-            };
-            if module
-                .argument_name(argument)
-                .as_deref()
-                .is_some_and(|name| {
-                    matches!(name, "how" | "suffix" | "strategy" | "descending" | "n")
-                })
-            {
-                continue;
-            }
-            if let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(value) {
-                first_column = Some(module[text].to_string());
-            } else {
-                first_column = first_column_read(module, value);
-            }
-            if first_column.is_some() {
-                break;
-            }
-        }
-        let Some(column) = first_column else {
+        let Some(column) = first_named_column(module, rest) else {
             return;
         };
+        // Steps that name no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`,
+        // reported nothing, so the walk looks through them for an earlier step that did.
         let mut inner = subject;
-        while let ExpressionKind::Paren(expression) = module.kind(inner) {
-            inner = *expression;
-        }
-        if let ExpressionKind::Call { callee, arguments } = module.kind(inner)
-            && self.dataframe_verb(*callee).is_some()
-            && let Some(inner_subject) = module[arguments].first().and_then(|first| first.value)
-            && let Some(&ty) = self.recorded.get(&inner_subject)
-            && matches!(self.structural(ty).kind(self.db), TyKind::Frame(_, None))
-        {
-            return;
+        loop {
+            while let ExpressionKind::Paren(expression) = module.kind(inner) {
+                inner = *expression;
+            }
+            let ExpressionKind::Call { callee, arguments } = module.kind(inner) else {
+                break;
+            };
+            if self.dataframe_verb(*callee).is_none() {
+                break;
+            }
+            let Some((first, inner_rest)) = module[arguments].split_first() else {
+                break;
+            };
+            let Some(inner_subject) = first.value else {
+                break;
+            };
+            let Some(&ty) = self.recorded.get(&inner_subject) else {
+                break;
+            };
+            if !matches!(self.structural(ty).kind(self.db), TyKind::Frame(_, None)) {
+                break;
+            }
+            if first_named_column(module, inner_rest).is_some() {
+                return;
+            }
+            inner = inner_subject;
         }
         let frame = variable_name(module, subject).map(|name| name.to_string());
         self.record_strict_origin(subject, StrictOriginKind::UnknownColumns { frame, column });
@@ -10538,17 +10532,22 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// `DataFrame.read_csv("data/sales.csv")` and `LazyFrame.scan_csv(...)` type with the columns
-    /// the project's file has, sniffed as for `fread`; `strings_as_factors = TRUE` reads its text
-    /// columns as factors. A computed path, a file the project lacks, or a flag that is not a
+    /// the project's file has, sniffed as for `fread`; `DataFrame.read_csv`'s
+    /// `strings_as_factors = TRUE` reads its text columns as factors. A computed path, a file the project lacks, or a flag that is not a
     /// literal keeps the declared result, a frame with unknown columns.
     fn read_csv_type(&mut self, kind: FrameKind, arguments: &[Argument]) -> Option<Ty<'db>> {
         let module = self.module;
-        let matched = match_formals(module, arguments, &["path", "strings_as_factors"]);
+        // `LazyFrame.scan_csv` takes only a path.
+        let formals: &[&str] = match kind {
+            FrameKind::LazyFrame => &["path"],
+            _ => &["path", "strings_as_factors"],
+        };
+        let matched = match_formals(module, arguments, formals);
         let path = match module.kind(matched[0]?) {
             ExpressionKind::Literal(LiteralKind::String(text)) => decode_escapes(&module[text])?,
             _ => return None,
         };
-        let factors = match matched[1].map(|value| module.kind(value)) {
+        let factors = match matched.get(1).copied().flatten().map(|value| module.kind(value)) {
             None => false,
             Some(ExpressionKind::Literal(LiteralKind::Logical(flag))) => *flag,
             Some(_) => return None,
@@ -16771,7 +16770,30 @@ fn decode_escapes(text: &str) -> Option<String> {
     Some(decoded)
 }
 
-/// A frame from named columns, or a frame with unknown columns when two share a name.
+/// The first column a verb's arguments after the subject name, as a string or a column read.
+fn first_named_column(module: &Module, rest: &[Argument]) -> Option<String> {
+    for argument in rest {
+        let Some(value) = argument.value else {
+            continue;
+        };
+        if module
+            .argument_name(argument)
+            .as_deref()
+            .is_some_and(|name| matches!(name, "how" | "suffix" | "strategy" | "descending" | "n"))
+        {
+            continue;
+        }
+        let column = match module.kind(value) {
+            ExpressionKind::Literal(LiteralKind::String(text)) => Some(module[text].to_string()),
+            _ => first_column_read(module, value),
+        };
+        if column.is_some() {
+            return column;
+        }
+    }
+    None
+}
+
 /// The first column an expression reads with `col("name")`, in source order.
 fn first_column_read(module: &Module, value: ExprId) -> Option<String> {
     if let ExpressionKind::Call { callee, arguments } = module.kind(value)
@@ -16817,6 +16839,7 @@ fn sniffed_columns<'db>(
         .collect()
 }
 
+/// A frame from named columns, or a frame with unknown columns when two share a name.
 fn frame_of<'db>(db: &'db dyn Db, kind: FrameKind, columns: Vec<(String, Ty<'db>)>) -> Ty<'db> {
     let mut fields: Vec<RecordField<'db>> = Vec::with_capacity(columns.len());
     for (name, ty) in columns {

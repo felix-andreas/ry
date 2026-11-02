@@ -494,7 +494,8 @@ impl Partition {
 
     /// Makes room for `levels` labels in all, so that a column of mostly distinct strings neither
     /// rehashes its table nor copies its views as they grow. A reservation the column does not
-    /// fill costs only the table's control bytes, since untouched memory is never paged in.
+    /// fill still costs the table's control bytes, one per slot, which are written when the
+    /// table is allocated; the views beyond the filled ones are never paged in.
     fn reserve(&mut self, levels: usize) {
         let state = FixedState::default();
         let Partition {

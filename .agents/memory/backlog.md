@@ -2139,6 +2139,17 @@ The end-to-end guard rests on the corpus suites.
     `report.py DIR --rows 1e8 --joins-only` and the 1e8 group-by, write the tables with
     `--write`, and update `contributing/design/r-runtime.md` section 7, whose 1e8 join prose
     says neither engine fits.
+- **`ry migrate data-table` checks a name's uses in the current file only** (`uses_are_safe` in
+  `crates/ide/src/migrate.rs`). A top-level `sales <- fread(...)` in one file that another file
+  queries with `sales[, z := 1]` is rewritten, which breaks the other file. The safety check
+  should see every file of the project that can read the name.
+- **A factor whose labels share their first 12 bytes sorts serially** (`Interner::finish` in
+  `crates/table/src/factor.rs`). Labels such as `customer_00001234` or ISO timestamps form one
+  run of tied prefixes, which is re-sorted on one thread through indirect label lookups. Sorting
+  such a run in parallel, or keying on the bytes after the common prefix, would fix it.
+- **A Polars `Enum` converted to a factor loses its level order** (`convert` in
+  `crates/table/src/table.rs`): it goes through `from_strings`, which sorts the levels by bytes,
+  so an Enum read from Parquet with a non-alphabetical order is reordered.
 - **A factor column with a missing value costs a second whole-file parse.** The sliced reader
   (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
   `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any

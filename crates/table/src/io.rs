@@ -431,9 +431,11 @@ fn read_sliced(
     for (index, range) in ranges.iter().enumerate() {
         let frame = parse(&bytes[range.clone()], layout, options, &schema)?;
         if index == 0 {
-            // The rows still to come are estimated from the first slice's bytes per row. A
-            // reservation the file does not fill is never touched, so it costs no memory.
-            let rows = frame.height() * bytes.len() / range.len().max(1);
+            // The rows still to come are estimated from the first slice's bytes per row over
+            // the bytes the read covers, which `nrows` may cut short. A column reservation the
+            // file does not fill is never touched, so it costs no memory, but a factor's hash
+            // tables are written in full, so the estimate must not count bytes past the read.
+            let rows = frame.height() * rows.len() / range.len().max(1);
             let reserve = rows + rows / 8 + 1024;
             builders = frame
                 .columns()

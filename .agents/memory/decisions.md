@@ -5642,8 +5642,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Target shape.** `note_unchecked_columns` in `check.rs` records a strict origin
   (`StrictOriginKind::UnknownColumns`) on the subject of a verb that names a column, through a
   string argument or a `col("x")` anywhere inside one, when the subject's columns are unknown. A
-  subject that is itself a verb over unknown columns is skipped, so a chain is reported once, at
-  its first step. The message suggests the annotation with the first column the query names.
+  verb whose chain already has an earlier step over unknown columns that names a column is
+  skipped, so a chain is reported once, at its first step that names a column; steps that name
+  none (`head`, `lazy`) are looked through. The message suggests the annotation with the first column the query names.
 - **Why at the query, not at the read.** The unknown schema has many origins (readers,
   parameters, pivots, unreadable arguments), and a frame nobody queries by column needs no schema.
   Reporting the first unchecked query is precise and always actionable; an annotation on the
