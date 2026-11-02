@@ -697,7 +697,11 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
             }
             values::set_attr(matrix, symbols().dimnames, sub)?;
         }
-        let shown = if index + 1 == shown_slices { last_rows } else { rows };
+        let shown = if index + 1 == shown_slices {
+            last_rows
+        } else {
+            rows
+        };
         print_matrix_rows(matrix, rows, cols, shown, options)?;
         out("\n");
     }

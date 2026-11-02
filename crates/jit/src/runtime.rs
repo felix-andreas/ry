@@ -105,15 +105,28 @@ pub struct Compiled {
     pub osr: Vec<usize>,
 }
 
-/// Whether every function lookup compiled code assumed still resolves the same way. Every
-/// change that could alter such a lookup moves the binding epoch (see `gp::WATCHED`), so an
-/// unchanged epoch proves the lookups without walking them.
-pub unsafe fn valid(compiled: &Compiled) -> bool {
-    let epoch = heap().binding_epoch();
-    if epoch == compiled.epoch.get() {
+/// Whether every function lookup compiled code assumed still resolves the same way for an
+/// activation whose frame is `frame`. Every change that could alter such a lookup moves the
+/// binding epoch (see `gp::WATCHED`), so an unchanged epoch proves the lookups without walking
+/// them. `thorough` walks them anyway, for an activation whose frame may have bound a watched
+/// name before the name was watched.
+pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+    let heap = heap();
+    let epoch = heap.binding_epoch();
+    if epoch == compiled.epoch.get() && !thorough {
         return true;
     }
     for speculation in &compiled.speculations {
+        // The body's own lookups start past its frame, because the compiler cannot see the
+        // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
+        // locals `UseMethod` copies in can each bind the name there.
+        if speculation.env == compiled.enclosure
+            && heap
+                .frame_cell(frame, speculation.symbol)
+                .is_some_and(|cell| may_be_function(cell.cdr()))
+        {
+            return false;
+        }
         match resolve_function(speculation.symbol, speculation.env) {
             Some(found)
                 if found.cell == speculation.cell && found.function == speculation.function => {}
@@ -122,6 +135,19 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
     }
     compiled.epoch.set(epoch);
     true
+}
+
+/// Whether a lookup of a function could stop at a binding holding `value`, which R skips only
+/// when it is certainly not a function.
+unsafe fn may_be_function(value: Sexp) -> bool {
+    unsafe {
+        let value = if value.kind() == SexpType::Promise {
+            value.car()
+        } else {
+            value
+        };
+        value == values::unbound() || values::is_function(value)
+    }
 }
 
 /// How many times a body may be compiled before the JIT gives up on it.
@@ -242,7 +268,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !valid(compiled(activation)) => outcome::INVALIDATED,
+                Ok(()) if validate != 0 && !valid(compiled(activation), machine.env, false) => {
+                    outcome::INVALIDATED
+                }
                 Ok(()) => outcome::OK,
             }
         })
@@ -285,7 +313,9 @@ unsafe fn finish_load(activation: &mut Activation, slot: i64, loaded: R<(Sexp, b
             Ok((value, local)) => {
                 *slot_cell(activation, slot) = value;
                 // Loading can force a promise, which runs arbitrary code.
-                if !compiled(activation).speculations.is_empty() && !valid(compiled(activation)) {
+                if !compiled(activation).speculations.is_empty()
+                    && !valid(compiled(activation), machine(activation).env, false)
+                {
                     return outcome::LOAD_INVALIDATED;
                 }
                 if local { 1 } else { 2 }
@@ -425,7 +455,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !valid(compiled(activation)) {
+                    if !valid(compiled(activation), machine.env, false) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK
@@ -713,6 +743,13 @@ pub unsafe extern "C" fn jit_dict_get(
 /// Whether a calling handler is established, so a warning would run R code.
 pub extern "C" fn jit_handlers_present() -> i32 {
     interp::interp().handlers.is_some() as i32
+}
+
+/// How many closure calls may still nest before R's expression depth limit, which a native
+/// function call counts down instead of pushing frames.
+pub extern "C" fn jit_depth_budget() -> i64 {
+    let state = interp::interp();
+    i64::from(state.max_depth) - state.frames.len() as i64
 }
 
 /// `^` on doubles, as tier 0 computes it.

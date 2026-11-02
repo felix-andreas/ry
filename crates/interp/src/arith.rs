@@ -573,15 +573,15 @@ pub fn pretty(
     if cell < smallest {
         warning = Some(format!(
             "R_pretty(): very small range 'cell'={}, corrected to {}",
-            crate::linalg::format_g(cell),
-            crate::linalg::format_g(smallest)
+            crate::format::format_g(cell),
+            crate::format::format_g(smallest)
         ));
         cell = smallest;
     } else if cell > largest {
         warning = Some(format!(
             "R_pretty(): very large range 'cell'={}, corrected to {}",
-            crate::linalg::format_g(cell),
-            crate::linalg::format_g(largest)
+            crate::format::format_g(cell),
+            crate::format::format_g(largest)
         ));
         cell = largest;
     }
@@ -983,7 +983,12 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp, arithmetic: boo
 
 /// Dimensions, dimension names and names from the operand of the result's length, the left
 /// one first.
-unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp, names_from_right: bool) -> R<()> {
+unsafe fn copy_array_structure(
+    left: Sexp,
+    right: Sexp,
+    result: Sexp,
+    names_from_right: bool,
+) -> R<()> {
     let result_length = length(result);
     for symbol in [symbols().dim, symbols().dimnames] {
         let from_left = get_attr(left, symbol);
@@ -2091,9 +2096,9 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     let count = length(operand);
     match operand.kind() {
-        SexpType::Integer | SexpType::Logical
-            if matches!(function, Math::Abs) && operand.kind() == SexpType::Integer =>
-        {
+        // GNU R's `abs` keeps integers and turns logicals into integers, unlike the other math
+        // functions, which give doubles.
+        SexpType::Integer | SexpType::Logical if matches!(function, Math::Abs) => {
             let result = alloc(SexpType::Integer, count)?;
             for index in 0..count {
                 let value = values::ints(operand)[index];
@@ -3398,7 +3403,7 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             match (from, to, by) {
                 (Some(from), Some(to), None) => {
                     if count == 1 {
-                        return values::real_vector(&[from]);
+                        return whole_sequence(&[from]);
                     }
                     let intervals = count as f64 - 1.0;
                     let by = (to - from) / intervals;
@@ -3441,7 +3446,10 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
 /// A `length.out` sequence is integer whenever every element is a whole number in integer
 /// range, whatever the types of `from`, `to` and `by`, as in GNU R.
 unsafe fn whole_sequence(values: &[f64]) -> R<Sexp> {
-    if values.iter().all(|value| value.fract() == 0.0 && value.abs() <= i32::MAX as f64) {
+    if values
+        .iter()
+        .all(|value| value.fract() == 0.0 && value.abs() <= i32::MAX as f64)
+    {
         let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
         return values::integer_vector(&integers);
     }

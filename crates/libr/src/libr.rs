@@ -76,6 +76,7 @@ pub mod frame_altrep;
 pub mod globals;
 pub mod graphics;
 pub mod hashtab;
+pub mod inspect;
 pub mod legacy;
 pub mod linpack;
 pub mod lists;
@@ -109,8 +110,14 @@ pub struct Runtime {
     pub heap: Heap,
     pub arena: Arena,
     /// How many native calls are on the stack. Objects the API hands to native code are rooted
-    /// in the handle stack while this is nonzero.
+    /// while this is nonzero.
     pub native_depth: u32,
+    /// Where the innermost native call's entries in the heap's handouts start.
+    pub handout_base: usize,
+    /// How many API functions are running inside the innermost native call. Only the outermost
+    /// one hands its result to native code; a nested one returns to ry's own code, which the
+    /// outer function's handle scope covers.
+    pub api_depth: u32,
     /// The unwind in flight between an API function that raised it and the C context that
     /// catches it.
     pub pending: Option<Unwind>,
@@ -124,7 +131,6 @@ pub struct Runtime {
     /// storage has no field for. Each key is preserved while it has an
     /// entry, so its address cannot be reused by another object.
     pub truelengths: FxHashMap<Sexp, isize>,
-    pub rng: arith::Rng,
     pub console: Console,
     running_finalizers: bool,
 }
@@ -199,13 +205,14 @@ impl Runtime {
             heap,
             arena: Arena::default(),
             native_depth: 0,
+            handout_base: 0,
+            api_depth: 0,
             pending: None,
             parked: FxHashMap::default(),
             error_buffer: Vec::new(),
             dlls: Vec::new(),
             c_callables: FxHashMap::default(),
             truelengths: FxHashMap::default(),
-            rng: arith::Rng::default(),
             console: Box::new(boundary::default_console),
             running_finalizers: false,
         };

@@ -1065,6 +1065,10 @@ pub unsafe fn run_closure(
     let depth = state.frames.len();
     let caller_srcref = state.srcref;
     state.srcref = values::get_attr(function, symbols().srcref);
+    if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
+        function.set_gp_bits(gp::CLOSURE_STEP, false);
+        crate::debugger::debugged_call(depth);
+    }
     let signature = match entry {
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),

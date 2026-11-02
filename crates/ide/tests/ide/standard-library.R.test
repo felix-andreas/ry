@@ -29,7 +29,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (3): Str.to_double, Str.to_integer, Str.to_utf8
+completion (5): Str.to_double, Str.to_integer, Str.to_utf16, Str.to_utf32, Str.to_utf8
 
 #---- hover_on_a_dict_value
 d <- Dict.from_list(list(("a", 1)))
