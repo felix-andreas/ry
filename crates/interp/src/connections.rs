@@ -2559,6 +2559,12 @@ unsafe fn new_builtin(
     configure(con);
     if !open.is_empty() {
         let slot = resolve_con(object)?.0;
+        // GNU R drops a connection whose text encoding cannot convert, and its constructor
+        // then reports only that the connection is gone.
+        if unsupported_conversion(con)?.is_some() {
+            close_slot(slot)?;
+            return Err(error("invalid connection"));
+        }
         if let Err(unwind) = open_con(con) {
             close_slot(slot)?;
             return Err(unwind);
@@ -2584,6 +2590,28 @@ unsafe fn open_con(con: Rconnection) -> R<()> {
         return Err(error("cannot open the connection"));
     }
     Ok(())
+}
+
+/// GNU R's message when a file connection opened in text mode names an encoding that cannot
+/// convert to or from UTF-8. `con` must be one of ry's own connections.
+unsafe fn unsupported_conversion(con: Rconnection) -> R<Option<String>> {
+    let Device::File(file) = device(con)? else {
+        return Ok(None);
+    };
+    let Some(encoding) = file.text_encoding.as_deref() else {
+        return Ok(None);
+    };
+    let Some(mode) = parse_mode(&mode_of(con)) else {
+        return Ok(None);
+    };
+    if mode.binary || crate::system::convert_to_utf8_prefix(encoding, b"").is_some() {
+        return Ok(None);
+    }
+    Ok(Some(if mode.write {
+        format!("unsupported conversion from 'UTF-8' to '{encoding}'")
+    } else {
+        format!("unsupported conversion from '{encoding}' to 'UTF-8'")
+    }))
 }
 
 /// Runs `body` with the connection open in `mode`, opening it first and closing it afterwards
@@ -3627,6 +3655,9 @@ fn io_error(failure: std::io::Error) -> Unwind {
 /// Opens the device for the struct's current mode. A device that cannot open warns why and
 /// returns false; the caller turns that into "cannot open the connection".
 unsafe fn device_open(con: Rconnection) -> R<bool> {
+    if let Some(message) = unsupported_conversion(con)? {
+        return Err(error(message));
+    }
     let mode_bytes = mode_of(con);
     let device = device(con)?;
     let Some(mode) = parse_mode(&mode_bytes) else {

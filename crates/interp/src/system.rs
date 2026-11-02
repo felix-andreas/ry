@@ -1438,6 +1438,24 @@ unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// GNU R rejects a POSIXlt in which some times exist but one of `components` is empty.
+unsafe fn require_nonempty_components(list: Sexp, components: &[usize]) -> R<()> {
+    let fields = length(list);
+    if (0..fields).all(|index| length(list.element(index)) == 0) {
+        return Ok(());
+    }
+    if let Some(&empty) = components
+        .iter()
+        .find(|&&index| index < fields && length(list.element(index)) == 0)
+    {
+        return Err(error(format!(
+            "zero-length component [[{}]] in non-empty \"POSIXlt\" structure",
+            empty + 1
+        )));
+    }
+    Ok(())
+}
+
 unsafe fn require_posixlt(list: Sexp) -> R<()> {
     if list.kind() != SexpType::List || length(list) < 9 {
         return Err(error(
@@ -1486,6 +1504,8 @@ unsafe fn posixlt_zone(list: Sexp) -> R<String> {
 /// A POSIXlt's wall-clock fields as seconds since the epoch read as UTC.
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
     require_posixlt(list)?;
+    // `wday` and `yday` are derived, so only formatting needs them present.
+    require_nonempty_components(list, &[0, 1, 2, 3, 4, 5, 8])?;
     let field = |index: usize| -> Sexp {
         if length(list) > index {
             list.element(index)
@@ -1711,6 +1731,9 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     } else {
         values::as_integer_scalar(digits).clamp(0, 6)
     };
+    require_posixlt(list)?;
+    let every: Vec<usize> = (0..length(list)).collect();
+    require_nonempty_components(list, &every)?;
     let seconds = posixlt_seconds(list)?;
     // A longer `format` recycles the times, as in GNU R.
     let count = if seconds.is_empty() {
