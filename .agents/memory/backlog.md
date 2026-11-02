@@ -1089,6 +1089,10 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 - **Allocation failure is not injectable** in the heap or the analysis.
 - **The simulator does not open `.Rtypes` stub buffers**, does not send `workspace/didChangeConfiguration`,
   and never restarts the server mid-session. Each is a cheap action to add to `Session::act`.
+- **`ry test --watch` has no end-to-end scenario.** `check_reload` (`crates/loader/src/testing.rs`) checks that every name whose call graph reaches changed code is among `Loader::callers`, but its reachability follows identifier tokens only, so a caller that reaches an edited S3 method through dispatch is not checked. Add a scenario that edits a file under a running watcher, and model dispatch in `reachable`.
+- **The make differential strips `include` lines** (`gnu_make_info` in `crates/rcmd/src/rcmd.rs`), because GNU R's `Makeconf` includes `$(R_SHARE_DIR)/make/vars.mk` from a home the test does not build. Point the include at a real file, or generate includes, so `include` handling is compared too.
+- **`fuzz/fuzz_targets/csv.rs` is not compiled by the default suite**; build the `fuzz/` crate in `just gate` (it needs nightly) or keep the target a one-line call into `io::check_csv_input`.
+- **The REPL is not driven by a seed.** `crates/repl` has no seeded harness; the console protocol is covered from the server side (`interp` `test_console_server`), not the REPL's line editing and evaluation loop.
 - **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
   query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
   protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.
