@@ -1,0 +1,42 @@
+[stdout]
+| [1]  1  2 NA  3 NA
+| [1]  9  2 NA NA
+| [1]  1  2 NA
+| List of 3
+|  $ : num 1
+|  $ : num 2
+|  $ : NULL
+|  a       
+|  5 NA NA 
+| [1]  0  2  3 NA
+| [1] 2 1 4 3 5
+| [1] 3 1 4 2 5
+| [1] TRUE TRUE TRUE TRUE TRUE
+| b a c 
+| 2 1 3 
+| List of 3
+|  $ : num 1
+|  $ : num 2
+|  $ : NULL
+| List of 3
+|  $ b: num 2
+|  $  : NULL
+|  $  : NULL
+| List of 4
+|  $ : num 1
+|  $ : num 2
+|  $ : NULL
+|  $ : NULL
+| List of 2
+|  $ a: num 1
+|  $  : NULL
+| List of 3
+|  $ : num 1
+|  $ : num 2
+|  $ : NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

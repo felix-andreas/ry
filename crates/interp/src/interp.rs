@@ -53,6 +53,8 @@ pub mod latex;
 pub mod linalg;
 pub mod long_double;
 pub mod lower;
+#[path = "../../rcmd/src/makeconf.rs"]
+mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
@@ -207,6 +209,11 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
+    /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
+    /// ry answers a lookup that finds no binding from here instead, so an assignment neither
+    /// adds a binding nor invalidates the lookup caches.
+    pub tmp_values: Vec<(Sexp, Sexp)>,
     /// The environments of the loops the tree-walking interpreter is running, innermost last.
     pub loop_envs: Vec<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
@@ -337,6 +344,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
+        tmp_values: Vec::new(),
         loop_envs: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
@@ -496,6 +504,10 @@ impl RootSource for InterpRoots {
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);
+            }
+            for &(env, value) in &interp.tmp_values {
+                marker.mark(env);
+                marker.mark(value);
             }
             for &(call, _) in &interp.warnings {
                 marker.mark(call);

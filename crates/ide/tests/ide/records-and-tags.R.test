@@ -104,7 +104,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (3): None, Pending, Some
+completion (3): Some, None, Pending
 
 #---- completion_after_colon_with_a_prefix
 #: fn(o: :Some(integer) | :None | :Pending) -> integer

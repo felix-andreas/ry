@@ -7,7 +7,7 @@ use {
     repl::{ReplError, RuntimeFlags},
     std::{
         ffi::{c_char, c_int, c_void},
-        io::{self, BufRead, Write},
+        io::{self, BufRead, Read, Write},
         sync::mpsc::{self, Receiver},
     },
 };
@@ -53,14 +53,25 @@ pub fn run(flags: RuntimeFlags) -> Result<i32, ReplError> {
     }
 }
 
-/// Reads one message's body, or `None` at the end of the input before a message starts.
+/// Reads one `Content-Length`-framed message's body, or `None` at the end of the input before a
+/// message starts. Blank lines between messages are skipped, header names ignore case, and
+/// headers other than `Content-Length` are ignored.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     let mut length = None;
     let mut started = false;
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        let read = reader
+            .by_ref()
+            .take(MAX_HEADER_LINE as u64)
+            .read_line(&mut line)?;
+        if read == MAX_HEADER_LINE && !line.ends_with('\n') {
+            return Err(invalid(format!(
+                "a header line is longer than the {MAX_HEADER_LINE} bytes ry accepts"
+            )));
+        }
+        if read == 0 {
             return match started {
                 false => Ok(None),
                 true => Err(io::Error::new(
@@ -92,8 +103,16 @@ pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
             "a message of {length} bytes is larger than the {MAX_MESSAGE} ry accepts"
         )));
     }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
+    // The body grows with the bytes that arrive, not with the length a header claims, so a
+    // corrupt header costs no more memory than the input it came with.
+    let mut body = Vec::new();
+    reader.take(length as u64).read_to_end(&mut body)?;
+    if body.len() < length {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the input ended inside a message's body",
+        ));
+    }
     Ok(Some(body))
 }
 
@@ -105,7 +124,11 @@ pub fn write_message(writer: &mut impl Write, body: &[u8]) -> io::Result<()> {
 
 /// A larger length is a corrupt header rather than a real request, and allocating it would
 /// abort the process.
-const MAX_MESSAGE: usize = 64 << 20;
+pub const MAX_MESSAGE: usize = 64 << 20;
+
+/// A header line is a name and a number; a longer one is garbage, and reading it whole would let
+/// input without line breaks grow the line without bound.
+pub const MAX_HEADER_LINE: usize = 1024;
 
 fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)

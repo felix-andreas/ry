@@ -205,16 +205,16 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     Ok(dll)
 }
 
-/// `dyn.unload`: runs the library's `R_unload_<name>` and retires its record, so the next
-/// `dyn.load` of the path opens the file afresh. The code stays mapped, because an R object
-/// or another library may still point into it.
+/// `dyn.unload(path)`: runs the library's `R_unload_<name>` and drops it from the loaded
+/// libraries, so `getLoadedDLLs()` and `PACKAGE =` no longer find it, and the next `dyn.load`
+/// of the path, such as of a rebuilt library, opens the file afresh.
 pub unsafe fn unload_library(path: &str) -> ApiResult<()> {
     let runtime = runtime();
     let canonical = std::fs::canonicalize(path)
         .map(|path| platform::path_text(&path))
         .unwrap_or_else(|_| path.to_owned());
     let Some(index) = runtime.dlls.iter().position(|dll| dll.path == canonical) else {
-        return Err(error(format!("shared object '{path}' was not loaded")));
+        return Err(error(format!("shared object '{canonical}' was not loaded")));
     };
     let dll = runtime.dlls.remove(index);
     let unload_name = CString::new(format!("R_unload_{}", dll.name.replace('.', "_")))

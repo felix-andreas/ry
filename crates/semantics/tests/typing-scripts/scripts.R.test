@@ -506,7 +506,7 @@ out <- with(list(y = 2L), x + y)
 print(out)
 #++++
 x: integer
-out: Unknown
+out: Any
 T
 
 #==== loop_carried_reads

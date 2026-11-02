@@ -1,0 +1,9 @@
+# tibble: a CONDITIONAL namespace. Its other exports come from `tibble.exports`.
+#
+# `tibble()` and the row and column adders are `@masked`: each argument may
+# read the columns defined before it (`tibble(x = 1:3, y = x * 2)`), so a bare
+# column name there is never "unresolved".
+
+tibble : @masked fn(...: Any) -> data.frame
+add_column : @masked <T> fn(.data: T, ...: Any) -> T
+add_row : @masked <T> fn(.data: T, ...: Any) -> T

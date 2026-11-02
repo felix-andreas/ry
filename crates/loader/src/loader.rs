@@ -25,7 +25,7 @@ use {
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
             PackageMetadata, S3MethodDirective, description_field, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
-            parse_namespace,
+            parse_namespace, resolve_namespace_conditionals,
         },
         stubs::install_shipped_stubs,
     },
@@ -44,6 +44,9 @@ use {
     xxhash_rust::xxh3::{Xxh3, xxh3_64},
 };
 
+/// A file's size, modification time and declared encoding.
+type FileStamp = (u64, Option<SystemTime>, SourceEncoding);
+
 /// One process's loader. It keeps one analysis database for every package it loads, so a
 /// reload re-derives only the items whose text changed.
 #[derive(Default)]
@@ -52,7 +55,7 @@ pub struct Loader {
     packages: Vec<LoadedPackage>,
     /// Size, modification time and declared encoding of each file as last read, per package
     /// root.
-    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>, SourceEncoding)>>,
+    stamps: FxHashMap<PathBuf, FxHashMap<String, FileStamp>>,
     /// Whether the shipped stubs are in the database. A strict package needs them to tell
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
@@ -65,6 +68,11 @@ pub struct Loader {
     /// application failed, with the [`source_fingerprint`] taken at that plan, so a console
     /// retries the load once the sources change.
     unloaded: FxHashMap<PathBuf, Option<u64>>,
+    /// The package whose `NAMESPACE`, `DESCRIPTION` and file list the purity inputs of the
+    /// database ([`PackageMetadata`], [`ProjectFiles`]) were last set from. Deriving them parses
+    /// `NAMESPACE`, which for a package exporting tens of thousands of names costs more than
+    /// the rest of a reload, so a reload that changed none of those leaves them be.
+    purity_root: Option<PathBuf>,
 }
 
 /// A package's sources as the loader reads them.
@@ -182,6 +190,10 @@ pub struct Plan {
     pub bind: Vec<Code>,
     /// Top-level code to run, in collation order.
     pub run: Vec<Code>,
+    /// Every name the statements of `run` write, when all of them are effect-free and so
+    /// write only names known before they run. `None` when one may write a name it computes,
+    /// as `assign(paste0("print.", class), ...)` does.
+    pub run_writes: Option<Vec<String>>,
     /// Statements of `run` that a backend may hold back until first use instead.
     pub deferred_s4: Option<DeferredS4>,
     pub sysdata: SysdataChange,
@@ -196,7 +208,7 @@ pub struct Plan {
     pub s3_declared: Option<Vec<S3MethodDirective>>,
     /// `Some` when compiled code must be (re)built and loaded.
     pub dynamic_libraries: Option<Vec<DynamicLibraryDirective>>,
-    pub namespace: NamespaceSpec,
+    pub namespace: Arc<NamespaceSpec>,
     /// The export directives changed, so the exports need a resync even when nothing else
     /// does.
     pub exports_changed: bool,
@@ -208,6 +220,50 @@ pub struct Plan {
     pub strict: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
+}
+
+/// The values the host gave the conditions of each `if` directive in `NAMESPACE`, by the
+/// directive's source text (see [`resolve_namespace_conditionals`]).
+pub type NamespaceConditions = FxHashMap<String, Vec<bool>>;
+
+/// Reads [`NamespaceConditions`] from the one string every transport can carry: a line per
+/// directive, its values as `T` and `F` letters, a tab, then its text with `\\`, `\n` and `\r`
+/// escaped. A malformed line is skipped, which leaves its directive unresolved, so the plan
+/// asks for it again.
+pub fn parse_namespace_conditions(encoded: &str) -> NamespaceConditions {
+    let mut conditions = NamespaceConditions::default();
+    for line in encoded.lines() {
+        let Some((values, text)) = line.split_once('\t') else {
+            continue;
+        };
+        let values: Option<Vec<bool>> = values
+            .chars()
+            .map(|value| match value {
+                'T' => Some(true),
+                'F' => Some(false),
+                _ => None,
+            })
+            .collect();
+        let Some(values) = values else {
+            continue;
+        };
+        let mut unescaped = String::with_capacity(text.len());
+        let mut characters = text.chars();
+        while let Some(character) = characters.next() {
+            if character != '\\' {
+                unescaped.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('n') => unescaped.push('\n'),
+                Some('r') => unescaped.push('\r'),
+                Some(other) => unescaped.push(other),
+                None => {}
+            }
+        }
+        conditions.insert(unescaped, values);
+    }
+    conditions
 }
 
 /// A package's S4 definitions when all of them can wait for first use: running them later,
@@ -337,6 +393,9 @@ pub enum LoadError {
     Io(PathBuf, io::Error),
     NoPackageName(PathBuf),
     Syntax(Vec<(String, u32, String)>),
+    /// `NAMESPACE` has `if` directives whose conditions the host has not evaluated. It
+    /// evaluates these and plans again.
+    Conditionals(Vec<String>),
 }
 
 impl fmt::Display for LoadError {
@@ -354,6 +413,11 @@ impl fmt::Display for LoadError {
                 formatter,
                 "{} has no `Package:` field",
                 path.join("DESCRIPTION").display()
+            ),
+            LoadError::Conditionals(conditionals) => write!(
+                formatter,
+                "the conditions of {} `if` directive(s) in NAMESPACE were not evaluated",
+                conditionals.len()
             ),
             LoadError::Syntax(errors) => {
                 let shown: Vec<String> = errors
@@ -431,14 +495,26 @@ impl Loader {
 
     /// Reads the package at or above `path` and plans loading it. Without a committed state, or
     /// with `full`, the plan builds the namespace from scratch; otherwise it patches the loaded
-    /// one. The plan stays pending until [`Loader::commit`].
-    pub fn plan(&mut self, path: &Path, full: bool) -> Result<Plan, LoadError> {
+    /// one. `conditions` holds the host's values for the conditions of `if` directives in
+    /// `NAMESPACE`; a directive it lacks fails the plan with [`LoadError::Conditionals`]. The
+    /// plan stays pending until [`Loader::commit`].
+    pub fn plan(
+        &mut self,
+        path: &Path,
+        full: bool,
+        conditions: &NamespaceConditions,
+    ) -> Result<Plan, LoadError> {
         let root = find_package_root(path)?;
-        // Taken before reading, so an edit made while the plan is read shows as a change later.
-        let fingerprint = source_fingerprint(&root);
-        let planned = self
-            .read(&root)
-            .and_then(|inputs| self.plan_inputs(&root, inputs, full));
+        // Taken from the stamps the read takes before it reads each file, so an edit made
+        // while the plan is read shows as a change later.
+        let (fingerprint, planned) = match self.read(&root, Some(conditions)) {
+            Ok((inputs, fingerprint)) => (fingerprint, self.plan_inputs(&root, inputs, full)),
+            // The read stopped before it took any stamp, so the package is as it was.
+            Err(LoadError::Conditionals(conditionals)) => {
+                return Err(LoadError::Conditionals(conditionals));
+            }
+            Err(error) => (source_fingerprint(&root), Err(error)),
+        };
         let package = self
             .packages
             .iter_mut()
@@ -465,7 +541,7 @@ impl Loader {
         let Ok(root) = find_package_root(path) else {
             return;
         };
-        let Ok(inputs) = self.read(&root) else {
+        let Ok((inputs, _)) = self.read(&root, None) else {
             return;
         };
         // A failure is the plan's to report: it reads the same sources.
@@ -755,7 +831,7 @@ impl Loader {
 
     /// Adopts a state saved by an earlier process as what is loaded.
     pub fn restore(&mut self, state: LoadState) -> Result<(), LoadError> {
-        let inputs = self.read(&state.root)?;
+        let (inputs, _) = self.read(&state.root, None)?;
         let (position, _, _) = self.sync(
             &state.root,
             inputs.description,
@@ -796,6 +872,11 @@ impl Loader {
         if !strict {
             return false;
         }
+        let root = &self.packages[position].root;
+        if self.purity_root.as_ref() == Some(root) {
+            return true;
+        }
+        self.purity_root = Some(root.clone());
         if !self.stubs_installed {
             install_shipped_stubs(&self.db);
             self.stubs_installed = true;
@@ -881,15 +962,39 @@ impl Loader {
         });
     }
 
-    /// Reads the package's sources. A file whose size, modification time and declared encoding
-    /// are unchanged since the last read is not read again.
-    fn read(&mut self, root: &Path) -> Result<PackageInputs, LoadError> {
-        let description = read_description(&root.join("DESCRIPTION"))?;
+    /// Reads the package's sources, and returns them with their [`source_fingerprint`] and the
+    /// `if` directives of `NAMESPACE`. A file whose size, modification time and declared
+    /// encoding are unchanged since the last read is not read again.
+    ///
+    /// With `conditions`, `NAMESPACE` comes back with its `if` directives resolved, and a
+    /// directive `conditions` lacks fails the read before it takes any stamp, so the next read
+    /// still sees every edit. Without, `NAMESPACE` comes back as written.
+    fn read(
+        &mut self,
+        root: &Path,
+        conditions: Option<&NamespaceConditions>,
+    ) -> Result<(PackageInputs, Option<u64>), LoadError> {
+        let mut fingerprint = Fingerprint::default();
+        let description_path = root.join("DESCRIPTION");
+        fingerprint.path(&description_path);
+        let description = read_description(&description_path)?;
         let encoding = SourceEncoding::of(&description);
-        let namespace = match fs::read_to_string(root.join("NAMESPACE")) {
+        let namespace_path = root.join("NAMESPACE");
+        fingerprint.path(&namespace_path);
+        let namespace = match fs::read_to_string(&namespace_path) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(LoadError::Io(root.join("NAMESPACE"), error)),
+            Err(error) => return Err(LoadError::Io(namespace_path, error)),
+        };
+        let namespace = match conditions {
+            Some(conditions) => {
+                let resolved = resolve_namespace_conditionals(&namespace, conditions);
+                if !resolved.resolved {
+                    return Err(LoadError::Conditionals(resolved.conditionals));
+                }
+                resolved.text
+            }
+            None => namespace,
         };
         let paths = collated_r_files(root, &parse_description_collate(&description))?;
         let known = self.stamps.entry(root.to_path_buf()).or_default();
@@ -897,10 +1002,11 @@ impl Loader {
         let mut stamps = FxHashMap::default();
         for path in paths {
             let absolute = root.join(&path);
+            let metadata =
+                fs::metadata(&absolute).map_err(|error| LoadError::Io(absolute.clone(), error))?;
+            fingerprint.record(&absolute, &metadata);
             // The encoding is part of the stamp, so declaring another one decodes every file again.
-            let stamp = fs::metadata(&absolute)
-                .map(|metadata| (metadata.len(), metadata.modified().ok(), encoding))
-                .map_err(|error| LoadError::Io(absolute.clone(), error))?;
+            let stamp = (metadata.len(), metadata.modified().ok(), encoding);
             let unchanged = stamp.1.is_some() && known.get(&path) == Some(&stamp);
             let text = if unchanged {
                 None
@@ -911,15 +1017,20 @@ impl Loader {
             files.push((path, text));
         }
         *known = stamps;
-        Ok(PackageInputs {
+        let sysdata_path = root.join("R").join("sysdata.rda");
+        fingerprint.path(&sysdata_path);
+        let inputs = PackageInputs {
             description,
             namespace,
             files,
-            sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
-            data: datasets(root)?,
+            sysdata: file_hash(&sysdata_path)?,
+            data: datasets(root, &mut fingerprint)?,
             compiled: compiled_fingerprint(&root.join("src"))?,
             strict: self.strict,
-        })
+        };
+        // `source_fingerprint` has none for a package without `R/`.
+        let fingerprint = root.join("R").is_dir().then(|| fingerprint.finish());
+        Ok((inputs, fingerprint))
     }
 
     /// Sets the analysis inputs to `files`, writing only what changed, and returns the
@@ -1003,28 +1114,33 @@ impl Loader {
         }
         let sources = package.sources;
         let mut inputs_changed = !changed.is_empty();
+        let mut package_changed = false;
         if sources.files(db) != &files {
             sources.set_files(db).to(files);
-            inputs_changed = true;
+            package_changed = true;
         }
         if sources.namespace(db) != &namespace {
             sources
                 .set_namespace(db)
                 .with_durability(Durability::LOW)
                 .to(namespace);
-            inputs_changed = true;
+            package_changed = true;
         }
         if *sources.strict(db) != strict {
             sources.set_strict(db).to(strict);
-            inputs_changed = true;
+            package_changed = true;
         }
         if sources.description(db) != &description {
             sources
                 .set_description(db)
                 .with_durability(Durability::LOW)
                 .to(description);
-            inputs_changed = true;
+            package_changed = true;
         }
+        if package_changed && self.purity_root.as_deref() == Some(root) {
+            self.purity_root = None;
+        }
+        inputs_changed |= package_changed;
         Ok((position, changed, inputs_changed))
     }
 }
@@ -1044,7 +1160,11 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
         for entry in entries {
             let entry = entry.map_err(|error| LoadError::Io(subdirectory.clone(), error))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if is_r_code(&name) && entry.path().is_file() {
+            // The directory entry knows its type without a stat, unless it is a link.
+            let file = entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_file() || (kind.is_symlink() && entry.path().is_file()));
+            if is_r_code(&name) && file {
                 paths.push(if prefix.is_empty() {
                     name
                 } else {
@@ -1066,9 +1186,10 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
 /// `devtools::load_all` appends it, and so does this.
 pub fn collate_code_files(mut paths: Vec<String>, collate: &[String]) -> Vec<String> {
     paths.sort_by(|left, right| (left.contains('/'), left).cmp(&(right.contains('/'), right)));
+    let present: FxHashSet<&str> = paths.iter().map(String::as_str).collect();
     let mut ordered: Vec<String> = collate
         .iter()
-        .filter(|path| paths.contains(path))
+        .filter(|path| present.contains(path.as_str()))
         .cloned()
         .collect();
     let mut seen: FxHashSet<String> = ordered.iter().cloned().collect();
@@ -1094,7 +1215,7 @@ fn is_r_code(name: &str) -> bool {
 /// The dataset files of `data/`, as `data()` and R CMD INSTALL find them: `.rda` and `.RData`
 /// files, which `load()` reads, `.R` files, which `sys.source()` runs, and `.csv`, `.tab` and
 /// `.txt` tables, which `read.table()` reads.
-fn datasets(root: &Path) -> Result<Option<Datasets>, LoadError> {
+fn datasets(root: &Path, fingerprint: &mut Fingerprint) -> Result<Option<Datasets>, LoadError> {
     let directory = root.join("data");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1108,9 +1229,9 @@ fn datasets(root: &Path) -> Result<Option<Datasets>, LoadError> {
         if !is_dataset(&name) {
             continue;
         }
-        let metadata = entry
-            .metadata()
-            .map_err(|error| LoadError::Io(entry.path(), error))?;
+        let path = entry.path();
+        let metadata = fs::metadata(&path).map_err(|error| LoadError::Io(path.clone(), error))?;
+        fingerprint.record(&path, &metadata);
         if metadata.is_file() {
             records.push((name, stamp(&metadata)));
         }
@@ -1175,17 +1296,17 @@ pub fn diff<'text>(
     let empty = PackageIndex::default();
     let old = previous.map_or(&empty, |previous| &*previous.index);
 
-    let by_path = |files: &'_ [IndexedFile]| -> FxHashMap<String, u64> {
+    fn by_path(files: &[IndexedFile]) -> FxHashMap<&str, u64> {
         files
             .iter()
-            .map(|file| (file.path.clone(), file.items.hash))
+            .map(|file| (file.path.as_str(), file.items.hash))
             .collect()
-    };
+    }
     let old_hashes = by_path(&old.files);
     let new_hashes = by_path(&index.files);
     // A clean file's text, and so every item in it, is unchanged.
-    let is_dirty = |file: &IndexedFile, other: &FxHashMap<String, u64>| {
-        full || other.get(&file.path) != Some(&file.items.hash)
+    let is_dirty = |file: &IndexedFile, other: &FxHashMap<&str, u64>| {
+        full || other.get(file.path.as_str()) != Some(&file.items.hash)
     };
     let new_dirty: Vec<bool> = index
         .files
@@ -1513,6 +1634,16 @@ pub fn diff<'text>(
         .filter(|(_, rerun)| **rerun)
         .map(|((path, item, _, effect_free), _)| eager_code(path, item, *effect_free))
         .collect();
+    let run_writes = eager
+        .iter()
+        .zip(&rerun)
+        .filter(|(_, rerun)| **rerun)
+        .map(|((_, item, _, effect_free), _)| effect_free.then_some(&item.binds))
+        .collect::<Option<Vec<_>>>()
+        .map(|binds| {
+            let names: BTreeSet<String> = binds.into_iter().flatten().cloned().collect();
+            names.into_iter().collect()
+        });
     // A fresh load runs every eager statement, so positions in `eager` are positions in `run`.
     let deferred_s4 = if full { deferred_s4(index) } else { None };
     // Another statement may make the same registration, which then stays.
@@ -1548,7 +1679,7 @@ pub fn diff<'text>(
     let dropped_sources = old
         .files
         .iter()
-        .filter(|file| !new_hashes.contains_key(&file.path))
+        .filter(|file| !new_hashes.contains_key(file.path.as_str()))
         .map(|file| file.path.clone())
         .collect();
 
@@ -1559,24 +1690,45 @@ pub fn diff<'text>(
         .iter()
         .filter_map(|code| code.name.as_deref())
         .collect();
-    let (old_set, new_set): (FxHashSet<&S3MethodDirective>, FxHashSet<&S3MethodDirective>) =
-        if s3_changed {
-            (old_declared.iter().collect(), declared.iter().collect())
-        } else {
-            Default::default()
-        };
+    // R registers the directives in order into one table entry per generic and class, so a
+    // later directive for the same pair replaces an earlier one, and a reload must diff the
+    // entries, not the directives: dropping one of two directives for a pair keeps the entry.
+    fn entry(method: &S3MethodDirective) -> (&str, &str) {
+        (method.generic.as_str(), method.class.as_str())
+    }
+    fn entries(methods: &[S3MethodDirective]) -> FxHashMap<(&str, &str), &S3MethodDirective> {
+        methods
+            .iter()
+            .map(|method| (entry(method), method))
+            .collect()
+    }
+    let new_entries = entries(declared);
+    let old_entries = match s3_changed {
+        true => entries(old_declared),
+        false => FxHashMap::default(),
+    };
     let s3_register = declared
         .iter()
         .filter(|method| {
-            full || (s3_changed && !old_set.contains(method))
+            // Only the directive that wins its entry registers, even when NAMESPACE is
+            // unchanged: rebinding the function of a losing directive must not let it win.
+            let wins = new_entries
+                .get(&entry(method))
+                .is_some_and(|winner| std::ptr::eq(*winner, *method));
+            wins && (full
+                || (s3_changed && old_entries.get(&entry(method)) != Some(method))
                 || changed.contains(&method.function)
-                || rebound.contains(method.function.as_str())
+                || rebound.contains(method.function.as_str()))
         })
         .cloned()
         .collect();
     let s3_unregister = old_declared
         .iter()
-        .filter(|method| s3_changed && !new_set.contains(method))
+        .filter(|method| {
+            s3_changed
+                && old_entries.get(&entry(method)) == Some(method)
+                && !new_entries.contains_key(&entry(method))
+        })
         .cloned()
         .collect();
 
@@ -1608,14 +1760,21 @@ pub fn diff<'text>(
         })
         .collect();
 
-    let exports_changed = full || exports_differ(&index.namespace, &old.namespace);
+    let exports_changed = full
+        || (!Arc::ptr_eq(&index.namespace, &old.namespace)
+            && exports_differ(&index.namespace, &old.namespace));
+    // A rerun statement may write a name nothing bound before, so the statements count too,
+    // and one that may write a name it computes rules the claim out.
     let keeps_names = !full
         && !exports_changed
         && remove.is_empty()
         && unregister.is_empty()
         && bind
             .iter()
-            .all(|code| code.name.as_ref().is_some_and(|name| old.binds(name)));
+            .all(|code| code.name.as_ref().is_some_and(|name| old.binds(name)))
+        && run_writes
+            .as_ref()
+            .is_some_and(|names: &Vec<String>| names.iter().all(|name| old.binds(name)));
 
     Plan {
         package: index.package.clone(),
@@ -1636,6 +1795,7 @@ pub fn diff<'text>(
         bind,
         run_on_load: full || changed.contains(".onLoad"),
         run,
+        run_writes,
         deferred_s4,
         sysdata,
         data,
@@ -1906,6 +2066,7 @@ impl Plan {
             unregister: Vec::new(),
             bind: Vec::new(),
             run: Vec::new(),
+            run_writes: Some(Vec::new()),
             deferred_s4: None,
             sysdata: SysdataChange::Keep,
             data: None,
@@ -1991,6 +2152,7 @@ fn parse_detached(db: &RootDatabase, files: Vec<SourceFile>) {
                             }));
                             // A cancelled parse is redone by the plan that cancelled it.
                             if let Err(cancelled) = parsed {
+                                #[allow(clippy::drop_non_drop)]
                                 drop(cancelled);
                             }
                         });
@@ -2046,7 +2208,7 @@ pub fn package_cache_path(root: &Path, kind: &str) -> Option<PathBuf> {
     Some(cache_directory()?.join("ry").join(kind).join(name))
 }
 
-fn cache_directory() -> Option<PathBuf> {
+pub(crate) fn cache_directory() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .filter(|directory| !directory.is_empty())
         .map(PathBuf::from)
@@ -2099,15 +2261,10 @@ fn write_index_cache(
 /// cost a walk of the compiled sources before every command, and a rebuild is slow enough that
 /// it is asked for with `load_all()`.
 fn source_fingerprint(root: &Path) -> Option<u64> {
-    let mut records = Vec::new();
-    let mut record = |path: &Path| {
-        if let Ok(metadata) = fs::metadata(path) {
-            records.push(format!("{}\0{}", path.display(), stamp(&metadata)));
-        }
-    };
-    record(&root.join("DESCRIPTION"));
-    record(&root.join("NAMESPACE"));
-    record(&root.join("R").join("sysdata.rda"));
+    let mut fingerprint = Fingerprint::default();
+    fingerprint.path(&root.join("DESCRIPTION"));
+    fingerprint.path(&root.join("NAMESPACE"));
+    fingerprint.path(&root.join("R").join("sysdata.rda"));
     let code = fs::read_dir(root.join("R")).ok()?;
     let os_code = fs::read_dir(root.join("R").join(OS_TYPE))
         .into_iter()
@@ -2116,7 +2273,7 @@ fn source_fingerprint(root: &Path) -> Option<u64> {
     // reloads nothing.
     for entry in code.chain(os_code).flatten() {
         if is_r_code(&entry.file_name().to_string_lossy()) {
-            record(&entry.path());
+            fingerprint.path(&entry.path());
         }
     }
     for entry in fs::read_dir(root.join("data"))
@@ -2125,11 +2282,38 @@ fn source_fingerprint(root: &Path) -> Option<u64> {
         .flatten()
     {
         if is_dataset(&entry.file_name().to_string_lossy()) {
-            record(&entry.path());
+            fingerprint.path(&entry.path());
         }
     }
-    records.sort();
-    Some(fnv1a(records.join("\n").as_bytes()))
+    Some(fingerprint.finish())
+}
+
+/// The records [`source_fingerprint`] hashes, one per file. [`Loader::read`] builds the same
+/// records from the metadata it reads anyway, so a reload stats each file once, and the two
+/// must agree exactly, or a console would reload after every command.
+#[derive(Default)]
+struct Fingerprint(Vec<String>);
+
+impl Fingerprint {
+    /// Records the file at `path`, if it is one.
+    fn path(&mut self, path: &Path) {
+        if let Ok(metadata) = fs::metadata(path) {
+            self.record(path, &metadata);
+        }
+    }
+
+    /// `metadata` must be of `path` with symbolic links followed, as [`fs::metadata`] reads it.
+    fn record(&mut self, path: &Path, metadata: &fs::Metadata) {
+        if metadata.is_file() {
+            self.0
+                .push(format!("{}\0{}", path.display(), stamp(metadata)));
+        }
+    }
+
+    fn finish(mut self) -> u64 {
+        self.0.sort_unstable();
+        fnv1a(self.0.join("\n").as_bytes())
+    }
 }
 
 /// A file's size and modification time, as one record of a fingerprint.

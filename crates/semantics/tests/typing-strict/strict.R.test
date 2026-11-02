@@ -134,9 +134,23 @@ add_column: <T> fn(dt: T) -> T
 #---- base_masking_family
 pick <- function(df) subset(df, cyl > 4)
 #++++
-pick: <T> fn(df: T) -> Unknown
-17..19 error[strict] strict mode: parameter `df` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `df: TYPE`
-21..40 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+pick: <T> fn(df: T) -> T
+
+#---- base_masking_family_results_are_typed
+#: data.frame
+d <- data.frame(a = c(1, 2), b = c(3, 4))
+small <- subset(d, a > 1, select = b)
+more <- transform(d, c = a + b)
+inside <- within(d, c <- a * 2)
+total <- with(d, sum(a + b))
+kept <- subset(c(1, 2, 3), c(TRUE, FALSE, TRUE))
+#++++
+d: data.frame
+small: data.frame
+more: data.frame
+inside: data.frame
+total: Any
+kept: double[]
 
 #---- base_indexing_keeps_checking
 f <- function() {

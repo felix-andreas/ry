@@ -757,10 +757,10 @@ grep("a", "banana")
 #++++
 Any
 
-#---- sapply_is_unknown
+#---- sapply_is_any
 sapply(list(1L), is.numeric)
 #++++
-Unknown
+Any
 
 #---- arbitrary_named_argument_sinks
 data.frame(x = 1L)

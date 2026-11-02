@@ -42,8 +42,17 @@ This page is the exact behavior.
   the attached `package:<name>` holds a copy of each, which wins over an export of the same name.
   Unlike an installed package, every dataset is read at load time whatever `LazyData` says, as with
   `load_all()`.
-- `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled with
-  [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
+- **`if` in `NAMESPACE`** works as in GNU R: at every load, the condition is evaluated in the
+  global environment, and the directives on the branch it takes apply, so
+  `if (.Platform$OS.type == "windows") export(f)` exports `f` only on Windows. This holds inside
+  a top-level `{ }` block too. A condition that fails stops the load with its error. `ry check` cannot evaluate R, so it reads the directives
+  of both branches: an import on either one resolves the names it brings in.
+- `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled and loaded,
+  and `.onLoad` and `.onAttach` run. On ry's runtime, `src/` is compiled by ry itself, against
+  ry's own headers and `libR`, with the `ry-rcmd` that sits beside ry's runtime; GNU R and
+  pkgbuild are not involved. The R home this needs is created once per build of ry in ry's cache
+  directory (`~/.cache/ry/home` on Linux). On GNU R, `src/` is compiled with
+  [pkgbuild](https://pkgbuild.r-lib.org), as `load_all()` does.
 - **`system.file()`** finds a source package's files the way `load_all()` maps them: a path under
   `inst/` is found as if the package were installed, so `system.file("extdata", "a.txt", package =
   "mypkg")` returns `inst/extdata/a.txt`, and other paths are looked up in the package root. Code
@@ -73,9 +82,10 @@ This page is the exact behavior.
   either runtime. When the check refuses one of them, the load raises
   `<package> was not loaded, because strict mode refused it` before anything runs, so the session
   keeps the code it had. A load that changes nothing skips the check.
-  The check shares [`ry check`'s record](/reference/cli#the-check-cache) in `.ry_cache/`, so a
-  load after `ry check`, the editor or an earlier load reuses the findings of every file that has
-  not changed and checks only the rest.
+  The first check in a process shares [`ry check`'s record](/reference/cli#the-check-cache) in
+  `.ry_cache/`, so a load after `ry check`, the editor or an earlier load reuses the findings of
+  every file that has not changed and checks only the rest. The first reload builds an analysis
+  that the process keeps, and every reload after it redoes only what the edit affects.
 
 ### S4 definitions
 
@@ -133,9 +143,8 @@ Functions keep their source references on both runtimes, so `print()` shows them
 `getSrcLocation()`, tracebacks and the debugger point into your files, as long as
 `options(keep.source = TRUE)` is set, which is the default in an interactive session. On ry's runtime
 a lazily bound definition gets its source reference when it is first used, and a file's `srcfile` is
-built only then. On GNU R, a definition placed after a non-ASCII character on the same line,
-such as `m <- function() "é"; n <- function() 3`, reports a column as many places too far right as
-that character has extra bytes in UTF-8; its line, byte offsets and printed text are right.
+built only then. Columns count characters and byte offsets count bytes on both runtimes, so in
+`m <- function() "é"; n <- function() 3` the definition of `n` starts at column 27 and byte 28.
 
 ## The load-index cache
 
@@ -183,15 +192,16 @@ importer keeps its old imports with a warning until you reload it.
 - Compressed dataset tables (`.csv.gz`, `.tab.bz2`, `.txt.xz` and so on) are not read. When one
   dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
   order, where `data()` reads only one.
-- `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
 - A reload that leaves a declared S3 method without its function is refused before it changes
-  anything, unless it also runs top-level statements or reloads `R/sysdata.rda`, either of which
-  could define the function. Then the refusal comes after they ran, and the namespace holds the
-  new code.
+  anything, unless it reruns a top-level statement that may bind a name it computes, such as
+  `assign(paste0("print.", class), ...)`, which could define the function. Then the refusal comes
+  after the statements ran, and the namespace holds the new code. In a file that is not strict,
+  every statement other than a function definition counts as such a statement.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
-  still points into it must not be used afterwards.
-- Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
-  GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
-  ry's own `libR.so` already provides.
+  still points into it must not be used afterwards. On ry's runtime the old library stays mapped, and
+  the rebuilt one loads from a fresh copy of the file, because the system loader would otherwise
+  hand back the mapping it already has.
+- A registered routine whose R name (after `.fixes`) is already defined in the namespace is not
+  bound, and the load warns, as GNU R's `loadNamespace` does.
 - A top-level statement that reads a name before the statement defining it runs sees, on a reload,
   the value from the previous load. A fresh load would fail on such code anyway.

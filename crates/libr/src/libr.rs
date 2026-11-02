@@ -126,8 +126,9 @@ pub struct Runtime {
     /// The last error message, as `R_curErrorBuf` returns it.
     pub error_buffer: Vec<u8>,
     pub dlls: Vec<Box<Dll>>,
-    /// Libraries `dyn.unload` retired. R objects and native code may still point at their
-    /// records and into their code, so both stay alive as long as the runtime.
+    /// Libraries `dyn.unload` removed from `dlls`. They stay mapped, unlike in GNU R, which
+    /// closes them, because external pointers and finalizers in the heap may still point into
+    /// their code, and a `DLLInfo` object still points at its entry.
     pub unloaded_dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
     /// `TRUELENGTH` values set on vectors to a value other than their capacity, which their
