@@ -248,6 +248,8 @@ impl Add for LongDouble {
 impl Sub for LongDouble {
     type Output = LongDouble;
 
+    // Subtraction is exactly addition of the negated operand, which flips only the sign.
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn sub(self, other: LongDouble) -> LongDouble {
         self + other.negate()
     }
@@ -361,7 +363,7 @@ impl Div<usize> for LongDouble {
         let numerator = (significand as u128) << 64;
         let divisor = count as u128;
         let quotient = numerator / divisor;
-        let sticky = u128::from(numerator % divisor != 0);
+        let sticky = u128::from(!numerator.is_multiple_of(divisor));
         round_wide(negative, quotient | sticky, exponent - 64)
     }
 }
@@ -443,7 +445,12 @@ pub fn finite_row_means(values: &[f64], rows: usize, divisor: usize, out: &mut [
         let columns = values.len() / rows;
         let blocked = rows - rows % x87::BLOCK;
         let mut totals = vec![[0u8; 16]; rows];
-        for (block, totals) in totals[..blocked].chunks_exact_mut(x87::BLOCK).enumerate() {
+        for (block, totals) in totals[..blocked]
+            .as_chunks_mut::<{ x87::BLOCK }>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             x87::block_row_sums(values, rows, columns, block * x87::BLOCK, totals);
         }
         for column in values.chunks_exact(rows) {

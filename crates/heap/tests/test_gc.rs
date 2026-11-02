@@ -11,7 +11,7 @@ use {
         strings::Encoding,
     },
     std::collections::HashSet,
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 #[derive(Clone)]
@@ -342,16 +342,12 @@ fn run(seed: u64, steps: usize, stress: bool) {
 
 #[test]
 fn fuzz_object_graphs_survive_collection() {
-    for seed in 0..fuzz_iterations(40) as u64 {
-        run(seed, 400, false);
-    }
+    for_each_seed(40, |seed| run(seed, 400, false));
 }
 
 #[test]
 fn fuzz_object_graphs_survive_stress_collection() {
-    for seed in 0..fuzz_iterations(8) as u64 {
-        run(1000 + seed, 150, true);
-    }
+    for_each_seed(8, |seed| run(1000 + seed, 150, true));
 }
 
 #[test]
@@ -720,8 +716,8 @@ fn the_protect_stack_reports_imbalance_in_gnu_r_words() {
 
 #[test]
 fn fuzz_arena_watermarks_nest() {
-    let mut rng = SplitMix64(7);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let mut arena = Arena::default();
         let mut marks = Vec::new();
         let mut blocks: Vec<(usize, u8, usize)> = Vec::new();
@@ -758,7 +754,7 @@ fn fuzz_arena_watermarks_nest() {
             let encoded = Arena::encode(arena.watermark());
             assert_eq!(Arena::decode(encoded), arena.watermark());
         }
-    }
+    });
 }
 
 #[test]

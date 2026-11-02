@@ -72,6 +72,9 @@ enum Command {
         /// Run GNU R only, to time it or to check the suite itself.
         #[arg(long)]
         gnu_r_only: bool,
+        /// Run ry only, to time it: every test counts as matching, and GNU R's columns repeat ry's.
+        #[arg(long, conflicts_with = "gnu_r_only")]
+        ry_only: bool,
         /// List matching tests too, not only the differing ones.
         #[arg(long)]
         verbose: bool,
@@ -166,6 +169,7 @@ fn main() -> ExitCode {
             filter,
             timeout,
             gnu_r_only,
+            ry_only,
             verbose,
             keep,
             json,
@@ -185,6 +189,7 @@ fn main() -> ExitCode {
                 filter,
                 timeout: Duration::from_secs(timeout),
                 skip_ry: gnu_r_only,
+                skip_gnu_r: ry_only,
                 keep,
             };
             run_bench(&packages, &options, verbose, json.as_deref())

@@ -203,6 +203,11 @@ pub const KEYWORDS: [(&str, SyntaxKind); 19] = [
 ];
 
 impl SyntaxKind {
+    /// Kinds are laid out tokens first, then nodes, so one comparison tells them apart.
+    pub fn is_node(self) -> bool {
+        self as u16 >= SyntaxKind::SOURCE_FILE as u16
+    }
+
     pub fn is_trivia(self) -> bool {
         matches!(self, WHITESPACE | NEWLINE | COMMENT)
     }
@@ -374,11 +379,5 @@ impl SyntaxKind {
             PURE_MARKER => "purity marker",
             ERROR => "error",
         }
-    }
-}
-
-impl From<SyntaxKind> for rowan::SyntaxKind {
-    fn from(kind: SyntaxKind) -> Self {
-        rowan::SyntaxKind(kind as u16)
     }
 }

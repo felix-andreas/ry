@@ -1,0 +1,29 @@
+# An analyst splits a script into a helper file they `source()`, and both the command line and
+# the editor read the helper's definitions.
+
+file ry.toml
+| [check]
+| typing = true
+file lib/helpers.R
+| #: fn(values: double[], total: double) -> double[]
+| scale_to <- function(values, total) values / sum(values) * total
+| default_total <- 100
+file analysis/run.R
+| source("lib/helpers.R")
+| shares <- scale_to(c(1, 2, 3), default_total)
+| print(shares)
+
+run ry check
+expect exit 0
+
+open analysis/run.R
+expect diagnostics analysis/run.R none
+expect diagnostics lib/helpers.R none
+
+# A wrong argument to the sourced function is reported where it is passed.
+replace analysis/run.R "default_total)" "\"all\")"
+expect diagnostics analysis/run.R "expected `double`, found `character`"
+
+# Without the `source()` call the names are unresolved again.
+replace analysis/run.R "source(\"lib/helpers.R\")" "# no source"
+expect diagnostics analysis/run.R "could not resolve `scale_to`"

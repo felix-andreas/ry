@@ -9,6 +9,7 @@ second <- function() 2
 #++++
 source R/a.R
 bind first from R/a.R:1:9
+keeps names
 
 #---- a_function_that_moved_is_rebound_but_nothing_reruns
 #~~~~ before R/a.R
@@ -21,6 +22,7 @@ helper <- function() 1
 #++++
 source R/a.R
 bind helper from R/a.R:3:10
+keeps names
 affects callers value
 
 #---- a_deleted_function_is_removed
@@ -46,6 +48,7 @@ travels <- function() 1
 source R/a.R
 source R/b.R
 bind travels from R/b.R:2:11
+keeps names
 
 #---- a_deleted_file_drops_its_bindings_and_source
 #~~~~ R/a.R
@@ -122,6 +125,7 @@ Class <- list(method = function() helper())
 #++++
 source R/a.R
 bind helper from R/a.R:1:10
+keeps names
 affects callers Class
 
 #---- a_deleted_statement_removes_what_only_it_bound
@@ -155,6 +159,7 @@ cache <- memoise::memoise(cache)
 #++++
 drop source R/b.R
 bind cache from R/a.R:1:9
+keeps names
 
 #==== registrations
 #---- a_deleted_s4_method_is_unregistered
@@ -187,6 +192,7 @@ print.money <- function(x, ...) cat("MONEY")
 source R/a.R
 bind print.money from R/a.R:1:15
 register S3 print.money as print.money
+keeps names
 
 #---- a_new_s3method_directive_registers_and_a_dropped_one_unregisters
 #~~~~ before NAMESPACE
@@ -199,6 +205,60 @@ format.money <- function(x, ...) "money"
 #++++
 unregister S3 print.money
 register S3 format.money as format.money
+keeps names
+
+#---- dropping_the_earlier_of_two_directives_for_a_method_changes_nothing
+#~~~~ before NAMESPACE
+S3method(summary, widget, summarise_widget)
+S3method(summary, widget, describe_widget)
+#~~~~ after NAMESPACE
+S3method(summary, widget, describe_widget)
+#~~~~ R/a.R
+summarise_widget <- function(object, ...) "summary"
+describe_widget <- function(object, ...) "description"
+#++++
+nothing to do
+
+#---- dropping_the_later_of_two_directives_for_a_method_registers_the_earlier
+#~~~~ before NAMESPACE
+S3method(summary, widget, summarise_widget)
+S3method(summary, widget, describe_widget)
+#~~~~ after NAMESPACE
+S3method(summary, widget, summarise_widget)
+#~~~~ R/a.R
+summarise_widget <- function(object, ...) "summary"
+describe_widget <- function(object, ...) "description"
+#++++
+register S3 summary.widget as summarise_widget
+keeps names
+
+#---- rebinding_the_losing_function_of_two_directives_registers_nothing
+#~~~~ NAMESPACE
+S3method(summary, widget, summarise_widget)
+S3method(summary, widget, describe_widget)
+#~~~~ before R/a.R
+summarise_widget <- function(object, ...) "summary"
+#~~~~ after R/a.R
+summarise_widget <- function(object, ...) "changed"
+#~~~~ R/b.R
+describe_widget <- function(object, ...) "description"
+#++++
+source R/a.R
+bind summarise_widget from R/a.R:1:20
+keeps names
+
+#---- a_rerun_statement_writing_only_known_names_keeps_them
+#~~~~ R/a.R
+f <- function() 1
+#~~~~ before R/b.R
+x <- 1
+y <- f()
+#~~~~ after R/b.R
+x <- 2
+y <- f()
+#++++
+source R/b.R
+run R/b.R:1 x <- 2
 
 #==== namespace
 #---- a_changed_import_rebuilds_the_imports
@@ -210,6 +270,7 @@ importFrom(stats, median, sd)
 f <- function() 1
 #++++
 rebuild imports (1 directives)
+keeps names
 
 #---- an_export_change_needs_no_rebinding
 #~~~~ before NAMESPACE
@@ -231,6 +292,7 @@ sync exports
 #++++
 source R/zzz.R
 bind .onLoad from R/zzz.R:1:11
+keeps names
 run .onLoad
 
 #==== ordering
@@ -300,6 +362,7 @@ label <- "fixed"
 source R/a.R
 bind twice from R/a.R:3:9
 bind doubled from R/a.R:4:11
+keeps names
 
 #---- a_statement_reading_a_rebound_constant_reruns
 #~~~~ before R/a.R
@@ -368,6 +431,7 @@ y <- z + 1
 source R/b.R
 bind .onLoad from R/b.R:3:11
 run R/b.R:2 y <- z + 1
+keeps names
 run .onLoad
 
 #---- a_constant_calling_a_pure_function_of_an_imported_package_stays_lazy
@@ -384,6 +448,7 @@ extension <- tools::file_ext("data.tsv")
 #++++
 source R/a.R
 bind extension from R/a.R:2:13
+keeps names
 
 #==== r6_generators
 #---- an_edited_generator_is_rebound_lazily_outside_strict_mode
@@ -394,6 +459,7 @@ Counter <- R6::R6Class("Counter", public = list(n = 1, add = function() self$n +
 #++++
 source R/a.R
 bind Counter from R/a.R:1:11
+keeps names
 
 #---- a_generator_whose_methods_call_a_later_function_stays_lazy
 #~~~~ before R/a.R
@@ -405,6 +471,7 @@ step <- function() 1
 #++++
 source R/a.R
 bind Counter from R/a.R:1:11
+keeps names
 
 #---- a_generator_with_an_effect_in_its_arguments_runs_eagerly
 #~~~~ before R/a.R
@@ -470,6 +537,7 @@ prices <- c(1, 2)
 binary
 #++++
 load datasets data/prices.R data/rates.rda
+keeps names
 
 #---- a_changed_dataset_reloads_the_datasets
 #~~~~ R/a.R
@@ -480,6 +548,7 @@ prices <- c(1, 2)
 prices <- c(1, 2, 3)
 #++++
 load datasets data/prices.R
+keeps names
 
 #---- removing_the_last_dataset_clears_them
 #~~~~ R/a.R
@@ -488,6 +557,7 @@ f <- function() 1
 prices <- c(1, 2)
 #++++
 clear datasets
+keeps names
 
 #---- a_fresh_load_reads_every_dataset
 #~~~~ R/a.R
@@ -520,4 +590,5 @@ unrelated <- function() 3
 #++++
 source R/a.R
 bind helper from R/a.R:1:10
+keeps names
 affects callers middle, outer

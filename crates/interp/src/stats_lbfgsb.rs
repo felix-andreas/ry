@@ -1124,8 +1124,7 @@ fn free_variables(
     changes.entering = 0;
     changes.leaving = n;
     if iteration > 0 && constrained {
-        for i in 0..*free {
-            let k = index[i];
+        for &k in &index[..*free] {
             if !where_[k].is_free() {
                 changes.leaving -= 1;
                 changes.indices[changes.leaving] = k;
@@ -1137,8 +1136,7 @@ fn free_variables(
                 }
             }
         }
-        for i in *free..n {
-            let k = index[i];
+        for &k in &index[*free..] {
             if where_[k].is_free() {
                 changes.indices[changes.entering] = k;
                 changes.entering += 1;
@@ -1163,8 +1161,8 @@ fn free_variables(
     let rebuild = changes.leaving < n || changes.entering > 0 || updated;
     *free = 0;
     let mut active = n;
-    for i in 0..n {
-        if where_[i].is_free() {
+    for (i, state) in where_[..n].iter().enumerate() {
+        if state.is_free() {
             index[*free] = i;
             *free += 1;
         } else {
@@ -1202,8 +1200,7 @@ fn form_k(
     let at = |row: usize, column: usize| (row - 1) + m2 * (column - 1);
     let wy = |row: usize, column: usize| memory.wy(row, column);
     let ws = |row: usize, column: usize| memory.ws(row, column);
-    let upcl;
-    if memory.updated {
+    let upcl = if memory.updated {
         if memory.updates > m {
             // Shift the old part of wn1 up and left by one row and column.
             for jy in 1..m {
@@ -1254,10 +1251,10 @@ fn form_k(
             ipntr = memory.next(ipntr);
             wn1[at(is, jy)] = temp3;
         }
-        upcl = col - 1;
+        col - 1
     } else {
-        upcl = col;
-    }
+        col
+    };
     let entering = &changes.indices[..changes.entering];
     let leaving = &changes.indices[changes.leaving..n];
     // Modify the old parts of blocks (1,1) and (2,2) for the changed free set.

@@ -2644,7 +2644,7 @@ impl CompileErrors {
 #[derive(Clone)]
 enum Matcher {
     /// A fixed pattern, with its searcher built once rather than on every search.
-    Literal(memmem::Finder<'static>),
+    Literal(Box<memmem::Finder<'static>>),
     Pattern(Rc<Regex>),
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
     /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
@@ -2685,7 +2685,9 @@ thread_local! {
 impl Matcher {
     unsafe fn compile(pattern: &str, options: PatternOptions, errors: CompileErrors) -> R<Matcher> {
         if options.fixed {
-            return Ok(Matcher::Literal(memmem::Finder::new(pattern).into_owned()));
+            return Ok(Matcher::Literal(Box::new(
+                memmem::Finder::new(pattern).into_owned(),
+            )));
         }
         let key = (pattern.to_owned(), options.ignore_case, options.perl);
         if let Some(matcher) = PATTERN_CACHE.with_borrow(|cache| cache.get(&key).cloned()) {
@@ -2722,6 +2724,7 @@ impl Matcher {
                 .configure(meta::Regex::config().match_kind(kind))
                 .syntax(syntax::Config::new().case_insensitive(options.ignore_case))
                 .build(&translated.pattern)
+                .ok()
         };
         let matcher = match compiled {
             Ok(regex) if longest || translated.minimal => {
@@ -2730,7 +2733,7 @@ impl Matcher {
                     automaton(MatchKind::LeftmostFirst),
                     automaton(MatchKind::All),
                 ) {
-                    (Ok(first), Ok(longest)) => Matcher::Automaton {
+                    (Some(first), Some(longest)) => Matcher::Automaton {
                         regex,
                         first,
                         longest,

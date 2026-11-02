@@ -987,9 +987,8 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         )));
     }
     if values::inherits(object, "factor") && kind == SexpType::String {
-        return factor_as_character(object).map(|result| {
+        return factor_as_character(object).inspect(|&result| {
             values::clear_attributes(result);
-            result
         });
     }
     // As in GNU R, a long number vector without attributes converts to character lazily, so

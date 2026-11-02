@@ -7,7 +7,10 @@ use {
         position::LineIndex,
     },
     console::style,
-    ide::{InferredAnnotation, TextEdit, inferred_annotations},
+    ide::{
+        InferredAnnotation, TextEdit, apply_data_table_rewrites, data_table_rewrites,
+        inferred_annotations,
+    },
     ignore::gitignore::{Gitignore, GitignoreBuilder},
     loader::SourceEncoding,
     miette::{
@@ -18,6 +21,7 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        SourcePaths,
         diagnostics::{
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
             derive_from_syntax, project_fold_shares,
@@ -127,32 +131,7 @@ pub fn check(
     annotate: bool,
     cache: CacheUse,
 ) -> Result<Outcome, CommandError> {
-    let root: Vec<PathBuf> = vec![".".into()];
-    let files = maybe_files.unwrap_or(&root);
-
-    // Analysis always covers the whole project root and only reporting is scoped to
-    // the named paths, so the verdict cannot depend on how the paths were spelled.
-    let mut groups: Vec<(PathBuf, config::Config, Vec<PathBuf>)> = Vec::new();
-    for file in files {
-        let config = match config::Config::discover(file) {
-            Ok(config) => config,
-            Err(err) => {
-                report(&err);
-                return Err(CommandError);
-            }
-        };
-        warn_config(&config);
-        let target = fs::canonicalize(file).map_err(|err| {
-            error_because(&format!("failed to resolve: {}", file.display()), &err);
-            CommandError
-        })?;
-        let root = project_root_for_target(&target);
-        match groups.iter_mut().find(|(existing, _, _)| *existing == root) {
-            Some((_, _, requested)) => requested.push(target),
-            None => groups.push((root, config, vec![target])),
-        }
-    }
-
+    let groups = project_groups(maybe_files)?;
     let mut n_files = 0;
     let mut n_diagnostics = 0;
     let mut n_failures = 0;
@@ -239,6 +218,101 @@ pub fn check(
     } else {
         Outcome::Findings
     })
+}
+
+/// The named paths, or the working directory, grouped by the project each belongs to: the
+/// project's root, its configuration, and the canonical paths named inside it. Analysis always
+/// covers the whole project root and only reporting is scoped to the named paths, so a verdict
+/// cannot depend on how the paths were spelled.
+fn project_groups(
+    maybe_files: Option<&[PathBuf]>,
+) -> Result<Vec<(PathBuf, config::Config, Vec<PathBuf>)>, CommandError> {
+    let root: Vec<PathBuf> = vec![".".into()];
+    let files = maybe_files.unwrap_or(&root);
+    let mut groups: Vec<(PathBuf, config::Config, Vec<PathBuf>)> = Vec::new();
+    for file in files {
+        let config = match config::Config::discover(file) {
+            Ok(config) => config,
+            Err(err) => {
+                report(&err);
+                return Err(CommandError);
+            }
+        };
+        warn_config(&config);
+        let target = fs::canonicalize(file).map_err(|err| {
+            error_because(&format!("failed to resolve: {}", file.display()), &err);
+            CommandError
+        })?;
+        let root = project_root_for_target(&target);
+        match groups.iter_mut().find(|(existing, _, _)| *existing == root) {
+            Some((_, _, requested)) => requested.push(target),
+            None => groups.push((root, config, vec![target])),
+        }
+    }
+    Ok(groups)
+}
+
+/// `ry migrate data-table`: rewrites the data.table code in the named files as DataFrame code,
+/// with the rewrites the editor offers as code actions. Without `write`, it prints each file's
+/// diff instead of changing it.
+pub fn migrate_data_table(
+    maybe_files: Option<&[PathBuf]>,
+    write: bool,
+) -> Result<Outcome, CommandError> {
+    let mut n_rewrites = 0;
+    let mut n_files = 0;
+    for (root, config, requested) in project_groups(maybe_files)? {
+        let analysis = analyze_project(&root, &root, config, &requested, CacheUse::Off)?;
+        if analysis.failures > 0 {
+            return Err(CommandError);
+        }
+        for file in analysis
+            .files
+            .iter()
+            .filter(|file| file.requested && fixes_apply(file))
+        {
+            let rewrites = data_table_rewrites(&analysis.db, file.file);
+            if rewrites.is_empty() {
+                continue;
+            }
+            let original = fs::read_to_string(&file.path).map_err(|err| {
+                error_because(&format!("failed to read: {}", file.path.display()), &err);
+                CommandError
+            })?;
+            // A literate document's analysis blanks its prose without moving an offset, so the
+            // rewrites apply to the document itself, unless it changed since it was read.
+            if analysable_source(&file.path, original.clone()) != analysis.source(file) {
+                continue;
+            }
+            let migrated = apply_data_table_rewrites(&original, &rewrites);
+            n_rewrites += rewrites.len();
+            n_files += 1;
+            if write {
+                fs::write(&file.path, migrated).map_err(|err| {
+                    error_because(&format!("failed to write: {}", file.path.display()), &err);
+                    CommandError
+                })?;
+            } else {
+                eprintln!("Diff in {}:", file.path.display());
+                print_diff(&original, &migrated);
+            }
+        }
+        std::mem::forget(analysis);
+    }
+    let rewrites = if n_rewrites == 1 {
+        "rewrite"
+    } else {
+        "rewrites"
+    };
+    let files = if n_files == 1 { "file" } else { "files" };
+    match (n_rewrites, write) {
+        (0, _) => println!("no data.table code to rewrite"),
+        (_, true) => println!("applied {n_rewrites} {rewrites} in {n_files} {files}"),
+        (_, false) => println!(
+            "{n_rewrites} {rewrites} in {n_files} {files}; apply them with `ry migrate data-table --write`"
+        ),
+    }
+    Ok(Outcome::Clean)
 }
 
 /// Writes the fixes for every requested file back to disk and returns how many changed a file.
@@ -504,6 +578,7 @@ fn analyze_project_with(
     ordered.sort_by_cached_key(|&index| order(&checked[index].0));
     let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
     let mut project = Vec::with_capacity(checked.len());
+    let mut source_paths = BTreeMap::new();
     for index in ordered {
         let (path, source, _) = &mut checked[index];
         let kind = document_kind(path, root);
@@ -513,7 +588,13 @@ fn analyze_project_with(
             .new(&db);
         files[index] = Some(file);
         project.push(file);
+        if let Some(relative) = relative_source_path(path, root) {
+            source_paths.insert(relative, file);
+        }
     }
+    let _: SourcePaths = SourcePaths::builder(source_paths)
+        .durability(Durability::HIGH)
+        .new(&db);
     let files: Vec<SourceFile> = files.into_iter().flatten().collect();
     let _: ProjectFiles = ProjectFiles::builder(project.clone())
         .durability(Durability::HIGH)
@@ -1323,6 +1404,17 @@ pub(crate) fn exclude_matcher(
             Err(CommandError)
         }
     }
+}
+
+/// `path` relative to `root` with `/` separators, the key a literal `source("...")` call is
+/// resolved against.
+pub(crate) fn relative_source_path(path: &Path, root: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let parts: Option<Vec<&str>> = relative
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect();
+    Some(parts?.join("/"))
 }
 
 /// Vendored dependency infrastructure rather than project code; scopes only the walk.
