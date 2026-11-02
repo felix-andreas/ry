@@ -5530,6 +5530,39 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
 
+## The item check's working maps live in a pooled bump arena
+
+- **Previous shape.** Every `Checker` built a dozen `FxHashMap`s and `FxHashSet`s on the global
+  heap (expression annotations, binding types, superassign seeds, read slots and the rest), so
+  each item check paid their growth and their frees. Call arguments carried names as `String`,
+  S3 method names were built with `format!`, `substitute_rigid` took a hash map and memoized every
+  type it visited, and several hot syntax queries (top-level definitions, annotation token scans,
+  the duplicate-argument lint) built red nodes and owned strings to answer a yes-or-no question.
+- **Weakness.** All of it is per-item or per-call allocation whose lifetime is one item check or
+  one query, which is exactly what the data-oriented rule says should come from an arena.
+- **Target shape.**
+  - The checker's maps are `hashbrown` maps allocated in a `bumpalo::Bump` (`ArenaMap`,
+    `ArenaSet` in `crates/semantics/src/check.rs`), through an `Arena` adapter that implements
+    std's `Allocator`. Bumpalo's `allocator-api2` impl does not work here, because the JIT turns
+    on hashbrown's `nightly` feature and that switches every hashbrown map in a workspace build
+    to std's trait; bumpalo's own `allocator_api` feature is no way out either, since it breaks
+    Cranelift's register allocator. The arenas live in a per-thread pool; it is a
+    stack, not one arena, because an item check can start a nested check (a callee's interface)
+    while its own arena is live. An arena is reset, not freed, when its check returns, so a
+    thread reuses the same chunks for every item.
+  - Call argument names are `Symbol`, overload and namespace lookups take `Symbol`, and S3
+    method names are spelled in a per-thread buffer before interning (`method_symbol`).
+  - `substitute_rigid` takes a slice of bindings and memoizes only types larger than 64 nodes,
+    where sharing actually repeats work.
+  - `top_level_definition`, the annotation token scans and the duplicate-argument prescan read
+    the green tree directly; the full argument list is built only when a name repeats.
+- **Impact.** On the whole finance bench (`ry check --no-cache`), callgrind went from 23.59 G to
+  22.68 G instructions and mimalloc calls from 19.78 M to 15.82 M, with byte-identical findings.
+  Interleaved wall time on 4 cores moved within noise (median 1.35 s against 1.34 s). Committed
+  memory rose about 24 MiB from the pooled arenas and pre-sized resolution caches. The remaining
+  allocations are rowan's red and green nodes, salsa's memo bookkeeping and scattered `Vec`
+  growth (`backlog.md`, "Check cache follow-ups").
+
 ## The strict load check shares the check record
 
 - **Previous shape.** `preflight::check_package` stored a clean verdict in `<cache dir>/ry/strict/<hash of the root>` under one fingerprint of every input, beside `ry check`'s own record in `.ry_cache/check.json`. Two mechanisms recorded the same fact, any edit invalidated the whole verdict, and a package that `ry check` or the editor had just checked still paid a full check on load.
@@ -5678,6 +5711,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** `ry test` is `ry load` running an R driver (`crates/ry/src/test.R`) that calls `testthat::test_dir(load_package = "none", package =)` against the namespace `load_all()` built, so testthat's own reporters print the output and helpers, setup files and the package environment behave as under `devtools::test()`. Nothing in the reporter path is reimplemented, which keeps the output identical for CI.
 - **Watch.** `--watch` polls size and mtime of the sources under `R/` and of `tests/testthat/*.R` (not other files: testthat creates and deletes `_snaps/` during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
 - **Why not a test index in the loader.** Test files are parsed with `all.names()` and cached by stamp; that is a few milliseconds per file and keeps the loader ignorant of testthat.
+
+## A primitive's S4 cache lookup matches arguments by name first
+
+- **Previous shape:** `s4_dispatch` (`crates/interp/src/dispatch.rs`) built the dispatch label from the primitive's supplied arguments in order, as GNU R's `R_quick_dispatch` does. `x[i, drop = FALSE]` then took the class of `drop` for `j`, keyed as `x#logical#logical#missing`, and ran the method cached for `x[i, j]`. Matrix's `indexing.R` hit this: after `D[TRUE, TRUE]`, `D[L, drop = FALSE]` failed with "logical subscript too long".
+- **Why GNU R gets away with it:** the quick table GNU R consults for a primitive is often a stale environment that lacks the inherited entries (as for Matrix), so the lookup misses and full dispatch, which matches by name, runs. A small class defined at top level does show the quirk in GNU R (`a[TRUE, TRUE]` then `a[TRUE, drop = FALSE]` both run the `j = "logical"` method).
+- **Chosen shape:** `methods::signature_arguments` matches the supplied arguments to the generic's formals (exact names, then positions up to `...`) and orders them by `.SigArgs` before the cache lookup. A partial or unknown name skips the cache and leaves matching to the generic. ry deliberately differs from GNU R's quirk here; an oracle case cannot pin it, the Matrix test suite does.
+
+## Package-test compatibility details that look optional but are not
+
+- **Warnings always go through `.signalSimpleWarning`.** GNU R's `vsignalWarning` calls `.signalSimpleWarning(msg, base::quote(call))` whenever that function is bound, even with no handler established, and rlang reads the frames it leaves. ry used to call it only when a handler existed (`crates/interp/src/conditions.rs`, `warning_call`).
+- **Compiled closure calls pass constant arguments as values.** GNU R's byte code pushes a constant argument with `PUSHCONSTARG`, without a promise, and rlang's `env_dot_type` tells the two apart. `compiler::cmpfun` compiles at once, as GNU R's does (`crates/interp/src/bytecode.rs`, `bcClose`; `eval::compiled_args_into`).
+- **Base binds the missing argument in the C API.** `R_MissingArg` is a symbol whose base value is itself, so `R_existsVarInFrame`, `R_GetBindingType`, `R_BindingIsActive` and `R_BindingIsLocked` answer for it in the base frames instead of erroring (`crates/libr/src/environments.rs`, `base_binds_missing_arg`).
+- **A compiled `local(expr)` is `(function() expr)()` with a four-element `function` call**, whose srcref slot is NULL, as GNU R's compiler writes it. rlang's `trace_back` writes into that slot of every frame call.
+- **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
 
 ## Records, tuples and tags compile natively
 

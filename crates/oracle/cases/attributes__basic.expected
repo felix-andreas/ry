@@ -45,9 +45,15 @@
 | $names
 | [1] "p" "q"
 | 
+| NULL
+| $names
+| [1] "a"
+| 
+| [1] 3 0
+| [1] "integer"
 [messages]
 [warnings]
 [errors]
 [value]
-list
-| list(colour = "red", names = c("p", "q"))
+character
+| "integer"

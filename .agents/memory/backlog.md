@@ -2240,13 +2240,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
   - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
-    the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
-    fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
-  - pkgload's `test-dll.R` fails under `oracle packages` (`getNativeSymbolInfo` is handed
-    something that is not a `DLLInfo`, and `test-load.R` hits "SETCAR on NULL"), yet the same
-    `load_all("testDllLoad")` from the test directory with `ry run` loads cleanly. Find what the
-    harness's environment changes (`R_HOME`, the `R CMD` it compiles with, or the working
-    directory).
+    the timeout, though a lone `callr::r_session` works.
+  - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
+    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
+    `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
+    algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
+    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
+    group, order, runs, split, expand and slice-chop files also fail; run them with
+    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -3081,3 +3083,18 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
   mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
   (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
+- The checker's working maps now live in a pooled bump arena and its names are interned
+  (`decisions.md`, "The item check's working maps live in a pooled bump arena"), which took the
+  finance bench from 19.78 M to 15.82 M mimalloc calls and 23.59 G to 22.68 G instructions,
+  with wall time unchanged within noise (median about 1.34 s). The
+  1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
+  self cost. What is left is structural:
+  - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still
+    built by metadata's namespace and call scans, `item_declared_pure`, `lower_type`,
+    `statement_annotations` and the inline-annotation sites. A flat green tree of our own (one
+    node array per file, children as index ranges) would remove both.
+  - salsa's per-query edge bookkeeping, about 2.5% of instructions, which only fewer and coarser
+    queries remove.
+  - checker work itself: `infer_ordinary_call` is about a fifth of all instructions inclusive.
+  - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
+    times on the slice), which a small-buffer type would absorb.
