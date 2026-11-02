@@ -38,7 +38,7 @@ The quality bar is four things.
 - **Strings:** `strsplit` 1.2x, `paste(collapse =)` 1.5x, `formatC` 2x, `regmatches` 1.4x, `sub` 1.4x, `gsub(perl = TRUE)` 1.5x. Interning dominates: a cache hit in `mk_char` costs about 250 instructions, so kernels that build many short strings pay it per piece.
 - **Grouping and tabulation:** `table` 1.3x, `split` 1.2x, `unsplit` 1.35x, `tapply` 1.2x, `ave` 1.2x, `cut` 1.6x, `order` on two keys 1.6x, `match` on integers 1.4x (a hash table where GNU R uses a direct-address table for small ranges).
 - **Matrix and time series:** `apply` over rows 1.7x (interpreter per-call cost, which the tier-0 work owns), xts `merge` and `period.apply` 2x, zoo `na.locf` 1.35x, `rollapply` and `rollmean` 1.2x.
-- **Peak memory** against GNU R per kernel is measured with `run.py --memory`; see `MEMORY.md` for the latest numbers.
+- **Peak memory** (`run.py --memory`) runs about 15 to 40 MB above GNU R's at 1e6 rows. ry starts 10 MB higher (60 MB against 50 MB for an empty script). Most of the rest is freed large vectors that mimalloc keeps resident for its purge delay while the next allocation takes fresh pages; GNU R's large vectors come from glibc `malloc`, which unmaps them on `free`. `MIMALLOC_PURGE_DELAY=0` brings the setup of `tools/bench/base/kernels.R` level with GNU R but slows several kernels by about 20%, so the fix is a reuse policy for large vectors rather than that setting. Tightening the collector's young budget (a quarter of the old generation instead of half) did not lower the peak.
 
 ## Open: the package loader
 
