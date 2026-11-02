@@ -5470,6 +5470,47 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Wire format.** Request decoding (path percent-decoding that stops at the first malformed escape, the query vector, the raw body with its `content-type`, the `Request-Method:` header block) and the response rules (error 500 forms, status reason "Code N", HEAD, HTTP version echo, `startHTTPD` return codes 0, -1 and -2) were probed against GNU R and are pinned by `crates/oracle/cases/tools__help_server.R`.
 - **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte apart from the render timestamps.
 
+## Inferred signatures carry body facts that a call reads
+
+- **Previous shape.** An inferred `FunctionType` was its parameters, its return and the `inferred`
+  bit. A call could only see the joined return and each formal's optionality, so three things R
+  decides from the call were lost: which branch a flag's default selects, which arguments the callee
+  captures with `substitute()` instead of evaluating, and which formals another formal's default
+  forces. The checker reported `pDist(...) - p` (DistributionUtils), typed withr's `wrap(f, pre)`
+  template in the caller's frame, and accepted `g()` for `function(x, y = x) y`.
+- **Shape.** `types::FunctionType` gains inferred-only fields, empty on every declared or stub
+  signature: `flag_return` (a formal with a literal logical default, never reassigned, that the
+  tail `if` tests, plus both branch types), `quoted` (formals read only through `substitute()`, from
+  `check::FormalUses`; a bare forward to another call counts as an evaluation), `default_reads` (an
+  optional formal that a forced formal's default forces), `missing_tested` (formals tested with
+  `missing()`) and `condition_only` (formals read only as a whole `if`/`while` condition, the only
+  ones that take logical text, since `!` and `&&` reject strings). `map_child_types` and `for_each_child` walk the branch types, so they
+  instantiate and generalize with the signature. The call site reads them: `flag_selected_return`
+  returns one branch when the flag is omitted or a literal (a forwarded `...` is assumed not to
+  carry the flag, since the opposite reports DistributionUtils' ordinary `pDist(densFn, q, ...)`), `quoted_arguments` types a captured
+  argument as `Unknown` without inferring it, and `match_arguments` reports a formal as missing when
+  both it and the formal whose default reads it are left out.
+- **Why on the type, not a side query.** The facts belong to the function value, which flows through
+  bindings, lists and callbacks; a per-item side table would only serve direct calls to a named
+  definition and would need its own invalidation. They are derived once from the body that inference
+  already walks, so there is no second source of truth.
+- **Limits.** An annotation has no syntax for these facts, so a written-back annotation is less
+  precise (`test_roundtrip.rs` lists the flag case). Branch selection needs the flag's default to be
+  a literal and the tail to be the only return.
+- **Related leniencies, no model change.** An apply-family element gets the inferred-scalar leniency
+  a direct call gives (`lapply(0:(n - 1L), Eulerian, n = n)`); a string that reads as a logical fits
+  an inferred `logical` parameter listed in `condition_only`; and at a `match.fun` caller, a bare
+  formal the body also reads as a value is accepted unpinned (`check::reads_as_value`), because
+  `match.fun` takes a function or its name and looks a bare name up as a function. A formal used only
+  as a function still infers as one, so `function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`.
+
+## `Reduce` folds a named function instead of matching `fn(U, T) -> U`
+
+- Previous shape: `Reduce`'s stub `fn(f: fn(U, T) -> U, ...)` pinned the accumulator to the start type, so a function whose return is wider (`T | NULL`, a union of list shapes) was reported as "must return `T`", although R simply carries the wider value forward.
+- Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
+- A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.
+- `FunctionType.missing_tested` (inferred only) lists the formals a body tests with `missing()`. `optional_argument_targets` treats such a parameter as one the callee may leave unread even when it has a default, so a missing formal forwarded there (knitr's `kable_format(format)`) stays optional in the caller.
+
 ## `ry test` is `ry load` plus testthat, with affected tests first
 
 - **Previous shape.** `load_all()` loaded a package, but running its tests meant `devtools::test()` under GNU R, which reloads the whole package (about a minute on finbench) before every run.
