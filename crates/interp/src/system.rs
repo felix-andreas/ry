@@ -1376,7 +1376,10 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     };
     let utc = name == "UTC" || name == "GMT";
     for (index, &value) in seconds.iter().enumerate() {
-        if !value.is_finite() {
+        // A year beyond the integer range cannot be broken down either, so it is kept like a
+        // non-finite time.
+        let years_since_1970 = value / (365.2425 * 86400.0);
+        if !value.is_finite() || (years_since_1970 + 70.0).abs() > i32::MAX as f64 {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
             values::reals_mut(fields[0])[index] = value;
             for field in 1..8 {
@@ -1829,13 +1832,16 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     }
     let year_names = values::names(field(5));
     if count > seconds.len() && year_names != nil() {
+        // The names are padded with NA to the number of times, then recycled with the times.
         let recycled = alloc(SexpType::String, count)?;
         for position in 0..count {
-            values::set_elt(
-                recycled,
-                position,
-                year_names.element(position % length(year_names)),
-            );
+            let time = position % seconds.len();
+            let name = if time < length(year_names) {
+                year_names.element(time)
+            } else {
+                values::na_string()
+            };
+            values::set_elt(recycled, position, name);
         }
         values::set_attr(result, symbols().names, recycled)?;
     } else {
@@ -2284,6 +2290,12 @@ unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
     for (index, &value) in seconds.iter().enumerate() {
         if value.is_finite() {
             values::set_elt(zones, index, label);
+        }
+    }
+    // A date whose year is beyond the integer range keeps its day count in `sec`.
+    for (index, &days) in values::reals(dates).iter().enumerate() {
+        if days.is_finite() && values::ints(result.element(5))[index] == NA_INTEGER {
+            values::reals_mut(result.element(0))[index] = days;
         }
     }
     values::set_attr(result, values::install("tzone")?, scalar_string(&tz)?)?;
