@@ -732,7 +732,9 @@ unsafe fn array_subset(
             gather_row(values::ints_mut(result), values::ints(object), row, rows);
         }
         if dimnames.kind() == SexpType::List && dimnames.element(1) != nil() {
-            let names = values::duplicate(dimnames.element(1))?;
+            // The dimnames vector may carry names of its own, which the result's names drop.
+            let names = values::shallow_duplicate(dimnames.element(1))?;
+            values::clear_attributes(names);
             values::set_attr(result, symbols().names, names)?;
         }
         return Ok(result);
@@ -743,20 +745,24 @@ unsafe fn array_subset(
         && *row == missing_arg()
         && rows != 1
         && let Some(column) = matrix_position(*column, columns)
+        // C code can set a `dim` that disagrees with the length, which the general path reports.
+        && (column + 1) * rows <= length(object)
         && matches!(
             object.kind(),
             SexpType::Real | SexpType::Integer | SexpType::Logical
         )
     {
-        let result = values::alloc_uninit(object.kind(), rows)?;
         let start = column * rows;
+        let result = values::alloc_uninit(object.kind(), rows)?;
         if object.kind() == SexpType::Real {
             values::reals_mut(result).copy_from_slice(&values::reals(object)[start..start + rows]);
         } else {
             values::ints_mut(result).copy_from_slice(&values::ints(object)[start..start + rows]);
         }
         if dimnames.kind() == SexpType::List && dimnames.element(0) != nil() {
-            let names = values::duplicate(dimnames.element(0))?;
+            // The dimnames vector may carry names of its own, which the result's names drop.
+            let names = values::shallow_duplicate(dimnames.element(0))?;
+            values::clear_attributes(names);
             values::set_attr(result, symbols().names, names)?;
         }
         return Ok(result);

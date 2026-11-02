@@ -14,3 +14,6 @@ tryCatch(m[, 3], error = function(e) conditionMessage(e))
 m[, NA_integer_]
 m[, 0]
 apply(matrix(1:6, nrow = 2), 1, function(row) sum(row * 2))
+named <- matrix(1:4, 2, dimnames = list(c(a = "r1", b = "r2"), c(p = "c1", q = "c2")))
+names(named[, 1])
+names(named[1, ])

@@ -3360,7 +3360,7 @@ pub fn logic_result(is_and: bool, left: i32, right: i32) -> i32 {
 /// calls, when the result is certain to equal what `[[<-` or `[<-` would return: `x` is a local,
 /// unshared, classless vector, `i` a scalar position inside it, and `value` either any non-`NULL`
 /// element of a list under `[[`, or an attribute-free scalar of `x`'s own atomic type. Returns
-/// whether it did the assignment; otherwise nothing has changed.
+/// whether it did the assignment; otherwise the variable is unchanged.
 unsafe fn assign_element_in_place(
     env: Sexp,
     variable: Sexp,

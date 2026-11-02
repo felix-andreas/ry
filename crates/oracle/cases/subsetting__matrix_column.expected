@@ -17,9 +17,11 @@
 | [2,]
 | [3,]
 | [1] 18 24
+| [1] "r1" "r2"
+| [1] "c1" "c2"
 [messages]
 [warnings]
 [errors]
 [value]
-double
-| c(18, 24)
+character
+| c("c1", "c2")
