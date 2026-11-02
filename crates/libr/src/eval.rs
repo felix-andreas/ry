@@ -600,7 +600,15 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
         foreign_context(call.call, || dot_c(call, RoutineKind::Fortran))
     }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
-    internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
+    internal("dyn.unload", 1, |call| unsafe {
+        let path = call.arg(0);
+        if path.kind() != SexpType::String || xlength(path)? != 1 {
+            return Err(error_in(call.call, "character argument expected"));
+        }
+        crate::dynload::unload_library(&utf8_text(path.element(0))?)?;
+        Ok(runtime().nil())
+    })
+    .invisible(),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
     internal("getRegisteredRoutines", 1, |call| unsafe {
         registered_routines(call.arg(0))

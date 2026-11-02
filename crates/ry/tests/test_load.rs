@@ -861,3 +861,52 @@ fn ry_document_matches_devtools_on_both_runtimes() {
         );
     }
 }
+
+/// A reload after an edit under `src/` rebuilds the shared library and the session calls the
+/// new code, which on ry's runtime needs `dyn.unload` to retire the old library so the next
+/// load maps the rebuilt file instead of returning the one already open.
+#[test]
+fn a_reload_rebuilds_compiled_code_on_both_runtimes() {
+    if !r_available() || !installed("pkgbuild") {
+        return;
+    }
+    let source = |answer: u32| {
+        format!(
+            "#include <R.h>\n#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+             SEXP c_answer(void) {{ return ScalarInteger({answer}); }}\n\
+             static const R_CallMethodDef calls[] = {{{{\"c_answer\", (DL_FUNC) &c_answer, 0}}, {{NULL, NULL, 0}}}};\n\
+             void R_init_cpkg(DllInfo *info) {{ R_registerRoutines(info, NULL, calls, NULL, NULL); R_useDynamicSymbols(info, FALSE); }}\n"
+        )
+    };
+    for runtime in RUNTIMES {
+        let original = source(41);
+        let root = package(&[
+            ("DESCRIPTION", "Package: cpkg\nVersion: 1.0\n"),
+            (
+                "NAMESPACE",
+                "useDynLib(cpkg, .registration = TRUE)\nexport(answer)\n",
+            ),
+            ("R/answer.R", "answer <- function() .Call(c_answer)\n"),
+            ("src/a.c", &original),
+        ]);
+        let path = root.path().join("src/a.c").display().to_string();
+        let edit = format!(
+            "Sys.sleep(1.1); writeLines({edited:?}, {path:?}); load_all({root:?})",
+            edited = source(44),
+            root = root.path().display().to_string(),
+        );
+        let output = ry_load_on(
+            runtime,
+            root.path(),
+            &[
+                "cat('before:', answer(), '\\n')",
+                &edit,
+                "cat('after:', answer(), '\\n')",
+            ],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("before: 41"), "{runtime}: {printed}");
+        assert!(printed.contains("after: 44"), "{runtime}: {printed}");
+    }
+}

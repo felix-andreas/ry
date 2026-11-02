@@ -143,11 +143,12 @@ A reload works out which top-level items changed and touches only those:
   times of the files in `data/`, every dataset is read again, and a deleted one is gone.
   `R/sysdata.rda` is loaded again when its content changed.
 
-A console reloads before a command when the names, sizes or modification times of `DESCRIPTION`,
-`NAMESPACE`, the code files in `R/` and `R/unix/`, `R/sysdata.rda` or the datasets in `data/`
-changed since the last load, so it never reads a file to find out.
-An edit under `src/` is not noticed, and neither is anything in a package whose first load failed:
-call `load_all()` after either.
+A console reloads before a command when `DESCRIPTION`, `NAMESPACE`, or anything under `R/`,
+`data/` or `src/` changed since the last load, and an edit under `src/` rebuilds the compiled code
+first. It learns of edits from the operating system's file notifications, so a command costs
+nothing when nothing changed. Where notifications are unavailable, it compares the names, sizes
+and modification times of the code files, `R/sysdata.rda` and the datasets instead, which misses
+`src/`. Nothing in a package whose first load failed is noticed: call `load_all()` after that.
 
 ## Limits
 

@@ -68,13 +68,13 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   read bundled files at load time (`.onLoad`) fail until this exists.
 - **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` (and so `ry test`)
   sources them itself, but `load_all()` followed by interactive use of a helper does not see it.
-- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
-  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
-  or `src/` does not trigger a rerun.
 - **Importers of a development package keep stale copies** of its changed bindings; only one
   development package reloads at a time. r-runtime.md section 6 describes the targeted update.
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
-  new name.
+  new name. On ry's runtime the retired library stays mapped (`libr` `unloaded_dlls`), so a
+  stale pointer into it does not crash, but every rebuild maps one more copy.
+- **R6 classes bound lazily carry no srcrefs, so `ry document` fails on a documented R6 class**
+  (roxygen2 reads the methods' srcrefs) on both runtimes. Same root cause as the srcref gap above.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
 - **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every

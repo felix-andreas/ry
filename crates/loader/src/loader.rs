@@ -620,8 +620,9 @@ impl Loader {
     }
 
     /// The roots of the loaded packages whose sources changed on disk since they were loaded,
-    /// judged from file names, sizes and modification times without reading a file. A root is
-    /// reported once per change: a reload that fails is not retried until the next change.
+    /// learned from operating-system notifications, or, where those are unavailable, from file
+    /// names, sizes and modification times. A root is reported once per change: a reload that
+    /// fails is not retried until the next change.
     pub fn changed_roots(&mut self) -> Vec<PathBuf> {
         let mut changed = Vec::new();
         for package in &mut self.packages {
