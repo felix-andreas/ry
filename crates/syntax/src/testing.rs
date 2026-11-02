@@ -364,15 +364,27 @@ impl Entropy for ByteStream<'_> {
 /// harness's whole input: the case builds its generator with `SplitMix64(seed)` and must draw
 /// nothing else, so the replay reproduces the failure byte for byte.
 pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
-    let iterations: Option<u64> = env::var("FUZZ_ITERS").ok().and_then(|value| value.parse().ok());
-    let seeds = match env::var("FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok()) {
+    for seed in fuzz_seeds(default) {
+        if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
+            panic!(
+                "seed {seed} failed; replay with\n    {}",
+                replay_command(seed)
+            );
+        }
+    }
+}
+
+/// The seeds [`for_each_seed`] runs, for a harness that has to write its own replay command.
+pub fn fuzz_seeds(default: usize) -> Range<u64> {
+    let iterations: Option<u64> = env::var("FUZZ_ITERS")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    match env::var("FUZZ_SEED")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
         Some(first) => first..first.saturating_add(iterations.unwrap_or(1)),
         None => 0..iterations.unwrap_or(default as u64),
-    };
-    for seed in seeds {
-        if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
-            panic!("seed {seed} failed; replay with\n    {}", replay_command(seed));
-        }
     }
 }
 
@@ -382,16 +394,29 @@ pub fn replay_command(seed: u64) -> String {
     let package = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "<package>".to_owned());
     let binary = env::current_exe()
         .ok()
-        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
         .map(|stem| match stem.rsplit_once('-') {
             Some((name, hash)) if hash.chars().all(|c| c.is_ascii_hexdigit()) => name.to_owned(),
             _ => stem,
         })
         .unwrap_or_default();
-    let target = if binary.is_empty() || binary == package.replace('-', "_") {
-        "--lib".to_owned()
-    } else {
+    // A library's unit-test binary is named after the library, which need not match the package
+    // (`ry-lang` builds `ry`), so an integration test is recognized by its source file instead.
+    let integration = match env::var_os("CARGO_MANIFEST_DIR") {
+        Some(manifest) if !binary.is_empty() => {
+            let tests = Path::new(&manifest).join("tests");
+            tests.join(format!("{binary}.rs")).exists()
+                || tests.join(&binary).join("main.rs").exists()
+        }
+        _ => !binary.is_empty() && binary != package.replace('-', "_"),
+    };
+    let target = if integration {
         format!("--test {binary}")
+    } else {
+        "--lib".to_owned()
     };
     let test = std::thread::current().name().unwrap_or("").to_owned();
     format!("FUZZ_SEED={seed} cargo test -p {package} {target} {test} -- --exact")

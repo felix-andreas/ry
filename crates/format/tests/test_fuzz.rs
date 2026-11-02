@@ -1,11 +1,12 @@
-//! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
+//! Each generated case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure and
+//! `FUZZ_ITERS` sets the budget.
 
 use {
     format::{Config, check_format_invariants, check_range_format_invariants, format},
     std::panic::catch_unwind,
     syntax::testing::{
-        SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes,
-        mutate_seed, program_corpus_sources, random_bytes, token_soup,
+        SplitMix64, corpus_sample, fixture_case_sources, for_each_seed, mutate_bytes, mutate_seed,
+        program_corpus_sources, random_bytes, token_soup,
     },
 };
 
@@ -169,9 +170,7 @@ fn check_invariants(input: &str) {
     check_range_format_invariants(input);
 }
 
-fn iterations() -> usize {
-    fuzz_iterations(1500)
-}
+const ITERATIONS: usize = 1500;
 
 #[test]
 fn seeds_hold_invariants() {
@@ -220,17 +219,17 @@ fn program_corpus_holds_invariants() {
 
 #[test]
 fn fuzz_random_bytes() {
-    run_random_bytes(iterations());
+    run_random_bytes(ITERATIONS);
 }
 
 #[test]
 fn fuzz_token_soup() {
-    run_token_soup(iterations());
+    run_token_soup(ITERATIONS);
 }
 
 #[test]
 fn fuzz_seed_mutations() {
-    run_seed_mutations(iterations());
+    run_seed_mutations(ITERATIONS);
 }
 
 #[test]
@@ -242,41 +241,41 @@ fn fuzz_corpus_seeded() {
     for source in &files {
         check_invariants(source);
     }
-    let mut rng = SplitMix64(0xF0_44_A7);
-    for _ in 0..iterations() / 3 {
+    for_each_seed(ITERATIONS / 3, |seed| {
+        let mut rng = SplitMix64(0xF0_44_A7 ^ seed);
         let source = &files[rng.below(files.len())];
         check_invariants(&String::from_utf8_lossy(&mutate_bytes(&mut rng, source)));
-    }
+    });
 }
 
 #[test]
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
-    let budget = iterations().max(20_000);
+    let budget = 20_000;
     run_random_bytes(budget);
     run_token_soup(budget);
     run_seed_mutations(budget);
 }
 
 fn run_random_bytes(budget: usize) {
-    let mut rng = SplitMix64(0xF0_12_34);
-    for _ in 0..budget {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0xF0_12_34 ^ seed);
         check_invariants(&random_bytes(&mut rng));
-    }
+    });
 }
 
 fn run_token_soup(budget: usize) {
-    let mut rng = SplitMix64(0xF0_50_42);
-    for _ in 0..budget {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0xF0_50_42 ^ seed);
         check_invariants(&token_soup(&mut rng, ALPHABET));
-    }
+    });
 }
 
 fn run_seed_mutations(budget: usize) {
-    let mut rng = SplitMix64(0xF0_5E_ED);
-    for _ in 0..budget {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0xF0_5E_ED ^ seed);
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
-    }
+    });
 }
 
 /// The whole-file invariants over every R file under `RY_FORMAT_DIR`, for

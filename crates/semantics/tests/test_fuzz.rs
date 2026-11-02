@@ -1,5 +1,5 @@
-//! Fuzz harness for the semantic pipeline. `FUZZ_ITERS` scales the per-generator budget;
-//! runs are deterministic per seed.
+//! Fuzz harness for the semantic pipeline. Each generated case is one seed of
+//! [`for_each_seed`], so `FUZZ_SEED` replays a failure and `FUZZ_ITERS` sets the budget.
 
 use {
     rustc_hash::FxHashMap,
@@ -15,9 +15,7 @@ use {
     syntax::{
         SyntaxKind, SyntaxNode,
         ast::is_expression_kind,
-        testing::{
-            SplitMix64, for_each_seed, fuzz_iterations, mutate_seed, program_corpus_sources,
-        },
+        testing::{SplitMix64, for_each_seed, mutate_seed, program_corpus_sources},
     },
 };
 
@@ -119,9 +117,8 @@ const SOUP: &[&str] = &[
     "Array<", ">", "as.Array", "[1, 2]",
 ];
 
-fn iterations() -> usize {
-    fuzz_iterations(250)
-}
+/// The default budget of the main generator; each seed is one generated case.
+const ITERATIONS: usize = 250;
 
 fn generate_program(rng: &mut SplitMix64) -> String {
     let mut lines = Vec::new();
@@ -148,10 +145,11 @@ fn generate_soup(rng: &mut SplitMix64) -> String {
     source
 }
 
-/// Prints the failing inputs on panic: a bare salsa or checker panic names no source.
-fn run_single_file(budget: usize, seed: u64, generate: fn(&mut SplitMix64) -> String) {
-    let mut rng = SplitMix64(seed);
-    for _ in 0..budget {
+/// Prints the failing inputs on panic: a bare salsa or checker panic names no source. `stream`
+/// keeps the generators apart, so the same seed draws a different case in each.
+fn run_single_file(budget: usize, stream: u64, generate: fn(&mut SplitMix64) -> String) {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(stream ^ seed);
         let source = generate(&mut rng);
         let kind = if rng.chance(1, 4) {
             DocumentKind::Script
@@ -166,13 +164,13 @@ fn run_single_file(budget: usize, seed: u64, generate: fn(&mut SplitMix64) -> St
             );
             resume_unwind(payload);
         }
-    }
+    });
 }
 
 /// Prints the failing inputs on panic, as [`run_single_file`] does.
-fn run_multi_file(budget: usize, seed: u64) {
-    let mut rng = SplitMix64(seed);
-    for _ in 0..budget {
+fn run_multi_file(budget: usize, stream: u64) {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(stream ^ seed);
         let first_source = generate_program(&mut rng);
         let second_source = generate_program(&mut rng);
         let edited_source = generate_program(&mut rng);
@@ -184,7 +182,7 @@ fn run_multi_file(budget: usize, seed: u64) {
             );
             resume_unwind(payload);
         }
-    }
+    });
 }
 
 /// Edits the second of two package files and back, checking each state against a fresh
@@ -286,25 +284,25 @@ fn fuzz_regressions_hold_invariants() {
 
 #[test]
 fn fuzz_generated_programs() {
-    run_single_file(iterations(), 0xDECA_FBAD, generate_program);
+    run_single_file(ITERATIONS, 0xDECA_FBAD, generate_program);
 }
 
 #[test]
 fn fuzz_token_soup() {
-    run_single_file(iterations() / 2, 0xBEEF_FACE, generate_soup);
+    run_single_file(ITERATIONS / 2, 0xBEEF_FACE, generate_soup);
 }
 
 #[test]
 fn fuzz_multi_file() {
-    run_multi_file(iterations() / 5, 0xCAFE_D00D);
+    run_multi_file(ITERATIONS / 5, 0xCAFE_D00D);
 }
 
 #[test]
 #[ignore = "long fuzz run for nightly/manual use"]
 fn fuzz_deep() {
-    run_single_file(iterations() * 20, 0x5EED_0001, generate_program);
-    run_single_file(iterations() * 10, 0x5EED_0002, generate_soup);
-    run_multi_file(iterations() * 4, 0x5EED_0003);
+    run_single_file(ITERATIONS * 20, 0x5EED_0001, generate_program);
+    run_single_file(ITERATIONS * 10, 0x5EED_0002, generate_soup);
+    run_multi_file(ITERATIONS * 4, 0x5EED_0003);
 }
 
 /// A generated `NAMESPACE`: directives, `{` blocks and `if` directives nested at random, each

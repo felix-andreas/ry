@@ -382,7 +382,7 @@ from the first allocation, which takes about seven seconds on an empty script in
 Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
 uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
 invalid, requests at every stop. Every request must get exactly one response, the session must end,
-and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
+and the interpreter must be left clean. `FUZZ_SEED=<seed>` replays a failing session.
 
 ### The table engine
 
