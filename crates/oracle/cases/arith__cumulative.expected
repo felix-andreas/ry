@@ -1,0 +1,44 @@
+[stdout]
+| [1]   1 NaN  NA  NA
+| [1]   1 NaN  NA  NA
+| [1]   1 NaN  NA  NA
+| [1] "1"   "NaN" "NA"  "NA" 
+| [1]  1 NA NA NA
+| [1]  1 NA NA NA
+| [1]  1 NA NA NA
+| [1] "1"  "NA" "NA" "NA"
+| [1] NaN NaN
+| [1] NaN NaN
+| [1] NaN NaN
+| [1] "NaN" "NaN"
+| [1]  3  4  8  9 14
+| [1] 3 3 4 4 5
+| [1] 3 1 1 1 1
+| [1] "3"  "4"  "8"  "9"  "14"
+| [1]   1 Inf NaN NaN
+| [1]   1 Inf Inf Inf
+| [1]    1    1 -Inf -Inf
+| [1] "1"   "Inf" "NaN" "NaN"
+| numeric(0)
+| numeric(0)
+| numeric(0)
+| character(0)
+| [1] 1e+308    Inf 1e+308
+| [1] 1e+308 1e+308 1e+308
+| [1]  1e+308  1e+308 -1e+308
+| [1] "1e+308" "Inf"    "1e+308"
+| [1] 1.000000e-01 3.000000e-01 6.000000e-01 2.775558e-17
+| [1] 0.1 0.2 0.3 0.3
+| [1]  0.1  0.1  0.1 -0.6
+| [1] "0.10000000000000001"    "0.30000000000000004"    "0.59999999999999998"   
+| [4] "2.7755575615628914e-17"
+| [1] 97141
+| [1] 1
+| [1] -Inf  Inf -Inf
+| [1]  Inf -Inf  Inf
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(Inf, -Inf, Inf)

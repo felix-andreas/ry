@@ -6,7 +6,7 @@ use {
     heap::{
         Collection, GcStress, Heap, HeapError,
         arena::Arena,
-        object::{NA_REAL, Sexp, SexpType, Slot, is_na_real},
+        object::{NA_REAL, Sexp, SexpType, Slot, gp, is_na_real},
         records::{Fields, Layout},
         strings::Encoding,
     },
@@ -481,6 +481,23 @@ fn strings_are_interned_per_encoding_and_ascii_is_unmarked() {
                 text: "a\\0b".into()
             })
         );
+        for bytes in [&b"0123\0567abcdefgh"[..], b"abcdefgh01234\0"] {
+            assert!(
+                matches!(
+                    heap.mk_char(bytes, Encoding::Native),
+                    Err(HeapError::EmbeddedNul { .. })
+                ),
+                "a NUL inside a word or in the tail is found"
+            );
+        }
+        let long_ascii = heap
+            .mk_char(b"abcdefgh\x01\x7f", Encoding::Utf8)
+            .expect("mk_char");
+        assert!(long_ascii.has_gp(gp::ASCII));
+        let high = heap
+            .mk_char(b"\x80\x01\xff\x01abcdefgh", Encoding::Latin1)
+            .expect("high bytes next to 0x01 are not NUL");
+        assert_eq!(Encoding::of(high), Encoding::Latin1);
         let count = heap.string_count();
         heap.collect(Collection::Major);
         assert!(
