@@ -72,6 +72,12 @@ The output is the same with or without the cache. `--no-cache` checks every file
 writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
 directory, so the record stays out of version control.
 
+The language server reads the same record when it starts. If the record still holds for a file
+under `R/`, opening that file shows its recorded findings at once, before the server has analysed
+the project, and the server's own analysis replaces them when it settles. A file that changed since
+the check, or whose findings depend on one that did, starts without them. Any edit drops the
+recorded findings of every file, and a record written by a different ry binary is never read.
+
 ## fmt
 
 ```sh

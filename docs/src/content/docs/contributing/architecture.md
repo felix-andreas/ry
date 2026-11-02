@@ -420,8 +420,21 @@ and all the documents, and the database handle deliberately never leaves it.
 - **Diagnostics are pushed in two waves.** On every sync the server immediately publishes the
   parse-stage classes and the lints, tagged with the document version. Until the startup warm-up
   (below) ends, the first wave holds only the parse-stage classes, because the lints read the
-  project-wide name maps. At idle time it publishes the settled full set, without a version. The settled set is a faithful superset of the first, so the
-  second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
+  project-wide name maps. At idle time it publishes the settled full set, without a version.
+  Without a check record, the settled set is a faithful superset of the first, so the second wave
+  only ever adds findings.
+- **The first wave can come from the check record.** At initialize the worker loads
+  `.ry_cache/check.json`, computes the record's key exactly as `ry check` does
+  (`check_cache::key`, with the server's own binary), and runs `check_cache::plan` over the
+  project's files, reading the scripts it does not load from disk. A changed file the server did
+  not load has no surface there, which plans a fresh run and restores nothing. Every loaded file
+  the plan reuses gets its recorded findings, and the first wave shows them instead of the parse
+  stage until the settled wave replaces them. The server analyses only the package files and the
+  open documents while `ry check` analyses every file, so the two can differ in a finding that
+  depends on a script, and the settled wave corrects it. Any input change (an edit, a watched-file
+  event, a stub or `NAMESPACE` buffer, a file opened with other text) drops every restored finding,
+  because a change to one file can change another's findings. Restoring the record for a
+  300,000-line package costs about what a replaying `ry check` does, about 0.2 s. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
   scans every file's `library()` and `require()` calls and applies the attached set once, then
