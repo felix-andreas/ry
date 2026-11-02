@@ -868,7 +868,7 @@ fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
             }
             definitions.push(Definition {
                 file,
-                name: target.text().to_string(),
+                name: target.text().to_string().trim_matches('`').to_owned(),
                 name_range: target.text_range(),
                 range: statement.text_range(),
                 is_function: binary
@@ -1031,6 +1031,11 @@ fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
             });
             if listed {
                 tally.matched += 1;
+            } else if results.len() == ide::COMPLETION_LIMIT {
+                // More names share the prefix than a search lists, so a user types on; the
+                // search is not wrong to leave this one out.
+                tally.total -= 1;
+                tally.crowded += 1;
             } else if tally.misses.len() < COVERAGE_EXAMPLES {
                 tally.misses.push(format!(
                     "{}: {}   query {query:?} lists {} symbols, not this definition",
@@ -1069,7 +1074,12 @@ fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
     for miss in &symbols.misses {
         println!("      {miss}");
     }
-    println!("  name prefix      {:>5.1}%", share(&prefixes));
+    println!(
+        "  name prefix      {:>5.1}%   ({} prefixes match more than {} names, left out)",
+        share(&prefixes),
+        prefixes.crowded,
+        ide::COMPLETION_LIMIT,
+    );
     for miss in &prefixes.misses {
         println!("      {miss}");
     }
@@ -1090,6 +1100,7 @@ struct Definition {
 struct HierarchyTally {
     total: usize,
     matched: usize,
+    crowded: usize,
     misses: Vec<String>,
 }
 

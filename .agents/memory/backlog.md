@@ -3014,7 +3014,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- Completion at two characters is weakest on call heads (httr2 68%, purrr 74%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them, and project-wide use counts favor testthat's `expect_*` over `exec`. A signal beyond use counts (the types the call site expects) would be needed.
+- Completion at two characters is weakest on call heads (httr2 72%, purrr 76%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them. Measured and rejected: ranking by words a candidate shares with the enclosing function (helps at half the name, hurts at two characters) and spellings before calls. A signal beyond use counts (the types the call site expects) would be needed.
 - An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
 - Semantic tokens: `col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
@@ -3030,7 +3030,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
-  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls. The
+  coverage roles in `ry debug analysis-stats` (incoming, outgoing, workspace symbols) are 99% or
+  more on R6, purrr, httr2 and finbench.
 - Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
   httr2 (`pkg::name`, `$` field, argument name, call head, variable):
   - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to

@@ -6124,15 +6124,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   only on input that parsed cleanly, because mutated input already has errors the rewrite cannot
   be blamed for.
 
-## Call-head completion ranks by call counts, not spelling counts
+## Call-head completion ranks by call counts, without test files
 
 - **Before.** Completion ranked equally good matches by how often the name is spelled in the
   project, so at two characters on a call head testthat's `expect_*` (spelled in every test)
-  beat the package's own functions.
+  beat the package's own functions, and S3 methods (`print.purrr_rate`) crowded out functions.
 - **Shape.** The per-file name-use fold (`SpelledNames`) also counts names in call-head position
-  (directly or as `pkg::name`), and `finish_completions` ranks a call-head completion by
-  `(calls, spellings)`, the file's own counts weighted as before. No new project-wide state: the
-  counts ride the existing per-file fold.
+  (directly or as `pkg::name`). A call-head completion ranks project S3 methods (a `generic.class`
+  beside a `generic` candidate) last, then by calls, then spellings. Call counts leave out test
+  files unless the cursor is in one (`chunk_uses` takes `with_tests`); spelling counts keep them,
+  since tests show which `pkg::` members a project uses (dropping them cost httr2's `pkg::name`
+  role 9 points). Two characters on call heads went from 68% to 72% on httr2 and 74% to 76% on
+  purrr.
+- **Rejected:** ranking by words shared with the enclosing function (`check_rate` in code that
+  has a `rate`). It gained a point or two at half the name and lost six to eight at two
+  characters, where long names share some word with almost any function.
 
 ## Call hierarchy and workspace symbols are measured against the reference oracle
 
@@ -6140,4 +6146,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   functions (defined exactly once) against the independent lexical resolver that already checks
   references: every oracle global site that is a call head is an expected call, grouped by the
   enclosing top-level definition. Workspace symbols are checked by querying each sampled
-  definition's exact name and a half-length prefix (at least 3 characters).
+  definition's exact name and a half-length prefix (at least 3 characters); a prefix that
+  matches more names than a search lists is left out of the share, since a user types on.
+- Workspace search reads a memoized per-file list (`searchable_symbols`), because rebuilding
+  every file's outline per query took about half a second on finbench.

@@ -4004,29 +4004,54 @@ pub struct WorkspaceSymbol {
 }
 
 pub fn workspace_symbols(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<WorkspaceSymbol> {
+    // A non-syntactic name is listed by its plain spelling, so a backquoted query still finds it.
+    let query = query.trim_matches('`');
     let mut symbols: Vec<(MatchScore, WorkspaceSymbol)> = Vec::new();
     for &file in files.files(db) {
-        for symbol in document_symbols(db, file) {
-            symbols.extend(once(&symbol).chain(&symbol.children).filter_map(|entry| {
-                Some((
-                    search_match(&entry.name, query)?,
-                    WorkspaceSymbol {
-                        name: entry.name.clone(),
-                        kind: entry.kind,
-                        target: NavigationTarget {
-                            file,
-                            range: entry.selection,
-                        },
+        symbols.extend(searchable_symbols(db, file).iter().filter_map(|symbol| {
+            Some((
+                search_match(&symbol.name, query)?,
+                WorkspaceSymbol {
+                    name: symbol.name.clone(),
+                    kind: symbol.kind,
+                    target: NavigationTarget {
+                        file,
+                        range: symbol.selection,
                     },
-                ))
-            }));
-        }
+                },
+            ))
+        }));
     }
     symbols.sort_by_cached_key(|(score, symbol)| {
         (*score, symbol.name.to_lowercase(), symbol.name.clone())
     });
     symbols.truncate(COMPLETION_LIMIT);
     symbols.into_iter().map(|(_, symbol)| symbol).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchableSymbol {
+    name: String,
+    kind: DocumentSymbolKind,
+    selection: TextRange,
+}
+
+/// A file's outline entries and their direct children, flattened. Memoized because a workspace
+/// search reads every file on each keystroke in the search box, and rebuilding every outline took
+/// about half a second at 300,000 lines.
+#[salsa::tracked(returns(ref))]
+fn searchable_symbols(db: &dyn Db, file: SourceFile) -> Vec<SearchableSymbol> {
+    let mut symbols = Vec::new();
+    for symbol in document_symbols(db, file) {
+        for entry in once(&symbol).chain(&symbol.children) {
+            symbols.push(SearchableSymbol {
+                name: entry.name.clone(),
+                kind: entry.kind,
+                selection: entry.selection,
+            });
+        }
+    }
+    symbols
 }
 
 struct AnnotationTypeCursor {
@@ -5112,8 +5137,9 @@ const USE_CHUNK_FILES: usize = 32;
 /// A keystroke changes its file's counts, so a single project-wide sum would be redone over
 /// every file on every completion; a chunk is redone over its own files only, and a lookup adds
 /// up one count per chunk.
+/// `with_tests` false leaves out testthat files ([`Usage::calls`] says why).
 #[salsa::tracked(returns(ref))]
-fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize) -> NameUses {
+fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize, with_tests: bool) -> NameUses {
     let mut uses = NameUses {
         spelled: HashMap::new(),
         called: HashMap::new(),
@@ -5123,6 +5149,7 @@ fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize) -> NameUses {
         .iter()
         .skip(chunk * USE_CHUNK_FILES)
         .take(USE_CHUNK_FILES)
+        .filter(|file| with_tests || !is_test_kind(*file.kind(db)))
     {
         let names = spelled_names(db, file);
         for (totals, counts) in [
@@ -6025,6 +6052,11 @@ fn finish_completions(
     usage: &Usage<'_>,
     called: bool,
 ) -> Option<CompletionResult> {
+    let labels: HashSet<&str> = if called {
+        items.iter().map(|item| item.label.as_str()).collect()
+    } else {
+        HashSet::new()
+    };
     let mut ranked: Vec<(Option<MatchScore>, u8, UseRank, usize)> = {
         let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
         items
@@ -6042,10 +6074,17 @@ fn finish_completions(
                     return None;
                 }
                 let calls = if called { usage.call_count(name) } else { 0 };
+                // A project function named `generic.class` beside a `generic` is an S3 method,
+                // which code calls through its generic, not by name.
+                let method = called
+                    && item.source == CompletionSource::Global
+                    && name
+                        .match_indices('.')
+                        .any(|(dot, _)| labels.contains(&name[..dot]));
                 Some((
                     search_match(&item.label, query),
                     item.source.group(called),
-                    (Reverse(calls), Reverse(usage.count(name))),
+                    (method, Reverse(calls), Reverse(usage.count(name))),
                     index,
                 ))
             })
@@ -6085,14 +6124,19 @@ fn finish_completions(
     })
 }
 
-/// Calls, then spellings, both descending.
-type UseRank = (Reverse<u32>, Reverse<u32>);
+/// S3 methods last, then calls and spellings, both descending.
+type UseRank = (bool, Reverse<u32>, Reverse<u32>);
 
 /// How often a name is spelled, for ranking: across the project, in the current file, and in
 /// the top-level item around the cursor. Nearer uses weigh more, since code tends to reuse the
 /// names it has just used.
 struct Usage<'db> {
     project: Vec<&'db NameUses>,
+    /// The project's uses that count for calls: outside `tests/`, test files are left out,
+    /// because testthat's `expect_*` are called in every test and never in package code. Test
+    /// files still count for spellings, which also rank `pkg::` members, where tests show which
+    /// of a package's functions the project uses.
+    calls: Vec<&'db NameUses>,
     file: Option<&'db SpelledNames>,
     item: HashMap<String, u32>,
 }
@@ -6117,9 +6161,13 @@ impl<'db> Usage<'db> {
                 }
             }
         }
+        let chunks = files.files(db).len().div_ceil(USE_CHUNK_FILES);
         Usage {
-            project: (0..files.files(db).len().div_ceil(USE_CHUNK_FILES))
-                .map(|chunk| chunk_uses(db, files, chunk))
+            project: (0..chunks)
+                .map(|chunk| chunk_uses(db, files, chunk, true))
+                .collect(),
+            calls: (0..chunks)
+                .map(|chunk| chunk_uses(db, files, chunk, is_test_kind(*file.kind(db))))
                 .collect(),
             file: Some(spelled_names(db, file)),
             item,
@@ -6129,6 +6177,7 @@ impl<'db> Usage<'db> {
     fn none() -> Usage<'static> {
         Usage {
             project: Vec::new(),
+            calls: Vec::new(),
             file: None,
             item: HashMap::new(),
         }
@@ -6144,7 +6193,7 @@ impl<'db> Usage<'db> {
     /// Calls weigh like [`Usage::count`]'s spellings: the project, then the file, three times.
     fn call_count(&self, name: &str) -> u32 {
         let project: u32 = self
-            .project
+            .calls
             .iter()
             .filter_map(|uses| uses.called.get(name))
             .sum();
@@ -6179,6 +6228,10 @@ impl<'db> Usage<'db> {
             .saturating_add(file.saturating_mul(FILE_USE_WEIGHT))
             .saturating_add(item.saturating_mul(ITEM_USE_WEIGHT))
     }
+}
+
+fn is_test_kind(kind: DocumentKind) -> bool {
+    matches!(kind, DocumentKind::Test | DocumentKind::TestHelper)
 }
 
 const FILE_USE_WEIGHT: u32 = 3;
