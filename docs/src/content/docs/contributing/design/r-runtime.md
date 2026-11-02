@@ -696,8 +696,9 @@ The rules the implementation settled:
   `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably
   pure constructor call lazy is not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
-  copies other development packages hold of a changed binding is not implemented; a session loads
-  one development package at a time without that cascade.
+  copies other development packages hold is done after every load: each loaded development package
+  whose `NAMESPACE` imports from the reloaded one runs its import directives again
+  (`.ry_update_importers` in `runtime.R`), which costs one pass over those directives.
 - **A reload is a diff over items.** A changed or new function is rebound and a deleted one removed.
   Statements in a changed file are matched to the file's old statements by content, in order, so an
   inserted statement runs alone while two swapped writers of a name rerun. A statement reruns when it
@@ -1015,10 +1016,9 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. Every oracle case in `crates/oracle/cases` but one matches GNU R 4.3.3
-   (`oracle compare --engine ry`). The exception, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
-   exit status and 26 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
+   The interpreter runs. Every oracle case in `crates/oracle/cases` matches GNU R 4.3.3
+   (`oracle compare --engine ry`). Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
+   exit status and 27 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
    `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
