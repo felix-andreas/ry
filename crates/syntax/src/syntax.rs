@@ -60,6 +60,10 @@ pub struct SyntaxError {
     /// Caused by the input ending too early: an opener it never closes, or a construct the end
     /// of the input cuts off. A console reads more input instead of reporting it.
     pub incomplete: bool,
+    /// The token the parser stood on when it found the error, or `None` at the end of the
+    /// input. R's own parser reports this token ("unexpected symbol"), not the construct the
+    /// message names.
+    pub found: Option<TextRange>,
 }
 
 impl SyntaxError {
@@ -69,6 +73,7 @@ impl SyntaxError {
             range,
             in_annotation: false,
             incomplete: false,
+            found: None,
         }
     }
 }

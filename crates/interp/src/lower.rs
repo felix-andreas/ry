@@ -19,7 +19,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
-    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange},
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -101,6 +101,10 @@ pub struct SyntaxFailure {
     pub offset: usize,
     pub message: String,
     pub condition: Option<ParseCondition>,
+    /// For an error of R's grammar, the token GNU R's parser stops on (an empty range at the end
+    /// of the input), whose location and preceding lines GNU R's message quotes. `offset` stays
+    /// where ry's parser anchors the error, which decides how much of a script runs first.
+    pub unexpected: Option<std::ops::Range<usize>>,
 }
 
 /// The class and fields of a `parseError` condition.
@@ -153,10 +157,28 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
         .find(|failure| !failure.in_annotation)
         .map(|failure| {
             let offset = usize::from(failure.range.start()).min(text.len());
-            pipe_bind_failure(text, offset).unwrap_or_else(|| SyntaxFailure {
-                offset,
-                message: failure.message.clone(),
-                condition: None,
+            pipe_bind_failure(text, offset).unwrap_or_else(|| {
+                // An unterminated string runs to the end of the input, where ry's parser stops,
+                // but GNU R's lexer reports it as a token of its own.
+                let found = failure.found.or_else(|| {
+                    root.descendants_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
+                        .find(|token| {
+                            token.kind() == SyntaxKind::STRING
+                                && !is_terminated_string(token.text())
+                        })
+                        .map(|token| token.text_range())
+                });
+                let unexpected = found.map_or(text.len()..text.len(), |found| {
+                    usize::from(found.start()).min(text.len())
+                        ..usize::from(found.end()).min(text.len())
+                });
+                SyntaxFailure {
+                    message: unexpected_token(&root, text, &unexpected),
+                    unexpected: Some(unexpected),
+                    offset,
+                    condition: None,
+                }
             })
         });
     // GNU R's lexer resolves escapes as it reads a string, so a bad escape in a string that
@@ -192,6 +214,7 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
         }
         if may_hold_placeholder && has_stray_placeholder(&child) {
             failure = Some(SyntaxFailure {
+                unexpected: None,
                 offset: start,
                 message: "invalid use of pipe placeholder".to_owned(),
                 condition: Some(ParseCondition {
@@ -215,20 +238,229 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
 }
 
 /// GNU R's message for a plain `failure` in `text`, whose first line is line `line_offset + 1`
-/// of the source.
+/// of the source, in the form `parse()` reports it: the location, then the last one or two
+/// lines read, with a caret under the column.
 pub fn syntax_failure_message(
     text: &str,
     failure: &SyntaxFailure,
     source_name: &str,
     line_offset: usize,
 ) -> String {
-    let before = &text[..failure.offset.min(text.len())];
-    let line = line_offset + before.matches('\n').count() + 1;
-    let column = before
-        .rsplit('\n')
-        .next()
-        .map_or(0, |line| line.chars().count());
-    format!("{source_name}:{line}:{column}: {}", failure.message)
+    let Some(unexpected) = &failure.unexpected else {
+        let before = &text[..failure.offset.min(text.len())];
+        let line = line_offset + before.matches('\n').count() + 1;
+        let column = before
+            .rsplit('\n')
+            .next()
+            .map_or(0, |line| line.chars().count());
+        return format!("{source_name}:{line}:{column}: {}", failure.message);
+    };
+    let report = grammar_error_report(text, unexpected, 0, line_offset);
+    let location = format!(
+        "{source_name}:{}:{}: {}",
+        report.line, report.column, failure.message
+    );
+    match report.context.as_slice() {
+        [] => location,
+        [only] => {
+            let prefix = format!("{}: ", report.context_line);
+            let width = prefix.len() + report.column + 1;
+            format!("{location}\n{prefix}{only}\n{:>width$}", "^")
+        }
+        [.., previous, last] => {
+            let width = format!("{}:", report.context_line).len() + report.column + 1;
+            format!(
+                "{location}\n{}: {previous}\n{}: {last}\n{:>width$}",
+                report.context_line - 1,
+                report.context_line,
+                "^"
+            )
+        }
+    }
+}
+
+/// GNU R's message for a plain `failure` in a script that `Rscript` runs: the message and the
+/// last one or two lines of the failing top-level expression, without a location. GNU R reads
+/// a script one top-level expression at a time, so the quoted lines start after the newline or
+/// `;` that ended the expression before, and an error at the end of the input quotes nothing.
+pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailure) -> String {
+    let text = script.text;
+    let Some(unexpected) = &failure.unexpected else {
+        return syntax_failure_message(text, failure, "<text>", 0);
+    };
+    if unexpected.is_empty() && unexpected.start >= text.len() {
+        return failure.message.clone();
+    }
+    let context_start = script
+        .root
+        .children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|token| matches!(token.kind(), SyntaxKind::NEWLINE | SyntaxKind::SEMICOLON))
+        .map(|token| usize::from(token.text_range().end()))
+        .take_while(|&end| end <= unexpected.start)
+        .last()
+        .unwrap_or(0);
+    let report = grammar_error_report(text, unexpected, context_start, 0);
+    match report.context.as_slice() {
+        [] => failure.message.clone(),
+        [only] => format!("{} in \"{only}\"", failure.message),
+        [.., previous, last] => format!("{} in:\n\"{previous}\n{last}\"", failure.message),
+    }
+}
+
+/// Where GNU R reports a grammar error and the lines it quotes with it.
+struct GrammarErrorReport {
+    line: usize,
+    /// GNU R's 1-based column of the token's first character, with tabs advancing to the next
+    /// multiple of 8, or 0 at the end of the input.
+    column: usize,
+    /// The line number of the last quoted line.
+    context_line: usize,
+    context: Vec<String>,
+}
+
+/// GNU R's location and context for a grammar error at `unexpected` in `text`. GNU R's lexer
+/// keeps the last 255 bytes it read in a ring buffer, from `context_start` on, and quotes them
+/// through the failing token split into lines, each with its tabs expanded and cut at 192
+/// bytes. GNU R reads every line with its newline, and the text here has the last one dropped,
+/// as the whole-parse source reference assumes, so the end of the input is the start of the
+/// line after the last.
+fn grammar_error_report(
+    text: &str,
+    unexpected: &std::ops::Range<usize>,
+    context_start: usize,
+    line_offset: usize,
+) -> GrammarErrorReport {
+    let at_end = unexpected.is_empty() && unexpected.start >= text.len();
+    let read = if at_end {
+        format!("{text}\n")
+    } else {
+        text[..unexpected.end.min(text.len())].to_owned()
+    };
+    let line = line_offset
+        + if at_end {
+            read.matches('\n').count()
+        } else {
+            text[..unexpected.start].matches('\n').count()
+        }
+        + 1;
+    let column = if at_end {
+        0
+    } else {
+        let line_start = text[..unexpected.start]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
+        text[line_start..unexpected.start]
+            .chars()
+            .fold(0, |column, character| {
+                if character == '\t' {
+                    (column + 8) & !7
+                } else {
+                    column + 1
+                }
+            })
+            + 1
+    };
+    let mut start = context_start
+        .min(read.len())
+        .max(read.len().saturating_sub(255));
+    while !read.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut context: Vec<&str> = read[start..].split('\n').collect();
+    let mut context_line = line_offset + read.matches('\n').count() + 1;
+    if context.last().is_some_and(|last| last.is_empty()) {
+        context.pop();
+        context_line -= 1;
+    }
+    let context = context
+        .into_iter()
+        .map(|line| {
+            let mut expanded = String::new();
+            for character in line.chars() {
+                if expanded.len() >= 192 {
+                    break;
+                }
+                if character == '\t' {
+                    expanded.push(' ');
+                    while expanded.len() % 8 != 0 {
+                        expanded.push(' ');
+                    }
+                } else {
+                    expanded.push(character);
+                }
+            }
+            expanded
+        })
+        .collect();
+    GrammarErrorReport {
+        line,
+        column,
+        context_line,
+        context,
+    }
+}
+
+/// GNU R's message for its parser stopping on the token at `unexpected`, an empty range at the
+/// end of the input, named as GNU R's grammar names its tokens.
+fn unexpected_token(root: &SyntaxNode, text: &str, unexpected: &std::ops::Range<usize>) -> String {
+    let description = if unexpected.is_empty() {
+        "end of input".to_owned()
+    } else {
+        let offset = TextSize::from(unexpected.start as u32);
+        let token = root.token_at_offset(offset).right_biased();
+        match token {
+            None => "input".to_owned(),
+            Some(token) => token_description(&token, &text[unexpected.clone()]),
+        }
+    };
+    format!("unexpected {description}")
+}
+
+fn token_description(token: &SyntaxToken, text: &str) -> String {
+    let name = match token.kind() {
+        SyntaxKind::INTEGER
+        | SyntaxKind::DOUBLE
+        | SyntaxKind::COMPLEX
+        | SyntaxKind::TRUE_KW
+        | SyntaxKind::FALSE_KW
+        | SyntaxKind::INF_KW
+        | SyntaxKind::NAN_KW
+        | SyntaxKind::NA_KW
+        | SyntaxKind::NA_INTEGER_KW
+        | SyntaxKind::NA_REAL_KW
+        | SyntaxKind::NA_COMPLEX_KW => "numeric constant",
+        SyntaxKind::STRING if is_terminated_string(text) => "string constant",
+        SyntaxKind::STRING => "INCOMPLETE_STRING",
+        SyntaxKind::RAW_STRING | SyntaxKind::NA_CHARACTER_KW => "string constant",
+        SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI => "symbol",
+        SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::COLON_EQ => "assignment",
+        SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => "'->'",
+        SyntaxKind::SPECIAL => "SPECIAL",
+        SyntaxKind::NEWLINE => "end of line",
+        SyntaxKind::ERROR_TOKEN => "input",
+        _ => return format!("'{text}'"),
+    };
+    name.to_owned()
+}
+
+/// Whether a string literal's text ends with its closing quote, which an escape does not hide.
+fn is_terminated_string(text: &str) -> bool {
+    let mut characters = text.chars();
+    let Some(quote) = characters.next() else {
+        return false;
+    };
+    let mut escaped = false;
+    for character in characters {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return true;
+        }
+    }
+    false
 }
 
 /// The error `failure` raises: a plain error with GNU R's message, or the signalled
@@ -325,6 +557,7 @@ unsafe fn quote_placeholders(value: Sexp) -> R<Sexp> {
 /// is set, so a grammar error at it is that parse error.
 fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
     text[offset..].starts_with("=>").then(|| SyntaxFailure {
+        unexpected: None,
         offset,
         message: "'=>' is disabled; set '_R_USE_PIPEBIND_' envvar to a true value to enable it"
             .to_owned(),
@@ -358,6 +591,7 @@ fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
             Some((
                 start,
                 SyntaxFailure {
+                    unexpected: None,
                     offset: start + 1 + failure.offset,
                     message: failure.message,
                     condition: Some(ParseCondition {
@@ -411,6 +645,7 @@ fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
         if !seen.insert(name.clone()) {
             let last = text.chars().next_back().map_or(0, char::len_utf8);
             return Some(SyntaxFailure {
+                unexpected: None,
                 offset: usize::from(range.end()) - last,
                 message: format!("repeated formal argument '{name}'"),
                 condition: Some(ParseCondition {
@@ -431,6 +666,7 @@ unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
     let offset = usize::from(significant_range(&right).start());
     let failure = |message: String, class, value, call: bool| {
         Some(SyntaxFailure {
+            unexpected: None,
             offset,
             message,
             condition: Some(ParseCondition {

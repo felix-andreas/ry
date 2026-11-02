@@ -2210,9 +2210,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - sessioninfo crashes in `external_info()`: GNU R's own `tcltk.so` is built with R's internals
-    and reads `SEXPREC` fields directly, so it segfaults on ry's layout. ry's R home needs a tcltk
-    built against ry, or a `tclVersion()` that errors cleanly when Tcl is unavailable.
+  - tcltk is unavailable: `dyn.load` refuses GNU R's own `tcltk.so` (`decisions.md`, "Package-test
+    compatibility details"), so code that needs Tcl/Tk gets an error. A tcltk built against ry
+    would bring it back.
+  - Parse errors name the token GNU R's parser stops on, but ry's parser recovers differently in
+    a few places: `x <- function( {` reports the end of the input, where GNU R reports the `{`, and
+    `a ;; b` parses where GNU R rejects the second `;`.
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.

@@ -2442,11 +2442,14 @@ unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
             continue;
         };
         let directory = crate::connections::expand_path(&directory);
-        names.push(if full {
-            directory.clone()
-        } else {
-            String::new()
-        });
+        // Only a recursive listing names the directory itself, and only when it exists.
+        if recursive && Path::new(&directory).is_dir() {
+            names.push(if full {
+                directory.clone()
+            } else {
+                String::new()
+            });
+        }
         let mut paths = Vec::new();
         walk(Path::new(&directory), recursive, true, &mut paths, true);
         for path in paths.into_iter().filter(|path| path.is_dir()) {

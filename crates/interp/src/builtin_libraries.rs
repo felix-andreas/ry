@@ -63,17 +63,37 @@ pub enum RoutineKind {
 
 /// Whether `path` is the shared library of one of the packages above, and which.
 pub fn builtin_library(path: &str) -> Option<&'static str> {
-    let path = std::path::Path::new(path);
-    let file = path.file_stem()?.to_str()?;
-    let package = PACKAGES.iter().find(|package| **package == file)?;
-    let mut libs = path.parent()?;
-    // GNU R for Windows keeps a package's DLL under `libs/x64`.
-    if cfg!(windows) && libs.file_name()? == "x64" {
-        libs = libs.parent()?;
-    }
-    let package_dir = libs.parent()?;
-    let matches = libs.file_name()? == "libs" && package_dir.file_name()?.to_str()? == *package;
-    matches.then_some(*package)
+    PACKAGES
+        .iter()
+        .copied()
+        .find(|package| is_package_library(path, package))
+}
+
+/// Why ry refuses to load `path`, when it is the shared library of a GNU R base package that
+/// ry neither implements nor can run. GNU R compiles its base packages against its internal
+/// headers, so their code reads GNU R's object layout directly, which ry's heap does not share:
+/// running GNU R's `tcltk.so` crashes on the first `.External` call. ry fails the load the way a
+/// GNU R built without Tcl/Tk does, which also matches `capabilities("tcltk")` being `FALSE`.
+pub fn refused_library(path: &str) -> Option<&'static str> {
+    is_package_library(path, "tcltk").then_some("Tcl/Tk support is not available on this system")
+}
+
+fn is_package_library(path: &str, package: &str) -> bool {
+    (|| {
+        let path = std::path::Path::new(path);
+        let mut libs = path.parent()?;
+        // GNU R for Windows keeps a package's DLL under `libs/x64`.
+        if cfg!(windows) && libs.file_name()? == "x64" {
+            libs = libs.parent()?;
+        }
+        let package_dir = libs.parent()?;
+        Some(
+            path.file_stem()? == package
+                && libs.file_name()? == "libs"
+                && package_dir.file_name()? == package,
+        )
+    })()
+    .unwrap_or(false)
 }
 
 /// `dyn.load` of a builtin library: records it as loaded and returns its `DLLInfo`.
