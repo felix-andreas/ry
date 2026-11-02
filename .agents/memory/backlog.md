@@ -2320,9 +2320,16 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
     (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
   - Bitmap pages are written when the device closes rather than per page.
-  - The plot gallery (`oracle gallery`) passes on every device, and three figures are not
-    pixel-exact on agg: `pch_table` (the join at pch 11's apex), `ts_decomposition` (rotated
-    side-2 axis labels one pixel off) and `margin_text_and_titles`.
+  - The plot gallery (`oracle gallery`) passes on every device, at seeds 1 to 8 on png, pdf and
+    svg as well as by default. On agg, no figure has a pixel
+    off by more than 64 levels at any seed from 0 to 24, and 140 of the 149 are identical. The
+    other nine (`contour_methods`, `contour_volcano`, `hist_density`, `lm_diagnostics`,
+    `log_axes`, `ts_decomposition`, `xspline_shapes`, `pa_correlation`,
+    `grid_round_rect_curve`) differ only in the antialiasing of 0.01% to 0.3% of their pixels.
+    For `ts_decomposition` the cause is the coordinate transform: user coordinates reach the
+    device through one affine map in inches (`user_axes`, `Device::to_device`), where GNU R
+    composes `win2fig` and `fig2dev`, so an antialiased vertex can round differently in the last
+    bit. The others are not yet diagnosed.
   - GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).

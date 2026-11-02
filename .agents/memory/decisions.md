@@ -2549,6 +2549,27 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - Labels are a `Label` (string lines, or an expression laid out by `plotmath.rs`), and every
     text path (`text`, `mtext`, `title`, `axis`, `strwidth`) goes through `push_label`, so
     plotmath is one code path rather than a deparse fallback per caller.
+  - Base graphics draws `pch` 0 to 25 through `graphics_engine::symbol` (GNU R's `GESymbol`),
+    which sizes symbols in device units. A second copy of the shapes in `push_symbol` had drawn
+    pch 0, 15 and 5 at different half-widths and started pch 23 at another vertex, which moves
+    where an antialiased outline closes.
+  - A missing `adj` or `at` in `mtext` defaults by `las` and side (`ComputeAdjValue`,
+    `ComputeAtValue`), not to `par("adj")`; `tck` below 0.5 is a fraction of the plot region's
+    shorter side, above it of its extent across the axis.
+- **The editor's plot panel is fed from the engine's display list.** A console with a
+  subscribed editor makes its default device (`options(device=)`) a `pdf(NULL)` device with the
+  display list enabled, when the subscription arrives so the next command already uses it. A
+  default the user set is kept, but the platform's own (`pdf`, `X11`, `quartz`, `windows`) is
+  replaced, since an X11 default would open a window or fail without a display. At each prompt, `publish_plot` in
+  `console_server.rs` compares the current device's display-list stamp
+  (`graphics_engine::display_list_stamp`, drawn from one global counter, so a device that takes
+  a closed one's slot never repeats a stamp) with the last one sent; when it changed, it copies
+  the display list onto an svg device with `dev.copy` (warnings muffled, and every device it
+  opened closed on exit, so a replay that fails leaks neither a device nor a warning) and sends
+  the file's text as a `ryPlot` event, which VS Code shows in one "R Plot" panel. A device of its own (httpgd-style) would
+  duplicate the engine and the devices; the display list is already the single record of what
+  was drawn. File devices keep their display list off, as in GNU R (`GErecordGraphicOperation`
+  records nothing while it is off), so `png()` output is never sent.
 - **Base graphics is checked against GNU R by a plot gallery.** `crates/oracle/gallery/*.R` holds
   about 150 figures (base graphics including the PerformanceAnalytics charts, grid, lattice,
   ggplot2), and `oracle gallery` renders each on both engines and every device, then compares.

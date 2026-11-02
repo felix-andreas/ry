@@ -2,10 +2,10 @@
 //
 // A console listens on a Unix socket and announces it with a registry file
 // `$TMPDIR/ry-<uid>/console-<pid>.json` that names its working directory and socket. The debugger
-// attaches over that socket, and a second connection subscribes to `View()` calls. A viewer
-// never holds the data: it asks for one page of rows at a time with `ryTable`, so a data frame
-// with millions of rows costs one page, and it closes the view with `ryRelease` when the panel
-// closes. Sorting and filtering are part of the page request, so the console sorts and filters
+// attaches over that socket, and a second connection subscribes to `View()` calls and to the
+// plots the console draws. A viewer never holds the data: it asks for one page of rows at a time
+// with `ryTable`, so a data frame with millions of rows costs one page, and it closes the view
+// with `ryRelease` when the panel closes. Sorting and filtering are part of the page request, so the console sorts and filters
 // the whole object, not just the rows the viewer has seen.
 
 import * as crypto from "crypto"
@@ -157,6 +157,8 @@ export class ConsoleConnection implements DataSource, Disposable {
   private dispatch(message: any): void {
     if (message.type === "event" && message.event === "ryView") {
       openViewer(this, message.body)
+    } else if (message.type === "event" && message.event === "ryPlot") {
+      showPlot(message.body.svg)
     } else if (message.type === "response") {
       const waiting = this.pending.get(message.request_seq)
       this.pending.delete(message.request_seq)
@@ -167,6 +169,35 @@ export class ConsoleConnection implements DataSource, Disposable {
       }
     }
   }
+}
+
+let plotPanel: WebviewPanel | undefined
+
+// Shows the console's latest plot beside the editor, in one panel that each new plot replaces.
+// The svg is shown as an image, so nothing in it runs.
+export function showPlot(svg: string): void {
+  if (!plotPanel) {
+    plotPanel = window.createWebviewPanel("ry.plot", "R Plot", { viewColumn: ViewColumn.Beside, preserveFocus: true }, {
+      enableScripts: false,
+    })
+    plotPanel.onDidDispose(() => {
+      plotPanel = undefined
+    })
+  }
+  const source = `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`
+  plotPanel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline';">
+<style>
+  body { margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh; background: white; }
+  img { max-width: 100%; max-height: 100%; }
+</style>
+</head>
+<body><img alt="R plot" src="${source}"></body>
+</html>`
+  plotPanel.reveal(undefined, true)
 }
 
 export function openViewer(source: DataSource, view: View): WebviewPanel {
