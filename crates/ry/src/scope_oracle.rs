@@ -204,9 +204,22 @@ impl Scopes {
                         definitions: Vec::new(),
                     });
                     local.visible_from = local.visible_from.min(visible_from);
+                    // An assignment after a loop continues the loop's variable.
+                    let generation = generation.or_else(|| {
+                        local
+                            .definitions
+                            .last()
+                            .and_then(|(_, generation)| *generation)
+                    });
                     local
                         .definitions
                         .push((node.text_range().start(), generation));
+                    return Binding::Local {
+                        file,
+                        function,
+                        name,
+                        generation,
+                    };
                 }
                 Binding::Local {
                     file,
@@ -291,7 +304,17 @@ impl Scopes {
                 self.lookup(file, &name, outer, None)
             }
             Some((Assignment::Local, _)) => {
-                self.local_or_global(file, function, name.clone(), None)
+                let generation = function
+                    .and_then(|function| self.functions.get(&(file, function)))
+                    .and_then(|scope| scope.locals.get(&name))
+                    .and_then(|local| {
+                        local
+                            .definitions
+                            .iter()
+                            .find(|(start, _)| *start == parent.text_range().start())
+                    })
+                    .and_then(|(_, generation)| *generation);
+                self.local_or_global(file, function, name.clone(), generation)
             }
             None => match loop_start(&parent) {
                 Some(start) => self.local_or_global(file, function, name.clone(), Some(start)),

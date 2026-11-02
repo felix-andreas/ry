@@ -108,7 +108,7 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
   grouped into function locals and package-level names. The resolver leaves out names whose binding
   scoping does not decide: inside a formula or quoted code, a `:=` target, an argument of a call it
   cannot see, and a `<<-` target that no enclosing function or file defines. It also follows ry in
-  giving each `for` loop's variable its own binding. It forces `[check] typing` on. Build with
+  giving each `for` loop's variable its own binding, which later assignments continue. It forces `[check] typing` on. Build with
   `--release` when absolute numbers matter; a debug build still gives honest ratios.
 
 ## The docs site
