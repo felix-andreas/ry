@@ -26,9 +26,9 @@ use {
         stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
-            Atomic, Constraint, FlagReturn, FrameKind, FunctionType, InferenceVar, Name,
-            NativeField, Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
-            TypeScheme, any, array, array_element, column_type, conflicting_tags,
+            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
+            Name, NativeField, Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty,
+            TyKind, TypeScheme, any, array, array_element, column_type, conflicting_tags,
             contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
             map_child_types, native_record, null, scalar, substitute_rigid, type_size, union_of,
             unknown,
@@ -2518,6 +2518,7 @@ impl<'db> Checker<'db, '_> {
                     .pop()
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
+                let default_reads = self.default_reads(&module[parameters], &uses, &named);
                 let flag_return = if early_returns.is_empty() {
                     self.flag_return(&module[parameters], *body)
                 } else {
@@ -2570,6 +2571,7 @@ impl<'db> Checker<'db, '_> {
                             .filter(|parameter| uses.quotes(parameter.name))
                             .map(|parameter| Name::new(self.db, &parameter.name))
                             .collect(),
+                        default_reads,
                     }),
                 )
             }
@@ -7112,6 +7114,7 @@ impl<'db> Checker<'db, '_> {
             inferred: false,
             flag_return: None,
             quoted: Vec::new(),
+            default_reads: Vec::new(),
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -7418,6 +7421,43 @@ impl<'db> Checker<'db, '_> {
             when_true: *self.recorded.get(then_branch)?,
             when_false: *self.recorded.get(else_branch)?,
         })
+    }
+
+    /// A formal the body never forces is optional, but a forced formal's default runs when the
+    /// call leaves that formal out, and forces what the default reads.
+    fn default_reads(
+        &self,
+        parameters: &[Formal],
+        uses: &FormalUses,
+        named: &[Parameter<'db>],
+    ) -> Vec<DefaultRead<'db>> {
+        let mut reads = Vec::new();
+        for reader in parameters {
+            let Some(default) = reader.default else {
+                continue;
+            };
+            if !uses.forces_on_every_path(reader.name) {
+                continue;
+            }
+            let default_uses = self.formal_uses(parameters, default);
+            for formal in parameters {
+                if formal.name == reader.name
+                    || formal.default.is_some()
+                    || uses.missing_tested.contains(&formal.name)
+                    || !default_uses.forces_on_every_path(formal.name)
+                    || !named.iter().any(|parameter| {
+                        parameter.optional && parameter.name.text(self.db) == formal.name
+                    })
+                {
+                    continue;
+                }
+                reads.push(DefaultRead {
+                    formal: Name::new(self.db, &formal.name),
+                    default_of: Name::new(self.db, &reader.name),
+                });
+            }
+        }
+        reads
     }
 
     fn writes_name(&self, id: ExprId, name: Symbol) -> bool {
@@ -10887,6 +10927,7 @@ impl<'db> Checker<'db, '_> {
                         inferred: true,
                         flag_return: None,
                         quoted: Vec::new(),
+                        default_reads: Vec::new(),
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -11422,6 +11463,27 @@ impl<'db> Checker<'db, '_> {
             })
             .map(|(_, field)| field.name.text(self.db).to_owned())
             .collect();
+        let supplied = |name: Name<'db>| {
+            function
+                .named
+                .iter()
+                .position(|field| field.name == name)
+                .is_some_and(|formal| {
+                    targets.iter().any(
+                        |target| matches!(target, Some(ArgumentTarget::Named(filled)) if *filled == formal),
+                    )
+                })
+        };
+        let mut missing = missing;
+        for read in &function.default_reads {
+            let name = read.formal.text(self.db);
+            if !supplied(read.formal)
+                && !supplied(read.default_of)
+                && !missing.iter().any(|missing| missing == name)
+            {
+                missing.push(name.to_owned());
+            }
+        }
         if !missing.is_empty() {
             return vec![TypeError {
                 range: callee_range,

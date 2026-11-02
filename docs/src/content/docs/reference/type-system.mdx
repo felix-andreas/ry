@@ -1207,6 +1207,28 @@ An unannotated `function(...)` expression gets its type from the definition itse
 `function(count, label = NULL) count` may therefore be called as `f(1L)`, `f(count = 1L)`, or
 `f(1L, "x")`.
 
+#### A return chosen by a flag
+
+A body that ends in `if (flag) a else b`, where `flag` is a formal with a literal `TRUE` or `FALSE`
+default that the body never reassigns and no `return()` leaves early, returns the union of both
+branches, as any `if` does. A call that leaves the flag out, or passes a literal, selects one branch,
+so it returns that branch's type alone:
+
+```r
+p_dist <- function(q, valueOnly = TRUE) {
+  prob <- q * 2
+  if (valueOnly) prob else list(value = prob, error = prob)
+}
+# p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+gap <- function(x, p) p_dist(x) - p
+# gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
+full <- function(x) p_dist(x, valueOnly = FALSE)$error
+# full: <T: numeric> fn(x: T) -> double
+```
+
+Any other flag argument, such as a variable, returns the union. An annotation has no syntax for
+the selection, so a declared signature always returns its declared type.
+
 #### Defaults
 
 Defaults are type-checked, and they interact with the parameter's type in four ways:
@@ -2146,7 +2168,25 @@ Arguments are checked for compatibility, not exact equality:
   `col.fun(n = length(levels) + 1)`. An annotated signature
   keeps its scalars: under `#: fn(flag: logical) -> double`, `pick(c(1, 0, 2) > 0)` is a type
   error. A type parameter bound by an earlier argument still widens as usual, and an inferred
-  `character` parameter still rejects a number.
+  `character` parameter still rejects a number. The same holds for an element that the apply family
+  passes to an inferred callback, so `lapply(0:3, not)` over `not <- function(value) if (value)
+  FALSE else TRUE` is `list[logical]`, and `lapply(c("a", "b"), not)` is still reported.
+- An inferred `logical` parameter accepts a `character` argument the way an `if` condition does:
+  a string literal only when it spells `TRUE` or `FALSE`, and any non-literal string. So
+  `not(Sys.getenv("CHECK", unset = "TRUE"))` and `not("TRUE")` are accepted, and `not("yes")` is
+  reported.
+- At a base helper that calls `match.fun`, a bare unannotated formal that the body also reads as a
+  value (as an operand, a condition, or an assigned value) is not inferred as a function there,
+  because `match.fun` takes a function or its name and looks a bare name up as a function. So
+  `spread <- function(x, var = 1) { co <- apply(x, 2, var); if (var < 10^-3) stop(); co }` calls
+  base `var` and compares the number, and `lapply(chunks, op, n)` beside `op == "tail"` accepts a
+  string `op`. A formal used only as a function, as in `each <- function(f) lapply(list(1, 2), f)`,
+  still infers as `fn(double) -> T`.
+- An argument bound to a formal that the callee reads only through `substitute()` (or
+  `missing()`) is code the callee captures, not a value, so it is not typed in the caller's frame.
+  withr's `wrap <- function(f, pre) { pre <- substitute(pre); ... }` splices `pre` into a function
+  that takes `f`'s formals, so `wrap(sink_to, { if (append) "a" else "w" })` reads `sink_to`'s
+  `append`, not base's `append`. A callee that also evaluates the formal checks the argument as usual.
 
 #### The native pipe
 
@@ -2439,9 +2479,11 @@ exceptions and additions:
   read. A project binding of that name still types the read.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
-- A read inside another formal's default does not force a formal, because the default runs only
-  when the call omits that formal. So in `function(x, y = x) y`, `x` is optional, and `g(y = 1)`
-  is accepted. So is `g()`, although R then fails with "argument "x" is missing".
+- A read inside another formal's default forces the formal only when that default runs, which is
+  when the call omits the formal that owns it and the body forces that formal. So in
+  `g <- function(x, y = x) y`, `x` is required exactly when `y` is left out: `g(y = 1)` and `g(2)`
+  are accepted, and `g()` is reported as leaving out `x`, as R fails with "argument "x" is
+  missing". A formal with its own default, or one the body tests with `missing()`, stays optional.
 
 #### `missing()` on a defaultless formal
 

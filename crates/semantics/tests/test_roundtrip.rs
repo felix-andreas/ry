@@ -21,8 +21,11 @@ use {
 /// no names to match.
 /// A callback the body calls with two arities after testing `formals()` has no single declared
 /// shape that admits both calls. A return that a flag's default selects has no annotation
-/// syntax, so the declared form returns both branches.
-const KNOWN_UNWRITABLE: [&str; 14] = [
+/// syntax, so the declared form returns both branches. A formal that is read as a value and
+/// also handed to `match.fun` keeps an open type when inferred, while the declared form pins it
+/// to the function `match.fun` expects. An argument the callee only substitutes is unchecked at
+/// an inferred call, while the declared parameter type is checked.
+const KNOWN_UNWRITABLE: [&str; 17] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -37,6 +40,9 @@ const KNOWN_UNWRITABLE: [&str; 14] = [
     "semantics/tests/typing::correct_r__an_inferred_logical_callback_parameter_takes_numbers :: not",
     "semantics/tests/typing::correct_r__an_element_fills_an_inferred_logical_parameter_after_a_forwarded_name :: eulerian",
     "semantics/tests/typing::correct_r__a_flag_default_selects_the_returned_branch :: p_dist",
+    "semantics/tests/typing::correct_r__a_formal_read_as_a_value_may_name_the_function_it_passes :: spread",
+    "semantics/tests/typing::correct_r__a_formal_read_as_a_value_may_name_the_function_it_passes :: trim",
+    "semantics/tests/typing::correct_r__an_argument_the_callee_only_substitutes_is_not_checked_in_the_caller :: wrap",
 ];
 
 #[test]

@@ -1842,12 +1842,18 @@ make <- function() {
 #++++
 make: <T> fn() -> fn([x]: T) -> double
 
-#---- a_formal_read_only_by_another_formals_default_stays_optional
+#---- a_formal_read_only_by_another_formals_default_is_required_when_that_default_runs
+# `y`'s default reads `x`, so `g()` fails in R, while `g(y = 1)` never reads `x`.
 g <- function(x, y = x) y
-g()
+leaves_both <- function() g()
+supplies_y <- function() g(y = 1)
+supplies_x <- function() g(2)
 #++++
 g: <T, U> fn([x]: T, [y]: U) -> U
-T
+leaves_both: Unknown
+supplies_y: fn() -> double
+supplies_x: fn() -> double
+134..135 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- a_superassignment_to_a_top_level_variable_is_read_back
 cache <- 1L

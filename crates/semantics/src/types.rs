@@ -331,6 +331,16 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only through `substitute()`, so a call's argument there is code
     /// the callee captures rather than a value the caller computes. Inferred only.
     pub quoted: Vec<Name<'db>>,
+    /// Optional formals that a forced formal's default reads: `function(x, y = x) y` may be
+    /// called as `g(y = 1)` but not as `g()`. Inferred only.
+    pub default_reads: Vec<DefaultRead<'db>>,
+}
+
+/// `formal` is required by a call that leaves out `default_of`, whose default reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct DefaultRead<'db> {
+    pub formal: Name<'db>,
+    pub default_of: Name<'db>,
 }
 
 /// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
@@ -758,6 +768,7 @@ fn mapped_kind<'db>(
                 ..flag
             }),
             quoted: function.quoted.clone(),
+            default_reads: function.default_reads.clone(),
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -981,6 +992,9 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Integer),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
             }),
         );
 
@@ -1007,6 +1021,9 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
             }),
         );
         let f2 = Ty::new(
@@ -1017,6 +1034,9 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
             }),
         );
         assert_eq!(f1, f2);
