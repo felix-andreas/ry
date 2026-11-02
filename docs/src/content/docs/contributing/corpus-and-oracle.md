@@ -96,11 +96,11 @@ ggplot2 and xts draw only when printed. A figure whose packages GNU R lacks is s
 `R_LIBS` to the corpus library (`.corpus/library`) to run all of them.
 
 ragg rasterizes the same way under both engines, so `agg` is the sharp check: at most 0.2% of
-pixels may differ. `png` and `pdf` (rasterized with `pdftoppm`) allow 5%, and there a pixel
+pixels may differ. `png` and `pdf` (rasterized with `pdftoppm` to `<figure>.pdf.png`) allow 5%, and there a pixel
 counts as differing only when nothing within one pixel in the other image matches it, because
 GNU R's cairo and ry's renderer antialias differently. `svg` is timed but not compared, because
 cairo writes text as glyph paths. The report lists each figure's differing share per device and both
-engines' times; `--repeats` keeps the fastest of several renders. `--seed` picks the sample and
+engines' times; `--repeats` keeps the fastest of several renders. A figure name used twice in the gallery, or a device outside `agg`, `png`, `pdf` and `svg`, is an error. `--seed` picks the sample and
 seeds R's random numbers in every figure, so a run replays exactly.
 
 `cargo test -p oracle` runs a bounded sample (`tests/test_gallery.rs`, four figures on `agg`, or

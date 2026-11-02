@@ -1170,7 +1170,13 @@ impl Layout {
             self.symbol_char(bottom, draw)?;
             let top_end = axis + distance - (top_bbox.height + top_bbox.depth);
             let bottom_end = axis - distance + (bottom_bbox.height + bottom_bbox.depth);
-            let count = ((top_end - bottom_end) / (0.99 * extension_height)).ceil() as i32;
+            // A device that reports no height for the extension glyph would ask for unbounded
+            // pieces, so none are drawn.
+            let count = if extension_height > 0.0 {
+                ((top_end - bottom_end) / (0.99 * extension_height)).ceil() as i32
+            } else {
+                0
+            };
             if count > 0 {
                 let delta = (top_end - bottom_end) / f64::from(count);
                 for index in 0..count {

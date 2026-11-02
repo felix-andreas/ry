@@ -17,6 +17,7 @@ use {
         },
         graphics_render::{self, Format, Paper, Rect, Stroke},
         plotmath::adobe_symbol_code,
+        sort::rsort_with_index,
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -3409,7 +3410,8 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
         shade = 1.0;
     }
     let mut lighting = light_theta.is_finite() && light_phi.is_finite() && shade.is_finite();
-    if scale != 1 {
+    // GNU R equalizes the axes only for `scale = FALSE`; NA keeps them scaled.
+    if scale == 0 {
         let largest = half.iter().copied().fold(f64::MIN, f64::max);
         half = [largest; 3];
     }
@@ -3550,7 +3552,7 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
                 order.push((-farthest, i + j * (rows - 1)));
             }
         }
-        order.sort_by(|left, right| left.0.total_cmp(&right.0));
+        rsort_with_index(&mut order);
         let stroke = par_stroke(&pars, edge);
         let scales = [1.0 / half[0], 1.0 / half[1], expand / half[2]];
         for (_, facet) in order {
@@ -6176,8 +6178,8 @@ unsafe fn do_filled_contour(call: &NativeCall<'_>) -> R<Sexp> {
         let [x_axis, y_axis] = user_axes(device);
         let rows = x.len();
         let mut corners = Vec::with_capacity(8);
-        for j in 1..y.len() {
-            for i in 1..rows {
+        for i in 1..rows {
+            for j in 1..y.len() {
                 let cell = [
                     z[i - 1 + (j - 1) * rows],
                     z[i + (j - 1) * rows],

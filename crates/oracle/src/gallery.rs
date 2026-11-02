@@ -124,7 +124,8 @@ pub fn gallery_dir() -> PathBuf {
 /// Every figure in the gallery files, with the files whose `# oracle: requires` packages GNU R
 /// lacks left out, sorted by file and name.
 pub fn figures() -> Result<Vec<Figure>, GalleryError> {
-    let installed = installed_packages().unwrap_or_default();
+    let installed = installed_packages()
+        .ok_or_else(|| GalleryError::Setup("GNU R could not list its packages".to_owned()))?;
     let mut figures = Vec::new();
     for path in gallery_files()? {
         let text = std::fs::read_to_string(&path)
@@ -158,6 +159,12 @@ pub fn figures() -> Result<Vec<Figure>, GalleryError> {
         }
     }
     figures.sort();
+    if let Some(pair) = figures.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(GalleryError::Setup(format!(
+            "the gallery names {} twice",
+            pair[0].label()
+        )));
+    }
     Ok(figures)
 }
 
@@ -184,6 +191,16 @@ pub fn available_devices(devices: &[String]) -> Vec<String> {
 
 /// Renders the chosen figures under both engines and compares them.
 pub fn run(options: &Options) -> Result<Vec<Render>, GalleryError> {
+    if let Some(device) = options
+        .devices
+        .iter()
+        .find(|device| !DEVICES.contains(&device.as_str()))
+    {
+        return Err(GalleryError::Setup(format!(
+            "unknown device {device}; the gallery renders on {}",
+            DEVICES.join(", ")
+        )));
+    }
     let all = figures()?;
     let chosen = if options.figures.is_empty() {
         match options.count {
@@ -420,15 +437,18 @@ pub fn read_png(path: &Path) -> Result<Image, String> {
 
 fn compare_pdf_files(expected: &Path, actual: &Path) -> Outcome {
     let rasterize = |pdf: &Path| -> Result<PathBuf, String> {
-        let stem = pdf.with_extension("");
+        // pdftoppm appends `.png` to the root it is given, so rooting at `x.pdf` writes
+        // `x.pdf.png` beside the png device's own `x.png`.
         let status = Command::new("pdftoppm")
             .args(["-png", "-r", "96", "-singlefile"])
             .arg(pdf)
-            .arg(&stem)
+            .arg(pdf)
             .status()
             .map_err(|error| format!("pdftoppm: {error}"))?;
+        let mut raster = pdf.as_os_str().to_owned();
+        raster.push(".png");
         match status.success() {
-            true => Ok(stem.with_extension("png")),
+            true => Ok(PathBuf::from(raster)),
             false => Err(format!("pdftoppm could not read {}", pdf.display())),
         }
     };

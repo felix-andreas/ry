@@ -64,7 +64,7 @@ fn sampled_gallery_figures_match_gnu_r() {
         return;
     }
     panic!(
-        "{}\nreplay with: cargo run -p oracle -- gallery --figures {} --devices {} --output {}",
+        "{}\nreplay with: cargo run -p oracle -- gallery --seed {seed} --figures {} --devices {} --output {}",
         render_report(&renders),
         failing.join(","),
         devices.join(","),
