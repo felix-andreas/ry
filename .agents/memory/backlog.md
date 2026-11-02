@@ -3090,7 +3090,8 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
 - The checker's working maps now live in a pooled bump arena and its names are interned
   (`decisions.md`, "The item check's working maps live in a pooled bump arena"), which took the
-  finance bench from 19.35 M to 15.39 M mimalloc calls and 23.22 G to 22.31 G instructions. The
+  finance bench from 19.78 M to 15.82 M mimalloc calls and 23.59 G to 22.68 G instructions,
+  with wall time unchanged within noise (median about 1.34 s). The
   1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
   self cost. What is left is structural:
   - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still

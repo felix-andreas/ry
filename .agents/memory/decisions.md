@@ -5460,8 +5460,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     where sharing actually repeats work.
   - `top_level_definition`, the annotation token scans and the duplicate-argument prescan read
     the green tree directly; the full argument list is built only when a name repeats.
-- **Impact.** On the whole finance bench (`ry check --no-cache`), callgrind went from 23.22 G to
-  22.31 G instructions and mimalloc calls from 19.35 M to 15.39 M, with byte-identical findings. Committed
+- **Impact.** On the whole finance bench (`ry check --no-cache`), callgrind went from 23.59 G to
+  22.68 G instructions and mimalloc calls from 19.78 M to 15.82 M, with byte-identical findings.
+  Interleaved wall time on 4 cores moved within noise (median 1.35 s against 1.34 s). Committed
   memory rose about 24 MiB from the pooled arenas and pre-sized resolution caches. The remaining
   allocations are rowan's red and green nodes, salsa's memo bookkeeping and scattered `Vec`
   growth (`backlog.md`, "Check cache follow-ups").
