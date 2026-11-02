@@ -3022,7 +3022,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
 - Not done from rust-analyzer's list, with the reason:
-  - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
   - Document highlight already exists.
