@@ -1495,7 +1495,10 @@ unsafe fn nice_names_ok(object: Sexp, opts: u32) -> bool {
             )
         });
     // A run deparses as `from:to`, which has no room for names.
-    any_named && !(any_na && opts & options::SHOW_ATTRIBUTES != 0) && !names_an_argument && !is_integer_run(object)
+    any_named
+        && !(any_na && opts & options::SHOW_ATTRIBUTES != 0)
+        && !names_an_argument
+        && !is_integer_run(object)
 }
 
 /// A run of at least two consecutive integers, increasing or decreasing, which deparses as
@@ -1587,7 +1590,8 @@ unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
             cell = cell.cdr();
             continue;
         }
-        if tag != symbols().names || !nice_names || !nice_names_ok(object, options::SHOW_ATTRIBUTES) {
+        if tag != symbols().names || !nice_names || !nice_names_ok(object, options::SHOW_ATTRIBUTES)
+        {
             return true;
         }
         cell = cell.cdr();
