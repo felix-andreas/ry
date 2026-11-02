@@ -3537,6 +3537,11 @@ first lines R had already read, leaving R mid-command.
   namespace, and the left side of a function assignment. Everything else stays with the editor's R
   grammar, so tokens add facts rather than replace the grammar. The server also answers range
   requests, so a large file only pays for the viewport.
+- **Member names are `property` or `method` tokens.** `x$name` and `x@name` decide from the
+  syntax alone (a called member is a method), and so do record-literal and pattern fields. R6
+  members and S4 slots are named by call arguments, so `semantic_tokens` reads them from the
+  outline's `classify_symbol_call` rather than a second classifier: one definition of what an R6
+  member or S4 slot is serves the outline and the highlighting.
 - **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
   `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
   finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics

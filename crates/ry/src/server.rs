@@ -2258,6 +2258,8 @@ fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult 
                                 lsp_types::SemanticTokenType::ENUM_MEMBER,
                                 lsp_types::SemanticTokenType::FUNCTION,
                                 lsp_types::SemanticTokenType::NAMESPACE,
+                                lsp_types::SemanticTokenType::PROPERTY,
+                                lsp_types::SemanticTokenType::METHOD,
                             ],
                             token_modifiers: vec![
                                 lsp_types::SemanticTokenModifier::DEFAULT_LIBRARY,
@@ -3416,7 +3418,8 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
         DocumentSymbolKind::S4Method | DocumentSymbolKind::R6Method => {
             lsp_types::SymbolKind::METHOD
         }
-        DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::R6Field | DocumentSymbolKind::S4Slot => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::Tag => lsp_types::SymbolKind::ENUM_MEMBER,
         // The kind RStudio's outline and the R language server use for sections.
         DocumentSymbolKind::Section => lsp_types::SymbolKind::STRING,
     }
@@ -3708,6 +3711,8 @@ fn semantic_class_index(class: SemanticClass) -> (u32, u32) {
         SemanticClass::Tag => 6,
         SemanticClass::Function | SemanticClass::LibraryFunction => 7,
         SemanticClass::Namespace => 8,
+        SemanticClass::Property => 9,
+        SemanticClass::Method => 10,
     };
     // Bit 0 is `defaultLibrary`, the only advertised modifier.
     let modifiers = match class {

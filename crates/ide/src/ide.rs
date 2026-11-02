@@ -1370,7 +1370,7 @@ fn spells_its_type(hir: &Module, item_node: &SyntaxNode, value: ExprId) -> bool 
 
 /// What a highlighted token is. R grammars already color R's own tokens, so plain R gets a class
 /// only where the grammar cannot know it: a function parameter wherever it is read, a called or
-/// defined function, and a namespace. ry's own syntax is classified in full: annotation and
+/// defined function, a namespace, and member names. ry's own syntax is classified in full: annotation and
 /// type-definition bodies, tags, `match` and its arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticClass {
@@ -1391,6 +1391,11 @@ pub enum SemanticClass {
     LibraryFunction,
     /// The package of `pkg::name`.
     Namespace,
+    /// A member name: the field of `x$field` or `x@slot`, a record literal's or pattern's field,
+    /// a non-function R6 member, or an S4 slot.
+    Property,
+    /// A called member, `x$method()`, or an R6 member defined as a function.
+    Method,
 }
 
 pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, SemanticClass)> {
@@ -1401,6 +1406,21 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
     let mut parameter_reads: HashSet<TextSize> = HashSet::new();
     let mut library_reads: HashSet<TextSize> = HashSet::new();
     let files = ProjectFiles::try_get(db);
+    // R6 members and S4 slots are named by call arguments, so the outline's reading of those
+    // calls decides them, which keeps one definition of what a member is.
+    let mut member_names: HashMap<TextSize, SemanticClass> = HashMap::new();
+    for call in root.descendants().filter(|node| node.kind() == CALL_EXPR) {
+        let Some(construct) = classify_symbol_call(&call) else {
+            continue;
+        };
+        for member in construct.children {
+            let class = match member.kind {
+                DocumentSymbolKind::R6Method => SemanticClass::Method,
+                _ => SemanticClass::Property,
+            };
+            member_names.insert(member.selection.start(), class);
+        }
+    }
     for &item in item_tree(db, file) {
         let (Some(node), Some(hir), Some(naming)) = (
             item_node(db, item),
@@ -1471,6 +1491,8 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 let start = token.text_range().start();
                 if token.kind() == IDENT && parameter_reads.contains(&start) {
                     Some(SemanticClass::Parameter)
+                } else if let Some(class) = member_names.get(&start) {
+                    Some(*class)
                 } else {
                     classify_r_name(&token).map(|class| match class {
                         SemanticClass::Function if library_reads.contains(&start) => {
@@ -1551,7 +1573,8 @@ fn classify_ry_token(token: &SyntaxToken) -> Option<SemanticClass> {
 }
 
 /// The classes the syntax decides on its own: a parameter's declaration, a call's head, a name
-/// assigned a function literal, and both halves of `pkg::name`.
+/// assigned a function literal, both halves of `pkg::name`, the member of `x$name` and `x@name`,
+/// and the field names of record literals and patterns.
 fn classify_r_name(token: &SyntaxToken) -> Option<SemanticClass> {
     if token.kind() != IDENT {
         return None;
@@ -1572,6 +1595,22 @@ fn classify_r_name(token: &SyntaxToken) -> Option<SemanticClass> {
             .filter(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder))
             .map(|_| SemanticClass::LibraryFunction),
         CALL_EXPR if is_first_child => Some(SemanticClass::Function),
+        DOLLAR_EXPR | AT_EXPR if !is_first_child => {
+            let called = holder.parent().is_some_and(|call| {
+                call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder)
+            });
+            Some(if called {
+                SemanticClass::Method
+            } else {
+                SemanticClass::Property
+            })
+        }
+        PATTERN_FIELD if is_first_child => Some(SemanticClass::Property),
+        ARGUMENT if is_first_child => holder
+            .parent()
+            .and_then(|list| list.parent())
+            .filter(|record| record.kind() == RECORD_EXPR)
+            .map(|_| SemanticClass::Property),
         BINARY_EXPR if is_first_child => {
             let binary = BinaryExpr::cast(holder)?;
             let assigns = binary
@@ -2970,6 +3009,10 @@ pub enum DocumentSymbolKind {
     R6Method,
     /// A non-function R6 member, or an `active` binding.
     R6Field,
+    /// A slot of an S4 class, from `representation(...)` or `slots =`.
+    S4Slot,
+    /// A tag of a type definition's union.
+    Tag,
     /// An RStudio-style section header (`# Title ----`) and what follows it.
     Section,
 }
@@ -2981,7 +3024,8 @@ pub struct DocumentSymbol {
     pub detail: Option<String>,
     pub range: TextRange,
     pub selection: TextRange,
-    /// R6 class members, functions defined inside a function, and the contents of a section.
+    /// R6 class members, S4 slots, a type definition's tags, functions defined inside a function,
+    /// and the contents of a section.
     pub children: Vec<DocumentSymbol>,
 }
 
@@ -3077,7 +3121,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
             detail: Some(keyword),
             range: definition.text_range(),
             selection: name_token.text_range(),
-            children: Vec::new(),
+            children: definition_tags(&definition),
         });
     }
     for directive in root
@@ -3578,7 +3622,12 @@ fn classify_symbol_call(call: &SyntaxNode) -> Option<SymbolCall> {
     let callee = s4_callee_name(call)?;
     let arguments = child_node(call, ARGUMENT_LIST)?;
     let (kind, name_parameter, detail, children) = match callee.as_str() {
-        "setClass" => (DocumentSymbolKind::S4Class, "Class", None, Vec::new()),
+        "setClass" => (
+            DocumentSymbolKind::S4Class,
+            "Class",
+            None,
+            s4_slots(&arguments),
+        ),
         "setGeneric" => (DocumentSymbolKind::S4Generic, "name", None, Vec::new()),
         "setMethod" => {
             let classes: Vec<String> = s4_argument(&arguments, "signature", 1)
@@ -3613,6 +3662,38 @@ fn classify_symbol_call(call: &SyntaxNode) -> Option<SymbolCall> {
         detail,
         children,
     })
+}
+
+/// The named slots of `setClass`'s `representation(...)` or `slots = c(...)`. An unnamed
+/// `representation` argument is a superclass, not a slot.
+fn s4_slots(arguments: &SyntaxNode) -> Vec<DocumentSymbol> {
+    let representation = s4_argument(arguments, "representation", 1).filter(|call| {
+        call.kind() == CALL_EXPR && s4_callee_name(call).as_deref() == Some("representation")
+    });
+    let slots = arguments
+        .children()
+        .filter(|argument| argument.kind() == ARGUMENT)
+        .find(|argument| child_node(argument, NAME).is_some_and(|name| name.text() == "slots"))
+        .and_then(|argument| argument.children().find(|child| child.kind() != NAME))
+        .filter(|call| call.kind() == CALL_EXPR);
+    representation
+        .into_iter()
+        .chain(slots)
+        .filter_map(|call| child_node(&call, ARGUMENT_LIST))
+        .flat_map(|list| list.children().filter(|child| child.kind() == ARGUMENT))
+        .filter_map(|slot| {
+            let name = child_node(&slot, NAME)?;
+            Some(DocumentSymbol {
+                name: name.text().to_string(),
+                kind: DocumentSymbolKind::S4Slot,
+                detail: string_argument_content(slot.children().find(|child| child.kind() != NAME))
+                    .map(|(class, _)| class),
+                range: slot.text_range(),
+                selection: name.text_range(),
+                children: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 fn r6_members(arguments: &SyntaxNode) -> Vec<DocumentSymbol> {
@@ -3655,6 +3736,34 @@ fn r6_members(arguments: &SyntaxNode) -> Vec<DocumentSymbol> {
         }
     }
     members
+}
+
+/// The tags of a definition whose body is a tag or a union of tags.
+fn definition_tags(definition: &SyntaxNode) -> Vec<DocumentSymbol> {
+    let body = definition
+        .children()
+        .find(|child| matches!(child.kind(), TYPE_UNION | TYPE_TAG));
+    let tags: Vec<SyntaxNode> = match body {
+        Some(union) if union.kind() == TYPE_UNION => union
+            .children()
+            .filter(|child| child.kind() == TYPE_TAG)
+            .collect(),
+        Some(tag) => vec![tag],
+        None => Vec::new(),
+    };
+    tags.into_iter()
+        .filter_map(|tag| {
+            let name = child_node(&tag, NAME)?;
+            Some(DocumentSymbol {
+                name: name.text().to_string(),
+                kind: DocumentSymbolKind::Tag,
+                detail: None,
+                range: tag.text_range(),
+                selection: name.text_range(),
+                children: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 fn function_detail(node: &SyntaxNode) -> Option<String> {

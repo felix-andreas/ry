@@ -40,11 +40,13 @@ You get:
   qualifies it as `pkg::name` and, outside a package's own code, one that adds `library(pkg)` after
   the `library` calls above the name
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
-  functions and sections under the function that defines them, plus workspace symbol search
+  functions and sections under the function that defines them, lists R6 members, S4 slots and a
+  type definition's tags under their class or type, plus workspace symbol search
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
   from a name to its argument, call, statement and block
-- semantic highlighting of parameters, called functions and package namespaces, which an R grammar
-  cannot tell apart, with functions from packages and base R marked as library functions
+- semantic highlighting of parameters, called functions, package namespaces and member names
+  (`x$field`, `x@slot`, `x$method()`, record and pattern fields, R6 members and S4 slots), which an
+  R grammar cannot tell apart, with functions from packages and base R marked as library functions
 - formatting with the same rules as `ry fmt`, for the whole document, a selection, or as you type
   (a line break lays out the line you finished, and `}` the block it closes, when your editor
   formats on type)
