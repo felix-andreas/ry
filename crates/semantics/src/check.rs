@@ -7283,6 +7283,27 @@ impl<'db> Checker<'db, '_> {
         {
             return unknown(self.db);
         }
+        // An operand of unknown type may be a classed object whose method takes the other
+        // operand as it is, as ggplot2's `+` takes a list of components, so a list beside it
+        // is no evidence of an error.
+        let opaque = |ty: Ty<'db>| matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any);
+        let list_like = |ty: Ty<'db>| {
+            guard_members(self.db, ty).iter().all(|member| {
+                matches!(
+                    member.kind(self.db),
+                    TyKind::List(_)
+                        | TyKind::NamedList(_)
+                        | TyKind::Tuple(_)
+                        | TyKind::Record(_)
+                        | TyKind::Null
+                )
+            })
+        };
+        if (opaque(resolved_left) && list_like(resolved_right))
+            || (opaque(resolved_right) && list_like(resolved_left))
+        {
+            return unknown(self.db);
+        }
         let left = self.classify_numeric_operand(resolved_left);
         let right = self.classify_numeric_operand(resolved_right);
 

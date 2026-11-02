@@ -2325,3 +2325,9 @@ weights <- function() V(3)$weight
 V: <T> fn(n: T) -> integer[]
 $.vs: <T, U> fn(x: T, name: U) -> character
 weights: fn() -> Unknown
+
+#---- a_list_beside_an_unknown_operand_may_meet_its_method
+added <- function(plot) undeclared::plot_of(plot) + list(1)
+#++++
+added: <T> fn(plot: T) -> Unknown
+24..43 warning[unresolved] unknown package namespace `undeclared`.

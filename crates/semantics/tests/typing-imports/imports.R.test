@@ -154,6 +154,20 @@ build <- function(frame) ggplot(frame) + 1L
 build: Unknown
 55..73 error[type-mismatch] `+` is not defined between `ggplot` and `integer`
 
+#---- a_plot_adds_a_list_of_components_or_null
+#description Imports: ggplot2
+extras <- function(main = NULL) {
+  out <- list()
+  if (!is.null(main)) out$title <- ggtitle(main)
+  out
+}
+titled <- function(df) ggplot(df) + extras(main = "x")
+plain <- function(df) ggplot(df) + NULL
+#++++
+extras: <T> fn([main]: T | NULL) -> list{} | list{title: gg}
+titled: <T> fn(df: T) -> ggplot
+plain: <T> fn(df: T) -> ggplot
+
 #==== testthat
 #---- declared_dependency_activates_the_testthat_stub
 #description Suggests: testthat
