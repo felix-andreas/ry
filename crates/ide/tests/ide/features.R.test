@@ -270,7 +270,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
-completion (128+): princomp, print, print.AsIs, print.by, print.condition, print.connection, print.data.frame, print.Date
+completion (128+): print, princomp, print.AsIs, print.by, print.condition, print.connection, print.data.frame, print.Date
 hint @1: fn() -> double
 
 #---- shadowed_local_not_global
@@ -333,7 +333,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> NULL"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> NULL"
-completion (128+): I, item, if, in, Inf, iconv, iconvlist, icuGetCollate
+completion (128+): I, item, in, if, Inf, iconv, iconvlist, icuGetCollate
 hint @1: fn() -> NULL
 hint @29: integer
 
@@ -357,7 +357,7 @@ action: Add inferred type annotations for the whole file
   edit 278..278 -> ": T"
   edit 281..281 -> ": T"
   edit 286..286 -> " -> T"
-completion (128+): x = , y = , f, g, break, else, FALSE, for
+completion (128+): x = , y = , f, function, g, break, else, FALSE
 hint @264: <T: numeric> fn(x: T, [y]: T) -> T
 
 #---- second_after_comma
@@ -378,7 +378,7 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> ": T"
   edit 23..23 -> " -> T"
   edit 45..45 -> " -> double"
-completion (128+): y = , f, g, break, else, FALSE, for, function
+completion (128+): y = , f, function, g, break, else, FALSE, for
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 hint @31: fn() -> double
 
@@ -397,7 +397,7 @@ action: Add inferred type annotations for the whole file
   edit 15..15 -> ": T"
   edit 18..18 -> ": T"
   edit 23..23 -> " -> T"
-completion (128+): f, g, break, else, FALSE, for, function, if
+completion (128+): f, function, g, break, else, FALSE, for, if
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 
 #---- stub_with_dots
@@ -413,7 +413,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> character"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> character"
-completion (128+): h, break, else, FALSE, for, function, if, in
+completion (128+): h, function, paste, break, else, FALSE, for, if
 hint @1: fn() -> character
 
 #---- unknown_name_hits_dots
@@ -429,7 +429,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> character"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> character"
-completion: none
+completion (1): collapse
 hint @1: fn() -> character
 
 #---- overload_set_lists_candidates
@@ -453,7 +453,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> integer"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
-completion (128+): h, break, else, FALSE, for, function, if, in
+completion (128+): h, function, sum, break, else, FALSE, for, if
 hint @1: fn() -> integer
 
 #---- overload_second_candidate_active
@@ -477,7 +477,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
-completion (128+): h, break, else, FALSE, for, function, if, in
+completion (128+): h, function, sum, break, else, FALSE, for, if
 hint @1: fn() -> double
 
 #==== hints
@@ -639,7 +639,7 @@ definition 26..27
 references: 26..27*, 35..36, 41..42
 rename: 3 edit(s)
 signature: none
-completion (1): T
+completion: none
 
 #---- rename_type_across_annotations
 #: @type Score {double}
@@ -836,7 +836,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
-completion (17): dead, DataFrame.head, DataFrame.read_csv, DataFrame.read_parquet, defaultDumpName, delayedAssign, Dict.keep_shared, .Deprecated
+completion (16): DataFrame.head, DataFrame.read_csv, DataFrame.read_parquet, defaultDumpName, delayedAssign, Dict.keep_shared, .Deprecated, model.frame.default
 hint @1: fn() -> double
 hint @24: double
 

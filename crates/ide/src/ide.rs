@@ -1777,6 +1777,7 @@ pub enum CompletionKind {
     Field,
     /// A tag name, completed after the `:` that starts a tag.
     Tag,
+    Package,
 }
 
 /// Variant order is the ranking order among items of equal match quality.
@@ -1790,6 +1791,39 @@ pub enum CompletionSource {
     Keyword,
     Stdlib,
     Field,
+    /// A package name, completed before the `::` that reads from it.
+    Package,
+    /// A name the project spells after `$`, `@` or `pkg::`, offered when the receiver's own
+    /// names are unknown or after them.
+    Spelled,
+}
+
+impl CompletionSource {
+    /// Ranking classes: within one, more frequently spelled names come first.
+    fn group(self) -> u8 {
+        match self {
+            CompletionSource::Argument => 0,
+            // A local is ranked with the globals by use: the item-local weight already favors it,
+            // and a parameter used everywhere must not bury `return`.
+            CompletionSource::Local
+            | CompletionSource::Global
+            | CompletionSource::Keyword
+            | CompletionSource::Stdlib
+            | CompletionSource::Field
+            | CompletionSource::Package => 2,
+            CompletionSource::Spelled => 3,
+        }
+    }
+
+    fn is_spelled_in_project(self) -> bool {
+        matches!(
+            self,
+            CompletionSource::Local
+                | CompletionSource::Global
+                | CompletionSource::Package
+                | CompletionSource::Spelled
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1847,14 +1881,15 @@ pub fn completion(
         return string_subscript_completion(db, file, offset, &string_token);
     }
 
+    let usage = Usage::of(db, files, file, offset);
     if let Some(items) = tag_completions(db, files, file, offset, &query) {
-        return finish_completions(items, &query);
+        return finish_completions(items, &query, &usage);
     }
     if let Some(items) = pattern_completions(db, file, offset, &query) {
-        return finish_completions(items, &query);
+        return finish_completions(items, &query, &usage);
     }
     if let Some(items) = literal_field_completions(db, file, offset, &query) {
-        return finish_completions(items, &query);
+        return finish_completions(items, &query, &usage);
     }
 
     // Resolving a scheme can type-check its item, so call shapes are filled in only for the
@@ -1862,7 +1897,7 @@ pub fn completion(
     let mut globals: Vec<(&str, Option<Item<'_>>)> = Vec::new();
     let items = match context {
         CompletionContext::Field => {
-            spelled_completions(db, files, &query, AT_EXPR, CompletionSource::Field)
+            spelled_completions(db, files, &query, AT_EXPR, CompletionSource::Spelled)
         }
         CompletionContext::Item => dollar_completions(db, files, file, offset, &query),
         CompletionContext::Namespace { package } => {
@@ -1885,6 +1920,7 @@ pub fn completion(
                 .collect();
             items.extend(frame_query_completions(db, file, offset, &query));
             items.extend(argument_name_completions(db, file, offset, &query));
+            items.extend(package_completions(db, files, &query));
             if let Some(position) = position_in_item(db, file, offset)
                 && let Some(naming) = item_naming(db, position.item)
                 && let Some(node) = item_node(db, position.item)
@@ -1987,7 +2023,7 @@ pub fn completion(
         }
     };
 
-    let mut result = finish_completions(items, &query)?;
+    let mut result = finish_completions(items, &query, &usage)?;
     let mut unresolved: HashMap<&str, usize> = result
         .items
         .iter()
@@ -3951,7 +3987,7 @@ fn string_subscript_completion(
             )
         })
         .collect();
-    finish_completions(items, query)
+    finish_completions(items, query, &Usage::none())
 }
 
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
@@ -4081,7 +4117,7 @@ fn annotation_completion(
                 ..CompletionItem::new(label, CompletionKind::Variable, source)
             }),
     );
-    finish_completions(items, query)
+    finish_completions(items, query, &Usage::none())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4186,8 +4222,7 @@ fn spelled_completions(
         let spelled = spelled_names(db, project_file);
         let names = match kind {
             AT_EXPR => &spelled.at,
-            DOLLAR_EXPR => &spelled.dollar,
-            _ => &spelled.namespace,
+            _ => &spelled.dollar,
         };
         labels.extend(
             names
@@ -4256,12 +4291,16 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
     names
 }
 
-/// The names a file spells after `@`, `$` and `::`, which untyped completion offers.
+/// The names a file spells after `@`, `$` and `::`, which untyped completion offers, and how
+/// often it spells each name anywhere, which ranks completion.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 struct SpelledNames {
     at: Vec<String>,
     dollar: Vec<String>,
-    namespace: Vec<String>,
+    /// As `(package, name)`.
+    namespace: Vec<(String, String)>,
+    /// Sorted by name.
+    uses: Vec<(String, u32)>,
 }
 
 /// Memoized per file, so completion does not re-walk every syntax tree in the project.
@@ -4271,26 +4310,69 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         at: Vec::new(),
         dollar: Vec::new(),
         namespace: Vec::new(),
+        uses: Vec::new(),
     };
     let root = semantics::parse(db, file).syntax_node();
+    let mut uses: HashMap<&str, u32> = HashMap::new();
+    let tokens: Vec<SyntaxToken> = root
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|token| token.kind() == IDENT || token.kind().is_keyword())
+        .collect();
+    for token in &tokens {
+        *uses.entry(token.text()).or_default() += 1;
+    }
+    spelled.uses = uses
+        .into_iter()
+        .map(|(name, count)| (name.trim_matches('`').to_owned(), count))
+        .collect();
+    spelled.uses.sort_unstable();
     for node in root.descendants() {
-        let names = match node.kind() {
-            AT_EXPR => &mut spelled.at,
-            DOLLAR_EXPR => &mut spelled.dollar,
-            NAMESPACE_EXPR => &mut spelled.namespace,
-            _ => continue,
-        };
         // The lhs is an expression node, so the last bare NAME child is the spelled name.
-        if let Some(name) = node.children().filter(|child| child.kind() == NAME).last() {
-            names.push(name.text().to_string());
+        let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
+            continue;
+        };
+        let name = name.text().to_string();
+        match node.kind() {
+            AT_EXPR => spelled.at.push(name),
+            DOLLAR_EXPR => spelled.dollar.push(name),
+            NAMESPACE_EXPR => {
+                if let Some(package) = node.children().find(|child| child.kind() == NAME) {
+                    spelled.namespace.push((package.text().to_string(), name));
+                }
+            }
+            _ => {}
         }
     }
-    for names in [&mut spelled.at, &mut spelled.dollar, &mut spelled.namespace] {
+    for names in [&mut spelled.at, &mut spelled.dollar] {
         names.sort_unstable();
         names.dedup();
     }
+    spelled.namespace.sort_unstable();
+    spelled.namespace.dedup();
     spelled
 }
+
+/// How often the project spells each name, summed over [`spelled_names`]. An edit recomputes it
+/// only when it changes a file's counts, and the merge is linear in the distinct names per file.
+#[salsa::tracked(returns(ref))]
+fn project_uses(db: &dyn Db, files: ProjectFiles) -> NameUses {
+    let mut uses: HashMap<String, u32> = HashMap::new();
+    for &file in files.files(db) {
+        for (name, count) in &spelled_names(db, file).uses {
+            match uses.get_mut(name.as_str()) {
+                Some(total) => *total += count,
+                None => {
+                    uses.insert(name.clone(), *count);
+                }
+            }
+        }
+    }
+    NameUses(uses)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct NameUses(HashMap<String, u32>);
 
 fn dollar_completions(
     db: &dyn Db,
@@ -4349,10 +4431,48 @@ fn dollar_completions(
                 .collect::<Vec<_>>(),
         )
     })();
-    match typed {
-        Some(items) => items,
-        None => spelled_completions(db, files, query, DOLLAR_EXPR, CompletionSource::Field),
+    if let Some(items) = typed {
+        return items;
     }
+    // An untyped receiver offers the fields its constructions declare first, then every name the
+    // project spells after `$`, since R code adds fields that no construction shows.
+    let mut items: Vec<CompletionItem> = (|| {
+        let position = position_in_item(db, file, offset)?;
+        let hir = item_hir(db, position.item).as_ref()?;
+        let field = hir
+            .expressions()
+            .enumerate()
+            .filter(|(_, expression)| {
+                matches!(expression.kind, ExpressionKind::Field { at: false, .. })
+                    && !expression.range.is_empty()
+                    && expression.range.contains_inclusive(position.relative)
+            })
+            .min_by_key(|(_, expression)| expression.range.len())
+            .map(|(index, _)| ExprId::new(index))?;
+        let names = fields::receiver_fields(db, files, position.item, field)?;
+        Some(
+            names
+                .into_iter()
+                .filter(|name| search_match(name.as_str(), query).is_some())
+                .map(|name| {
+                    CompletionItem::new(
+                        insertable_name(name.as_str()),
+                        CompletionKind::Field,
+                        CompletionSource::Field,
+                    )
+                })
+                .collect(),
+        )
+    })()
+    .unwrap_or_default();
+    items.extend(spelled_completions(
+        db,
+        files,
+        query,
+        DOLLAR_EXPR,
+        CompletionSource::Spelled,
+    ));
+    items
 }
 
 /// What `$` reads on a nominal value: its definition's body, as the checker projects it.
@@ -4980,50 +5100,125 @@ fn namespace_completions(
     package: &str,
     query: &str,
 ) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
     if let Some(library) = stubs(db)
         && let Some(exports) = library.exports_by_namespace.get(package)
     {
-        return exports
-            .iter()
-            .filter(|name| search_match(name, query).is_some())
-            .map(|name| {
-                let label = insertable_name(name);
-                match library
-                    .schemes
-                    .get(name)
-                    .and_then(|schemes| schemes.first())
-                {
-                    Some(scheme) => scheme_completion(db, label, scheme),
-                    None => CompletionItem::new(
-                        label,
-                        CompletionKind::Variable,
-                        CompletionSource::Stdlib,
-                    ),
-                }
-            })
-            .collect();
+        items.extend(
+            exports
+                .iter()
+                .filter(|name| search_match(name, query).is_some())
+                .map(|name| {
+                    let label = insertable_name(name);
+                    match library
+                        .schemes
+                        .get(name)
+                        .and_then(|schemes| schemes.first())
+                    {
+                        Some(scheme) => scheme_completion(db, label, scheme),
+                        None => CompletionItem::new(
+                            label,
+                            CompletionKind::Variable,
+                            CompletionSource::Stdlib,
+                        ),
+                    }
+                }),
+        );
     }
-    spelled_completions(db, files, query, NAMESPACE_EXPR, CompletionSource::Global)
+    // A package without stubs still completes what the project reads from it; with stubs, the
+    // spelled names add the internals read through `:::`.
+    for &project_file in files.files(db) {
+        let spelled = &spelled_names(db, project_file).namespace;
+        let start =
+            spelled.partition_point(|(spelled_package, _)| spelled_package.as_str() < package);
+        items.extend(
+            spelled
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|(spelled_package, _)| spelled_package == package)
+                .filter(|(_, name)| search_match(name, query).is_some())
+                .map(|(_, name)| {
+                    CompletionItem::new(
+                        name.clone(),
+                        CompletionKind::Variable,
+                        CompletionSource::Spelled,
+                    )
+                }),
+        );
+    }
+    items
+}
+
+/// The packages the project reads with `::` and the ones it declares or attaches, completed as
+/// the start of a `pkg::name`.
+fn package_completions(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<CompletionItem> {
+    let mut packages: BTreeSet<&str> = BTreeSet::new();
+    for &project_file in files.files(db) {
+        packages.extend(
+            spelled_names(db, project_file)
+                .namespace
+                .iter()
+                .map(|(package, _)| package.as_str())
+                .filter(|package| search_match(package, query).is_some()),
+        );
+    }
+    packages
+        .into_iter()
+        .map(|package| {
+            CompletionItem::new(
+                package.to_owned(),
+                CompletionKind::Package,
+                CompletionSource::Package,
+            )
+        })
+        .collect()
 }
 
 /// A one-letter query fuzzy-matches nearly every global in a large project, so only the
 /// first [`COMPLETION_LIMIT`] are selected and sorted, without allocating a key per candidate.
-fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<CompletionResult> {
-    let mut ranked: Vec<(Option<MatchScore>, usize)> = {
+///
+/// Within a match tier and a [`CompletionSource::group`], names the project spells more often
+/// rank first, counting the current file twice: in R a call to `return` or `is.null` is far more
+/// likely than the alphabetically first global that shares the prefix.
+fn finish_completions(
+    items: Vec<CompletionItem>,
+    query: &str,
+    usage: &Usage<'_>,
+) -> Option<CompletionResult> {
+    let mut ranked: Vec<(Option<MatchScore>, u8, Reverse<u32>, usize)> = {
         let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
         items
             .iter()
             .enumerate()
             .filter(|(_, item)| seen.insert(item.label.as_str()))
-            .map(|(index, item)| (search_match(&item.label, query), index))
+            .filter_map(|(index, item)| {
+                let name = item.label.trim_matches('`');
+                // The word being typed is spelled once, at the cursor, and is no completion of
+                // itself.
+                if name == query
+                    && usage.project_count(name) <= 1
+                    && item.source.is_spelled_in_project()
+                {
+                    return None;
+                }
+                let uses = usage.count(name);
+                Some((
+                    search_match(&item.label, query),
+                    item.source.group(),
+                    Reverse(uses),
+                    index,
+                ))
+            })
             .collect()
     };
-    let order = |left: &(Option<MatchScore>, usize), right: &(Option<MatchScore>, usize)| {
-        let (Some(left_item), Some(right_item)) = (items.get(left.1), items.get(right.1)) else {
-            return left.1.cmp(&right.1);
+    let order = |left: &(Option<MatchScore>, u8, Reverse<u32>, usize),
+                 right: &(Option<MatchScore>, u8, Reverse<u32>, usize)| {
+        let (Some(left_item), Some(right_item)) = (items.get(left.3), items.get(right.3)) else {
+            return left.3.cmp(&right.3);
         };
-        left.0
-            .cmp(&right.0)
+        (left.0, left.1, left.2)
+            .cmp(&(right.0, right.1, right.2))
             .then(left_item.source.cmp(&right_item.source))
             .then_with(|| {
                 left_item
@@ -5043,13 +5238,85 @@ fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<Complet
     let mut slots: Vec<Option<CompletionItem>> = items.into_iter().map(Some).collect();
     let items: Vec<CompletionItem> = ranked
         .into_iter()
-        .filter_map(|(_, index)| slots.get_mut(index).and_then(Option::take))
+        .filter_map(|(_, _, _, index)| slots.get_mut(index).and_then(Option::take))
         .collect();
     (!items.is_empty()).then_some(CompletionResult {
         items,
         is_incomplete,
     })
 }
+
+/// How often a name is spelled, for ranking: across the project, in the current file, and in
+/// the top-level item around the cursor. Nearer uses weigh more, since code tends to reuse the
+/// names it has just used.
+struct Usage<'db> {
+    project: Option<&'db NameUses>,
+    file: Option<&'db SpelledNames>,
+    item: HashMap<String, u32>,
+}
+
+impl<'db> Usage<'db> {
+    fn of(db: &'db dyn Db, files: ProjectFiles, file: SourceFile, offset: TextSize) -> Self {
+        let mut item: HashMap<String, u32> = HashMap::new();
+        if let Some(position) = position_in_item(db, file, offset)
+            && let Some(node) = item_node(db, position.item)
+        {
+            for token in node
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .filter(|token| token.kind() == IDENT)
+            {
+                let name = token.text().trim_matches('`');
+                match item.get_mut(name) {
+                    Some(count) => *count += 1,
+                    None => {
+                        item.insert(name.to_owned(), 1);
+                    }
+                }
+            }
+        }
+        Usage {
+            project: Some(project_uses(db, files)),
+            file: Some(spelled_names(db, file)),
+            item,
+        }
+    }
+
+    fn none() -> Usage<'static> {
+        Usage {
+            project: None,
+            file: None,
+            item: HashMap::new(),
+        }
+    }
+
+    fn project_count(&self, name: &str) -> u32 {
+        self.project
+            .and_then(|uses| uses.0.get(name).copied())
+            .unwrap_or(0)
+    }
+
+    fn count(&self, name: &str) -> u32 {
+        let file = self
+            .file
+            .and_then(|spelled| {
+                spelled
+                    .uses
+                    .binary_search_by(|(spelled, _)| spelled.as_str().cmp(name))
+                    .ok()
+                    .and_then(|index| spelled.uses.get(index))
+                    .map(|(_, count)| *count)
+            })
+            .unwrap_or(0);
+        let item = self.item.get(name).copied().unwrap_or(0);
+        self.project_count(name)
+            .saturating_add(file.saturating_mul(FILE_USE_WEIGHT))
+            .saturating_add(item.saturating_mul(ITEM_USE_WEIGHT))
+    }
+}
+
+const FILE_USE_WEIGHT: u32 = 3;
+const ITEM_USE_WEIGHT: u32 = 10;
 
 /// Offers `name = ` for each parameter of the enclosing call that no argument has claimed yet,
 /// following R's matching: named arguments claim their parameter, and positional ones fill the
@@ -5098,12 +5365,15 @@ fn argument_name_completions(
     // The cursor is either on a bare name it is typing as a positional argument, or between
     // arguments; anywhere inside an argument's own expression or name, a name would not fit.
     let mut typed = None;
+    // On the name of a named argument, the user is replacing that name, which keeps its `=`.
+    let mut renaming = None;
     for (index, argument) in arguments.iter().enumerate() {
         if hir
             .argument_name_range(argument)
             .is_some_and(|range| range.contains_inclusive(relative))
         {
-            return Vec::new();
+            renaming = Some(index);
+            continue;
         }
         let Some(value) = argument.value else {
             continue;
@@ -5124,7 +5394,9 @@ fn argument_name_completions(
     };
     let claimed: HashSet<&str> = arguments
         .iter()
-        .filter_map(|argument| hir.argument_name(argument).map(Symbol::as_str))
+        .enumerate()
+        .filter(|(index, _)| renaming != Some(*index))
+        .filter_map(|(_, argument)| hir.argument_name(argument).map(Symbol::as_str))
         .collect();
     let positional = arguments
         .iter()
@@ -5158,7 +5430,10 @@ fn argument_name_completions(
             CompletionItem {
                 detail: Some(TypeRenderer::default().render(db, field.ty)),
                 ..CompletionItem::new(
-                    format!("{} = ", insertable_name(name)),
+                    match renaming {
+                        Some(_) => insertable_name(name),
+                        None => format!("{} = ", insertable_name(name)),
+                    },
                     CompletionKind::Variable,
                     CompletionSource::Argument,
                 )
@@ -5209,6 +5484,7 @@ pub struct MatchScore {
 enum MatchTier {
     Exact,
     Prefix,
+    PrefixOtherCase,
     Substring,
     Subsequence,
 }
@@ -5223,10 +5499,13 @@ pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
     let case_sensitive = query_is_case_sensitive(query);
     // Most candidates are settled here, before the character scan below.
     if prefix_under_case(candidate, query, case_sensitive) {
-        let tier = if equal_under_case(candidate, query, case_sensitive) {
+        // Smart case still prefers the spelling the user typed: `re` is `return` before `Re`.
+        let tier = if candidate == query {
             MatchTier::Exact
-        } else {
+        } else if candidate.starts_with(query) {
             MatchTier::Prefix
+        } else {
+            MatchTier::PrefixOtherCase
         };
         return Some(MatchScore {
             tier,
@@ -5275,14 +5554,6 @@ pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
 
 fn query_is_case_sensitive(query: &str) -> bool {
     query.chars().any(|character| character.is_uppercase())
-}
-
-fn equal_under_case(candidate: &str, query: &str, case_sensitive: bool) -> bool {
-    if case_sensitive {
-        candidate == query
-    } else {
-        candidate.eq_ignore_ascii_case(query)
-    }
 }
 
 fn prefix_under_case(candidate: &str, query: &str, case_sensitive: bool) -> bool {

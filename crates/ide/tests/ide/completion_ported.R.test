@@ -183,7 +183,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (2): fi, first_field
+completion (1): first_field
 
 #---- single_colon_not_namespace
 pkg:al$0

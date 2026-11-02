@@ -64,7 +64,7 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 17..17 -> ": integer"
   edit 30..30 -> ": integer"
-completion (128+): other, result, value, break, else, FALSE, for, function
+completion (128+): other, value, result, break, else, FALSE, for, function
 hint @5: integer
 hint @17: integer
 hint @30: integer
@@ -153,7 +153,7 @@ action: Add inferred type annotation for `block`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 17..17 -> ": integer"
-completion (128+): block, value, break, else, FALSE, for, function, if
+completion (128+): value, block, break, else, FALSE, for, function, if
 hint @5: integer
 hint @17: integer
 
@@ -171,7 +171,7 @@ action: Add inferred type annotation for `negated`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 19..19 -> ": integer"
-completion (128+): negated, value, break, else, FALSE, for, function, if
+completion (128+): value, negated, break, else, FALSE, for, function, if
 hint @5: integer
 hint @19: integer
 
@@ -207,7 +207,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 18..18 -> ": NULL"
-completion (102): F, FALSE, for, function, factanal, factor, factor.scope, factorial
+completion (102): F, for, FALSE, function, factanal, factor, factor.scope, factorial
 hint @5: integer
 hint @18: NULL
 hint @31: integer
@@ -731,7 +731,7 @@ action: Add inferred type annotation for `total`
   edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
-completion (128+): S3Class, S3Part, sample, sample.int, sapply, save, save.image, savehistory
+completion (128+): sum, S3Class, S3Part, sample, sample.int, sapply, save, save.image
 hint @5: integer
 
 #==== hover_untyped_callees
@@ -768,7 +768,7 @@ definition: installed c from base, stats, utils, methods, graphics, grDevices, d
 references: none
 rename: none
 signature: none
-completion (128+): a, b, x, f, break, else, FALSE, for
+completion (128+): a, b, x, f, function, c, break, else
 
 #---- base_argument_name
 f <- function(env) {
@@ -781,7 +781,7 @@ definition: installed ls from base, stats, utils, methods, graphics, grDevices, 
 references: none
 rename: none
 signature: none
-completion (120): all, all.equal, all.equal.character, all.equal.default, all.equal.environment, all.equal.envRefClass, all.equal.factor, all.equal.formula
+completion (120): all, all.names, all.equal, all.equal.character, all.equal.default, all.equal.environment, all.equal.envRefClass, all.equal.factor
 
 #---- installed_argument_name
 f <- function(x) {

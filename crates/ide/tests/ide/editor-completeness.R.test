@@ -150,7 +150,7 @@ definition 5..6
 references: 5..6*, 29..30
 rename: 2 edit(s)
 signature: none
-completion (128+): i, I, if, in, Inf, iconv, iconvlist, icuGetCollate
+completion (128+): i, I, in, if, Inf, iconv, iconvlist, icuGetCollate
 hint @6: integer
 
 #---- loop_var_use_hover
@@ -163,7 +163,7 @@ references: 5..6*, 29..30
 rename: 2 edit(s)
 signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
 parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
-completion (128+): i, I, if, in, Inf, iconv, iconvlist, icuGetCollate
+completion (128+): i, I, in, if, Inf, iconv, iconvlist, icuGetCollate
 hint @6: integer
 
 #---- completion_argument_names
@@ -217,7 +217,7 @@ action: Add inferred type annotations for the whole file
   edit 13..13 -> "<T>"
   edit 19..19 -> ": T"
   edit 20..20 -> " -> T"
-completion (128+): result, value, f, break, else, FALSE, for, function
+completion (128+): value, result, f, function, break, else, FALSE, for
 hint @1: <T> fn(value: T) -> T
 
 #---- completion_skips_positionally_filled_parameter
@@ -236,7 +236,7 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": U"
   edit 44..44 -> ": V"
   edit 50..50 -> " -> T"
-completion (128+): second = , third = , helper, break, else, FALSE, for, function
+completion (128+): second = , third = , helper, function, break, else, FALSE, for
 hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
 
 #---- completion_skips_named_parameter
@@ -255,7 +255,7 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": U"
   edit 44..44 -> ": V"
   edit 50..50 -> " -> T"
-completion (128+): first = , second = , helper, break, else, FALSE, for, function
+completion (128+): first = , second = , helper, function, break, else, FALSE, for
 hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
 
 #---- completion_no_parameter_names_in_named_value
@@ -273,7 +273,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (128+): helper, break, else, FALSE, for, function, if, in
+completion (128+): helper, function, break, else, FALSE, for, if, in
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 
 #---- base_data_frame_hover
@@ -325,7 +325,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
-completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
 
 #---- parameter_renames_its_named_arguments
@@ -369,7 +369,7 @@ action: Add inferred type annotation for `doubled`
 action: Add inferred type annotations for the whole file
   edit 7..7 -> ": double"
   edit 39..39 -> ": double"
-completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @7: double
 hint @39: double
 
@@ -389,7 +389,7 @@ action: Add inferred type annotation for `outer`
   edit 19..19 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> double"
-completion (72): break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default, bartlett.test
+completion (72): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
 hint @5: fn() -> double
 hint @29: fn(x: T, by: T) -> T
 
@@ -463,7 +463,7 @@ definition: installed paste from utils
 references: none
 rename: none
 signature: none
-completion (6): package.skeleton, packageDescription, packageStatus, getParseData, getParseText, make.packages.html
+completion (7): paste, package.skeleton, packageDescription, packageStatus, getParseData, getParseText, make.packages.html
 
 #---- abbreviated_argument_is_not_followed
 grow <- function(principal, rate) principal * (1 + rate)
@@ -480,7 +480,7 @@ action: Add inferred type annotations for the whole file
   edit 26..26 -> ": T"
   edit 32..32 -> ": U"
   edit 33..33 -> " -> double"
-completion (15): rainbow, randu, range, range.Date, range.default, range.POSIXct, rank, rapply
+completion (16): rate, rainbow, randu, range, range.Date, range.default, range.POSIXct, rank
 hint @4: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double
 
 #---- field_list_literal
@@ -730,27 +730,17 @@ encapsulate({
 })
 f <- function(y) helper(y, env$0ir = NULL)
 #++++
-hover 150..155: [envir]: NULL
+hover 150..155: envir: NULL
 definition 104..109
 references: 104..109*, 150..155
 rename: 2 edit(s)
-signature: fn(x: T, [envir]: NULL) -> T
-parameters: x: T | [[envir]: NULL]
-action: Add inferred type annotation for `f`
-  edit 136..136 -> "<T>"
-  edit 138..138 -> ": T"
-  edit 139..139 -> " -> T"
+signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
-  edit 136..136 -> "<T>"
-  edit 138..138 -> ": T"
-  edit 139..139 -> " -> T"
 completion (63): env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv, new.env
 hint @11: <T> fn([expr]: T) -> Any
 hint @35expr =
 hint @53envir =
-hint @88: fn(x: T, [envir]: U) -> T
-hint @124: <T> fn(y: T) -> T
 
 #---- field_forwarded_through_dots
 new_rate <- function(.subclass, ..., jitter = TRUE) {
@@ -814,7 +804,7 @@ action: Add inferred type annotation for `df`
   edit 2..2 -> ": data.frame"
 action: Add inferred type annotations for the whole file
   edit 2..2 -> ": data.frame"
-completion (1): default.stringsAsFactors
+completion (2): stringsAsFactors, default.stringsAsFactors
 hint @2: data.frame
 
 #---- field_self_reassigned

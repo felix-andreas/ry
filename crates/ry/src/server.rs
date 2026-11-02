@@ -3540,6 +3540,7 @@ fn convert_completion_item(
         CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
         CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
         CompletionKind::Tag => lsp_types::CompletionItemKind::ENUM_MEMBER,
+        CompletionKind::Package => lsp_types::CompletionItemKind::MODULE,
     };
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
