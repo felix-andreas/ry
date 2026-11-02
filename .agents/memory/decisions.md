@@ -5226,3 +5226,47 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   cold-check target is not met, and the rest of the profile is flat across mimalloc, salsa's
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
+
+## `$` fields resolve through the values that built the receiver
+
+- Before, a `$` field was no navigation target at all: goto, references and rename found nothing.
+- Now `ide::fields` follows the receiver back to its constructions: a constructor call (`list`,
+  `data.frame`, `DataFrame`, `env`...), a record, an R6 class seen from outside or through
+  `self$`/`private$` (following `inherit`), `Class$new(...)`, pass-through calls, the returns of a
+  project function, `if` branches, and `receiver$name <- value` writes. The named element is the
+  declaration. Depth is capped (`MAX_DEPTH`) to bound a request.
+- A receiver that cannot be followed (a parameter) falls back to every same-named declaration in
+  the project. That target is imprecise: references list every same-named access, and rename is
+  refused, because a guess must never edit code.
+- A receiver a library function returns has its fields declared by that function, so goto goes
+  to the function (stub or installed package) and the hover carries its help page.
+- A tag's payload record is not a field declaration, because patterns, not `$`, read it.
+- A named argument passed to a project function that forwards its `...` into a constructor
+  (`new_rate <- function(...) list(...)`, then `new_rate(pause = 1)`) declares that field for the
+  by-name fallback, unless it names one of the function's parameters.
+- `object$method(arg = 1)` navigates `arg` to the parameter of the function the precise field
+  holds, and references of that parameter include such calls, so rename edits them too.
+- Field spellings come from `field_index`, a tracked map built from per-file `file_fields`
+  memos, so a references request does not scan every file and an edit re-derives one file's list.
+  References on a precise field resolve every same-named access through one `Resolver`, which
+  caches each item's field writes, so a common name costs one scan per item, not per access.
+  `goto_definition` returns several locations because an `if` can build the value two ways.
+
+## Packages without stubs are read from the R library by the host, lazily
+
+- Before, a name that neither the project nor a stub declared had no definition and hovered as
+  `Unknown`.
+- Now the analysis returns `DefinitionTarget::Package` with the candidate packages, in R's lookup
+  order (`importFrom`, `import`, attached packages, then the default search path). The analysis
+  never touches the R library, so it stays pure, deterministic and independent of the machine.
+- The host (`crates/ry/src/installed.rs`) resolves the target through the `rdb` crate, which
+  reads a package's lazy-load database (`R/<pkg>.rdb`/`.rdx`) and Rd help without running R. A
+  package is read once, on first use, and its namespace is written as R source under
+  `<cache>/ry/packages/<pkg>/<version>/<pkg>.R` so the editor can open it; the server ignores
+  that file's open and change notifications so it never becomes project code.
+- Base primitives have no R code. Their argument lists come from the closures in `.ArgsEnv` and
+  `.GenericArgsEnv`, which the database stores as separate environment records (the index's
+  `references` table), and the generated source shows them as `name <- function(args)
+  .Primitive("name")`.
+- The LSP simulator runs with `installed_packages: false`, because the machine's library would
+  make it nondeterministic. No stub is generated from what is read: this is navigation only.

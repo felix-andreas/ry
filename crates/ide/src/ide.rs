@@ -132,16 +132,19 @@ pub fn hover(
     {
         return typed;
     }
+    // A field a library function returns is documented on that function.
+    if let Some(position) = position_in_item(db, file, offset)
+        && let Some(producers) =
+            fields::field_producers(db, files, position.item, position.relative)
+    {
+        let mut field_hover = typed?;
+        field_hover.definition = producers.iter().find_map(|producer| {
+            hover(db, files, producer.file, producer.range.start())?.definition
+        });
+        return Some(field_hover);
+    }
     let package = match target_at(db, files, file, offset) {
         Some(Target::Package(target)) => target,
-        // A field a library function returns is documented on that function.
-        Some(Target::Field(field)) => {
-            let mut field_hover = typed?;
-            field_hover.definition = field.producers.iter().find_map(|producer| {
-                hover(db, files, producer.file, producer.range.start())?.definition
-            });
-            return Some(field_hover);
-        }
         Some(Target::StubGlobal(name)) if stub_target(db, &name).is_none() => {
             library_target(db, name)
         }
@@ -155,6 +158,15 @@ pub fn hover(
             definition: None,
         }
     });
+    // The help page says more than an `Unknown` type does.
+    let unknown = format!("{}: Unknown", package.name);
+    if hover
+        .lines
+        .iter()
+        .all(|line| line == "Unknown" || *line == unknown)
+    {
+        hover.lines = vec![package.name.clone()];
+    }
     hover.definition = Some(HoverDefinition::Package(package));
     Some(hover)
 }
@@ -259,6 +271,35 @@ fn typed_hover(
             definition,
         });
     }
+    // `pkg::name` as a call head likewise: its stub signature when that package's stub declares
+    // it, else the bare name, which the caller documents from the installed package.
+    if let Some(innermost) = position.expression_at()
+        && check.expression_types.get(&innermost).is_none()
+        && let ExpressionKind::Namespace {
+            package: Some(package),
+            name: Some(name),
+            ..
+        } = &hir.kind(innermost)
+    {
+        let stubbed = declaring_namespace(db, name)
+            .filter(|namespace| *namespace == package.as_str())
+            .and_then(|_| stubs(db)?.schemes.get(name.as_str())?.last().cloned());
+        let (lines, definition) = match stubbed {
+            Some(mut scheme) => {
+                scheme.body = without_impossible_vectors(db, scheme.body);
+                (
+                    hover_lines(db, name, &scheme),
+                    stub_hover_definition(db, name),
+                )
+            }
+            None => (vec![name.to_string()], None),
+        };
+        return Some(Hover {
+            range: trim_trailing_trivia(file.text(db), hir.range(innermost) + position.item_offset),
+            lines,
+            definition,
+        });
+    }
     // Write targets and operators record no type, so the hover widens to the enclosing typed
     // expression.
     let (expression, ty) = position
@@ -294,6 +335,9 @@ fn typed_hover(
                 hover_definition(db, files, position.item, expression, name),
             )
         }
+        ExpressionKind::Namespace {
+            name: Some(name), ..
+        } => (hover_lines(db, name, &TypeScheme::monomorphic(ty)), None),
         _ => (vec![TypeRenderer::default().render(db, ty)], None),
     };
 
@@ -415,12 +459,23 @@ fn member_at<'db>(
                     range: name_range,
                 } = hir[name];
                 // An assignment target records no type of its own, but its record still says
-                // what the field holds.
+                // what the field holds, and failing that, the assigned value does.
+                let field = ExprId::new(index);
+                let assigned = || {
+                    hir.expressions()
+                        .find_map(|expression| match expression.kind {
+                            ExpressionKind::Assign { target, value, .. } if *target == field => {
+                                check.expression_types.get(value).copied()
+                            }
+                            _ => None,
+                        })
+                };
                 let ty = check
                     .expression_types
-                    .get(&ExprId::new(index))
+                    .get(&field)
                     .copied()
-                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))?;
+                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))
+                    .or_else(assigned)?;
                 return Some(Member {
                     range: name_range,
                     label: Some(name.to_string()),
@@ -696,14 +751,23 @@ fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Opti
     package_definitions(db, files)
         .get(&Symbol::new(name))
         .copied()
-        .or_else(|| {
-            files.files(db).iter().find_map(|&file| {
-                item_tree(db, file).iter().copied().find(|item| {
-                    matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                        && item.name(db).as_deref() == Some(name)
-                })
-            })
-        })
+        .or_else(|| project_declarations(db, files).get(name).copied())
+}
+
+/// The first function or value item of each name across every project file, scripts and tests
+/// included. Field resolution asks for every library call head it follows, and a miss would
+/// otherwise scan every file's items.
+#[salsa::tracked(returns(ref))]
+fn project_declarations<'db>(db: &'db dyn Db, files: ProjectFiles) -> HashMap<String, Item<'db>> {
+    let mut declarations = HashMap::new();
+    for &file in files.files(db) {
+        for name in global_names(db, file) {
+            if let Some(item) = name.item {
+                declarations.entry(name.name.clone()).or_insert(item);
+            }
+        }
+    }
+    declarations
 }
 
 /// Without a committed overload, the last stub candidate: by corpus convention the most general.
@@ -5590,10 +5654,25 @@ fn parameter_target<'db>(
     argument: &NamedArgument,
 ) -> Option<Target<'db>> {
     let naming = item_naming(db, item).as_ref()?;
-    let callee = expression_target(db, files, item, naming, argument.callee)?;
+    let hir = item_hir(db, item).as_ref()?;
+    let callee = match hir.kind(argument.callee) {
+        ExpressionKind::Field { .. } => {
+            Target::Field(fields::resolve_field(db, files, item, argument.callee))
+        }
+        _ => expression_target(db, files, item, naming, argument.callee)?,
+    };
     match callee {
         Target::Global(name) => {
-            let definition = declaring_item(db, files, &name)?;
+            // A function a top-level block assigns, as in `local({ helper <- function(...) })`,
+            // is no item of its own, so its item is found from the declaration, as definition
+            // finds it.
+            let definition = declaring_item(db, files, &name).or_else(|| {
+                let target = Target::Global(name.clone());
+                let declaration = occurrences(db, files, &target)
+                    .into_iter()
+                    .find(|occurrence| occurrence.is_declaration)?;
+                Some(position_in_item(db, declaration.file, declaration.range.start())?.item)
+            })?;
             let binding = item_naming(db, definition)
                 .as_ref()?
                 .bindings
@@ -5604,8 +5683,59 @@ fn parameter_target<'db>(
         }
         Target::Slot { item, binding } => parameter_binding(db, item, binding, argument.name),
         library @ (Target::StubGlobal(_) | Target::Package(_)) => Some(library),
+        // `object$method(deep = TRUE)`: the parameter of the function the field was given.
+        Target::Field(field) if field.precise => field.sites.iter().find_map(|site| {
+            let position = position_in_item(db, site.file, site.range.start())?;
+            let hir = item_hir(db, position.item).as_ref()?;
+            let declared = site.range - position.item_offset;
+            let function = hir
+                .expressions()
+                .find_map(|expression| match &expression.kind {
+                    ExpressionKind::Call { arguments, .. } => {
+                        hir[arguments].iter().find_map(|named| {
+                            (hir.argument_name_range(named)? == declared).then_some(named.value?)
+                        })
+                    }
+                    ExpressionKind::Record(fields) => hir[fields]
+                        .iter()
+                        .find(|record_field| record_field.name_range == declared)
+                        .map(|record_field| record_field.value),
+                    ExpressionKind::Assign { target, value, .. } => {
+                        matches!(hir.kind(*target), ExpressionKind::Field { name: Some(name), .. }
+                        if hir.name_range(*name) == declared)
+                        .then_some(*value)
+                    }
+                    _ => None,
+                })?;
+            function_parameter(db, position.item, function, argument.name)
+        }),
         _ => None,
     }
+}
+
+/// The parameter named `name` of the function expression `function`.
+fn function_parameter<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    function: ExprId,
+    name: Symbol,
+) -> Option<Target<'db>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let naming = item_naming(db, item).as_ref()?;
+    let ExpressionKind::Function { parameters, .. } = hir.kind(function) else {
+        return None;
+    };
+    let parameter = hir[parameters]
+        .iter()
+        .find(|parameter| parameter.name == name)?;
+    let (binding, _) = naming
+        .bindings
+        .iter()
+        .find(|(_, info)| info.kind == BindingKind::Parameter && info.range == parameter.range)?;
+    Some(Target::Slot {
+        item,
+        binding: *binding,
+    })
 }
 
 /// The parameter named `name` of the function last assigned to `function`.
@@ -5617,34 +5747,19 @@ fn parameter_binding<'db>(
 ) -> Option<Target<'db>> {
     let hir = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let parameter = hir
+    let value = hir
         .expressions()
         .filter_map(|expression| match expression.kind {
             ExpressionKind::Assign { target, value, .. }
-                if naming.resolutions.get(target) == Some(&function) =>
+                if naming.resolutions.get(target) == Some(&function)
+                    && matches!(hir.kind(*value), ExpressionKind::Function { .. }) =>
             {
-                match hir.kind(*value) {
-                    ExpressionKind::Function { parameters, .. } => Some(parameters),
-                    _ => None,
-                }
+                Some(*value)
             }
             _ => None,
         })
-        .last()
-        .and_then(|parameters| {
-            hir[parameters]
-                .iter()
-                .find(|parameter| parameter.name == name)
-                .copied()
-        })?;
-    let (binding, _) = naming
-        .bindings
-        .iter()
-        .find(|(_, info)| info.kind == BindingKind::Parameter && info.range == parameter.range)?;
-    Some(Target::Slot {
-        item,
-        binding: *binding,
-    })
+        .last()?;
+    function_parameter(db, item, value, name)
 }
 
 /// The named arguments that fill a parameter at the calls of its function, so a rename of the
@@ -5680,25 +5795,32 @@ fn named_argument_occurrences(
     else {
         return;
     };
-    let Some(function_binding) = hir
+    let function_binding = hir
         .expressions()
         .find_map(|expression| match expression.kind {
             ExpressionKind::Assign { target, value, .. } if *value == function => {
                 naming.resolutions.get(target).copied()
             }
             _ => None,
-        })
-    else {
-        return;
-    };
-    let Some(function_info) = naming.bindings.get(&function_binding) else {
-        return;
-    };
+        });
     let mut callers = Vec::new();
-    if function_info.kind == BindingKind::TopLevel {
-        callers = occurrences(db, files, &Target::Global(function_info.name.to_string()));
-    } else {
-        slot_occurrences(db, item, function_binding, &mut callers);
+    match function_binding.and_then(|binding| Some((binding, naming.bindings.get(&binding)?))) {
+        Some((_, function_info)) if function_info.kind == BindingKind::TopLevel => {
+            callers = occurrences(db, files, &Target::Global(function_info.name.to_string()));
+        }
+        Some((function_binding, _)) => {
+            slot_occurrences(db, item, function_binding, &mut callers);
+        }
+        // A method, `list(copy = function(deep) ...)`: its calls are the reads of the field,
+        // when those are known precisely.
+        None => {
+            if let Some(declared) = field_holding(hir, function)
+                && let Some(field) = fields::field_at(db, files, item, declared.start())
+                && field.precise
+            {
+                callers = fields::field_occurrences(db, files, &field);
+            }
+        }
     }
     for caller in callers.iter().filter(|caller| !caller.is_declaration) {
         let Some(position) = position_in_item(db, caller.file, caller.range.start()) else {
@@ -5726,6 +5848,33 @@ fn named_argument_occurrences(
             }));
         }
     }
+}
+
+/// The item-relative name range of the field that `value` is put into: a named argument of a
+/// call, a record field, or a `receiver$name <- value` write.
+fn field_holding(hir: &Module, value: ExprId) -> Option<TextRange> {
+    hir.expressions()
+        .find_map(|expression| match &expression.kind {
+            ExpressionKind::Call { arguments, .. } => hir[arguments]
+                .iter()
+                .find(|argument| argument.value == Some(value))
+                .and_then(|argument| hir.argument_name_range(argument)),
+            ExpressionKind::Record(fields) => hir[fields]
+                .iter()
+                .find(|field| field.value == value)
+                .map(|field| field.name_range),
+            ExpressionKind::Assign {
+                target,
+                value: assigned,
+                ..
+            } if *assigned == value => match hir.kind(*target) {
+                ExpressionKind::Field {
+                    name: Some(name), ..
+                } => Some(hir.name_range(*name)),
+                _ => None,
+            },
+            _ => None,
+        })
 }
 
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a

@@ -205,6 +205,7 @@ pub fn package_source(package_dir: &Path) -> io::Result<PackageSource> {
         }))));
         text.push('\n');
     }
+    definitions.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(PackageSource { text, definitions })
 }
 

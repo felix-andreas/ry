@@ -19,6 +19,11 @@ You get:
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition
+- go-to-definition and hover on `$` fields: `account$balance` goes to where `balance` was put
+  into the value, whether that is `list(balance = 0)`, a record, an `account$balance <- x`
+  write, or a member of an R6 class read through `self$` or `private$`
+- navigation into installed packages that have no stub: go-to-definition opens the package's R
+  code, read from your R library, and hover shows its help page
 - signature help with each parameter's type and default, and inlay hints for assignments, loop
   variables, and parameter names in calls with two or more positional arguments
   (`grow(principal = 100, years = 2)`)
@@ -46,6 +51,24 @@ it are one binding, so renaming `rate` in `grow <- function(principal, rate)` al
 `grow(100, rate = 0.05)` in every file, and hover, go-to-definition and references work from either
 end. An abbreviated argument that R completes by partial matching (`grow(100, ra = 0.05)`) is not
 followed, so spell arguments out before you rename their parameter.
+
+A field ry cannot trace to the value it was read from, such as a field of a function parameter,
+goes to every place in the project that puts a field of that name into a value, and rename refuses
+it, because those places are a guess. A field of a value that a package function returns, such as
+`optim(start, cost)$par`, goes to that function, whose help page describes what it returns. A
+named argument passed to a function that collects its `...` into a list, as in
+`new_rate <- function(...) list(...)` and then `new_rate(pause = 1)`, counts as a place that puts
+`pause` into a value. In `account$deposit(amount = 5)`, the argument name `amount` goes to the
+parameter of the function stored in `deposit`, and renaming that parameter renames the argument.
+
+The code of an installed package comes from its lazy-load database, so it is the code R runs. ry
+writes it to a read-only file under your cache directory (`~/.cache/ry/packages` on Linux), named
+by the package's version, and reads a package only when you first navigate into it. It finds
+packages where R does: the libraries in `R_LIBS`, `R_LIBS_USER` and `R_LIBS_SITE`, your user
+library, the project's renv library, and R's own library. A package
+installed with `options(keep.source.pkgs = TRUE)` shows its original source with comments,
+otherwise the code is deparsed. Base R's primitive functions, such as `sum` and `c`, have no R
+code, so they show only their arguments.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.

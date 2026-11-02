@@ -686,7 +686,7 @@ completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid
 #---- uninferable_call
 unde$0fined_fn(1L)
 #++++
-hover 0..12: undefined_fn: Unknown
+hover 0..12: undefined_fn
 hover-definition: installed undefined_fn from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed undefined_fn from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -781,3 +781,36 @@ references: none
 rename: none
 signature: none
 completion (116): optim, optimHess, optimise, optimize, options, .Options, .OptRequireMethods, constrOptim
+
+#---- namespaced_callee
+f <- function(obj) {
+  utils::he$0ad(obj, 60)
+}
+#++++
+hover 23..34: head: fn(x: Any, [n]: Any, ...: Any) -> Any
+hover-definition: package utils (8 declaration(s), declared in stub source utils at `head`)
+definition: stub source utils at `head`
+references: none
+rename: none
+signature: fn(x: factor, [n]: integer | double, ...: Any) -> factor (active)
+parameters: [x: factor] | [n]: integer | double | ...: Any
+signature: fn(x: Date, [n]: integer | double, ...: Any) -> Date
+parameters: [x: Date] | [n]: integer | double | ...: Any
+signature: fn(x: data.frame, [n]: integer | double, ...: Any) -> data.frame
+parameters: [x: data.frame] | [n]: integer | double | ...: Any
+signature: fn(x: matrix, [n]: integer | double, ...: Any) -> matrix
+parameters: [x: matrix] | [n]: integer | double | ...: Any
+signature: <T> fn(x: T[], [n]: integer | double, ...: Any) -> T[]
+parameters: [x: T[]] | [n]: integer | double | ...: Any
+signature: <T> fn(x: list[named: T], [n]: integer | double, ...: Any) -> list[named: T]
+parameters: [x: list[named: T]] | [n]: integer | double | ...: Any
+signature: <T> fn(x: list[T], [n]: integer | double, ...: Any) -> list[T]
+parameters: [x: list[T]] | [n]: integer | double | ...: Any
+signature: fn(x: Any, [n]: Any, ...: Any) -> Any
+parameters: [x: Any] | [n]: Any | ...: Any
+action: Add inferred type annotation for `f`
+  edit 0..0 -> "#: <T> fn(obj: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn(obj: T) -> T\n"
+completion (6): head, head.matrix, help, help.request, help.search, help.start
+hint @1: <T> fn(obj: T) -> T

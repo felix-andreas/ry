@@ -10,7 +10,7 @@
 use {
     crate::{NavigationTarget, Occurrence, declaring_item, position_in_item},
     semantics::{
-        Db, Item, ProjectFiles, SourceFile,
+        Db, Item, ItemKind, ProjectFiles, SourceFile,
         hir::{AssignSpelling, ExprId, ExpressionKind, Module, Symbol},
         item_hir, item_naming, item_node, item_tree,
         naming::BindingKind,
@@ -102,6 +102,26 @@ fn declared_here(file: SourceFile, name: Symbol, range: TextRange) -> FieldTarge
     }
 }
 
+/// The library calls the receiver of the `$` field at `relative` comes from, without the by-name
+/// fallback, which hover has no use for and which costs a project-wide index on first use.
+pub(crate) fn field_producers(
+    db: &dyn Db,
+    files: ProjectFiles,
+    item: Item<'_>,
+    relative: TextSize,
+) -> Option<Vec<NavigationTarget>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let field = hir.expressions().position(|expression| {
+        matches!(expression.kind, ExpressionKind::Field { at: false, name: Some(name), .. }
+            if hir.name_range(*name).contains_inclusive(relative))
+    })?;
+    let resolved = precise_sites(db, files, item, ExprId::new(field))?;
+    Some(match resolved.sites.is_empty() {
+        true => resolved.producers,
+        false => Vec::new(),
+    })
+}
+
 /// Where the field read or written by `field` (a `Field` expression of `item`) is declared.
 pub(crate) fn resolve_field<'db>(
     db: &'db dyn Db,
@@ -159,6 +179,18 @@ fn precise_sites<'db>(
     item: Item<'db>,
     field: ExprId,
 ) -> Option<Resolved> {
+    resolve_with(&mut Resolver::new(db, files), item, field)
+}
+
+/// [`precise_sites`] through a resolver that may already hold the sources of earlier accesses.
+fn resolve_with<'db>(
+    resolver: &mut Resolver<'db>,
+    item: Item<'db>,
+    field: ExprId,
+) -> Option<Resolved> {
+    let db = resolver.db;
+    resolver.visited.clear();
+    resolver.producers.clear();
     let hir = item_hir(db, item).as_ref()?;
     let ExpressionKind::Field {
         target,
@@ -169,12 +201,6 @@ fn precise_sites<'db>(
         return None;
     };
     let name = hir[*name].name;
-    let mut resolver = Resolver {
-        db,
-        files,
-        visited: HashSet::new(),
-        producers: Vec::new(),
-    };
     let absolute = |item: Item<'db>, range: TextRange| {
         Some(NavigationTarget {
             file: *item.file(db),
@@ -250,6 +276,7 @@ pub(crate) fn field_occurrences(
         return result;
     }
     let target_sites: HashSet<NavigationTarget> = target.sites.iter().copied().collect();
+    let mut resolver = Resolver::new(db, files);
     for spelled in accesses {
         let file = spelled.file;
         let Some(position) = position_in_item(db, file, spelled.range.start()) else {
@@ -266,7 +293,7 @@ pub(crate) fn field_occurrences(
             continue;
         };
         let Some(Resolved { sites, .. }) =
-            precise_sites(db, files, position.item, ExprId::new(index))
+            resolve_with(&mut resolver, position.item, ExprId::new(index))
         else {
             continue;
         };
@@ -319,8 +346,15 @@ struct IndexedSpelling {
 #[salsa::tracked(returns(ref))]
 fn field_index(db: &dyn Db, files: ProjectFiles) -> FieldIndex {
     let mut by_name: HashMap<String, Vec<IndexedSpelling>> = HashMap::new();
+    let mut forwarders: HashMap<&str, &[String]> = HashMap::new();
     for &file in files.files(db) {
-        for spelled in field_spellings(db, file) {
+        let fields = file_fields(db, file);
+        for forwarder in &fields.forwarders {
+            forwarders
+                .entry(forwarder.name.as_str())
+                .or_insert(&forwarder.formals);
+        }
+        for spelled in &fields.spellings {
             by_name
                 .entry(spelled.name.clone())
                 .or_default()
@@ -329,6 +363,24 @@ fn field_index(db: &dyn Db, files: ProjectFiles) -> FieldIndex {
                     kind: spelled.kind,
                     range: spelled.range,
                 });
+        }
+    }
+    // `new_rate(pause = 1)` declares `pause` when `new_rate` puts its `...` into `list(...)`.
+    for &file in files.files(db) {
+        for argument in &file_fields(db, file).call_arguments {
+            if forwarders
+                .get(argument.callee.as_str())
+                .is_some_and(|formals| !formals.contains(&argument.name))
+            {
+                by_name
+                    .entry(argument.name.clone())
+                    .or_default()
+                    .push(IndexedSpelling {
+                        file,
+                        kind: SpellingKind::Element,
+                        range: argument.range,
+                    });
+            }
         }
     }
     FieldIndex { by_name }
@@ -343,6 +395,31 @@ enum SpellingKind {
     Access,
 }
 
+/// A file's field spellings, and what the project index needs to find fields passed through
+/// `...` into a constructor.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct FileFields {
+    spellings: Vec<FieldSpelling>,
+    forwarders: Vec<Forwarder>,
+    /// Named arguments of calls to plain names, which become fields when the callee is a
+    /// forwarder and the name is none of its parameters.
+    call_arguments: Vec<CallArgument>,
+}
+
+/// A top-level function that passes its `...` to a constructor, as `list(...)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Forwarder {
+    name: String,
+    formals: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallArgument {
+    callee: String,
+    name: String,
+    range: TextRange,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 struct FieldSpelling {
     name: String,
@@ -353,13 +430,41 @@ struct FieldSpelling {
 /// Memoized per file, so the by-name fallback and references do not lower every item of a large
 /// project on each request. A write is listed twice, as a write and as an access.
 #[salsa::tracked(returns(ref))]
-fn field_spellings(db: &dyn Db, file: SourceFile) -> Vec<FieldSpelling> {
+fn file_fields(db: &dyn Db, file: SourceFile) -> FileFields {
     let mut spellings = Vec::new();
+    let mut forwarders = Vec::new();
+    let mut call_arguments = Vec::new();
     for &item in item_tree(db, file) {
         let (Some(hir), Some(node)) = (item_hir(db, item).as_ref(), item_node(db, item)) else {
             continue;
         };
         let item_offset = node.text_range().start();
+        let is_dots = |value: Option<ExprId>| {
+            value.is_some_and(
+                |value| matches!(hir.kind(value), ExpressionKind::NameRef(name) if name.as_str() == "..."),
+            )
+        };
+        if *item.kind(db) == ItemKind::Function
+            && let Some(name) = item.name(db)
+            && let Some(parameters) = hir.expressions().find_map(|expression| match &expression.kind {
+                ExpressionKind::Function { parameters, .. } => Some(*parameters),
+                _ => None,
+            })
+            && hir[parameters].iter().any(|parameter| parameter.name.as_str() == "...")
+            && hir.expressions().any(|expression| {
+                matches!(&expression.kind, ExpressionKind::Call { callee, arguments }
+                    if is_constructor(hir, *callee)
+                        && hir[arguments].iter().any(|argument| argument.name.is_none() && is_dots(argument.value)))
+            })
+        {
+            forwarders.push(Forwarder {
+                name: name.clone(),
+                formals: hir[parameters]
+                    .iter()
+                    .map(|parameter| parameter.name.to_string())
+                    .collect(),
+            });
+        }
         let mut push = |name: Symbol, kind, range: TextRange| {
             spellings.push(FieldSpelling {
                 name: name.to_string(),
@@ -399,12 +504,32 @@ fn field_spellings(db: &dyn Db, file: SourceFile) -> Vec<FieldSpelling> {
                         push(field.name, SpellingKind::Element, field.name_range);
                     }
                 }
+                ExpressionKind::Call { callee, arguments } => {
+                    if let ExpressionKind::NameRef(callee) = hir.kind(*callee) {
+                        for argument in &hir[arguments] {
+                            if let (Some(name), Some(range)) = (
+                                hir.argument_name(argument),
+                                hir.argument_name_range(argument),
+                            ) {
+                                call_arguments.push(CallArgument {
+                                    callee: callee.to_string(),
+                                    name: name.to_string(),
+                                    range: range + item_offset,
+                                });
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
     spellings.sort_by_key(|spelled| spelled.range.start());
-    spellings
+    FileFields {
+        spellings,
+        forwarders,
+        call_arguments,
+    }
 }
 
 /// Calls whose named arguments become the `$` fields of the value they build.
@@ -469,9 +594,24 @@ struct Resolver<'db> {
     visited: HashSet<(Item<'db>, ExprId, Symbol)>,
     /// The heads of library calls a followed value came from, as item and callee.
     producers: Vec<(Item<'db>, ExprId)>,
+    /// Per field name, the items that write it; per item and name, those writes. A global
+    /// receiver's writes are searched across the project once, not once per access.
+    written_items: HashMap<Symbol, Vec<Item<'db>>>,
+    field_writes: HashMap<(Item<'db>, Symbol), Vec<(ExprId, Site<'db>)>>,
 }
 
 impl<'db> Resolver<'db> {
+    fn new(db: &'db dyn Db, files: ProjectFiles) -> Self {
+        Resolver {
+            db,
+            files,
+            visited: HashSet::new(),
+            producers: Vec::new(),
+            written_items: HashMap::new(),
+            field_writes: HashMap::new(),
+        }
+    }
+
     /// The declarations of `name` on the value of `receiver`.
     fn sites(
         &mut self,
@@ -848,10 +988,10 @@ impl<'db> Resolver<'db> {
         name: Symbol,
         sites: &mut Vec<Site<'db>>,
     ) {
-        let (Some(hir), Some(naming)) = (
-            item_hir(self.db, item).as_ref(),
-            item_naming(self.db, item).as_ref(),
-        ) else {
+        let db = self.db;
+        let (Some(hir), Some(naming)) =
+            (item_hir(db, item).as_ref(), item_naming(db, item).as_ref())
+        else {
             return;
         };
         let ExpressionKind::NameRef(variable) = hir.kind(receiver) else {
@@ -867,16 +1007,89 @@ impl<'db> Resolver<'db> {
                     .get(binding)
                     .is_some_and(|info| info.kind != BindingKind::TopLevel)
             });
-        let field_writes = |hir: &Module, item: Item<'db>, matches: &dyn Fn(ExprId) -> bool| {
+        if let Some(binding) = local {
+            sites.extend(
+                self.field_writes(item, name)
+                    .iter()
+                    .filter(|(written, _)| naming.resolutions.get(written) == Some(&binding))
+                    .map(|(_, site)| *site),
+            );
+            return;
+        }
+        if matches!(variable.as_str(), "self" | "private")
+            && let Some(class) = enclosing_r6_class(hir, receiver)
+        {
+            let class_range = hir.range(class);
+            sites.extend(
+                self.field_writes(item, name)
+                    .iter()
+                    .filter(|(written, _)| {
+                        matches!(hir.kind(*written), ExpressionKind::NameRef(spelled) if spelled == variable)
+                            && class_range.contains_range(hir.range(*written))
+                    })
+                    .map(|(_, site)| *site),
+            );
+            return;
+        }
+        let variable = *variable;
+        let written_items = match self.written_items.get(&name) {
+            Some(items) => items.clone(),
+            None => {
+                let mut items: Vec<Item<'db>> = Vec::new();
+                let writes = field_index(db, self.files)
+                    .by_name
+                    .get(name.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter(|spelled| spelled.kind == SpellingKind::Write);
+                for spelled in writes {
+                    if let Some(position) =
+                        position_in_item(db, spelled.file, spelled.range.start())
+                        && !items.contains(&position.item)
+                    {
+                        items.push(position.item);
+                    }
+                }
+                self.written_items.insert(name, items.clone());
+                items
+            }
+        };
+        for other in written_items {
+            let (Some(hir), Some(naming)) = (
+                item_hir(db, other).as_ref(),
+                item_naming(db, other).as_ref(),
+            ) else {
+                continue;
+            };
+            sites.extend(
+                self.field_writes(other, name)
+                    .iter()
+                    .filter(|(written, _)| {
+                        matches!(hir.kind(*written), ExpressionKind::NameRef(spelled) if *spelled == variable)
+                            && naming.resolutions.get(written).is_none_or(|binding| {
+                                naming
+                                    .bindings
+                                    .get(binding)
+                                    .is_some_and(|info| info.kind == BindingKind::TopLevel)
+                            })
+                    })
+                    .map(|(_, site)| *site),
+            );
+        }
+    }
+
+    /// The writes `receiver$name <- value` in `item`, as the written receiver and the site.
+    fn field_writes(&mut self, item: Item<'db>, name: Symbol) -> &[(ExprId, Site<'db>)] {
+        let db = self.db;
+        self.field_writes.entry((item, name)).or_insert_with(|| {
+            let Some(hir) = item_hir(db, item).as_ref() else {
+                return Vec::new();
+            };
             hir.expressions()
                 .filter_map(|expression| match expression.kind {
                     ExpressionKind::Assign {
-                        spelling: AssignSpelling::Local | AssignSpelling::Equals,
-                        target,
-                        value,
-                    }
-                    | ExpressionKind::Assign {
-                        spelling: AssignSpelling::Super,
+                        spelling:
+                            AssignSpelling::Local | AssignSpelling::Equals | AssignSpelling::Super,
                         target,
                         value,
                     } => match hir.kind(*target) {
@@ -884,69 +1097,20 @@ impl<'db> Resolver<'db> {
                             target: written,
                             name: Some(field),
                             at: false,
-                        } if hir[*field].name == name && matches(*written) => Some(Site {
-                            item,
-                            range: hir.name_range(*field),
-                            value: Some(*value),
-                        }),
+                        } if hir[*field].name == name => Some((
+                            *written,
+                            Site {
+                                item,
+                                range: hir.name_range(*field),
+                                value: Some(*value),
+                            },
+                        )),
                         _ => None,
                     },
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-        };
-        if let Some(binding) = local {
-            sites.extend(field_writes(hir, item, &|written| {
-                naming.resolutions.get(&written) == Some(&binding)
-            }));
-            return;
-        }
-        if matches!(variable.as_str(), "self" | "private")
-            && let Some(class) = enclosing_r6_class(hir, receiver)
-        {
-            let class_range = hir.range(class);
-            sites.extend(field_writes(hir, item, &|written| {
-                matches!(hir.kind(written), ExpressionKind::NameRef(spelled) if spelled == variable)
-                    && class_range.contains_range(hir.range(written))
-            }));
-            return;
-        }
-        let variable = *variable;
-        let written_items: Vec<Item<'db>> = {
-            let mut items: Vec<Item<'db>> = Vec::new();
-            let writes = field_index(self.db, self.files)
-                .by_name
-                .get(name.as_str())
-                .into_iter()
-                .flatten()
-                .filter(|spelled| spelled.kind == SpellingKind::Write);
-            for spelled in writes {
-                if let Some(position) =
-                    position_in_item(self.db, spelled.file, spelled.range.start())
-                    && !items.contains(&position.item)
-                {
-                    items.push(position.item);
-                }
-            }
-            items
-        };
-        for other in written_items {
-            let (Some(hir), Some(naming)) = (
-                item_hir(self.db, other).as_ref(),
-                item_naming(self.db, other).as_ref(),
-            ) else {
-                continue;
-            };
-            sites.extend(field_writes(hir, other, &|written| {
-                matches!(hir.kind(written), ExpressionKind::NameRef(spelled) if *spelled == variable)
-                    && naming.resolutions.get(&written).is_none_or(|binding| {
-                        naming
-                            .bindings
-                            .get(binding)
-                            .is_some_and(|info| info.kind == BindingKind::TopLevel)
-                    })
-            }));
-        }
+                .collect()
+        })
     }
 }
 

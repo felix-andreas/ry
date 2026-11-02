@@ -67,7 +67,7 @@ completion (1): Array
 #---- signature_picks_the_array_overload
 doubled <- List.map([1, 2], f$0)
 #++++
-hover 28..29: f: Unknown
+hover 28..29: f
 hover-definition: installed f from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed f from base, stats, utils, methods, graphics, grDevices, datasets
 references: none

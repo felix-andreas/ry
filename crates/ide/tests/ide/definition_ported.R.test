@@ -117,7 +117,7 @@ wrapper <- function() {
   unknown$0_value
 }
 #++++
-hover 26..39: unknown_value: Unknown
+hover 26..39: unknown_value
 hover-definition: installed unknown_value from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed unknown_value from base, stats, utils, methods, graphics, grDevices, datasets
 references: none

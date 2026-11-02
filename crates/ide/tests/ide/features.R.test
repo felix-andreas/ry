@@ -489,7 +489,7 @@ f <- function(total_count) {
   tot$0
 }
 #++++
-hover 31..34: tot: Unknown
+hover 31..34: tot
 hover-definition: installed tot from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed tot from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -501,7 +501,7 @@ completion (128+): total_count, prototype, NLSstAsymptotic, NLSstLfAsymptote, NL
 print <- function(x) x
 g <- function() pri$0
 #++++
-hover 39..42: pri: Unknown
+hover 39..42: pri
 hover-definition: installed pri from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed pri from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -533,7 +533,7 @@ hint @41: fn() -> double
 #---- namespace_exports
 h <- function() stats::med$0
 #++++
-hover 16..26: Unknown
+hover 16..26: med
 hover-definition: installed med from stats
 definition: installed med from stats
 references: none
@@ -544,7 +544,7 @@ completion (11): median, median.default, medpolish, runmed, makepredictcall, mod
 #---- keyword_prefix
 g <- function() fun$0
 #++++
-hover 16..19: fun: Unknown
+hover 16..19: fun
 hover-definition: installed fun from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed fun from base, stats, utils, methods, graphics, grDevices, datasets
 references: none

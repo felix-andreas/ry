@@ -457,7 +457,7 @@ completion (1): currency
 #: Record{amount: double, currency: character}
 m <- (am$0)
 #++++
-hover 53..55: am: Unknown
+hover 53..55: am
 hover-definition: installed am from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed am from base, stats, utils, methods, graphics, grDevices, datasets
 references: none

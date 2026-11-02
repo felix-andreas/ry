@@ -3,7 +3,7 @@
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 totals <- sales[, .(total = sum(am$0)), by = team]
 #++++
-hover 89..91: am: Unknown
+hover 89..91: am
 hover-definition: installed am from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed am from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -27,7 +27,7 @@ hint @5: DataFrame{team: character[], amount: double[]}
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 counts <- sales[, .(n = .$0), by = team]
 #++++
-hover 81..82: .: Unknown
+hover 81..82: .
 hover-definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -42,7 +42,7 @@ hint @5: DataFrame{team: character[], amount: double[]}
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 amou$0
 #++++
-hover 57..61: amou: Unknown
+hover 57..61: amou
 hover-definition: installed amou from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed amou from base, stats, utils, methods, graphics, grDevices, datasets
 references: none

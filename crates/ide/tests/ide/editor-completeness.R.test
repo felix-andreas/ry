@@ -50,7 +50,7 @@ hint @5: DataFrame{region: character[], units: integer[]}
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 x <- DataFrame.$0
 #++++
-hover 67..77: DataFrame.: Unknown
+hover 67..77: DataFrame.
 hover-definition: installed DataFrame. from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed DataFrame. from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -166,7 +166,7 @@ hint @6: integer
 helper <- function(first, second = 2L) first
 helper(1L, se$0)
 #++++
-hover 56..58: se: Unknown
+hover 56..58: se
 hover-definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -183,7 +183,7 @@ hint @56second =
 #---- completion_stdlib_namespace
 x <- Str.$0
 #++++
-hover 5..9: Str.: Unknown
+hover 5..9: Str.
 hover-definition: installed Str. from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed Str. from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
@@ -398,7 +398,12 @@ completion (47): fifo, file, file.access, file.append, file.choose, file.copy, f
 #---- qualified_library_name_navigates_to_its_stub
 x <- base::past$0e("a", "b")
 #++++
-hover 5..16: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+hover 5..16: paste: fn(
+hover 5..16:   ...: Any,
+hover 5..16:   [sep]: character,
+hover 5..16:   [collapse]: character | NULL,
+hover 5..16:   [recycle0]: logical,
+hover 5..16: ) -> character
 definition: stub source base at `paste`
 references: none
 rename: none
@@ -414,7 +419,7 @@ hint @1: character
 #---- qualified_name_of_another_package_stays_put
 x <- utils::past$0e("a", "b")
 #++++
-hover 5..17: Unknown
+hover 5..17: paste
 hover-definition: installed paste from utils
 definition: installed paste from utils
 references: none
@@ -537,7 +542,7 @@ Counter <- R6::R6Class("Counter",
   )
 )
 #++++
-hover 102..130: Unknown
+hover 107..112: count: Unknown
 definition 107..112
 references: 107..112*, 121..126
 rename: 2 edit(s)
@@ -554,7 +559,7 @@ Account <- R6::R6Class("Account",
   private = list(balance = 0)
 )
 #++++
-hover 90..133: Unknown
+hover 98..105: balance: Unknown
 definition 98..105
 references: 98..105*, 117..124
 rename: 2 edit(s)
@@ -647,3 +652,71 @@ action: Add inferred type annotations for the whole file
 completion (1): root
 hint @3: double
 hint @41interval =
+
+#---- field_write_hover
+config <- list()
+config$po$0rt <- 8080L
+#++++
+hover 24..28: port: integer
+definition 24..28
+references: 24..28*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: list{}\n"
+completion (1): port
+hint @6: list{}
+
+#---- field_method_argument
+Counter <- R6::R6Class("Counter", public = list(
+  copy = function(deep = FALSE) deep
+))
+counter <- Counter$new()
+counter$copy(de$0ep = TRUE)
+#++++
+hover 127..131: deep: logical
+definition 67..71
+references: 67..71*, 81..85, 127..131
+rename: 3 edit(s)
+signature: none
+completion (53): de, de.ncols, de.restore, de.setup, debug, debugcall, debugger, debuggingState
+
+#---- block_function_argument
+encapsulate <- function(expr) eval(substitute(expr), globalenv())
+encapsulate({
+  helper <- function(x, envir = NULL) x
+})
+f <- function(y) helper(y, env$0ir = NULL)
+#++++
+hover 150..155: [envir]: NULL
+definition 104..109
+references: 104..109*, 150..155
+rename: 2 edit(s)
+signature: fn(x: T, [envir]: NULL) -> T
+parameters: x: T | [[envir]: NULL]
+action: Add inferred type annotation for `f`
+  edit 123..123 -> "#: <T> fn(y: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
+  edit 80..80 -> "  #: fn(x: T, [envir]: U) -> T\n"
+  edit 123..123 -> "#: <T> fn(y: T) -> T\n"
+completion (63): env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv, new.env
+hint @11: <T> fn([expr]: T) -> Any
+hint @35expr =
+hint @53envir =
+hint @88: fn(x: T, [envir]: U) -> T
+hint @124: <T> fn(y: T) -> T
+
+#---- field_forwarded_through_dots
+new_rate <- function(.subclass, ..., jitter = TRUE) {
+  structure(list(..., jitter = jitter), class = .subclass)
+}
+rate_delay <- function(pause = 1) new_rate("delay", pause = pause)
+rate_sleep <- function(rate) rate$pa$0use
+#++++
+hover 216..221: pause: Unknown
+definition 167..172
+references: 167..172*, 216..221
+rename: none
+signature: none
+completion (1): pause

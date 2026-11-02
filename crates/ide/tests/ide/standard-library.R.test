@@ -24,7 +24,7 @@ hint @20list =
 parsed <- Str.to_$0
 
 #++++
-hover 10..17: Str.to_: Unknown
+hover 10..17: Str.to_
 hover-definition: installed Str.to_ from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed Str.to_ from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
