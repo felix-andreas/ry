@@ -3266,6 +3266,10 @@ first lines R had already read, leaving R mid-command.
   - Logical widens under the numeric constraint (`widen_numeric_binding`), and a vector partner leaves the flexible operand open with a `double[]` result.
   - A callback called with nothing but forwarded `...` is `fn(...: Any) -> T`.
   - `pkg::name` on a shipped namespace is accepted without attaching it, since R's `::` loads without attaching.
+  - A call to an inferred function narrows a union parameter that its return echoes to the argument's own member (`narrow_echoed_parameter_unions`), so `f(x)` with `x: list` does not return `list | vector`. A remaining member that is a variable of the callee alone, such as a getter-or-setter closure's setter value, makes the return `Unknown` rather than leak.
+  - A union of lists with different elements, passed where a generic callback consumer expects one list, joins element-wise (`joined_list_union`), skipping `list()` members, because each path's list holds only its own elements.
+  - Arithmetic on an operand whose type is still open fits any class with arithmetic methods (`Arith.matrix`, `Ops.Date`), except a method that takes `Any`, like `Arith.data.frame`, and except inside an overload probe, where it would pick `sum`'s `difftime` candidate.
+  - A `<<-` write to a top-level variable is read back in the rest of the writing body, never in other items, so one function's cache write does not change what another item reads.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
 - **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
 
