@@ -108,6 +108,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
+hint @84df =
 
 #---- hover_on_a_column_string_in_a_verb
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))

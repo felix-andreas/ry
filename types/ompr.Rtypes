@@ -1,0 +1,19 @@
+# ompr: mixed-integer models built with a pipe. Variable and index expressions such as `x[i]`
+# and `i = 1:n` are captured unevaluated and name model variables, so every verb masks the
+# arguments its `...` absorbs. The verbs' expression formals (`.variable`, `expression`,
+# `.constraint_expr`, `.expr`, `expr`) are left undeclared so positional arguments land there.
+@type linear_optimization_model
+@type LinearFunction
+@type LinearConstraint
+@type solution
+
+MIPModel : @pure fn() -> linear_optimization_model
+add_variable : @masked fn(.model: linear_optimization_model, ...: Any, [type]: character, [lb]: double, [ub]: double) -> linear_optimization_model
+set_objective : @masked fn(model: linear_optimization_model, ...: Any, [sense]: character) -> linear_optimization_model
+add_constraint : @masked fn(.model: linear_optimization_model, ...: Any, [.show_progress_bar]: logical) -> linear_optimization_model
+sum_over : @masked fn(...: Any) -> LinearFunction
+Compare.LinearFunction : fn(e1: LinearFunction, e2: double | LinearFunction) -> LinearConstraint
+Compare.LinearFunction : fn(e1: double, e2: LinearFunction) -> LinearConstraint
+solve_model : fn(model: linear_optimization_model, solver: fn(model: linear_optimization_model) -> solution) -> solution
+# One row per variable index: `variable`, one column per index, and `value`.
+get_solution : @masked fn(solution: solution, ...: Any, [type]: character) -> data.frame

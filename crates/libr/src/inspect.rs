@@ -9,6 +9,7 @@ use {
     crate::{
         altrep,
         boundary::{ApiResult, enter, write_console},
+        vectors,
     },
     heap::object::{Sexp, SexpType, gp},
     interp::{
@@ -138,10 +139,12 @@ unsafe fn tree(pre: c_int, object: Sexp, deep: c_int, pvec: c_int) -> ApiResult<
             let shown = count.min(pvec.max(0) as usize);
             for index in 0..shown {
                 out.push_str(if index > 0 { "," } else { " " });
+                // GNU R prints the raw C values, so `NA_integer_` shows as `-2147483648` and
+                // `NA_real_` as `nan`.
                 match kind {
-                    SexpType::Real => out.push_str(&format_g(values::reals(object)[index])),
+                    SexpType::Real => out.push_str(&format_g(vectors::real_elt(object, index)?)),
                     SexpType::Raw => out.push_str(&format!("{:02x}", values::raws(object)[index])),
-                    _ => out.push_str(&values::ints(object)[index].to_string()),
+                    _ => out.push_str(&vectors::int_elt(object, index)?.to_string()),
                 }
             }
             if shown < count {
@@ -155,8 +158,12 @@ unsafe fn tree(pre: c_int, object: Sexp, deep: c_int, pvec: c_int) -> ApiResult<
     if deep != 0 {
         match kind {
             SexpType::List | SexpType::Expression | SexpType::String => {
-                for index in 0..count {
-                    tree(pre + 2, object.element(index), deep - 1, pvec)?;
+                let shown = count.min(pvec.max(0) as usize);
+                for index in 0..shown {
+                    tree(pre + 2, vectors::sexp_elt(object, index)?, deep - 1, pvec)?;
+                }
+                if shown < count {
+                    write_console(format!("{}  ...\n", indent(pre)).as_bytes(), false);
                 }
             }
             SexpType::Pairlist | SexpType::Language => {

@@ -133,15 +133,9 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             if is_na_real(value) {
                 Ok(na_string())
             } else {
-                let text = crate::format::format_real_alone_scipen(value, 15);
-                // GNU R writes the decimal mark that `options(OutDec)` names.
-                if text.contains('.') {
-                    let mark = crate::envir::get_option("OutDec");
-                    if let Some(mark) = values::first_string(mark).filter(|mark| &**mark != ".") {
-                        return values::mkchar(&text.replacen('.', &mark, 1));
-                    }
-                }
-                values::mkchar(&text)
+                values::mkchar(&crate::format::localize_decimal(
+                    crate::format::format_real_alone_scipen(value, 15),
+                ))
             }
         }
         SexpType::Complex => {
@@ -149,7 +143,9 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             if is_na_real(value.r) || is_na_real(value.i) {
                 Ok(na_string())
             } else {
-                values::mkchar(&crate::format::format_complex_alone(value, 15))
+                values::mkchar(&crate::format::localize_decimal(
+                    crate::format::format_complex_alone(value, 15),
+                ))
             }
         }
         SexpType::Raw => values::mkchar(&format!("{:02x}", values::raws(vector)[index])),
@@ -157,7 +153,11 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             let element = vector.element(index);
             if element.kind() == SexpType::String && length(element) == 1 {
                 Ok(element.element(0))
-            } else if element.kind().is_atomic() && length(element) == 1 {
+            } else if element.kind().is_atomic()
+                && length(element) == 1
+                && values::names(element) == nil()
+            {
+                // A named scalar other than a string deparses with its name, as in GNU R.
                 element_as_charsxp(element, 0)
             } else if element.kind() == SexpType::Symbol {
                 Ok(element.car())
@@ -211,7 +211,9 @@ pub unsafe fn coerce_vector_quiet(
                 "cannot coerce type 'environment' to vector of type 'list'",
             ));
         }
-        SexpType::List | SexpType::Expression => coerce_list(object, kind, warnings)?,
+        SexpType::List | SexpType::Expression => {
+            coerce_list(object, kind, SexpType::List, warnings)?
+        }
         _ if source.is_atomic() => coerce_atomic(object, kind, warnings)?,
         SexpType::Closure | SexpType::Builtin | SexpType::Special if kind == SexpType::List => {
             return values::list_vector(&[object]);
@@ -242,7 +244,7 @@ unsafe fn coerce_symbol(symbol: Sexp, kind: SexpType) -> R<Sexp> {
         }
         SexpType::Language => values::call(symbol, &[]),
         _ => Err(error(format!(
-            "(symbol) object cannot be coerced to type '{}'",
+            "cannot coerce type 'symbol' to vector of type '{}'",
             kind.name()
         ))),
     }
@@ -293,12 +295,18 @@ unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWar
         }
         _ => {
             let list_vector = values::pairlist_to_list(list)?;
-            coerce_list(list_vector, kind, warnings)
+            coerce_list(list_vector, kind, list.kind(), warnings)
         }
     }
 }
 
-unsafe fn coerce_list(list: Sexp, kind: SexpType, warnings: &mut CoercionWarnings) -> R<Sexp> {
+/// `source` is the type the error names: a call or pairlist arrives here as a list.
+unsafe fn coerce_list(
+    list: Sexp,
+    kind: SexpType,
+    source: SexpType,
+    warnings: &mut CoercionWarnings,
+) -> R<Sexp> {
     let count = length(list);
     match kind {
         SexpType::List | SexpType::Expression => {
@@ -322,7 +330,8 @@ unsafe fn coerce_list(list: Sexp, kind: SexpType, warnings: &mut CoercionWarning
                 let element = list.element(index);
                 if !(element.kind().is_atomic() && length(element) == 1) {
                     return Err(error(format!(
-                        "'list' object cannot be coerced to type '{}'",
+                        "'{}' object cannot be coerced to type '{}'",
+                        source.name(),
                         kind.name()
                     )));
                 }
@@ -335,7 +344,8 @@ unsafe fn coerce_list(list: Sexp, kind: SexpType, warnings: &mut CoercionWarning
             Ok(result)
         }
         _ => Err(error(format!(
-            "'list' object cannot be coerced to type '{}'",
+            "'{}' object cannot be coerced to type '{}'",
+            source.name(),
             kind.name()
         ))),
     }
@@ -897,9 +907,11 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         SexpType::Symbol | SexpType::Language | SexpType::Pairlist if kind == SexpType::String => {
             coerce_vector(object, kind)?
         }
-        SexpType::List | SexpType::Pairlist | SexpType::Language | SexpType::Nil => {
-            coerce_vector(object, kind)?
-        }
+        SexpType::List
+        | SexpType::Expression
+        | SexpType::Pairlist
+        | SexpType::Language
+        | SexpType::Nil => coerce_vector(object, kind)?,
         kind_of if kind_of.is_atomic() => {
             let converted = coerce_vector(object, kind)?;
             if converted == object {

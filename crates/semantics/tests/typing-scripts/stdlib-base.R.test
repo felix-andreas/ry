@@ -50,6 +50,26 @@ seq_along(c(1L, 2L))
 #++++
 integer[]
 
+#---- seq_from_a_whole_number_is_integer_vector
+seq(1, 10)
+#++++
+integer[]
+
+#---- seq_from_a_fraction_is_double_vector
+seq(0.5, 3)
+#++++
+double[]
+
+#---- seq_with_by_is_double_vector
+seq(1, 10, by = 2)
+#++++
+double[]
+
+#---- seq_of_one_number_is_integer_vector
+seq(2.5)
+#++++
+integer[]
+
 #---- toupper_is_character
 toupper("x")
 #++++
@@ -349,6 +369,20 @@ f(c("a", "b"))
 f: fn(x: Unknown) -> Unknown
 Unknown
 
+#---- an_unchecked_argument_takes_the_fit_more_specific_than_the_catch_all
+n <- nrow(matrix(0, 2L, 2L))
+rep(0, n)
+#++++
+n: Any
+double[]
+
+#---- unchecked_arguments_the_specific_fits_disagree_on_pick_no_candidate
+# `nrow` returns `Any`, which fits every `seq` candidate, and the candidates disagree, so the
+# call opts out like its argument rather than taking the first candidate's `integer[]`.
+seq(nrow(matrix(0, 2L, 2L)))
+#++++
+Any
+
 #==== precise_strings
 #---- trimws_is_character
 trimws("  hi  ")
@@ -364,6 +398,14 @@ character
 gsub("a", "b", "banana")
 #++++
 character
+
+#---- regex_patterns_accept_a_vector
+# R uses the first element of a longer pattern with a warning, which the types cannot see.
+patterns <- c("a", "b")
+gregexpr(patterns, "banana")
+#++++
+patterns: character[]
+list[integer[]]
 
 #---- grepl_is_logical
 grepl("a", "banana")
@@ -509,7 +551,7 @@ NULL
 #---- tryCatch_resolves_with_handler
 tryCatch(1L, error = function(e) NULL)
 #++++
-Unknown
+integer | NULL
 
 #---- try_returns_any
 try(log(-1), silent = TRUE)
@@ -591,7 +633,7 @@ integer[]
 character[]
 logical[]
 
-#---- matrix_and_factor_return_their_nominals
+#---- matrix_and_factor_type_with_checked_formals
 matrix(c(1L, 2L), nrow = 1L)
 factor(c("a"), levels = c("a", "b"))
 #++++
@@ -710,10 +752,10 @@ getOption("digits", default = 7L)
 Any
 
 #==== untyped_stubs
-#---- grep_is_unknown
+#---- grep_is_any
 grep("a", "banana")
 #++++
-Unknown
+Any
 
 #---- sapply_is_unknown
 sapply(list(1L), is.numeric)
@@ -729,9 +771,9 @@ table(group = c("a", "a"))
 #++++
 data.frame
 integer
+Any
 Unknown
-Unknown
-Unknown
+integer[]
 
 #==== still_any
 #---- reflection_resolves
@@ -845,8 +887,8 @@ words <- c("alpha", "beta")
 lapply(words, gsub, pattern = 1L, replacement = "o")
 #++++
 words: character[]
-Unknown
-42..46 error[type-mismatch] expected `fn(character) -> T`, found `fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character`
+list[Unknown]
+58..60 error[type-mismatch] expected `character`, found `integer`
 
 #==== missing_guarded_formals
 #---- missing_tested_formal_is_optional_at_call_sites
@@ -883,3 +925,8 @@ pick(2L)
 #++++
 pick: <T: numeric> fn([x]: T) -> T | integer
 integer
+
+#---- seq_from_beyond_the_integer_range_is_double_vector
+seq(1e10, 1e10 + 5)
+#++++
+double[]

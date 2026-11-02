@@ -211,7 +211,7 @@ find_index <- function(xs, target) {
 
 run <- function() find_index(list(10L, 20L, 30L), 20L)
 #++++
-find_index: <T, U> fn(xs: T, target: U) -> integer
+find_index: <T, U> fn(xs: T, [target]: U) -> integer
 run: fn() -> integer
 
 #---- switch_dispatch_is_clean
@@ -381,10 +381,10 @@ run <- function() {
   list(kept = kept, present = present, total = total)
 }
 #++++
-keep_positive: fn(values: Unknown) -> Unknown
+keep_positive: <T> fn(values: T) -> T
 is_present: Unknown
 sum_all: fn(values: list[integer] | integer[]) -> integer
-run: fn() -> list{kept: Unknown, present: Unknown, total: integer}
+run: fn() -> list{kept: list{integer, integer, integer}, present: Unknown, total: integer}
 
 #---- structural_access_on_unannotated_params_is_clean
 sum_tree <- function(node) {
@@ -1120,7 +1120,7 @@ report <- function() {
   length(stats$cleaned) + length(stats$lengths)
 }
 #++++
-normalize_words: fn(words: Unknown) -> list{cleaned: Unknown, lengths: list[named: integer]}
+normalize_words: fn(words: Unknown) -> list{cleaned: list[character], lengths: Unknown}
 report: fn() -> integer
 
 #==== cran_idioms
@@ -1200,8 +1200,8 @@ has_op <- function(x, which = FALSE) {
 }
 found <- has_op(c("Op", "Hi"), 1)
 #++++
-has_op: <T, U> fn(x: T, [which]: U) -> Unknown
-found: Unknown
+has_op: <T, U> fn(x: T, [which]: U) -> Any
+found: Any
 
 #---- reassigned_default_keeps_the_parameter_open
 tag <- function(name, class = NULL) {

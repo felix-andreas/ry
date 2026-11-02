@@ -15,11 +15,11 @@ f: <T> fn(x: T) -> Unknown
 #namespace importFrom(rlang, "%||%")
 f <- function(a, b) a %||% b
 #++++
-f: <T, U> fn(a: T, b: U) -> Unknown
+f: <T, U> fn(a: T, [b]: U) -> Unknown
 
 #---- whole_import_without_stubs_tolerates_any_read
-#namespace import(jsonlite)
-f <- function(x) fromJSON(x)
+#namespace import(glue)
+f <- function(x) glue(x)
 #++++
 f: <T> fn(x: T) -> Unknown
 
@@ -40,14 +40,14 @@ Counter <- R6Class("Counter", public = list(
   }
 ))
 #++++
-Counter: Unknown
+Counter: Any
 
 #---- library_of_an_unstubbed_package_tolerates_any_read
 library(jsonlite)
 make <- function(d) toJSON(d)
 #++++
 Any
-make: <T> fn(d: T) -> Unknown
+make: <T> fn(d: T) -> json
 
 #---- attaching_the_project_itself_buys_no_tolerance
 # `usethis` writes `library(yourpkg)` into `tests/testthat.R`, so this shape is
@@ -92,7 +92,7 @@ shout <- function(x) str_to_upper(x)
 oops <- function(x) str_to_uper(x)
 #++++
 Any
-shout: <T> fn(x: T) -> Unknown
+shout: fn(x: character[] | double[] | factor) -> character[]
 oops: <T> fn(x: T) -> Unknown
 353..364 warning[unresolved] I could not resolve `str_to_uper` in this package, its imports, or builtins. Did you mean `str_to_upper`?
 
@@ -391,3 +391,14 @@ apply_twice <- function(path) path(path)
 #++++
 apply_twice: Unknown
 30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+
+#---- a_purrr_formula_lambda_is_accepted
+library(purrr)
+total <- reduce(list(1, 2, 3), ~ .x + .y)
+walk(1:3, ~ print(.x))
+safe_log <- safely(~ log(.x))
+#++++
+Any
+total: Any
+integer[]
+safe_log: fn(...: Any) -> list{result: Any, error: Any}

@@ -1,0 +1,6 @@
+# AzureAuth: Azure Active Directory tokens. A token is an R6 object of class "AzureToken", and
+# acquiring one may open a browser, prompt, or read the token cache.
+
+@type AzureToken
+
+get_azure_token : fn(resource: character[], tenant: character, app: character, [password]: character | NULL, [username]: character | NULL, [certificate]: Any, [auth_type]: character | NULL, [aad_host]: character, [version]: double, [authorize_args]: list[named: Any], [token_args]: list[named: Any], [use_cache]: logical | NULL, [on_behalf_of]: Any, [auth_code]: character | NULL, [device_creds]: Any) -> AzureToken

@@ -76,6 +76,8 @@ const PRINTS: &[(&str, &str)] = &[
     // Indexing.
     ("xs[[2]]", "[1] 2\n"),
     ("is.Array(xs[[2]])", "[1] FALSE\n"),
+    ("xs[2]", "[2]\n"),
+    ("xs[[2.5]]", "[1] 2\n"),
     ("xs[2:3]", "[2, 3]\n"),
     ("xs[xs > 1]", "[2, 3]\n"),
     ("positions <- [3L, 1L]; xs[positions]", "[3, 1]\n"),
@@ -192,6 +194,10 @@ const ERRORS: &[(&str, &str)] = &[
     ("xs[NA_integer_]", "position NA is out of bounds"),
     ("xs[c(-1, 2)]", "cannot mix positive and negative positions"),
     ("xs[[0]]", "takes one whole-number position"),
+    (
+        "xs[[3.5]]",
+        "position 3.5 is out of bounds for an Array of 3 items",
+    ),
     (
         "xs[\"a\"]",
         "an Array is indexed by positions or a logical mask, not a character vector",

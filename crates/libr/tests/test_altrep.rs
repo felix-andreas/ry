@@ -267,6 +267,33 @@ fn errors_in_methods_surface_as_r_errors() {
     assert_eq!(r.integers(region), vec![0, 1, 2]);
 }
 
+/// R code reaches a string class's elements one at a time, and an `Elt` error is raised by the
+/// builtin that read the element, not by whatever runs next.
+#[test]
+fn r_code_reads_only_the_string_elements_it_asks_for() {
+    let r = r();
+    altreptest(&r);
+    let x = make(&r, "failing_string", 3);
+    let length = r.eval("length", &[(None, x)]).expect("length");
+    assert_eq!(r.integers(length), vec![3]);
+    let first = r
+        .eval("[[", &[(None, x), (None, r.integer(1))])
+        .expect("the first string");
+    assert_eq!(r.strings(first), vec![Some("ok".into())]);
+    let error = r
+        .eval("[[", &[(None, x), (None, r.integer(2))])
+        .expect_err("the second string raises");
+    assert!(error.contains("string 2 is unavailable"), "{error}");
+    let error = r
+        .eval("c", &[(None, x)])
+        .expect_err("`c` copies every string");
+    assert!(error.contains("string 2 is unavailable"), "{error}");
+    let third = r
+        .eval("[[", &[(None, x), (None, r.integer(3))])
+        .expect("no error is left pending");
+    assert_eq!(r.strings(third), vec![Some("ok".into())]);
+}
+
 #[test]
 fn a_writable_list_pointer_keeps_what_is_stored_through_it() {
     let r = r();

@@ -56,3 +56,17 @@ format(as.POSIXct("2021-11-07 01:30:00", tz = "America/New_York"), "%Z")
 tryCatch(strptime("2020-01-01 UTC", "%Y-%m-%d %Z"), error = conditionMessage)
 strptime("12:00:00.123", "%H:%M:%OS3", tz = "UTC")$sec
 strptime("2020-01-01 5 pm", "%Y-%m-%d %H %p", tz = "UTC")
+
+# %x reads year first, hour 24 allows only 24:00:00, and week numbers with a weekday give a date.
+print(strptime(c("24/01/15", "01/15/24"), "%x", tz = "UTC"))
+print(strptime(c("2024-01-01 24:30", "2024-01-01 24:00"), "%Y-%m-%d %H:%M", tz = "UTC"))
+print(strptime("2024 10 1", "%Y %U %w", tz = "UTC"))
+print(strptime(c("2024 10 1", "2024 10 7"), "%Y %W %u", tz = "UTC"))
+print(strptime("19", "%C", tz = "UTC")$year)
+print(strptime("19 05", "%C %y", tz = "UTC")$year)
+print(strptime("-100-01-01", "%Y-%m-%d", tz = "UTC"))
+print(withCallingHandlers(strptime("2024-01-01 +1500", "%Y-%m-%d %z", tz = "UTC"),
+  warning = function(w) { cat("warning:", conditionMessage(w), "\n"); invokeRestart("muffleWarning") }))
+print(strptime(NA, "%Z"))
+print(strptime("abc", "%Y %Z"))
+print(tryCatch(strptime("x", "%Z"), error = conditionMessage))

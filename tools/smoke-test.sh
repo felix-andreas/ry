@@ -25,6 +25,15 @@ case "$archive" in
 esac
 ry="$scratch/install/ry"
 [ -x "$ry.exe" ] && ry="$ry.exe"
+runtime=""
+for library in libR.so libR.dylib R.dll; do
+	[ -e "$scratch/install/$library" ] && runtime=$library
+done
+
+# ry.exe and GNU R on Windows read Windows paths, not Git Bash's /tmp/... spelling.
+native_path() {
+	if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
 
 if version=$("$ry" --version); then pass "ry --version: $version"; else fail "ry --version"; fi
 
@@ -80,23 +89,29 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 		export R_HOME
 	fi
 	printf 'cat(sum(1:10), "\\n")\n' >sum.R
-	if [ -e "$scratch/install/libR.so" ] || [ -e "$scratch/install/libR.dylib" ]; then
+	if [ -n "$runtime" ]; then
 		output=$("$ry" run sum.R 2>&1 | tr -d '\r') || true
 		if [ "$output" = "55 " ]; then pass "ry run on ry's runtime"; else fail "ry run: $output"; fi
+		# A matrix product goes through BLAS and solve() through LAPACK, which on Windows are the
+		# R installation's Rblas.dll and Rlapack.dll bound to ry's R.dll.
+		printf 'cat(sum(matrix(1:6, 2) %%*%% matrix(1:6, 3)), solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)), "\\n")\n' >linalg.R
+		output=$("$ry" run linalg.R 2>&1 | tr -d '\r') || true
+		if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi
 	else
 		echo "skip  ry run (this archive carries no runtime)"
 	fi
 	output=$("$ry" R sum.R 2>&1 | tr -d '\r') || true
 	if [ "$output" = "55 " ]; then pass "ry R on GNU R"; else fail "ry R: $output"; fi
 
-	# A package with compiled code, installed by GNU R (a CRAN binary on macOS, built from source
-	# on Linux), must load under ry's runtime and call its C routines there. On macOS this is
+	# A package with compiled code, installed by GNU R (a CRAN binary on macOS and Windows, built
+	# from source on Linux), must load under ry's runtime and call its C routines there. On macOS this is
 	# what proves ry rebinds the package's libR reference to its own runtime. It downloads from
 	# CRAN, so it runs only when asked.
-	if [ -n "${RY_SMOKE_PACKAGES:-}" ] && { [ -e "$scratch/install/libR.so" ] || [ -e "$scratch/install/libR.dylib" ]; }; then
+	if [ -n "${RY_SMOKE_PACKAGES:-}" ] && [ -n "$runtime" ]; then
 		mkdir -p "$scratch/library"
-		Rscript -e "install.packages('jsonlite', lib = '$scratch/library', repos = 'https://cloud.r-project.org', quiet = TRUE)" >/dev/null 2>&1 || true
-		printf 'library(jsonlite, lib.loc = "%s")\ncat(toJSON(list(a = 1:3)), "\\n")\n' "$scratch/library" >package.R
+		library=$(native_path "$scratch/library")
+		Rscript -e "install.packages('jsonlite', lib = '$library', repos = 'https://cloud.r-project.org', quiet = TRUE)" >/dev/null 2>&1 || true
+		printf 'library(jsonlite, lib.loc = "%s")\ncat(toJSON(list(a = 1:3)), "\\n")\n' "$library" >package.R
 		output=$("$ry" run package.R 2>&1 | tr -d '\r') || true
 		if [ "$output" = '{"a":[1,2,3]} ' ]; then
 			pass "ry run loads a compiled package GNU R installed"

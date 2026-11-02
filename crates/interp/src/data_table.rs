@@ -17,9 +17,8 @@
 //!   `data.frame` alone, with no key or index (whose upkeep is data.table's), and columns that are
 //!   attribute-free logical, integer, double or character vectors, or plain factors.
 //! - Only code data.table itself treats as data.table-aware qualifies (data.table's `cedta`):
-//!   anything outside a namespace, and namespaces that import data.table or set
-//!   `.datatable.aware`. data.table's own namespace does not, so its internals keep their
-//!   semantics.
+//!   anything outside a namespace, namespaces that import data.table or set `.datatable.aware`,
+//!   and data.table's own namespace, though from there only a grouped query without `:=`.
 //!
 //! A result is built as data.table builds its own: the columns as a list, then data.table's
 //! `setattr` and `setalloccol`, so printing, `.internal.selfref` and over-allocation are
@@ -39,16 +38,13 @@ use {
         unwind::{R, Unwind, error},
         values::{self, install, is_nil, length, nil, symbols},
     },
-    heap::object::{Sexp, SexpType},
-    rustc_hash::{FxHashMap, FxHashSet},
+    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
+    rustc_hash::FxHashSet,
     std::{cell::Cell, collections::HashSet},
     table::{
         ColumnType, Schema, Table,
         convert::{self, RVector},
-        polars::prelude::{
-            ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries,
-            NewChunkedArray, PlSmallStr, Series, StringChunked,
-        },
+        polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
         query::{self, Output, Query, Rows, Select},
     },
 };
@@ -56,12 +52,13 @@ use {
 /// R helpers in the `ry` namespace. They call into data.table, which may not be installed, so
 /// they are only called once a data.table exists.
 const HELPERS: &str = r#"
-.datatable_aware <- function(env) {
+.datatable_caller <- function(env) {
   ns <- topenv(env)
-  if (!isNamespace(ns)) return(TRUE)
-  name <- getNamespaceName(ns)
-  name != "data.table" &&
-    ("data.table" %in% names(getNamespaceImports(ns)) || isTRUE(get0(".datatable.aware", ns, inherits = FALSE)))
+  if (!isNamespace(ns)) return(1L)
+  if (getNamespaceName(ns) == "data.table") return(2L)
+  aware <- "data.table" %in% names(getNamespaceImports(ns)) ||
+    isTRUE(get0(".datatable.aware", ns, inherits = FALSE))
+  if (aware) 1L else 0L
 }
 .datatable_result <- function(columns, names, sorted, shape) {
   rows <- c(NA_integer_, -(if (length(columns)) length(columns[[1L]]) else 0L))
@@ -165,9 +162,11 @@ unsafe fn is_plain(subject: Sexp) -> bool {
 }
 
 unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
-    if values::as_logical_scalar(helper(".datatable_aware", &[env])?) != 1 {
-        return Ok(None);
-    }
+    let internal = match values::as_integer_scalar(helper(".datatable_caller", &[env])?) {
+        1 => false,
+        2 => true,
+        _ => return Ok(None),
+    };
     let Some((columns, height)) = subject_columns(subject)? else {
         return Ok(None);
     };
@@ -176,7 +175,7 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
             .iter()
             .map(|column| (column.name.clone(), column.kind)),
     );
-    let parts = frame::parse_parts(call, env, true)?;
+    let mut parts = frame::parse_parts(call, env, true)?;
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
     {
@@ -189,12 +188,20 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         call,
         strict: true,
     };
+    if let Some(j) = parts.j.as_mut() {
+        j.expand_eval(&lowering)?;
+    }
     let grouped = parts.by.is_some();
     let assigning = parts
         .j
         .as_ref()
         .and_then(Piece::expression)
         .is_some_and(|j| is_call(j, ":="));
+    // Inside data.table, only grouped aggregations are worth the engine (`dcast` aggregates this
+    // way). Its internal row and column picks are vector copies its C does faster.
+    if internal && (!grouped || assigning || parts.each_i) {
+        return Ok(None);
+    }
     if let Some(j) = parts.j.as_ref().and_then(Piece::expression)
         && !reductions_agree(j, grouped && !assigning, &schema)
     {
@@ -220,14 +227,35 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         by,
         keyed: parts.keyed,
     };
-    // Only the columns the query reads enter the engine, because importing a character column
-    // converts every string.
-    let mut table = import(&columns, height, query::referenced_columns(&query))?;
+    let referenced = query::referenced_columns(&query);
+    // `by = cols` with `cols` empty groups the whole table as one group, which data.table answers
+    // as a grouped query and the engine as an ungrouped one.
+    if parts.by.is_some() && query.by.is_empty() {
+        return Ok(None);
+    }
+    if grouped
+        && parts
+            .j
+            .as_ref()
+            .and_then(Piece::expression)
+            .is_some_and(|j| mentions_sum(j))
+        && !running_sums_fit(&columns, referenced.as_ref())
+    {
+        return Ok(None);
+    }
     if assigns {
+        // Only the columns the query reads enter the engine, because importing a character
+        // column converts every string.
+        let table = import(&columns, height, referenced)?;
         return update(subject, table, query, call);
     }
     // `x[]` returns `x` itself, which only data.table can do.
     if parts.i.is_none() && parts.j.is_none() {
+        return Ok(None);
+    }
+    // Picking whole columns of every row computes nothing: data.table copies the vectors, while
+    // the engine would convert each string column in and back out.
+    if query.by.is_empty() && matches!(query.rows, Rows::All) && picks_columns(&query.select) {
         return Ok(None);
     }
     let shape = if !query.by.is_empty() {
@@ -239,6 +267,7 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     } else {
         Shape::Selected
     };
+    let mut table = import(&columns, height, referenced)?;
     let sorted = parts.keyed.then(|| {
         query
             .by
@@ -308,7 +337,59 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
             } => term_agrees(function, *column, *extra),
         });
     }
-    !reduces(j)
+    !reduces(j, schema)
+}
+
+/// Whether `expression` mentions `sum`, as a call or as a function passed on, as in
+/// `lapply(.SD, sum)`.
+unsafe fn mentions_sum(expression: Sexp) -> bool {
+    match expression.kind() {
+        SexpType::Symbol => values::symbol_name(expression) == "sum",
+        SexpType::Builtin | SexpType::Special => values::primitive_name(expression) == "sum",
+        SexpType::Language => {
+            mentions_sum(expression.car())
+                || values::pairlist_items(expression.cdr())
+                    .into_iter()
+                    .any(|(_, item)| mentions_sum(item))
+        }
+        _ => false,
+    }
+}
+
+/// Whether no running total of an integer column the query reads can leave the integer range,
+/// because its absolute values add up to at most `INT_MAX`. Grouped integer sums are where the
+/// engine and data.table part on overflow: GForce's `sum` widens a group's sum to a double, with
+/// a warning, as soon as its running total in row order leaves the range, even when the final
+/// total fits; outside GForce, base `sum` widens one group's total while the others stay
+/// integers, which data.table rejects; the engine widens every group on the final totals.
+/// `referenced` is `None` when the query reads every column.
+unsafe fn running_sums_fit(
+    columns: &[SubjectColumn],
+    referenced: Option<&HashSet<PlSmallStr>>,
+) -> bool {
+    columns
+        .iter()
+        .filter(|column| column.kind == ColumnType::Integer)
+        .filter(|column| referenced.is_none_or(|names| names.contains(&column.name)))
+        .all(|column| {
+            let mut total = 0i64;
+            for chunk in values::ints(column.vector).chunks(4096) {
+                total += chunk
+                    .iter()
+                    .map(|&value| {
+                        if value == NA_INTEGER {
+                            0
+                        } else {
+                            i64::from(value).abs()
+                        }
+                    })
+                    .sum::<i64>();
+                if total > i64::from(i32::MAX) {
+                    return false;
+                }
+            }
+            true
+        })
 }
 
 /// One term of a `j` that data.table's GForce runs: `.N`, or `function(column, ...)`.
@@ -407,23 +488,33 @@ unsafe fn gforce_terms(j: Sexp, schema: &Schema) -> Option<Vec<Term>> {
 }
 
 /// Whether `expression` calls one of the reductions whose rounding depends on how they sum.
-unsafe fn reduces(expression: Sexp) -> bool {
+/// `sum` of one integer or logical column adds exactly in any order, so it is not one of them.
+unsafe fn reduces(expression: Sexp, schema: &Schema) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
     }
-    let head = expression.car();
-    if head.kind() == SexpType::Symbol
-        && matches!(
-            values::symbol_name(head).as_ref(),
-            "sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply"
-        )
-    {
-        return true;
+    match frame::call_head(expression).as_deref() {
+        Some("sum") if sums_exactly(expression, schema) => return false,
+        Some("sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply") => return true,
+        _ => {}
     }
-    reduces(head)
+    reduces(expression.car(), schema)
         || values::pairlist_items(expression.cdr())
             .into_iter()
-            .any(|(_, item)| reduces(item))
+            .any(|(_, item)| reduces(item, schema))
+}
+
+/// Whether `call` is `sum(column)` of an integer or logical column.
+unsafe fn sums_exactly(call: Sexp, schema: &Schema) -> bool {
+    let [(tag, argument)] = values::pairlist_items(call.cdr())[..] else {
+        return false;
+    };
+    is_nil(tag)
+        && argument.kind() == SexpType::Symbol
+        && matches!(
+            schema.column(&values::symbol_name(argument)),
+            Some(ColumnType::Integer | ColumnType::Logical)
+        )
 }
 
 unsafe fn is_call(expression: Sexp, name: &str) -> bool {
@@ -558,6 +649,18 @@ unsafe fn selects_columns(select: &Select, j: Option<Sexp>) -> bool {
         )
 }
 
+/// Whether `select` takes columns as they are, under their own names or new ones, or one column
+/// as a vector.
+fn picks_columns(select: &Select) -> bool {
+    match select {
+        Select::All | Select::Value(table::query::Expr::Column(_)) => true,
+        Select::Columns(columns) => columns
+            .iter()
+            .all(|(_, expr)| matches!(expr, table::query::Expr::Column(_))),
+        _ => false,
+    }
+}
+
 /// `result` as a new data.table, keyed by `sorted` when the query was a `keyby`.
 unsafe fn result_table(result: &Table, shape: Shape, sorted: Option<&[String]>) -> R<Sexp> {
     let frame = result.frame();
@@ -637,6 +740,7 @@ unsafe fn import(
     needed: Option<HashSet<PlSmallStr>>,
 ) -> R<Table> {
     let mut imported = Vec::with_capacity(columns.len());
+    let mut string_codes = Vec::new();
     for column in columns {
         if needed
             .as_ref()
@@ -644,55 +748,104 @@ unsafe fn import(
         {
             continue;
         }
-        imported.push(import_column(column)?.into_column());
+        let (series, codes) = import_column(column)?;
+        if let Some(codes) = codes {
+            string_codes.push((column.name.clone(), codes));
+        }
+        imported.push(series.into_column());
     }
     let frame = DataFrame::new(height, imported).map_err(|failure| error(failure.to_string()))?;
-    Table::new(frame).map_err(|failure| error(failure.to_string()))
+    let mut table = Table::new(frame).map_err(|failure| error(failure.to_string()))?;
+    for (name, codes) in string_codes {
+        table
+            .set_string_codes(&name, codes.codes, codes.first_rows)
+            .map_err(|failure| error(failure.to_string()))?;
+    }
+    Ok(table)
 }
 
-unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
+/// A character column's rows numbered by distinct CHARSXP, as `Table::set_string_codes` takes
+/// them.
+struct ImportedCodes {
+    codes: Vec<u32>,
+    first_rows: Vec<u32>,
+}
+
+unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCodes>)> {
     let name = column.name.clone();
     let vector = values::materialize(column.vector)?;
     Ok(match column.kind {
         // The engine reads integer and double data where R keeps it, see the module docs.
-        ColumnType::Integer => convert::borrow_integer(name, values::ints(vector)),
-        ColumnType::Double => convert::borrow_double(name, values::reals(vector)),
-        ColumnType::Logical => to_series(name, RVector::Logical(values::ints(vector).to_vec()))?,
+        ColumnType::Integer => (convert::borrow_integer(name, values::ints(vector)), None),
+        ColumnType::Double => (convert::borrow_double(name, values::reals(vector)), None),
+        ColumnType::Logical => (
+            to_series(name, RVector::Logical(values::ints(vector).to_vec()))?,
+            None,
+        ),
         ColumnType::Character => {
-            // R interns its strings, so a column repeats a few CHARSXPs. Each distinct one
-            // converts once, and the column gathers them, which copies a 16-byte view per row.
+            // R interns its strings, so equal strings are one CHARSXP, and numbering the
+            // distinct CHARSXPs numbers the rows by string without comparing any. The number
+            // goes in the CHARSXP's truelength, negated, as data.table's own C marks strings,
+            // and the saved truelengths are put back before anything else can run.
             let na = values::na_string();
-            let mut positions: FxHashMap<Sexp, IdxSize> = FxHashMap::default();
-            let mut distinct = Vec::new();
-            let mut indices = Vec::with_capacity(length(vector));
-            let mut has_na = false;
-            for index in 0..length(vector) {
+            let rows = length(vector);
+            let mut codes = Vec::with_capacity(rows);
+            let mut first_rows = Vec::new();
+            let mut saved: Vec<(Sexp, i32)> = Vec::new();
+            let mut stale = false;
+            for index in 0..rows {
                 let charsxp = vector.element(index);
                 if charsxp == na {
-                    has_na = true;
-                    indices.push(IdxSize::MAX);
+                    codes.push(0);
                     continue;
                 }
-                let position = *positions.entry(charsxp).or_insert_with(|| {
-                    distinct.push(values::char_str(charsxp));
-                    (distinct.len() - 1) as IdxSize
-                });
-                indices.push(position);
+                let mark = charsxp.char_truelength();
+                if mark < 0 {
+                    // A mark this loop did not set (one left behind by C code that stopped
+                    // midway) would alias two strings, so it is checked against its owner.
+                    let code = mark.unsigned_abs();
+                    let ours = (code as usize)
+                        .checked_sub(1)
+                        .and_then(|slot| saved.get(slot))
+                        .is_some_and(|(owner, _)| *owner == charsxp);
+                    if !ours {
+                        stale = true;
+                        break;
+                    }
+                    codes.push(code);
+                    continue;
+                }
+                saved.push((charsxp, mark));
+                first_rows.push(index as u32);
+                let code = saved.len() as u32;
+                charsxp.set_char_truelength(-(code as i32));
+                codes.push(code);
             }
-            let indices = if has_na {
-                IdxCa::from_iter_options(
-                    PlSmallStr::EMPTY,
-                    indices
-                        .into_iter()
-                        .map(|index| (index != IdxSize::MAX).then_some(index)),
-                )
-            } else {
-                IdxCa::from_vec(PlSmallStr::EMPTY, indices)
-            };
-            StringChunked::from_iter_values(name, distinct.iter().map(AsRef::as_ref))
-                .take(&indices)
-                .map_err(|failure| error(failure.to_string()))?
-                .into_series()
+            for (charsxp, mark) in &saved {
+                charsxp.set_char_truelength(*mark);
+            }
+            if stale {
+                return Err(error("a string carries a truelength mark from elsewhere"));
+            }
+            // Strings intern by encoding, so the same text marked UTF-8, latin1 or native is
+            // several CHARSXPs that data.table groups as one. Codes would split them, so such a
+            // column groups by its text instead.
+            let mut encodings = saved
+                .iter()
+                .filter(|(charsxp, _)| !charsxp.has_gp(gp::ASCII))
+                .map(|(charsxp, _)| charsxp.gp() & gp::ENCODING);
+            let mixed = encodings
+                .next()
+                .is_some_and(|first| encodings.any(|other| other != first));
+            let distinct: Vec<_> = saved
+                .iter()
+                .map(|(charsxp, _)| values::char_str(*charsxp))
+                .collect();
+            let series =
+                convert::strings_from_codes(name, distinct.iter().map(AsRef::as_ref), &codes)
+                    .map_err(|failure| error(failure.to_string()))?;
+            let codes = (!mixed).then_some(ImportedCodes { codes, first_rows });
+            (series, codes)
         }
         ColumnType::Factor => {
             let levels = values::get_attr(vector, symbols().levels);
@@ -700,13 +853,14 @@ unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
             if levels.len() != length(values::get_attr(vector, symbols().levels)) {
                 return Err(error("a factor level is NA"));
             }
-            to_series(
+            let series = to_series(
                 name,
                 RVector::Factor {
                     codes: values::ints(vector).to_vec(),
                     levels,
                 },
-            )?
+            )?;
+            (series, None)
         }
     })
 }

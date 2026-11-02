@@ -2,14 +2,19 @@
 #@ ns importFrom(zeallot,"%<-%")
 #@ param DAYS int 5 120
 # Date arithmetic with lubridate, and destructuring with zeallot.
+#: fn(start: Date, [days]: integer) -> Date
 business_days_@ID@ <- function(start, days = @DAYS@L) {
   candidates <- start + lubridate::days(seq_len(days * 2L))
   weekdays_only <- candidates[!lubridate::wday(candidates) %in% c(1L, 7L)]
+  #: Date
   utils::head(weekdays_only, days)
 }
 
+#: fn(dates: Date) -> list{first: Date, last: Date, months: double[], quarters: double[]}
 span_summary_@ID@ <- function(dates) {
-  c(first, last) %<-% range(dates)
+  #: Date
+  bounds <- range(dates)
+  c(first, last) %<-% bounds
   list(
     first = first,
     last = last,
@@ -18,6 +23,7 @@ span_summary_@ID@ <- function(dates) {
   )
 }
 
+#: fn(year: double) -> Date
 month_ends_@ID@ <- function(year) {
   starts <- lubridate::make_date(year, 1:12, 1L)
   lubridate::ceiling_date(starts, "month") - lubridate::days(1)

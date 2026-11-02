@@ -1,0 +1,4 @@
+# brio: UTF-8 line I/O with no encoding or newline surprises.
+read_lines : fn(path: character | connection, [n]: double) -> character[]
+# Returns `text` invisibly.
+write_lines : fn(text: character[], path: character | connection, [eol]: character) -> character[]

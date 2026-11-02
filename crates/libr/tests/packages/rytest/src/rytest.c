@@ -2,6 +2,9 @@
 #include <Rinternals.h>
 #include <R_ext/Altrep.h>
 #include <R_ext/Rdynload.h>
+#include <R_ext/PrtUtil.h>
+#include <R_ext/RS.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -594,6 +597,77 @@ SEXP rytest_maphash(void)
     return ScalarInteger(maphash_visits == 50 ? maphash_corrupt : -1);
 }
 
+/* The non-header entry points GNU R exports and packages call anyway, and the formatting
+   API of R_ext/PrtUtil.h. Each result is one string, so a mismatch names the step. */
+
+typedef struct {
+    char *data;
+    size_t bufsize;
+    size_t defaultSize;
+} StringBuffer;
+
+typedef struct {
+    void *cell;
+} VarLoc;
+
+void *R_AllocStringBuffer(size_t blen, StringBuffer *buf);
+void R_FreeStringBuffer(StringBuffer *buf);
+SEXP R_findVar(SEXP symbol, SEXP rho);
+SEXP R_findVarInFrame(SEXP rho, SEXP symbol);
+VarLoc R_findVarLocInFrame(SEXP rho, SEXP symbol);
+SEXP R_GetVarLocValue(VarLoc loc);
+SEXP R_GetVarLocSymbol(VarLoc loc);
+void R_SetVarLocValue(VarLoc loc, SEXP value);
+int utf8clen(char c);
+
+SEXP rytest_api_extras(void)
+{
+    char text[200];
+    SEXP out = PROTECT(allocVector(STRSXP, 7));
+
+    double values[] = {1.5, 100, 0.25};
+    int w, d, e;
+    formatReal(values, 3, &w, &d, &e, 0);
+    snprintf(text, sizeof text, "%d %d %d [%s]", w, d, e, EncodeReal0(values[0], w, d, e, "."));
+    SET_STRING_ELT(out, 0, mkChar(text));
+
+    double tiny[] = {1e-10, 2};
+    formatReal(tiny, 2, &w, &d, &e, 0);
+    snprintf(text, sizeof text, "%d %d %d [%s]", w, d, e, EncodeReal0(tiny[0], w, d, e, "."));
+    SET_STRING_ELT(out, 1, mkChar(text));
+
+    SEXP env = PROTECT(R_NewEnv(R_GlobalEnv, FALSE, 0));
+    SEXP symbol = install("ry_extras_value");
+    defineVar(symbol, PROTECT(ScalarInteger(41)), env);
+    VarLoc loc = R_findVarLocInFrame(env, symbol);
+    int before = INTEGER(R_GetVarLocValue(loc))[0];
+    R_SetVarLocValue(loc, PROTECT(ScalarInteger(42)));
+    snprintf(text, sizeof text, "%d %d %s %d", before,
+             INTEGER(R_findVar(symbol, env))[0], CHAR(PRINTNAME(R_GetVarLocSymbol(loc))),
+             R_findVarLocInFrame(env, install("ry_extras_absent")).cell == NULL);
+    SET_STRING_ELT(out, 2, mkChar(text));
+    snprintf(text, sizeof text, "%d",
+             R_findVarInFrame(env, install("ry_extras_absent")) == R_UnboundValue);
+    SET_STRING_ELT(out, 3, mkChar(text));
+
+    snprintf(text, sizeof text, "%d %d %d %d", utf8clen('a'), utf8clen((char) 0xC3),
+             utf8clen((char) 0xE2), utf8clen((char) 0xF0));
+    SET_STRING_ELT(out, 4, mkChar(text));
+
+    StringBuffer buffer = {NULL, 0, 16};
+    char *data = R_AllocStringBuffer(100, &buffer);
+    snprintf(data, buffer.bufsize, "grown");
+    snprintf(text, sizeof text, "%s %d", data, buffer.bufsize > 100);
+    R_FreeStringBuffer(&buffer);
+    SET_STRING_ELT(out, 5, mkChar(text));
+
+    snprintf(text, sizeof text, "%s %s", EncodeInteger(7, 3), EncodeLogical(0, 6));
+    SET_STRING_ELT(out, 6, mkChar(text));
+
+    UNPROTECT(4);
+    return out;
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -643,6 +717,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_return_null", (DL_FUNC) &rytest_return_null, 0},
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
+    {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {NULL, NULL, 0}
 };
 

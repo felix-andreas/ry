@@ -2,22 +2,31 @@
 #@ param SIZE int 3 40
 #@ param SCALE int 2 9
 # A memoised computation backed by an in-memory cache, with a call counter for tests.
-cache_calls_@ID@ <- new.env()
-cache_calls_@ID@$count <- 0L
+#: @trust list{count: integer}
+cache_calls_@ID@ <- local({
+  calls <- new.env()
+  calls$count <- 0L
+  calls
+})
 
+#: fn(n: double) -> double
 expensive_@ID@ <- function(n) {
   cache_calls_@ID@$count <- cache_calls_@ID@$count + 1L
   sum(seq_len(n) * @SCALE@)
 }
 
+#: fn([cache]: cachem) -> fn(n: double) -> double
 memoised_@ID@ <- function(cache = cachem::cache_mem(max_size = 1024 * 1024)) {
   memoise::memoise(expensive_@ID@, cache = cache)
 }
 
+#: fn(...: Any) -> character
 cache_key_@ID@ <- function(...) {
+  #: character
   digest::digest(list(...), algo = "xxhash64")
 }
 
+#: fn(fn: fn(n: double) -> double, [sizes]: double[]) -> double[]
 warm_cache_@ID@ <- function(fn, sizes = seq_len(@SIZE@)) {
   vapply(sizes, fn, numeric(1))
 }

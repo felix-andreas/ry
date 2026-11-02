@@ -1,0 +1,10 @@
+[stdout]
+| [1] TRUE
+| [1] TRUE
+| [1] 3
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 3

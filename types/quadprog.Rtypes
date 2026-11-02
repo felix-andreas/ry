@@ -1,0 +1,5 @@
+# quadprog: dense quadratic programming, minimising -d'b + b'Db/2 subject to A'b >= b0
+# with the first `meq` constraints as equalities.
+@alias QPSolution {list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}}
+
+solve.QP : @pure fn(Dmat: matrix, dvec: double[], Amat: matrix, bvec: double[], [meq]: integer, [factorized]: logical) -> QPSolution

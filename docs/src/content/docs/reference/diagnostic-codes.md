@@ -46,6 +46,23 @@ Some R idioms silence findings on their own:
 - A name created with `<<-` anywhere in a file resolves in that file.
 - A name that starts with `.` or `_` is never reported as unused.
 
+## Fixes
+
+Some findings carry a mechanical fix, which the editor offers as a quick fix and `ry check --fix`
+applies. A fix is **safe** when it keeps what the code means, so `--fix`, the editor's fix shortcut
+and its "Apply all safe fixes" action apply it without asking. A fix is **unsafe** when it guesses
+what you meant or silences a finding without handling it, so it needs `--unsafe-fixes` or a click.
+
+| Code | Fix | Applicability |
+| --- | --- | --- |
+| `assignment-operator` | `=` to `<-` | safe |
+| `boolean-shorthand` | `T` to `TRUE`, `F` to `FALSE` | safe |
+| `trailing-comma` | remove the comma | safe |
+| `annotation-mismatch` | change the `#:` comment to the inline type, when ry uses the inline one and it names no type parameter | safe |
+| `unreachable-pattern` | remove the arm, when it has its lines to itself | safe |
+| `unresolved`, `type-mismatch`, `annotation` | change a misspelled name, argument, field, column or type to the suggestion | unsafe |
+| `non-exhaustive-match` | add an arm per missing case that calls `stop("not handled yet")` | unsafe |
+
 ## On by default
 
 **`syntax-error`** (error): code R would refuse to parse, or an assignment target R would refuse to
@@ -82,7 +99,8 @@ silently keeps whichever is collated last. Both definitions are reported.
 line assigns rather than passes an argument.
 
 **`boolean-shorthand`** (warning): `T` or `F`, which are ordinary variables that any code can
-reassign, unlike `TRUE` and `FALSE`.
+reassign, unlike `TRUE` and `FALSE`. A file that binds `T` or `F` itself, even as a parameter, gets
+no finding for that name, because there it may mean the binding.
 
 **`trailing-comma`** (warning): a comma after a call's last argument. R reads it as an empty
 argument, which fails only when the callee evaluates it: `c(1, 2, )` stops with "argument 3 is

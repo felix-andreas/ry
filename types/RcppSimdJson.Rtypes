@@ -1,0 +1,4 @@
+# RcppSimdJson: a fast JSON parser. The result's shape follows the document (a data frame, a matrix,
+# a vector or a list), so it is `Any`.
+
+fparse : @pure fn(json: character[] | raw[], [query]: character[] | NULL, [empty_array]: Any, [empty_object]: Any, [single_null]: Any, [parse_error_ok]: logical, [on_parse_error]: Any, [query_error_ok]: logical, [on_query_error]: Any, [max_simplify_lvl]: character, [type_policy]: character, [int64_policy]: character, [always_list]: logical) -> Any

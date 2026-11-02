@@ -26,14 +26,15 @@ hover 113..117: logical
 definition: none
 references: none
 rename: none
-signature: fn([quiet]: logical, ...: character) -> character
-parameters: [[quiet]: logical] | ...: character
+signature: fn(quiet: logical = FALSE, ...: character) -> character
+parameters: [quiet: logical = FALSE] | ...: character
 action: Add inferred type annotation for `text`
   edit 100..100 -> "#: character\n"
 action: Add inferred type annotations for the whole file
   edit 100..100 -> "#: character\n"
 completion (1): TRUE
 hint @104: character
+hint @113quiet =
 
 #---- lapply_open_scheme
 # No candidate matches yet, so the set still lists and the call stays `Unknown`.
@@ -67,6 +68,7 @@ action: Add inferred type annotations for the whole file
   edit 83..83 -> "#: list[integer]\n"
 completion (128+): result, break, else, FALSE, for, function, if, in
 hint @89: list[integer]
+hint @114FUN =
 
 #---- user_generic_open_call
 pick <- function(x, y) x

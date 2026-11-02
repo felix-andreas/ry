@@ -10,8 +10,9 @@
 # ry reads the stream but writes a different, equally valid layout (a hashed environment, which
 # ry writes unhashed). It differs where GNU R writes a representation ry reads into a plainer
 # object: ALTREP vectors and bytecode, whose expected stream is GNU R's serialization of the
-# plain equivalent. The writer's R version in every header is replaced by ry's (4.6.2), so the
-# streams compare byte for byte.
+# plain equivalent. The writer's R version in every header is replaced by a fixed one (4.6.2),
+# and the test maps the version ry presents to that one, so the streams compare byte for byte
+# whichever GNU R is linked.
 
 ry_version <- 4L * 65536L + 6L * 256L + 2L
 

@@ -145,21 +145,15 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
             let copy = runtime().heap.alloc_vector(kind, length)?;
             runtime().heap.root(copy);
             match kind {
-                SexpType::String => {
-                    for index in 0..length as usize {
-                        runtime()
-                            .heap
-                            .set_element(copy, index, object.element(index));
-                    }
-                }
+                SexpType::String => runtime()
+                    .heap
+                    .copy_elements(copy, 0, object, 0, length as usize),
+                SexpType::List | SexpType::Expression if !deep => runtime()
+                    .heap
+                    .copy_elements(copy, 0, object, 0, length as usize),
                 SexpType::List | SexpType::Expression => {
                     for index in 0..length as usize {
-                        let element = object.element(index);
-                        let element = if deep {
-                            duplicate(element, true)?
-                        } else {
-                            element
-                        };
+                        let element = duplicate(object.element(index), true)?;
                         runtime().heap.set_element(copy, index, element);
                     }
                 }

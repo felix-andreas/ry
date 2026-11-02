@@ -6,7 +6,9 @@ use {
     syntax::testing::{SplitMix64, fuzz_iterations},
     table::{
         ColumnType, Schema, Table,
-        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        convert::{
+            self, NA_INTEGER, NA_REAL, RVector, is_na_real, string_to_factor, to_r, to_series,
+        },
         ffi, io, ops,
         polars::prelude::{IntoColumn, PlSmallStr},
         query::{
@@ -1540,6 +1542,56 @@ fn random_table(rng: &mut SplitMix64, rows: usize) -> Table {
     ])
 }
 
+/// `table` with a character column `g4` whose rows are numbered by distinct string, as the R
+/// bridge numbers them, so grouping by it takes the kernels' string digit.
+fn with_string_key(rng: &mut SplitMix64, mut table: Table) -> Table {
+    let rows = table.height();
+    let distinct = if rng.chance(1, 4) {
+        5_000
+    } else {
+        1 + rng.below(6)
+    };
+    let values: Vec<Option<String>> = (0..rows)
+        .map(|_| {
+            // Reversed digits make the strings' order differ from their order of appearance.
+            (!rng.chance(1, 10)).then(|| {
+                let number = rng.below(distinct);
+                format!("k{}", number.to_string().chars().rev().collect::<String>())
+            })
+        })
+        .collect();
+    let mut numbers = std::collections::HashMap::new();
+    let mut first_rows = Vec::new();
+    let mut distinct: Vec<&str> = Vec::new();
+    let codes: Vec<u32> = values
+        .iter()
+        .enumerate()
+        .map(|(row, value)| match value {
+            None => 0,
+            Some(value) => *numbers.entry(value.as_str()).or_insert_with(|| {
+                first_rows.push(row as u32);
+                distinct.push(value);
+                first_rows.len() as u32
+            }),
+        })
+        .collect();
+    let column =
+        convert::strings_from_codes(PlSmallStr::from("g4"), distinct.iter().copied(), &codes)
+            .expect("the codes index the distinct strings");
+    assert_eq!(
+        to_r(&column).expect("a string column converts"),
+        RVector::Character(values.clone()),
+        "strings_from_codes",
+    );
+    table
+        .set_column(column.into_column())
+        .expect("the column has the table's height");
+    table
+        .set_string_codes("g4", codes, first_rows)
+        .expect("the codes fit the column");
+    table
+}
+
 /// A table to join [`random_table`] to: its keys overlap that table's, and its factor has the
 /// levels in another order plus one that table lacks.
 fn random_lookup(rng: &mut SplitMix64, rows: usize) -> Table {
@@ -1774,7 +1826,8 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             1 + rng.below(400)
         };
         let table = random_table(&mut rng, rows);
-        let keys = ["g1", "g2", "g3"];
+        let table = with_string_key(&mut rng, table);
+        let keys = ["g1", "g2", "g3", "g4"];
         let mut by = Vec::new();
         for key in keys {
             if rng.chance(1, 2) {
@@ -2061,6 +2114,106 @@ fn large_grouped_medians_and_moments_match_the_plan() {
                 );
             }
         }
+    }
+}
+
+/// Four integer keys whose ranges multiply past 64 bits, as db-benchmark's six-key question does
+/// at 5e7 rows: the kernel ranks the leading keys' codes before the next one would overflow, and
+/// must still give the plan's groups in both `by` and `keyby` order, `NA` keys included.
+#[test]
+fn keys_too_wide_for_one_64_bit_code_group_like_the_plan() {
+    let mut rng = SplitMix64(11);
+    let rows = 200_000;
+    let key = |rng: &mut SplitMix64| -> Vec<i32> {
+        (0..rows)
+            .map(|_| {
+                if rng.chance(1, 500) {
+                    NA_INTEGER
+                } else {
+                    (rng.below(6) as i32 - 3) * 300_000_000 + rng.below(3) as i32
+                }
+            })
+            .collect()
+    };
+    let keys: Vec<Vec<i32>> = (0..4).map(|_| key(&mut rng)).collect();
+    let values: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
+    let table = frame(vec![
+        ("k1", ints(&keys[0])),
+        ("k2", ints(&keys[1])),
+        ("k3", ints(&keys[2])),
+        ("k4", ints(&keys[3])),
+        ("v", doubles(&values)),
+    ]);
+    for keyed in [false, true] {
+        let query = Query {
+            select: Select::Columns(vec![
+                named("v", aggregate(Aggregate::Sum, column("v"))),
+                named("n", Expr::Count),
+            ]),
+            by: ["k1", "k2", "k3", "k4"]
+                .iter()
+                .map(|name| named(name, column(name)))
+                .collect(),
+            keyed,
+            ..Query::default()
+        };
+        assert_same_output(
+            execute(&mut table.fork(), query.clone()),
+            execute_with_plans_only(&mut table.fork(), query),
+            &format!("keyed {keyed}"),
+        );
+    }
+}
+
+/// A double `sum` adds each group's values in row order, as data.table does, however many threads
+/// split the groups. The values mix magnitudes so that any other order rounds differently.
+#[test]
+fn a_double_sum_over_many_groups_adds_in_row_order() {
+    let mut rng = SplitMix64(23);
+    let rows = 300_000;
+    let groups = 40_000;
+    let keys: Vec<i32> = (0..rows).map(|_| rng.below(groups) as i32).collect();
+    let values: Vec<f64> = (0..rows)
+        .map(|_| {
+            if rng.chance(1, 50) {
+                1e15
+            } else {
+                rng.below(1_000_000) as f64 / 7.0
+            }
+        })
+        .collect();
+    let mut expected = vec![0.0; groups as usize];
+    let mut seen = vec![false; groups as usize];
+    for (key, value) in keys.iter().zip(&values) {
+        expected[*key as usize] += value;
+        seen[*key as usize] = true;
+    }
+    let table = frame(vec![("k", ints(&keys)), ("v", doubles(&values))]);
+    let query = Query {
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        by: vec![named("k", column("k"))],
+        keyed: true,
+        ..Query::default()
+    };
+    let Ok(Executed {
+        output: Output::Table(mut output),
+        ..
+    }) = execute(&mut table.fork(), query)
+    else {
+        panic!("the grouped sum failed");
+    };
+    let RVector::Double(sums) = get(&mut output, "s") else {
+        panic!("the sum is not a double column");
+    };
+    let present: Vec<f64> = expected
+        .iter()
+        .zip(&seen)
+        .filter(|(_, seen)| **seen)
+        .map(|(sum, _)| *sum)
+        .collect();
+    assert_eq!(sums.len(), present.len());
+    for (group, (sum, want)) in sums.iter().zip(&present).enumerate() {
+        assert_eq!(sum.to_bits(), want.to_bits(), "group {group}");
     }
 }
 
@@ -3229,6 +3382,34 @@ fn files_read_and_write_through_the_file_system() {
     assert_eq!(
         back.schema().to_string(),
         "DataFrame{k: factor, v: integer[]}"
+    );
+}
+
+#[test]
+fn a_string_column_becomes_a_factor_with_sorted_levels() {
+    let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![3, 2, NA_INTEGER, 3, 1],
+            levels: vec!["asia".to_string(), "eu".to_string(), "us".to_string()],
+        }
+    );
+}
+
+#[test]
+fn an_all_missing_string_column_becomes_a_factor_without_levels() {
+    let column = column_of("k", strings(&["NA", "NA"]));
+    let factor =
+        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Factor {
+            codes: vec![NA_INTEGER, NA_INTEGER],
+            levels: vec![],
+        }
     );
 }
 

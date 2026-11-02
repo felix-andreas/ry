@@ -25,8 +25,31 @@ use {
         ffi::c_void,
         fmt,
         ptr::NonNull,
+        sync::OnceLock,
     },
 };
+
+/// Reads and writes elements of ALTREP string and list vectors. Only the C API host knows the
+/// classes' methods, so it installs these; the heap and the interpreter then treat every vector
+/// alike.
+#[derive(Clone, Copy)]
+pub struct AltrepElements {
+    pub read: unsafe fn(Sexp, usize) -> Sexp,
+    pub write: unsafe fn(Sexp, usize, Sexp),
+}
+
+static ALTREP_ELEMENTS: OnceLock<AltrepElements> = OnceLock::new();
+
+/// Installs the accessors behind [`Sexp::element`] and `Heap::set_element` for ALTREP
+/// instances. Later calls keep the first.
+pub fn install_altrep_elements(elements: AltrepElements) {
+    ALTREP_ELEMENTS.get_or_init(|| elements);
+}
+
+/// The installed ALTREP accessors, for an object that has the ALTREP flag.
+pub(crate) fn altrep_elements() -> Option<&'static AltrepElements> {
+    ALTREP_ELEMENTS.get()
+}
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -311,13 +334,12 @@ pub mod gp {
 }
 
 pub(crate) mod gc_bits {
-    /// Reached by the current collection. Marks are sticky between collections, so a marked
-    /// object outside a collection belongs to the old generation.
+    /// The mark of a large object, which lives outside the small-object space and its mark
+    /// bitmaps. Marks are sticky between collections, so a marked object outside a collection
+    /// belongs to the old generation.
     pub const MARK: u8 = 1 << 0;
     /// In the remembered set: an old object that may point at young objects.
     pub const REMEMBERED: u8 = 1 << 1;
-    /// Allocated on its own instead of in a size-class page.
-    pub const LARGE: u8 = 1 << 2;
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;
@@ -376,8 +398,11 @@ pub(crate) struct EnvironmentObject {
     /// allocation and no malloc while its bindings fit the frame's inline cells.
     pub frame: UnsafeCell<Frame>,
     pub enclosure: Cell<Sexp>,
-    pub spare: Cell<usize>,
 }
+
+// Every closure call allocates an environment, so growing the frame past this size class would
+// cost each call a larger slot to zero.
+const _: () = assert!(size_of::<EnvironmentObject>() <= 192);
 
 #[repr(C)]
 pub(crate) struct ExternalPtrObject {
@@ -430,8 +455,8 @@ pub const UNBOXED_SLOTS: usize = 64;
 /// 32 bits under one of these quiet-NaN prefixes, so the one-bit mask is enough to tell a raw
 /// slot from a handle. A double whose upper word happens to equal a prefix is stored boxed
 /// instead, which keeps every NaN payload (`NA_real_` among them) exact.
-const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
-const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
+pub const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
+pub const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
 
 impl Slot {
     fn encode(self) -> u64 {
@@ -488,6 +513,9 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
 
 /// Where a record's slots start.
 pub const RECORD_DATA_OFFSET: usize = size_of::<RecordObject>();
+/// Where a record's layout id and its unboxed-slot mask are, for compiled field reads.
+pub const RECORD_LAYOUT_OFFSET: usize = std::mem::offset_of!(RecordObject, layout);
+pub const RECORD_UNBOXED_OFFSET: usize = std::mem::offset_of!(RecordObject, unboxed);
 
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
@@ -594,6 +622,12 @@ impl Sexp {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
     }
 
+    /// Whether the object's fields count as references to what they hold (see
+    /// `flag_bits::UNTRACKED`).
+    pub unsafe fn tracks_references(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::UNTRACKED == 0 }
+    }
+
     pub unsafe fn is_array(self) -> bool {
         unsafe { self.header().flags.get() & flag_bits::ARRAY != 0 }
     }
@@ -630,10 +664,6 @@ impl Sexp {
             let gc = &self.header().gc;
             gc.set(if on { gc.get() | bit } else { gc.get() & !bit });
         }
-    }
-
-    pub(crate) unsafe fn is_marked(self) -> bool {
-        unsafe { self.gc_bits() & gc_bits::MARK != 0 }
     }
 
     pub(crate) unsafe fn size_class(self) -> u8 {
@@ -729,11 +759,37 @@ impl Sexp {
         unsafe { self.slice::<u8>() }
     }
 
-    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`.
+    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`. An ALTREP instance has no element
+    /// storage, so its class's `Elt` method answers through the accessor the host installed.
+    #[inline]
     pub unsafe fn element(self, index: usize) -> Sexp {
+        unsafe {
+            if self.is_altrep() {
+                return self.altrep_element(index);
+            }
+            *(self.data() as *const Sexp).add(index)
+        }
+    }
+
+    // Out of line, so that `element` is small enough to inline into the interpreter's loop.
+    #[cold]
+    #[inline(never)]
+    unsafe fn altrep_element(self, index: usize) -> Sexp {
+        unsafe {
+            match ALTREP_ELEMENTS.get() {
+                Some(elements) => (elements.read)(self, index),
+                None => *(self.data() as *const Sexp).add(index),
+            }
+        }
+    }
+
+    /// An element of a vector the caller knows is not ALTREP.
+    #[inline]
+    pub(crate) unsafe fn stored_element(self, index: usize) -> Sexp {
         unsafe { *(self.data() as *const Sexp).add(index) }
     }
 
+    #[inline]
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {
         unsafe { *(self.data() as *mut Sexp).add(index) = value }
     }
@@ -936,11 +992,5 @@ impl Sexp {
 
     pub(crate) unsafe fn set_altrep_flag(self) {
         unsafe { self.set_flag(flag_bits::ALTREP, true) }
-    }
-
-    /// The raw kind byte, read without forming a reference to the header, so it is valid on a
-    /// free slot too.
-    pub(crate) unsafe fn kind_byte(self) -> u8 {
-        unsafe { *(self.0.as_ptr() as *const u8) }
     }
 }

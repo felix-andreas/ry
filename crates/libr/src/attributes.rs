@@ -573,6 +573,18 @@ pub unsafe extern "C" fn REFCNT(object: Sexp) -> c_int {
     object.refcount() as c_int
 }
 
+/// The function forms of the `Rinternals.h` macros, which packages call when built without
+/// `USE_RINTERNALS`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn MAYBE_SHARED(object: Sexp) -> c_int {
+    c_int::from(object.refcount() > 1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn NO_REFERENCES(object: Sexp) -> c_int {
+    c_int::from(object.refcount() == 0)
+}
+
 /// A no-op since R 4.0, where reference counts replaced `NAMED`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_NAMED(_object: Sexp, _value: c_int) {}

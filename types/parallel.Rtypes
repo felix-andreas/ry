@@ -1,0 +1,7 @@
+# parallel: forked and socket clusters shipped with R.
+#
+# `mclapply()` is `lapply()` on forked workers, so it keeps `lapply()`'s shapes. A worker that fails
+# yields a "try-error" element instead of `FUN`'s result, which the element type does not record.
+
+mclapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any, [mc.preschedule]: logical, [mc.set.seed]: logical, [mc.silent]: logical, [mc.cores]: double, [mc.cleanup]: logical, [mc.allow.recursive]: logical, [affinity.list]: list[Any] | NULL) -> list[named: U]
+mclapply : <T, U> fn(X: list[T] | T[], FUN: fn(T) -> U, ...: Any, [mc.preschedule]: logical, [mc.set.seed]: logical, [mc.silent]: logical, [mc.cores]: double, [mc.cleanup]: logical, [mc.allow.recursive]: logical, [affinity.list]: list[Any] | NULL) -> list[U]

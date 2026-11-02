@@ -1,0 +1,25 @@
+# lgr: R6 loggers and appenders.
+#
+# An R6 object is an environment of fields and methods, typed here as the
+# record of its public members. A record type cannot refer to itself, so the
+# setters, which return the object invisibly for chaining, return `Any`.
+# Records have no width subtyping either, so an appender list holds `Any`:
+# appender classes differ in their members.
+
+@alias LogLayout {list{format_event: fn(event: Any) -> character, toString: fn() -> character}}
+@alias Appender {list{threshold: integer, layout: LogLayout, append: fn(event: Any) -> Any, set_threshold: fn(level: character | double) -> Any, set_layout: fn(layout: LogLayout) -> Any, filter: fn(event: Any) -> logical, add_filter: fn(filter: Any, [name]: character | NULL) -> Any, remove_filter: fn(pos: Any) -> Any, set_filters: fn(filters: Any) -> Any}}
+# An in-memory appender. `data` is the buffered events as a data.frame with
+# the columns level, timestamp, logger, caller and msg.
+@alias AppenderBuffer {list{threshold: integer, layout: LogLayout, data: data.frame, dt: Any, buffer_size: double, buffer_events: list[Any], append: fn(event: Any) -> Any, flush: fn() -> Any, clear: fn() -> Any, show: fn([threshold]: character | double | NULL, [n]: double) -> Any, set_threshold: fn(level: character | double) -> Any, set_layout: fn(layout: LogLayout) -> Any, set_appenders: fn(x: Any) -> Any, add_appender: fn(appender: Any, [name]: character | NULL) -> Any, remove_appender: fn(pos: Any) -> Any, filter: fn(event: Any) -> logical, add_filter: fn(filter: Any, [name]: character | NULL) -> Any, remove_filter: fn(pos: Any) -> Any, set_filters: fn(filters: Any) -> Any}}
+
+# The log methods format `msg` with `sprintf()` over the unnamed arguments in
+# `...`, store named ones as custom event fields, and return the formatted
+# message invisibly.
+@alias Logger {list{name: character, threshold: integer, propagate: logical, ancestry: logical[named], parent: Any, last_event: Any, appenders: list[named: Any], inherited_appenders: list[named: Any], log: fn(level: character | double, msg: Any, ...: Any, [timestamp]: POSIXct, [caller]: character) -> character, fatal: fn(msg: Any, ...: Any, [caller]: character) -> character, error: fn(msg: Any, ...: Any, [caller]: character) -> character, warn: fn(msg: Any, ...: Any, [caller]: character) -> character, info: fn(msg: Any, ...: Any, [caller]: character) -> character, debug: fn(msg: Any, ...: Any, [caller]: character) -> character, trace: fn(msg: Any, ...: Any, [caller]: character) -> character, list_log: fn(x: list[Any]) -> Any, config: fn(cfg: Any, [file]: character, [text]: character, [list]: list[Any]) -> Any, add_appender: fn(appender: Any, [name]: character | NULL) -> Any, remove_appender: fn(pos: Any) -> Any, set_propagate: fn(x: logical) -> Any, set_threshold: fn(level: character | double | NULL) -> Any, set_appenders: fn(x: Any) -> Any, set_exception_handler: fn(fun: fn(e: Any) -> Any) -> Any, handle_exception: fn(e: Any) -> Any, spawn: fn(name: character) -> Any, filter: fn(event: Any) -> logical, add_filter: fn(filter: Any, [name]: character | NULL) -> Any, remove_filter: fn(pos: Any) -> Any, set_filters: fn(filters: Any) -> Any}}
+
+# Looking up a logger creates and registers it on first use.
+get_logger : fn(name: character, [class]: Any, [reset]: logical) -> Logger
+lgr : Logger
+
+# R6 class generators: `$new()` builds an instance.
+AppenderBuffer : list{new: fn([threshold]: character | double, [layout]: LogLayout, [appenders]: Any, [buffer_size]: double, [flush_threshold]: character | double | NULL, [flush_on_exit]: logical, [flush_on_rotate]: logical, [should_flush]: Any, [filters]: Any) -> AppenderBuffer}

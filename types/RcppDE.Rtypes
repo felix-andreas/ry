@@ -1,0 +1,11 @@
+# RcppDE: differential evolution optimisation (a C++ port of DEoptim). The result is
+# an S3 list of class `DEoptim`; it is declared by its structure, because a stub
+# cannot give an opaque type fields.
+@alias DEoptimControl {list{VTR: double, strategy: double, NP: double, itermax: double, CR: double, F: double, bs: logical, trace: logical | double, initialpop: Any, storepopfrom: double, storepopfreq: double, p: double, c: double, reltol: double, steptol: double}}
+@alias DEoptimResult {list{optim: list{bestmem: double[named], bestval: double, nfeval: double, iter: double}, member: list{lower: double[named], upper: double[named], bestmemit: matrix, bestvalit: double[], pop: matrix, storepop: list[matrix]}}}
+
+DEoptim.control : @pure fn([VTR]: double, [strategy]: double, [bs]: logical, [NP]: double, [itermax]: double, [CR]: double, [F]: double, [trace]: logical | double, [initialpop]: matrix | NULL, [storepopfrom]: double, [storepopfreq]: double, [p]: double, [c]: double, [reltol]: double, [steptol]: double) -> DEoptimControl
+
+# `fn` receives the parameter vector, then the extra arguments in `...`. The search
+# draws from the random number generator, so it is not pure.
+DEoptim : fn(fn: fn(double[]) -> double, lower: double[], upper: double[], [control]: DEoptimControl, ...: Any) -> DEoptimResult

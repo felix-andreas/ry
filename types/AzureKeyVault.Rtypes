@@ -1,0 +1,6 @@
+# AzureKeyVault: an Azure Key Vault client, an R6 object of class "az_key_vault" whose `secrets`,
+# `keys` and `certificates` fields are themselves R6 objects.
+
+@type az_key_vault
+
+key_vault : fn(url: character, [tenant]: character, [app]: character, ...: Any, [domain]: character, [as_managed_identity]: logical, [token]: AzureToken | NULL) -> az_key_vault

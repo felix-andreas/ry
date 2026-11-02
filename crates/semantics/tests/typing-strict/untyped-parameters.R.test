@@ -57,3 +57,13 @@ apply_one(function(x) NULL)
 apply_one: fn(f: fn(integer) -> NULL) -> NULL
 NULL
 52..79 error[strict] strict mode: this calls `apply_one`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts, or mark `apply_one` `@pure` if calling it has no effect
+
+#---- package_hooks_take_the_arguments_r_passes
+.onLoad <- function(libname, pkgname) {
+  options(demo.loaded = pkgname)
+  invisible(NULL)
+}
+.onUnload <- function(libpath) invisible(NULL)
+#++++
+.onLoad: fn(libname: character, pkgname: character) -> Any
+.onUnload: fn(libpath: character) -> Any

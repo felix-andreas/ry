@@ -1,0 +1,12 @@
+[stdout]
+| [1] "Marsaglia-Multicarry"   "Buggy Kinderman-Ramage" "Rounding"              
+| [1] -0.97462574 -0.56075523 -2.18392278  0.08951152  0.96951953
+| [1] -0.97462574 -0.56075523 -2.18392278  0.08951152  0.96951953
+| [1] -0.6264538  0.1836433 -0.8356286
+[messages]
+[warnings]
+- RNGkind: severe deviations from normality for Kinderman-Ramage + Marsaglia-Multicarry (in RNGkind(normal.kind = "Kinderman-Ramage"))
+[errors]
+[value]
+double
+| c(-0.626453810742332, 0.183643324222082, -0.835628612410047)

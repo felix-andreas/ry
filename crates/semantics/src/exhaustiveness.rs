@@ -7,14 +7,12 @@
 
 use {
     crate::{
-        Db,
-        annotations::NamedDefinition,
+        Db, TypeDefinitions,
         check::ExpressionTypes,
         hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         infer::apply_definition,
-        types::{Atomic, Name, Ty, TyKind, union_of, unknown},
+        types::{Atomic, Ty, TyKind, union_of, unknown},
     },
-    rustc_hash::FxHashMap,
     syntax::TextRange,
 };
 
@@ -31,20 +29,25 @@ pub enum MatchFindingKind {
     NonExhaustive {
         missing: Vec<String>,
         more: bool,
+        /// The whole `match` expression, whose closing brace new arms go before.
+        expression: TextRange,
     },
-    Unreachable,
+    Unreachable {
+        /// The whole arm, from its pattern to the end of its body.
+        arm: TextRange,
+    },
 }
 
 pub const WITNESS_LIMIT: usize = 3;
 
 /// The project's `type` and `alias` definitions, through which a named scrutinee shows
 /// its cases.
-pub type Definitions<'db> = Option<&'db FxHashMap<Name<'db>, NamedDefinition<'db>>>;
+pub type Definitions = Option<TypeDefinitions>;
 
 /// Every `match` of an item, in expression order. Ranges are item-relative.
 pub fn match_findings<'db>(
     db: &'db dyn Db,
-    definitions: Definitions<'db>,
+    definitions: Definitions,
     module: &Module,
     types: &ExpressionTypes<'db>,
 ) -> Vec<MatchFinding> {
@@ -63,9 +66,15 @@ pub fn match_findings<'db>(
         for arm in module[arms].iter() {
             let row = vec![lower(db, definitions, module, arm.pattern, subject)];
             if checker.useful(&rows, &row, &[subject], 1).is_empty() {
+                let pattern = module.pattern(arm.pattern).range;
                 findings.push(MatchFinding {
-                    range: module.pattern(arm.pattern).range,
-                    kind: MatchFindingKind::Unreachable,
+                    range: pattern,
+                    kind: MatchFindingKind::Unreachable {
+                        arm: TextRange::new(
+                            pattern.start(),
+                            module.range(arm.body).end().max(pattern.end()),
+                        ),
+                    },
                 });
             }
             // A guard can fail, so its arm covers nothing.
@@ -89,7 +98,11 @@ pub fn match_findings<'db>(
         let scrutinee_range = module.range(scrutinee);
         findings.push(MatchFinding {
             range: TextRange::new(module.range(expression).start(), scrutinee_range.end()),
-            kind: MatchFindingKind::NonExhaustive { missing, more },
+            kind: MatchFindingKind::NonExhaustive {
+                missing,
+                more,
+                expression: module.range(expression),
+            },
         });
     }
     findings
@@ -99,7 +112,7 @@ pub fn match_findings<'db>(
 /// union it wraps. Only the head and a union's members unfold, which keeps a recursive
 /// definition such as `Tree<T>` from unfolding forever; deeper positions unfold when the
 /// search reaches them. An opaque nominal, which has no definition body, stays named.
-fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) -> Ty<'db> {
+fn structural<'db>(db: &'db dyn Db, definitions: Definitions, ty: Ty<'db>) -> Ty<'db> {
     let unfold = |ty: Ty<'db>| {
         let mut current = ty;
         // Bounded, because a definition may name another definition as its whole body.
@@ -107,7 +120,7 @@ fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) 
             let TyKind::Named(name, arguments) = current.kind(db) else {
                 break;
             };
-            let Some(definition) = definitions.and_then(|table| table.get(name)) else {
+            let Some(definition) = definitions.and_then(|table| table.get(db, *name)) else {
                 break;
             };
             if matches!(definition.body.kind(db), TyKind::Unknown)
@@ -179,7 +192,7 @@ impl Constructor {
 
 struct Coverage<'db> {
     db: &'db dyn Db,
-    definitions: Definitions<'db>,
+    definitions: Definitions,
 }
 
 impl<'db> Coverage<'db> {
@@ -470,7 +483,7 @@ fn constructor_field_types<'db>(
 
 fn lower<'db>(
     db: &'db dyn Db,
-    definitions: Definitions<'db>,
+    definitions: Definitions,
     module: &Module,
     pattern: PatId,
     ty: Ty<'db>,
@@ -514,7 +527,7 @@ fn lower<'db>(
             ..
         } if module.is_any_payload(*payload) => {
             let tag = |payload| Constructor::Tag {
-                name: name.as_str().to_owned(),
+                name: module.name(*name).as_str().to_owned(),
                 payload,
             };
             Pat::Or(vec![
@@ -524,7 +537,7 @@ fn lower<'db>(
         }
         PatternKind::Tag { name, payload, .. } => {
             let constructor = Constructor::Tag {
-                name: name.as_str().to_owned(),
+                name: module.name(*name).as_str().to_owned(),
                 payload: payload.is_some(),
             };
             let fields = match payload {

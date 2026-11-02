@@ -1,0 +1,32 @@
+# rlang: conditions, dots and environments.
+#
+# A condition object is a list whose fields depend on what built it, so it is
+# opaque.
+@type rlang_error
+@type rlang_warning
+@type rlang_message
+
+# `abort()` never returns, so like base `stop()` it is `Any`, which fits the
+# join in `x <- if (ok) v else abort("...")`.
+abort : fn([message]: character[] | NULL, [class]: character[] | NULL, ...: Any, [call]: Any, [body]: Any, [footer]: Any, [trace]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical, [.internal]: logical, [.file]: Any, [.frame]: environment, [.trace_bottom]: Any, [.subclass]: Any) -> Any
+# `warn()` and `inform()` return their message invisibly after signalling.
+warn : fn([message]: character[] | NULL, [class]: character[] | NULL, ...: Any, [body]: Any, [footer]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical | NULL, [.frequency]: character, [.frequency_id]: character | NULL, [.subclass]: Any) -> character[]
+inform : fn([message]: character[] | NULL, [class]: character[] | NULL, ...: Any, [body]: Any, [footer]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical | NULL, [.file]: Any, [.frequency]: character, [.frequency_id]: character | NULL, [.subclass]: Any) -> character[]
+
+# Building a condition has no effect; signalling it does.
+error_cnd : @pure fn([class]: character[] | NULL, ...: Any, [message]: character[], [call]: Any, [trace]: Any, [parent]: Any, [use_cli_format]: logical | NULL) -> rlang_error
+warning_cnd : @pure fn([class]: character[] | NULL, ...: Any, [message]: character[], [call]: Any, [use_cli_format]: logical | NULL) -> rlang_warning
+message_cnd : @pure fn([class]: character[] | NULL, ...: Any, [message]: character[], [call]: Any, [use_cli_format]: logical | NULL) -> rlang_message
+# Signalling an error condition does not return; any other condition returns
+# `NULL` invisibly once no handler takes it.
+cnd_signal : fn(cnd: Any, ...: Any) -> NULL
+cnd_message : fn(cnd: Any, ...: Any, [inherit]: logical, [prefix]: logical) -> character
+
+# Dots. The names and the number of the elements are whatever the caller passed.
+list2 : @pure fn(...: Any) -> list[Any]
+dots_list : @pure fn(...: Any, [.named]: logical, [.ignore_empty]: character, [.preserve_empty]: logical, [.homonyms]: character, [.check_assign]: logical) -> list[Any]
+
+is_string : @pure fn(x: Any, [string]: character[] | NULL) -> logical
+is_scalar_character : @pure fn(x: Any) -> logical
+caller_env : fn([n]: double) -> environment
+current_env : fn() -> environment

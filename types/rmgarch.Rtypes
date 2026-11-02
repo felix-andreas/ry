@@ -1,0 +1,4 @@
+# rmgarch: multivariate GARCH models, built from rugarch's univariate specifications.
+@type DCCspec
+
+dccspec : @pure fn(uspec: uGARCHmultispec, [VAR]: logical, [robust]: logical, [lag]: double, [lag.max]: Any, [lag.criterion]: character, [external.regressors]: Any, [robust.control]: list[named: Any], [dccOrder]: double[], [model]: character, [groups]: double[], [distribution]: character, [start.pars]: list[named: Any], [fixed.pars]: list[named: Any]) -> DCCspec

@@ -1,0 +1,26 @@
+# assertthat: assertions with readable failure messages.
+#
+# `assert_that()` returns `TRUE` invisibly or signals an error, so its result
+# is always `TRUE`. The predicates test a value and have no effect.
+assert_that : fn(...: Any, [env]: environment, [msg]: Any) -> logical
+see_if : fn(...: Any, [env]: environment, [msg]: Any) -> logical
+validate_that : fn(...: Any, [env]: environment, [msg]: Any) -> logical | character
+is.string : @pure fn(x: Any) -> logical
+is.count : @pure fn(x: Any) -> logical
+is.flag : @pure fn(x: Any) -> logical
+is.number : @pure fn(x: Any) -> logical
+is.scalar : @pure fn(x: Any) -> logical
+is.time : @pure fn(x: Any) -> logical
+is.error : @pure fn(x: Any) -> logical
+is.date : @pure fn(x: Any) -> logical
+is.dir : fn(path: character) -> logical
+is.readable : fn(path: character) -> logical
+is.writeable : fn(path: character) -> logical
+has_name : @pure fn(x: Any, which: character[]) -> logical
+has_attr : @pure fn(x: Any, which: character) -> logical
+has_extension : @pure fn(path: character, ext: character) -> logical
+noNA : @pure fn(x: Any) -> logical
+not_empty : @pure fn(x: Any) -> logical
+are_equal : @pure fn(x: Any, y: Any, ...: Any) -> logical
+on_failure : @pure fn(x: Any) -> Any
+has_args : @pure fn(f: Any, args: character[], [exact]: logical) -> logical

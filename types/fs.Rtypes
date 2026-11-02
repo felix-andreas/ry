@@ -1,0 +1,7 @@
+# fs: paths are `fs_path`, a character subclass, declared as `character` so they keep flowing
+# into every function that takes a path.
+path : @pure fn(...: Any, [ext]: character) -> character
+path_abs : @pure fn(path: character[], [start]: character) -> character
+path_ext : @pure fn(path: character[]) -> character
+# Returns `path` invisibly.
+dir_create : fn(path: character[], ...: Any, [mode]: character, [recurse]: logical) -> character

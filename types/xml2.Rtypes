@@ -1,0 +1,21 @@
+# xml2: parsing XML and HTML.
+#
+# R's classes form a hierarchy (`xml_document` is also an `xml_node`), which nominal types do not
+# have, so a function that accepts a node names every class it accepts. `xml_find_first()` on a
+# single node finds no match as an `xml_missing`. Searching and reading a parsed document are pure,
+# while `read_xml()` and `read_html()` may read a file or a URL.
+
+@type xml_document
+@type xml_node
+@type xml_nodeset
+@type xml_missing
+
+read_xml : fn(x: Any, [encoding]: character, ...: Any, [as_html]: logical, [options]: character[]) -> xml_document
+read_html : fn(x: Any, [encoding]: character, ...: Any, [options]: character[]) -> xml_document
+xml_find_all : @pure fn(x: xml_document | xml_node | xml_nodeset, xpath: character, [ns]: Any, ...: Any) -> xml_nodeset
+xml_find_first : @pure fn(x: xml_nodeset, xpath: character, [ns]: Any) -> xml_nodeset
+xml_find_first : fn(x: xml_document | xml_node, xpath: character, [ns]: Any) -> xml_node | xml_missing
+xml_attr : @pure fn(x: xml_nodeset, attr: character, [ns]: Any, [default]: character) -> character[]
+xml_attr : fn(x: xml_document | xml_node | xml_missing, attr: character, [ns]: Any, [default]: character) -> character
+xml_text : @pure fn(x: xml_nodeset, [trim]: logical) -> character[]
+xml_text : fn(x: xml_document | xml_node | xml_missing, [trim]: logical) -> character

@@ -1,0 +1,18 @@
+# zoo: ordered observations indexed by an arbitrary index. An `xts` object is also a
+# zoo object, so the functions that keep their input's class declare the xts case
+# first.
+@type zoo
+
+zoo : fn([x]: Any, [order.by]: Any, [frequency]: Any, [calendar]: logical) -> zoo
+is.zoo : @pure fn(object: Any) -> logical
+coredata : @pure fn(x: Any, ...: Any) -> Any
+index : @pure fn(x: Any, ...: Any) -> Any
+
+# `rollapply` keeps an xts or zoo input's class; any other input comes back as the
+# plain vector or matrix of results. `FUN` is called with each window and with the
+# extra arguments in `...`.
+rollapply : fn(data: xts, width: Any, FUN: Any, ...: Any, [by]: Any, [by.column]: logical, [fill]: Any, [na.pad]: logical, [partial]: Any, [align]: character, [coredata]: logical) -> xts
+rollapply : fn(data: zoo, width: Any, FUN: Any, ...: Any, [by]: Any, [by.column]: logical, [fill]: Any, [na.pad]: logical, [partial]: Any, [align]: character, [coredata]: logical) -> zoo
+rollapply : fn(data: Any, width: Any, FUN: Any, ...: Any, [by]: Any, [by.column]: logical, [fill]: Any, [na.pad]: logical, [partial]: Any, [align]: character, [coredata]: logical) -> Any
+
+[.zoo : fn(x: zoo, ...: Any) -> zoo

@@ -10,7 +10,6 @@
 
 use {
     crate::{
-        NativeSymbol,
         builtins::{BuiltinDef, Call, internal},
         coerce::{coerce_vector, type_name},
         conditions::warning,
@@ -44,10 +43,6 @@ pub struct Rng {
     /// Box-Muller makes deviates in pairs and keeps the second here. Like GNU R, the value is
     /// not part of `.Random.seed`, and reseeding or choosing Box-Muller again clears it.
     box_muller_saved: f64,
-    /// The user-supplied generator last initialized, which stays loaded after a switch to
-    /// another kind, as GNU R's `User_unif_fun` does, so a saved `.Random.seed` naming it
-    /// still restores.
-    user: Option<UserGenerator>,
 }
 
 impl Default for Rng {
@@ -62,13 +57,12 @@ impl Default for Rng {
             normal_kind: NormalKind::Inversion,
             sample_kind: SampleKind::Rejection,
             box_muller_saved: 0.0,
-            user: None,
         }
     }
 }
 
-/// A uniform generator and its state. GNU R also offers Knuth's TAOCP generators, which ry
-/// does not implement, so they have no variant.
+/// A uniform generator and its state. GNU R also offers Knuth's TAOCP generators and a
+/// user-supplied one, which ry does not implement, so they have no variant.
 enum State {
     WichmannHill([u32; 3]),
     MarsagliaMulticarry([u32; 2]),
@@ -79,18 +73,6 @@ enum State {
         words: Box<[u32; TWISTER_WORDS]>,
     },
     LecuyerCmrg([u32; 6]),
-    UserSupplied(UserGenerator),
-}
-
-/// The routines of `RNGkind("user-supplied")`, found in the loaded DLLs as GNU R finds them:
-/// `user_unif_rand` returns a pointer to the next uniform, and the optional `user_unif_nseed`
-/// and `user_unif_seedloc` expose the generator's seed words for `.Random.seed` to mirror.
-#[derive(Clone, Copy)]
-struct UserGenerator {
-    unif_rand: NativeSymbol,
-    /// The generator's own seed words, null when it exposes none.
-    seeds: *mut u32,
-    seed_count: usize,
 }
 
 /// GNU R's codes for the uniform generators, which `.Random.seed[1] %% 100` and `RNGkind` use.
@@ -140,15 +122,12 @@ pub unsafe fn get_rng_state() -> R<()> {
     let Some(kind) = read_kinds(seeds)? else {
         return Ok(());
     };
-    let count = match kind {
-        Kind::UserSupplied => rng().user.map_or(0, |generator| generator.seed_count),
-        kind => kind.seed_count(),
-    };
+    let count = kind.seed_count();
     let available = length(seeds);
     if available > 1 && available < count + 1 {
         return Err(error("'.Random.seed' has wrong length"));
     }
-    if available == 1 && kind != Kind::UserSupplied {
+    if available == 1 {
         return randomize(kind);
     }
     let words: Vec<u32> = ints(seeds)
@@ -201,8 +180,8 @@ pub unsafe fn unif_index(n: f64) -> R<f64> {
     Ok(next_index(rng(), n))
 }
 
-/// `R_sample_kind`: GNU R's `Sampletype` code of the current discrete-uniform method.
-pub fn sample_kind_code() -> i32 {
+/// `R_sample_kind`: GNU R's `Sampletype` code of the current sampling method.
+pub fn sample_kind() -> i32 {
     rng().sample_kind as i32
 }
 
@@ -286,7 +265,7 @@ unsafe fn do_sample(call: &Call<'_>) -> R<Sexp> {
 /// `.Internal(sample2(n, size))`: sampling without replacement by redrawing duplicates, which
 /// `sample.int` uses when `size` is small next to a large `n`.
 unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
-    let population = as_real_scalar(call.arg(0));
+    let population = as_real_scalar(call.arg(0)).floor();
     let size = as_integer_scalar(call.arg(1));
     if !(0.0..=4.5e15).contains(&population) || (size > 0 && population == 0.0) {
         return Err(error("invalid first argument"));
@@ -325,7 +304,7 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
 
 /// Sampling with equal probabilities. Populations beyond the integer range give doubles.
 unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp> {
-    let count = as_real_scalar(population);
+    let count = as_real_scalar(population).floor();
     let size = vector_size(size)?;
     if !(0.0..=4.5e15).contains(&count) || (size > 0 && count == 0.0) {
         return Err(error("invalid first argument"));
@@ -662,7 +641,7 @@ unsafe fn read_kinds(seeds: Sexp) -> R<Option<Kind>> {
                 (_, None, _) => {
                     "'.Random.seed[1]' is not a valid Normal type, so ignored".to_string()
                 }
-                (Some(Kind::UserSupplied), ..) if rng().user.is_none() => {
+                (Some(Kind::UserSupplied), ..) => {
                     "'.Random.seed[1] = 5' but no user-supplied generator, so ignored".to_string()
                 }
                 (Some(kind), Some(normal_kind), Some(sample_kind)) => {
@@ -698,7 +677,10 @@ unsafe fn set_kinds(kind: Sexp, normal_kind: Sexp, sample_kind: Sexp) -> R<()> {
         };
         if !matches!(
             normal_kind,
-            NormalKind::Inversion | NormalKind::BoxMuller | NormalKind::KindermanRamage
+            NormalKind::Inversion
+                | NormalKind::BoxMuller
+                | NormalKind::KindermanRamage
+                | NormalKind::BuggyKindermanRamage
         ) {
             return Err(error(format!(
                 "normal.kind \"{}\" is not supported by ry",
@@ -706,6 +688,15 @@ unsafe fn set_kinds(kind: Sexp, normal_kind: Sexp, sample_kind: Sexp) -> R<()> {
             )));
         }
         get_rng_state()?;
+        if matches!(
+            normal_kind,
+            NormalKind::KindermanRamage | NormalKind::BuggyKindermanRamage
+        ) && rng().state.kind() == Kind::MarsagliaMulticarry
+        {
+            warning(
+                "RNGkind: severe deviations from normality for Kinderman-Ramage + Marsaglia-Multicarry",
+            )?;
+        }
         let rng = rng();
         if normal_kind == NormalKind::BoxMuller {
             rng.box_muller_saved = 0.0;
@@ -777,10 +768,6 @@ impl State {
             for _ in 0..50 {
                 seed = lcg_step(seed);
             }
-            if kind == Kind::UserSupplied {
-                // SAFETY: the routines are the loaded package's, called as GNU R calls them.
-                return unsafe { init_user_generator(seed) }.map(State::UserSupplied);
-            }
             let mut words = vec![0u32; kind.seed_count()];
             for word in words.iter_mut() {
                 seed = lcg_step(seed);
@@ -817,19 +804,7 @@ impl State {
                 }
             }
             Kind::LecuyerCmrg => State::LecuyerCmrg(std::array::from_fn(word)),
-            Kind::UserSupplied => {
-                let generator = rng()
-                    .user
-                    .ok_or_else(|| error("'user_unif_rand' not in load table"))?;
-                if !generator.seeds.is_null() {
-                    for (index, &value) in words.iter().take(generator.seed_count).enumerate() {
-                        // SAFETY: `user_unif_nseed` vouches for `seed_count` words.
-                        unsafe { *generator.seeds.add(index) = value };
-                    }
-                }
-                State::UserSupplied(generator)
-            }
-            Kind::KnuthTaocp | Kind::KnuthTaocp2002 => {
+            Kind::KnuthTaocp | Kind::KnuthTaocp2002 | Kind::UserSupplied => {
                 return Err(error(format!(
                     "RNG kind \"{}\" is not supported by ry",
                     kind.name()
@@ -845,7 +820,6 @@ impl State {
             State::SuperDuper(_) => Kind::SuperDuper,
             State::MersenneTwister { .. } => Kind::MersenneTwister,
             State::LecuyerCmrg(_) => Kind::LecuyerCmrg,
-            State::UserSupplied(_) => Kind::UserSupplied,
         }
     }
 
@@ -857,44 +831,8 @@ impl State {
                 .chain(words.iter().copied())
                 .collect(),
             State::LecuyerCmrg(words) => words.to_vec(),
-            State::UserSupplied(generator) if generator.seeds.is_null() => Vec::new(),
-            // SAFETY: `user_unif_nseed` vouches for `seed_count` words.
-            State::UserSupplied(generator) => unsafe {
-                std::slice::from_raw_parts(generator.seeds, generator.seed_count).to_vec()
-            },
         }
     }
-}
-
-/// `RNG_Init` for `USER_UNIF`: finds the generator's routines, seeds it with the scrambled
-/// seed, and records where its seed words live.
-unsafe fn init_user_generator(seed: u32) -> R<UserGenerator> {
-    let find = interp().hooks.find_native_symbol;
-    let unif_rand =
-        find("user_unif_rand").ok_or_else(|| error("'user_unif_rand' not in load table"))?;
-    if let Some(init) = find("user_unif_init") {
-        let init = std::mem::transmute::<NativeSymbol, unsafe extern "C" fn(u32)>(init);
-        init(seed);
-    }
-    let mut generator = UserGenerator {
-        unif_rand,
-        seeds: std::ptr::null_mut(),
-        seed_count: 0,
-    };
-    if let Some(seed_location) = find("user_unif_seedloc") {
-        match find("user_unif_nseed") {
-            None => warning("cannot read seeds unless 'user_unif_nseed' is supplied")?,
-            Some(seed_count) => match *seed_count().cast::<i32>() {
-                count @ 0..=625 => {
-                    generator.seeds = seed_location().cast::<u32>();
-                    generator.seed_count = count as usize;
-                }
-                _ => warning("seed length must be in 0...625; ignored")?,
-            },
-        }
-    }
-    rng().user = Some(generator);
-    Ok(generator)
 }
 
 fn lcg_step(seed: u32) -> u32 {
@@ -944,7 +882,6 @@ fn fixup_seeds(state: &mut State, initial: bool) -> bool {
             };
             valid(first, LECUYER_MODULUS_1) && valid(second, LECUYER_MODULUS_2)
         }
-        State::UserSupplied(_) => true,
     }
 }
 
@@ -1002,9 +939,6 @@ fn next_uniform(state: &mut State) -> f64 {
             };
             difference as f64 * 2.328306549295727688e-10
         }
-        // GNU R returns the user's uniform as it is, without the fix-up into (0, 1).
-        // SAFETY: `user_unif_rand` returns a pointer to its current deviate.
-        State::UserSupplied(generator) => unsafe { *(generator.unif_rand)().cast::<f64>() },
     }
 }
 
@@ -1091,7 +1025,8 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
             rng.box_muller_saved = radius * theta.sin();
             Ok(radius * theta.cos())
         }
-        NormalKind::KindermanRamage => Ok(kinderman_ramage(&mut rng.state)),
+        NormalKind::KindermanRamage => Ok(kinderman_ramage(&mut rng.state, false)),
+        NormalKind::BuggyKindermanRamage => Ok(kinderman_ramage(&mut rng.state, true)),
         other => Err(error(format!(
             "normal.kind \"{}\" is not supported by ry",
             other.name()
@@ -1100,16 +1035,23 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
 }
 
 /// Kinderman and Ramage's (1976) normal generator with Josef Leydold's correction, as GNU R's
-/// `norm_rand` runs it.
+/// `norm_rand` runs it. `buggy` keeps the uncorrected version R used before 1.7.0, which
+/// `RNGversion` still selects: a mistyped constant in the main region and a first region that
+/// accepts a candidate without the density test whenever max(u2, u3) <= 0.8056.
 #[allow(clippy::excessive_precision)]
-fn kinderman_ramage(state: &mut State) -> f64 {
+fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
     const A: f64 = 2.216035867166471;
     let g = |x: f64| 0.398942280401433 * (-x * x / 2.0).exp() - 0.180025191068563 * (A - x);
     let signed = |u2: f64, u3: f64, value: f64| if u2 < u3 { value } else { -value };
     let u1 = next_uniform(state);
     if u1 < 0.884070402298758 {
         let u2 = next_uniform(state);
-        return A * (1.131131635444180 * u1 + u2 - 1.0);
+        let slope = if buggy {
+            1.13113163544180
+        } else {
+            1.131131635444180
+        };
+        return A * (slope * u1 + u2 - 1.0);
     }
     if u1 >= 0.973310954173898 {
         loop {
@@ -1149,6 +1091,12 @@ fn kinderman_ramage(state: &mut State) -> f64 {
         let u2 = next_uniform(state);
         let u3 = next_uniform(state);
         let value = 0.479727404222441 - 0.595507138015940 * u2.min(u3);
+        if buggy {
+            if u2.max(u3) <= 0.805577924423817 {
+                return signed(u2, u3, value);
+            }
+            continue;
+        }
         if value < 0.0 {
             continue;
         }

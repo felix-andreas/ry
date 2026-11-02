@@ -1,0 +1,4 @@
+# callr: running R code in a child process. The function's result is serialized back to the
+# caller, so `r()` returns what `func` returns.
+
+r : <T> fn(func: fn(...: Any) -> T, [args]: list[named: Any] | list[Any], [libpath]: character[], [repos]: character[], [stdout]: character | NULL, [stderr]: character | NULL, [poll_connection]: logical, [error]: character, [cmdargs]: character[], [show]: logical, [callback]: (fn(...: Any) -> Any) | NULL, [block_callback]: (fn(...: Any) -> Any) | NULL, [spinner]: logical, [system_profile]: logical, [user_profile]: logical | character, [env]: character[named], [timeout]: double, [package]: logical | character, [arch]: character, ...: Any) -> T

@@ -1,0 +1,8 @@
+# NlcOptim: sequential quadratic programming for nonlinear constrained problems.
+# `objfun` and `confun` receive the parameters as a one-column matrix. `confun`
+# returns a list with the inequality constraints `c` and the equality constraints
+# `ceq`, either of which may be NULL. The multipliers in `lambda` are named after the
+# kinds of constraint the problem has, so they stay an open dictionary.
+@alias SolnlResult {list{par: matrix, fn: double, counts: matrix, lambda: list[named: Any], grad: matrix, hessian: matrix}}
+
+solnl : fn([X]: double[] | matrix, [objfun]: fn(matrix) -> double, [confun]: fn(matrix) -> list[named: Any] | NULL, [A]: matrix | NULL, [B]: double[] | NULL, [Aeq]: matrix | NULL, [Beq]: double[] | NULL, [lb]: double[] | NULL, [ub]: double[] | NULL, [tolX]: double, [tolFun]: double, [tolCon]: double, [maxnFun]: double, [maxIter]: double) -> SolnlResult

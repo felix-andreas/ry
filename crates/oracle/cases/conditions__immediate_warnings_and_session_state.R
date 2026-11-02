@@ -35,3 +35,18 @@ print(Sys.getlocale("LC_COLLATE"))
 print(sort(c("b", "A", "a", "B")))
 invisible(Sys.setlocale("LC_COLLATE", old_collate))
 print(suppressWarnings(Sys.setlocale("LC_COLLATE", "no_such_locale")))
+
+# A pairlist assigns into a list but not into an atomic vector.
+x <- 1:3
+print(tryCatch({ x[2] <- pairlist(5); x }, error = conditionMessage))
+l <- list(1, 2)
+l[2] <- pairlist(5)
+str(l)
+print(tryCatch(Sys.sleep(-1), error = conditionMessage))
+print(tryCatch(Sys.sleep(NaN), error = conditionMessage))
+Sys.setlocale("LC_NUMERIC", "C")
+b <- "\xff"; Encoding(b) <- "bytes"
+l1 <- "\xe9"; Encoding(l1) <- "latin1"
+print(charToRaw(paste(b, l1)))
+print(Encoding(paste(c(l1, "a"), "b")))
+print(Encoding(paste(c(l1, "a"), collapse = "")))

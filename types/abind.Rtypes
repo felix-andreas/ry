@@ -1,0 +1,4 @@
+# abind: combine arrays along any dimension. The result is an array, which the
+# shipped base types have no name for, so it stays `Any`; with `force.array = FALSE`
+# a data frame input can also come back as a data frame.
+abind : @pure fn(...: Any, [along]: double, [rev.along]: double | NULL, [new.names]: Any, [force.array]: logical, [make.names]: logical, [use.anon.names]: logical, [use.first.dimnames]: logical, [hier.names]: Any, [use.dnns]: logical) -> Any

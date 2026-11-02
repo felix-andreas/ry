@@ -12,7 +12,7 @@ query runs. The [DataFrames guide](/guides/dataframes) covers the API and runnin
 because DataFrames need ry's own runtime.
 
 ```r
-sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
+sales <- DataFrame(region = ["eu", "us"], units = [3L, 5L], price = [1.5, 2])
 summary <- sales |>
   DataFrame.filter(col("units") > 1L) |>
   DataFrame.with_columns(revenue = col("units") * col("price")) |>
@@ -77,7 +77,7 @@ A DataFrame type lists its columns, like a record. A column type is always a vec
 total_units <- function(sales: DataFrame{region: character, units: integer}) -> integer {
   sum(sales$units)
 }
-total_units(DataFrame(region = "eu", unit = 1L))
+total_units(DataFrame(region = ["eu"], unit = [1L]))
 ```
 
 </TabItem>
@@ -88,7 +88,7 @@ total_units(DataFrame(region = "eu", unit = 1L))
 total_units <- function(sales) {
   sum(sales$units)
 }
-total_units(DataFrame(region = "eu", unit = 1L))
+total_units(DataFrame(region = ["eu"], unit = [1L]))
 ```
 
 </TabItem>

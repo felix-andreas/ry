@@ -153,6 +153,7 @@ fn run(seed: u64, steps: usize, stress: bool) {
     let mut rng = SplitMix64(seed);
     let mut heap = Heap::new();
     heap.policy_mut().young_limit = 4096 + rng.below(64 * 1024);
+    heap.policy_mut().young_large_limit = 4096 + rng.below(256 * 1024);
     if stress {
         heap.policy_mut().stress = GcStress::EveryAllocation;
     }
@@ -226,7 +227,25 @@ fn run(seed: u64, steps: usize, stress: bool) {
                     let target = live[rng.below(live.len())];
                     let child = live[rng.below(live.len())];
                     let child_sexp = model.nodes[child].as_ref().expect("live").0;
+                    let source = model.nodes[child].clone();
                     match model.nodes[target].clone() {
+                        // Copy a run of another list's elements, as `Rf_duplicate` does.
+                        Some((sexp, Node::List(mut children)))
+                            if child != target
+                                && rng.chance(1, 3)
+                                && matches!(&source, Some((_, Node::List(from))) if !from.is_empty()) =>
+                        {
+                            let Some((from_sexp, Node::List(from))) = source else {
+                                unreachable!("matched above")
+                            };
+                            let count = rng.below(children.len().min(from.len()) + 1);
+                            let to_start = rng.below(children.len() - count + 1);
+                            let from_start = rng.below(from.len() - count + 1);
+                            heap.copy_elements(sexp, to_start, from_sexp, from_start, count);
+                            children[to_start..to_start + count]
+                                .copy_from_slice(&from[from_start..from_start + count]);
+                            model.nodes[target] = Some((sexp, Node::List(children)));
+                        }
                         Some((sexp, Node::List(mut children))) if !children.is_empty() => {
                             let position = rng.below(children.len());
                             heap.set_element(sexp, position, child_sexp);
@@ -342,11 +361,14 @@ fn unrooted_objects_are_freed_and_their_slots_reused() {
         let before = heap.stats().objects_freed;
         heap.collect(Collection::Minor);
         assert!(heap.stats().objects_freed > before);
-        assert_eq!(
-            garbage.kind(),
-            SexpType::Free,
-            "a freed slot is poisoned as FREESXP"
-        );
+        // Only debug builds poison freed slots, since it costs a store per dead byte.
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                garbage.kind(),
+                SexpType::Free,
+                "a freed slot is poisoned as FREESXP"
+            );
+        }
         let reused = heap.alloc_vector(SexpType::Real, 3).expect("alloc");
         assert_eq!(reused, garbage, "the free list hands the slot out again");
         assert!(is_na_real(kept.slice::<f64>()[1]));

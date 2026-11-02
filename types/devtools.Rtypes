@@ -1,0 +1,3 @@
+# devtools: package development. `load_all()` returns pkgload's invisible record of what it loaded.
+
+load_all : fn([path]: character, [reset]: logical, [recompile]: logical, [export_all]: logical, [helpers]: logical, [quiet]: logical, ...: Any) -> list[named: Any]

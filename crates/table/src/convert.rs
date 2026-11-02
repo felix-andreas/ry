@@ -7,13 +7,27 @@
 //! value and back, and a column without nulls has the same bytes on both sides.
 
 use {
-    crate::{Error, Result},
-    polars::prelude::{
-        BooleanChunked, ChunkUnique, DataType, Float64Chunked, FrozenCategories, Int32Chunked,
-        IntoSeries, NewChunkedArray, PlSmallStr, Series, StringChunked,
+    crate::{
+        Error, Result,
+        kernel::{gather_values, pack_rows},
     },
-    polars_arrow::{array::PrimitiveArray, bitmap::Bitmap, datatypes::ArrowDataType},
+    foldhash::fast::FixedState,
+    hashbrown::HashTable,
+    polars::prelude::{
+        BooleanChunked, DataType, Float64Chunked, FrozenCategories, Int32Chunked, IntoSeries,
+        NewChunkedArray, PlSmallStr, Series, StringChunked, UInt32Chunked,
+    },
+    polars_arrow::{
+        array::{Array, PrimitiveArray, Utf8ViewArray},
+        bitmap::Bitmap,
+        datatypes::ArrowDataType,
+    },
     polars_buffer::{Buffer, SharedStorage},
+    rayon::{current_num_threads, join, prelude::*},
+    std::{
+        hash::BuildHasher,
+        sync::atomic::{AtomicU32, Ordering},
+    },
 };
 
 /// R's `NA_integer_`, which is also `NA` for a logical vector.
@@ -227,19 +241,135 @@ pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
     )?))
 }
 
-/// A string column as a factor with R's default levels, its distinct values sorted, as
-/// `factor(x)` makes them.
+/// A string column as a factor with its distinct values as levels, sorted in byte order, which is
+/// what `factor(x)` gives in R's C locale.
+///
+/// A column can hold millions of distinct strings, and then every random access into one big hash
+/// table misses the cache. So the rows are hashed in parallel and split by hash into partitions,
+/// each partition numbers its own distinct strings in a table small enough to stay warm, and no
+/// string is copied. The distinct strings sort by a 16-byte prefix key, falling back to the whole
+/// string only on a tie, and Polars builds its categories while the codes are renumbered into
+/// level order. Polars' own string-to-`Enum` cast would intern every distinct string twice and look
+/// every row up again.
 pub fn string_to_factor(series: &Series) -> Result<Series> {
-    let strings = series.cast(&DataType::String)?;
-    let mut levels: Vec<String> = strings
-        .str()?
-        .unique()?
-        .iter()
-        .flatten()
-        .map(str::to_string)
+    let strings = series.cast(&DataType::String)?.rechunk();
+    let chunked = strings.str()?;
+    let empty = Utf8ViewArray::new_empty(ArrowDataType::Utf8View);
+    let array = chunked.downcast_iter().next().unwrap_or(&empty);
+    let rows = array.len();
+    let valid = |row: usize| {
+        array
+            .validity()
+            .is_none_or(|validity| validity.get_bit(row))
+    };
+    let partitions = (current_num_threads() * 4).next_power_of_two().min(128);
+    let state = FixedState::default();
+    let (hashes, partition_of): (Vec<u64>, Vec<u8>) = (0..rows)
+        .into_par_iter()
+        .map(|row| {
+            if !valid(row) {
+                return (0, u8::MAX);
+            }
+            let hash = state.hash_one(array.value(row));
+            // hashbrown tags an entry with the hash's top seven bits and finds its bucket with the
+            // low bits, so the partition comes from bits that neither uses: taken from the top,
+            // every string in a partition would share most of its tag.
+            (hash, ((hash >> 40) as usize & (partitions - 1)) as u8)
+        })
+        .unzip();
+    // Each partition owns the rows whose strings hash into it, so the code of a row is written by
+    // exactly one partition.
+    let local_codes: Vec<AtomicU32> = (0..rows).map(|_| AtomicU32::new(0)).collect();
+    let locals: Vec<Vec<&str>> = (0..partitions as u8)
+        .into_par_iter()
+        .map(|partition| {
+            let mut table: HashTable<u32> = HashTable::new();
+            let mut distinct: Vec<&str> = Vec::new();
+            for (row, _) in partition_of
+                .iter()
+                .enumerate()
+                .filter(|(_, owner)| **owner == partition)
+            {
+                let value = array.value(row);
+                let hash = hashes[row];
+                let code = match table.find(hash, |index| distinct[*index as usize] == value) {
+                    Some(index) => *index,
+                    None => {
+                        let index = distinct.len() as u32;
+                        distinct.push(value);
+                        table.insert_unique(hash, index, |index| {
+                            state.hash_one(distinct[*index as usize])
+                        });
+                        index
+                    }
+                };
+                local_codes[row].store(code, Ordering::Relaxed);
+            }
+            distinct
+        })
         .collect();
-    levels.sort_unstable();
-    Ok(strings.cast(&enum_dtype(&levels)?)?)
+    let offsets: Vec<u32> = locals
+        .iter()
+        .scan(0u32, |offset, local| {
+            let start = *offset;
+            *offset += local.len() as u32;
+            Some(start)
+        })
+        .collect();
+    let distinct: Vec<&str> = locals.into_iter().flatten().collect();
+    let mut order: Vec<(u128, u32)> = distinct
+        .par_iter()
+        .enumerate()
+        .map(|(index, value)| (prefix_key(value), index as u32))
+        .collect();
+    order.par_sort_unstable_by(|(a_key, a), (b_key, b)| {
+        a_key
+            .cmp(b_key)
+            .then_with(|| distinct[*a as usize].cmp(distinct[*b as usize]))
+    });
+    let mut rank = vec![0u32; distinct.len()];
+    for (position, (_, index)) in order.iter().enumerate() {
+        rank[*index as usize] = position as u32;
+    }
+    let (categories, codes) = join(
+        || FrozenCategories::new(order.iter().map(|(_, index)| distinct[*index as usize])),
+        || -> Vec<u32> {
+            (0..rows)
+                .into_par_iter()
+                .map(|row| match partition_of[row] {
+                    // A missing row's code is masked by the validity bitmap, so any level stands
+                    // in for it.
+                    u8::MAX => 0,
+                    partition => {
+                        let local = local_codes[row].load(Ordering::Relaxed);
+                        rank[(offsets[partition as usize] + local) as usize]
+                    }
+                })
+                .collect()
+        },
+    );
+    let dtype = DataType::from_frozen_categories(categories?);
+    let physical = UInt32Chunked::with_chunk(
+        series.name().clone(),
+        PrimitiveArray::new(
+            ArrowDataType::UInt32,
+            codes.into(),
+            array.validity().cloned(),
+        ),
+    )
+    .into_series()
+    .cast(&dtype.to_physical())?;
+    // SAFETY: every code is the position of its string among the dtype's categories.
+    Ok(unsafe { physical.from_physical_unchecked(&dtype) }?)
+}
+
+/// The first 16 bytes of `value`, big-endian and padded with zeros, so comparing keys orders
+/// strings as comparing their bytes does, up to a tie between strings that share those bytes.
+fn prefix_key(value: &str) -> u128 {
+    let mut bytes = [0u8; 16];
+    let prefix = &value.as_bytes()[..value.len().min(16)];
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    u128::from_be_bytes(bytes)
 }
 
 fn validity<T>(values: &[T], valid: impl Fn(&T) -> bool) -> Option<Bitmap> {
@@ -247,4 +377,42 @@ fn validity<T>(values: &[T], valid: impl Fn(&T) -> bool) -> Option<Bitmap> {
         return None;
     }
     Some(values.iter().map(valid).collect())
+}
+
+/// A string column from codes into `distinct`: code 0 is `NA` and code `c` is `distinct[c - 1]`,
+/// as [`StringCodes`](crate::StringCodes) numbers a column's rows. The rows share the distinct
+/// strings' bytes and get a 16-byte view each, gathered in parallel.
+pub fn strings_from_codes<'a>(
+    name: PlSmallStr,
+    distinct: impl Iterator<Item = &'a str>,
+    codes: &[u32],
+) -> Result<Series> {
+    let dictionary =
+        StringChunked::from_iter_values(PlSmallStr::EMPTY, std::iter::once("").chain(distinct));
+    let dictionary = dictionary.rechunk();
+    let [chunk] = dictionary.chunks().as_slice() else {
+        return Err(Error::InvalidStringCodes(name.to_string()));
+    };
+    let Some(array) = chunk.as_any().downcast_ref::<Utf8ViewArray>() else {
+        return Err(Error::InvalidStringCodes(name.to_string()));
+    };
+    let entries = array.len() as u32;
+    if codes.iter().any(|code| *code >= entries) {
+        return Err(Error::InvalidStringCodes(name.to_string()));
+    }
+    let views = gather_values(array.views(), codes);
+    let validity = codes
+        .contains(&0)
+        .then(|| pack_rows(codes.len(), |row| codes[row] != 0));
+    // SAFETY: every gathered view is a view of `array`, so it stays valid over its buffers.
+    let gathered = unsafe {
+        Utf8ViewArray::new_unchecked_unknown_md(
+            array.dtype().clone(),
+            views,
+            array.data_buffers().clone(),
+            validity,
+            Some(array.total_buffer_len()),
+        )
+    };
+    Ok(StringChunked::with_chunk(name, gathered).into_series())
 }

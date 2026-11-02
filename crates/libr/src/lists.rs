@@ -178,7 +178,18 @@ read_cell!(CAR, car, |object| unsafe {
     Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
 });
 read_cell!(CDR, cdr, |object| unsafe { object.external_protected() });
-read_cell!(TAG, tag, |object| unsafe { object.external_tag() });
+
+/// GNU R leaves a bytecode object's tag unused. ry keeps the inline caches there, and their
+/// environment binding cells are internal objects that native code walking a closure (lobstr's
+/// `obj_size`, for one) must not reach.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
+    enter(|| match object.kind() {
+        SexpType::ExternalPtr => Ok(object.external_tag()),
+        SexpType::Bytecode => Ok(runtime().nil()),
+        _ => Ok(triple(object, "TAG")?.tag()),
+    })
+}
 read_path!(CAAR, car, car);
 read_path!(CDAR, car, cdr);
 read_path!(CADR, cdr, car);

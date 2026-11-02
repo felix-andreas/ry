@@ -1,0 +1,4 @@
+# doParallel: a parallel backend for foreach. Registering one changes foreach's global state, and
+# the result is the internal record `foreach::setDoPar()` leaves behind.
+
+registerDoParallel : fn([cl]: Any, [cores]: integer | NULL, ...: Any) -> Any

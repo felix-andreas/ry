@@ -1,0 +1,11 @@
+# DBI: the database interface. Drivers and connections are S4 classes that extend "DBIDriver" and
+# "DBIConnection", and these declarations use the base classes. A `pool::Pool` stands in for a
+# connection wherever DBI's generics are called.
+
+@type DBIDriver
+@type DBIConnection
+@type SQL
+
+ANSI : @pure fn() -> DBIConnection
+dbConnect : fn(drv: DBIDriver, ...: Any) -> DBIConnection
+dbQuoteIdentifier : @pure fn(conn: DBIConnection | Pool, x: Any, ...: Any) -> SQL

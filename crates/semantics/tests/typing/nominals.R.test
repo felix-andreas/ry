@@ -208,9 +208,9 @@ setGeneric("deposit", function(account, amount) standardGeneric("deposit"))
 setMethod("deposit", "Account", function(account, amount) account)
 use <- function(account) deposit(account, 50)
 #++++
-Unknown
-Unknown
-Unknown
+fn(...: Any) -> Any
+character
+character
 use: <T> fn(account: T) -> Unknown
 
 #==== nominal_field_writes
@@ -395,3 +395,21 @@ double
 double
 double
 669..671 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Tag`
+
+#---- a_dollar_method_types_field_reads_on_its_class
+# R dispatches `x$name` on a classed `x` to a `$.class` method, so its result types the read.
+#: @type Request {list[named: character]}
+
+#: fn(x: Request, name: character) -> double
+"$.Request" <- function(x, name) nchar(unclass(x)[[name]]) + 0
+
+#: @new Request
+request <- list(url = "https://example.org")
+
+#: character
+url <- request$url
+#++++
+$.Request: fn(x: Request, name: character) -> double
+request: Request
+url: character
+328..339 error[type-mismatch] expected `character`, found `double`

@@ -4,7 +4,7 @@ use {
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime},
         config::Config,
-        load,
+        debug_adapter, load,
         preflight::{self, ConsoleFilter, Erase, Preflight, Verdict},
         repl_completer::AnalysisCompleter,
         server,
@@ -84,13 +84,37 @@ fn main() -> ExitCode {
         return run_load(path, expressions, file.as_deref(), *runtime);
     }
 
+    if let Command::DebugAdapter = &cli.command {
+        return run_debug_adapter();
+    }
+
     // Recursive tree walks can exceed a constrained `ulimit -s` main stack.
     let command = move || match cli.command {
         Command::Check {
             files,
             output,
             min_severity,
-        } => exit_code(cli::check(files.as_deref(), output, min_severity)),
+            fix,
+            unsafe_fixes,
+            no_cache,
+        } => {
+            let fix = match (fix, unsafe_fixes) {
+                (false, _) => cli::FixMode::Off,
+                (true, false) => cli::FixMode::Safe,
+                (true, true) => cli::FixMode::All,
+            };
+            let cache = match no_cache {
+                true => ry::check_cache::CacheUse::Off,
+                false => ry::check_cache::CacheUse::ReadWrite,
+            };
+            exit_code(cli::check(
+                files.as_deref(),
+                output,
+                min_severity,
+                fix,
+                cache,
+            ))
+        }
         Command::Fmt {
             files,
             check,
@@ -132,7 +156,11 @@ fn main() -> ExitCode {
             println!("{}", load::process_runtime());
             ExitCode::SUCCESS
         }
-        Command::Run { .. } | Command::R { .. } | Command::Repl { .. } | Command::Load { .. } => {
+        Command::Run { .. }
+        | Command::R { .. }
+        | Command::Repl { .. }
+        | Command::Load { .. }
+        | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
     };
@@ -148,7 +176,9 @@ fn main() -> ExitCode {
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
-    let source = match fs::read_to_string(file) {
+    // R reads a script in the session's encoding, so a Latin-1 script is valid R; the runtime
+    // reads the bytes itself, and the check sees them with invalid UTF-8 replaced.
+    let source = match fs::read(file) {
         Ok(source) => source,
         Err(error) => {
             cli::error(&format!("cannot read {}: {error}", file.display()));
@@ -158,7 +188,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
         return ExitCode::from(2);
     };
-    if preflight.check(&source) == Verdict::Refuse {
+    if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
         return ExitCode::from(1);
     }
     match runtime {
@@ -167,6 +197,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
             None,
             &arguments,
             runtime_flags(preflight.config()),
+            None,
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
@@ -232,10 +263,10 @@ fn run_console(
     let filter: Box<dyn repl::InputFilter> =
         Box::new(ConsoleFilter::new(preflight, runtime == Runtime::GnuR));
     let completer = Some(Box::new(AnalysisCompleter::new()) as Box<dyn repl::SessionCompleter>);
-    let load = load_package
-        .then(load::current_package)
-        .flatten()
-        .map(|root| load::load_statement(&root, true));
+    let package = load_package.then(load::current_package).flatten();
+    let load = package
+        .as_ref()
+        .map(|root| load::load_statement(root, true));
     match runtime {
         // ry's runtime carries its own loader, so it needs only the load statement.
         Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
@@ -245,11 +276,15 @@ fn run_console(
                 input,
                 filter: Some(filter),
                 completer,
+                package,
                 ..repl::RunOptions::default()
             },
             flags,
         )),
         Runtime::GnuR => {
+            if let Some(root) = package {
+                load::prepare(root);
+            }
             let mut startup = vec![load::embedded_runtime()];
             startup.extend(load);
             gnu_r_exit(repl::run(repl::RunOptions {
@@ -264,6 +299,22 @@ fn run_console(
             }))
         }
     }
+}
+
+/// The debugged program runs with the flags of the project the working directory belongs to,
+/// which is the workspace an editor starts the adapter in.
+fn run_debug_adapter() -> ExitCode {
+    let working_directory = match env::current_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            cli::error(&format!("cannot read the working directory: {error}"));
+            return ExitCode::from(2);
+        }
+    };
+    let Some(preflight) = Preflight::discover(&working_directory, working_directory.clone()) else {
+        return ExitCode::from(2);
+    };
+    runtime_exit(debug_adapter::run(runtime_flags(preflight.config())))
 }
 
 /// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
@@ -302,6 +353,7 @@ fn run_load(
             Some(&input),
             &[],
             runtime_flags(preflight.config()),
+            Some(&root),
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),

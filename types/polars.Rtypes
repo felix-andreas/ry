@@ -1,0 +1,10 @@
+# polars (r-polars 1.x). Frames, expressions and the `pl` namespace are environments whose
+# methods are reached with `$`; the stub grammar has no `$` method declarations yet, so those
+# calls stay untyped and need a binding annotation at the call site.
+@type polars_data_frame
+
+#' Converts a data frame, list or vector to a polars DataFrame.
+as_polars_df : fn(x: Any, ...: Any) -> polars_data_frame
+
+#' The polars namespace object (`pl$col()`, `pl$lit()` and so on).
+pl : environment

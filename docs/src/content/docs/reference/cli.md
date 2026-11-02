@@ -25,6 +25,8 @@ ry check                       # the current directory
 ry check R/model.R             # report on one file
 ry check --output json         # one JSON object per finding, on stdout
 ry check --min-severity error  # ignore warnings, also for the exit code
+ry check --fix                 # apply the safe fixes, then report what remains
+ry check --fix --unsafe-fixes  # also apply fixes that guess, such as a spelling suggestion
 ```
 
 Naming a file limits what is reported, not what is analyzed: ry always reads the whole
@@ -36,6 +38,39 @@ which is analyzed only when you name it.
 stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
 turns off only the color, and a pipe gets plain ASCII. [Diagnostic
 codes](/reference/diagnostic-codes) shows how to read a finding.
+
+A finding with a mechanical fix says so under its snippet, and the summary counts them:
+
+```text
+  help: Change to `TRUE` (`ry check --fix` applies it)
+...
+3 problems in 1 file
+2 fixable with `ry check --fix` (1 more with `--unsafe-fixes`)
+```
+
+`--fix` rewrites the files in place and then reports what is left. It applies only safe fixes, which
+keep what the code means: `T` to `TRUE`, `=` to `<-`, and removing a trailing comma. A fix that
+guesses what you meant, such as changing a misspelled `totl` to `total`, is unsafe and needs
+`--unsafe-fixes` as well. One fix can expose another, so ry repeats the pass until nothing changes. A file with a syntax
+error is left unchanged, because its fixes were worked out on a guess at what the broken code means.
+The editor offers the same fixes as quick fixes.
+
+### The check cache
+
+`ry check` records its findings in `.ry_cache/check.json` at the project root, and the next run
+reuses them for every file whose findings cannot have changed. On a 300,000-line package, a repeat
+check of an unchanged project takes about 0.1 s instead of 1.5 s. After an edit inside a function
+body, only the edited file and the files whose check read it are checked again, which takes about
+0.45 s. Any other change checks every file again: an edit outside a function body (a new top-level
+name, a changed signature, a class definition), an added or removed file, a different `ry.toml`,
+`NAMESPACE`, `DESCRIPTION` or stub, or a different ry binary. An edit inside a body that changes
+what the rest of the project sees also checks every file, for example one that adds `UseMethod`,
+`<<-`, `assign`, `library`, `setClass` or a `#: @type` declaration. A directory with no `ry.toml`
+or `DESCRIPTION`, such as one holding a single downloaded script, gets no cache.
+
+The output is the same with or without the cache. `--no-cache` checks every file without reading or
+writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
+directory, so the record stays out of version control.
 
 ## fmt
 
@@ -72,9 +107,9 @@ The runtimes differ in what they do with the annotations. ry's runtime turns the
 function boundaries](/type-checking/inline-annotations#running-annotated-code), and GNU R runs the
 script with them erased. ry's runtime is under construction: a script that calls something it
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
-package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which are written
-when the device closes or the script ends; `jpeg` and `postscript` devices open but write no image
-yet. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
+built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and `tiff` devices write their files when
+the device closes or the script ends. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
@@ -103,6 +138,13 @@ and consoles of `ry run` and `ry R`.
 `--experimental-features range_formatting` lets the server format a selection instead of the whole
 file.
 
+## debug-adapter
+
+`ry debug-adapter` serves one debug session over the
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
+output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
+script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments.
+
 ## debug
 
 `ry debug ast FILE` prints the syntax tree of a file, and `ry debug analysis-stats [PATH]` analyzes
@@ -129,11 +171,13 @@ a `2`.
 summary, so the stream can be read line by line:
 
 ```json
-{"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
+{"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"fix":null,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
 ```
 
 `path` is absolute. Lines and columns start at 1 and count characters, as your editor does, and
 `endColumn` is one past the end. `severity` is `"warning"` or `"error"`, and `code` is what a
 `# ry: allow(...)` comment names. `related` lists companion locations with the same position fields
-and a `message`, such as the other definition of a `duplicate`. These field names are a contract,
+and a `message`, such as the other definition of a `duplicate`. `fix` is `null` or an object with
+the `title`, an `applicability` of `"safe"` or `"unsafe"`, the position fields of the range it
+replaces, and the `replacement` text. These field names are a contract,
 so tools built on them keep working across releases.

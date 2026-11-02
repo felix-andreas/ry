@@ -1,0 +1,3 @@
+# ompr.roi: the ROI solver bridge for ompr. The solver must already be registered, which
+# loading its ROI plugin does.
+with_ROI : fn(solver: character, ...: Any) -> fn(model: linear_optimization_model) -> solution

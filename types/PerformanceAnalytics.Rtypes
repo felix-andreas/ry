@@ -1,0 +1,16 @@
+# PerformanceAnalytics: return and risk statistics on time series of returns.
+# Every function converts its input with `checkData`, so `R` and `prices` take any
+# xts, zoo, matrix, data frame or numeric vector.
+
+# The returns always come back as xts, whatever the input was.
+Return.calculate : @pure fn(prices: Any, [method]: character) -> xts
+
+# One column per asset and one row per statistic.
+table.AnnualizedReturns : @pure fn(R: Any, [scale]: double, [Rf]: Any, [geometric]: logical, [digits]: integer) -> data.frame
+
+# A single series gives a plain number; several give a one-row matrix with one column
+# per series.
+maxDrawdown : @pure fn(R: Any, [weights]: Any, [geometric]: logical, [invert]: logical, ...: Any) -> matrix | double
+
+# Always a matrix, with one row per risk-free rate and one column per series.
+SharpeRatio.annualized : @pure fn(R: Any, [Rf]: Any, [scale]: double, [geometric]: logical) -> matrix

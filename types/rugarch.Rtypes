@@ -1,0 +1,21 @@
+# rugarch: univariate GARCH models. Specifications, fits and simulations are S4
+# objects, declared here as opaque types named after their classes.
+@type uGARCHspec
+@type uGARCHmultispec
+@type uGARCHpath
+@type uGARCHfit
+
+# The model pieces are named lists whose fields depend on the model, so they stay
+# open dictionaries.
+ugarchspec : @pure fn([variance.model]: list[named: Any], [mean.model]: list[named: Any], [distribution.model]: character, [start.pars]: list[named: Any], [fixed.pars]: list[named: Any], ...: Any) -> uGARCHspec
+
+# Simulation draws from the random number generator, so it is not pure.
+ugarchpath : fn(spec: uGARCHspec, [n.sim]: double, [n.start]: double, [m.sim]: double, [presigma]: Any, [prereturns]: Any, [preresiduals]: Any, [rseed]: Any, [custom.dist]: list[named: Any], [mexsimdata]: Any, [vexsimdata]: Any, [trunclag]: double, ...: Any) -> uGARCHpath
+ugarchfit : fn(spec: uGARCHspec, data: Any, ...: Any) -> uGARCHfit
+
+multispec : @pure fn(speclist: list[uGARCHspec]) -> uGARCHmultispec
+
+# `sigma` is an S4 generic with one method per model class. On a path or a fit it is
+# the conditional volatility, a matrix with one column per simulation or series.
+sigma : @pure fn(object: uGARCHpath | uGARCHfit, ...: Any) -> matrix
+sigma : fn(object: Any, ...: Any) -> Any

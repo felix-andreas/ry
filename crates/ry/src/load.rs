@@ -77,27 +77,37 @@ pub fn process_runtime() -> String {
 ///
 /// The runtime also binds each name of ry's standard library that GNU R lacks to a function that
 /// explains the library runs only on ry's runtime, which reads better than GNU R's "could not
-/// find function". A name the session already has, such as `col` or data.table's `copy`, keeps
-/// its meaning.
+/// find function". A constant such as `Bool.true` becomes an active binding that stops with the
+/// same explanation when it is read. A name the session already has, such as `col` or
+/// data.table's `copy`, keeps its meaning.
 fn runtime(transport: &str) -> String {
     let names: Vec<String> = include_str!("../../../types/ry.exports")
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|name| format!("\"{name}\""))
         .collect();
+    // A declaration whose type is not a function type declares a constant.
+    let constants: Vec<String> = include_str!("../../../types/ry.Rtypes")
+        .lines()
+        .filter_map(|line| line.split_once(" : "))
+        .filter(|(name, declared)| !name.contains(' ') && !declared.contains("fn("))
+        .map(|(name, _)| format!("\"{name}\""))
+        .collect();
     let source = format!(
         r#"{transport}
 {RUNTIME_GNUR}
+.ry_standard_library_message <- function(name) paste0(
+  "`", name, "` is part of ry's standard library, which only ry's runtime provides, ",
+  "and this session runs on GNU R; run the code with `ry run` or `ry load` instead"
+)
 .ry_standard_library_name <- function(name) {{
   force(name)
-  function(...) stop(
-    "`", name, "()` is part of ry's standard library, which only ry's runtime provides, ",
-    "and this session runs on GNU R; run the code with `ry run` or `ry load` instead",
-    call. = FALSE
-  )
+  function(...) stop(.ry_standard_library_message(paste0(name, "()")), call. = FALSE)
 }}
-.ry_standard_library_names <- c({names})"#,
-        names = names.join(", ")
+.ry_standard_library_names <- c({names})
+.ry_standard_library_constants <- c({constants})"#,
+        names = names.join(", "),
+        constants = constants.join(", ")
     );
     let cache = dirs::cache_dir()
         .map(|directory| directory.join("ry").to_string_lossy().into_owned())
@@ -123,7 +133,15 @@ fn runtime(transport: &str) -> String {
   }}
   # Decided per session, not cached: a name an attached package exports keeps its meaning.
   for (name in runtime$.ry_standard_library_names) {{
-    if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
+    if (exists(name)) next
+    if (name %in% runtime$.ry_standard_library_constants) {{
+      makeActiveBinding(name, local({{
+        message <- runtime$.ry_standard_library_message(name)
+        function() stop(message, call. = FALSE)
+      }}), runtime)
+    }} else {{
+      runtime[[name]] <- runtime$.ry_standard_library_name(name)
+    }}
   }}
   runtime$.ry_packages <- new.env(parent = emptyenv())
   runtime$.ry_timing <- new.env(parent = emptyenv())
@@ -224,6 +242,24 @@ extern "C" fn ry_loader_commit(root: Sexp) -> Sexp {
         return libr::string_value("ry's loader panicked; please report this");
     }
     libr::null()
+}
+
+/// Starts analyzing the package at `root` on a thread of its own, so the analysis overlaps
+/// starting R and the `load_all()` that follows finds it done; that load waits for the
+/// loader while this holds it.
+pub fn prepare(root: PathBuf) {
+    let spawned = thread::Builder::new()
+        .name("ry-loader-prepare".to_owned())
+        .stack_size(ANALYSIS_STACK_SIZE)
+        .spawn(move || {
+            let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
+            loader.set_strict(strict_config(&root));
+            loader.prepare(&root);
+        });
+    if let Err(error) = spawned {
+        // Preparing only saves time: without the thread, the load derives everything itself.
+        drop(error);
+    }
 }
 
 /// Analysis recurses as deeply as the code nests, so it gets the analysis stack rather than

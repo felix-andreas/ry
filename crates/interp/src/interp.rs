@@ -23,6 +23,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod annotations;
+mod approximate;
 pub mod arith;
 pub mod arrays;
 pub mod builtin_libraries;
@@ -33,6 +34,7 @@ pub mod conditions;
 pub mod connections;
 pub mod data_table;
 pub mod dataframe;
+pub mod debugger;
 pub mod deparse;
 pub mod dispatch;
 pub mod distributions;
@@ -42,12 +44,19 @@ pub mod format;
 pub mod frame;
 pub mod gnu_r_home;
 pub mod graphics;
+pub mod graphics_engine;
 pub mod graphics_render;
+pub mod http;
+pub mod latex;
 pub mod linalg;
+pub mod long_double;
 pub mod lower;
 pub mod methods;
+pub mod moves;
 pub mod native;
 pub mod parallel;
+pub mod parse_data;
+pub mod platform;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -62,10 +71,12 @@ pub mod stats_arima;
 pub mod stats_cluster;
 pub mod stats_deriv;
 pub mod stats_lbfgsb;
+pub mod stats_loess;
 pub mod stats_models;
 pub mod stats_nlm;
 pub mod stats_optimize;
 pub mod stats_port;
+pub mod stats_spline;
 pub mod stats_tests;
 pub mod strings;
 pub mod subset;
@@ -81,7 +92,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
-        unwind::R,
+        unwind::{R, Unwind},
     },
     heap::{Heap, Marker, RootSource, object::Sexp},
     rustc_hash::FxHashMap,
@@ -116,6 +127,8 @@ pub struct Hooks {
     pub write_console: unsafe fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    /// An ALTREP vector's length, from its class's `Length` method.
+    pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
@@ -131,16 +144,14 @@ pub struct Hooks {
     /// Runs `body` as an entry from native code: the host's boundary turns an unwind into a
     /// `longjmp` into whatever native frame called the connection.
     pub enter_from_native: unsafe fn(&mut dyn FnMut() -> R<()>),
+    /// Calls a graphics device or system callback, which may be C code, under the host's
+    /// native-code boundary: a `longjmp` out of it becomes an `Err`, and the protection stack
+    /// and handles it left behind are released.
+    pub guard_native: unsafe fn(&mut dyn FnMut()) -> R<()>,
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
-    /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
-    /// finds `user_unif_rand`.
-    pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
 }
-
-/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
-pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -162,13 +173,6 @@ pub struct Interp {
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
-    /// The environments of the loops running, innermost last. A `break` or `next` in an
-    /// environment with no loop running is an error where it is evaluated, as in GNU R, so a
-    /// handler around it catches it.
-    pub loops: Vec<Sexp>,
-    /// The value each function whose `on.exit` code is running returns, innermost last, or
-    /// `None` while an unwind passes through it. `returnValue` reads the innermost.
-    pub exit_values: Vec<Option<Sexp>>,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
     /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
@@ -177,11 +181,16 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// `returnValue()` for the `on.exit` code running innermost: the value its function
+    /// returns, or `None` when the function is being left by an error or a jump past it.
+    pub returned_values: Vec<Option<Sexp>>,
     /// The innermost complex assignment running: its replacement call, the whole assignment,
     /// and the frame depth it runs at. GNU R evaluates the replacement inside a context for the
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The environments of the loops the tree-walking interpreter is running, innermost last.
+    pub loop_envs: Vec<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
@@ -190,6 +199,9 @@ pub struct Interp {
     pub error_message: String,
     /// Whether the default error handler prints (`R_ShowErrorMessages`).
     pub show_error_messages: bool,
+    /// The attached Debug Adapter Protocol server, which the evaluator consults before each
+    /// statement.
+    pub debugger: Option<Box<debugger::Adapter>>,
     /// Depth of nested default error handling, to stop an error in `options(error=)` looping.
     pub in_error: u32,
     /// Objects that live as long as the session: the options list, `.Random.seed` helpers, and
@@ -212,9 +224,17 @@ pub struct Interp {
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// Values moved out of a caller's variable into a closure's parameter.
+    pub moves: moves::State,
+    pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
+    /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
+    pub parked_unwind: Option<Unwind>,
+    /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
+    pub forks: parallel::Forks,
 }
 
 struct InterpState {
@@ -290,18 +310,19 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         restarts: None,
         global_handlers: None,
         srcref: heap.known().nil,
-        loops: Vec::new(),
-        exit_values: Vec::new(),
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: FxHashMap::default(),
         symbols,
         visible: true,
+        returned_values: Vec::new(),
         assignment_call: None,
+        loop_envs: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),
         show_error_messages: true,
+        debugger: None,
         in_error: 0,
         globals: values::Globals::placeholder(),
         hooks,
@@ -315,7 +336,11 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
+        moves: moves::State::default(),
+        library_tags: standard_library::Tags::default(),
         object_systems: true,
+        parked_unwind: None,
+        forks: parallel::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -335,6 +360,7 @@ pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
@@ -347,8 +373,11 @@ pub fn default_hooks() -> Hooks {
                 panic!("an R error escaped into native code without the libR host");
             }
         },
+        guard_native: |body| {
+            body();
+            Ok(())
+        },
         connection_vfprintf: None,
-        find_native_symbol: |_| None,
     }
 }
 
@@ -365,9 +394,8 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
     drop(written);
 }
 
-/// Writes to the console through the host.
-/// Writes console output: standard output goes where `sink` diverts it, and errors and messages
-/// where `sink(type = "message")` does.
+/// Writes console output: standard output goes where `sink` diverts it, errors and messages
+/// where `sink(type = "message")` diverts them.
 pub fn write_console(text: &[u8], is_error: bool) {
     if is_error {
         // SAFETY: the connection table only holds connections of this session.
@@ -429,6 +457,13 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            graphics_engine::trace(marker);
+            if let Some(unwind) = &interp.parked_unwind {
+                crate::unwind::trace_unwind(unwind, marker);
+            }
+            for value in interp.returned_values.iter().flatten() {
+                marker.mark(*value);
+            }
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);
@@ -446,6 +481,8 @@ impl RootSource for InterpRoots {
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
+            interp.moves.trace(marker);
+            interp.library_tags.trace(marker);
         }
     }
 }

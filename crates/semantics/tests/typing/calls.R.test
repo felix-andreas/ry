@@ -14,13 +14,13 @@ f <- function(choices) {
   if (confirmed) selected else 0L
 }
 #++++
-f: fn(choices: character | character[]) -> integer
+f: fn(choices: character | character[] | list[Any]) -> integer
 
 #---- error_handler_stubs_resolve
 options(error = recover)
 handler <- function() traceback()
 #++++
-Unknown
+list[named: Any]
 handler: fn() -> Any
 
 #---- manifest_only_exports_resolve
@@ -59,7 +59,7 @@ f: fn() -> integer[]
 f <- function(x) grepl(1L, x)
 #++++
 f: Unknown
-23..25 error[type-mismatch] expected `character`, found `integer`
+17..29 error[type-mismatch] no overload of `grepl` matches these arguments. I tried all 2 declared signatures; the first candidate fails with: expected `character`, found `integer`
 
 #---- namespace_access
 f <- function(x) base::length(x)
@@ -151,16 +151,40 @@ f <- function() g(1)
 g: <T: numeric, U> fn(x: T, [total]: U) -> double
 f: fn() -> double
 
-#---- a_formal_assigned_on_one_branch_only_is_required
+#---- a_formal_assigned_on_one_branch_only_may_be_omitted
 g <- function(x, flag) {
   if (flag) x <- 1
   x
 }
 f <- function() g(flag = FALSE)
 #++++
+g: <T> fn([x]: T, flag: logical) -> Unknown
+f: fn() -> Unknown
+
+#---- a_formal_read_by_its_own_conditional_write_is_required
+g <- function(x, flag) {
+  if (flag) x <- x + 1
+  x
+}
+f <- function() g(flag = FALSE)
+#++++
+g: <T: numeric> fn(x: T, flag: logical) -> Unknown
+f: Unknown
+70..71 error[type-mismatch] this call leaves out `x`, which the function requires
+
+#---- a_formal_forced_before_its_write_is_still_required
+g <- function(x, flag) {
+  if (flag) {
+    print(x)
+    x <- 1
+  }
+  x
+}
+f <- function() g(flag = FALSE)
+#++++
 g: <T> fn(x: T, flag: logical) -> Unknown
 f: Unknown
-66..67 error[type-mismatch] this call leaves out `x`, which the function requires
+89..90 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- a_formal_assigned_on_both_branches_may_be_omitted
 g <- function(x, flag) {
@@ -182,7 +206,7 @@ f <- function() g(flag = TRUE)
 g: <T> fn([x]: T, flag: logical) -> double
 f: fn() -> double
 
-#---- a_formal_assigned_in_a_loop_body_is_required
+#---- a_formal_assigned_in_a_loop_body_may_be_omitted
 g <- function(x, n) {
   while (n > 0) {
     x <- n
@@ -192,9 +216,8 @@ g <- function(x, n) {
 }
 f <- function() g(n = 2)
 #++++
-g: <T, U: numeric> fn(x: T, n: U) -> Unknown
-f: Unknown
-92..93 error[type-mismatch] this call leaves out `x`, which the function requires
+g: <T, U: numeric> fn([x]: T, n: U) -> Unknown
+f: fn() -> Unknown
 
 #---- a_super_assignment_does_not_assign_the_formal
 g <- function(x) {
@@ -446,12 +469,28 @@ pick <- function(kind) {
 pick: <T> fn(kind: T) -> character
 
 #==== higher_order
-#---- a_wrapper_over_disagreeing_overloads_leaves_its_parameter_unchecked
+#---- a_wrapper_over_shape_preserving_overloads_returns_its_argument
 keep_positive <- function(values) Filter(function(x) x > 0L, values)
 kept <- keep_positive(list(1L, -2L))
 #++++
-keep_positive: fn(values: Unknown) -> Unknown
-kept: Unknown
+keep_positive: <T> fn(values: T) -> T
+kept: list{integer, integer}
+
+#---- a_data_frame_passes_through_a_shape_preserving_wrapper
+first_rows <- function(rows) head(rows, 2L)
+numeric_columns <- function(frame) Filter(is.numeric, frame)
+#: fn(frame: data.frame) -> data.frame
+top <- function(frame) first_rows(numeric_columns(frame))
+#++++
+first_rows: <T> fn(rows: T) -> T
+numeric_columns: <T> fn(frame: T) -> T
+top: fn(frame: data.frame) -> data.frame
+
+#---- a_declared_parameter_passes_through_a_shape_preserving_call
+#: <T> fn(values: T) -> T
+keep_positive <- function(values) Filter(function(x) x > 0L, values)
+#++++
+keep_positive: <T> fn(values: T) -> T
 
 #---- a_lambda_argument_does_not_make_an_overload_a_guess
 named <- lapply(list(a = 1L), function(v) v + 1L)
@@ -697,7 +736,7 @@ f: <T> fn() -> T
 dedup <- function(func, x, ...) func(unique(x), ...)
 f <- function() dedup(basename, c("a/b", "a/b"))
 #++++
-dedup: <T, U> fn(func: fn(Any, ...: Any) -> T, x: U, ...: Any) -> T
+dedup: <T, U> fn(func: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
 f: fn() -> character
 
 #---- forwarded_dots_beside_a_named_argument_demand_no_callback_parameter
@@ -863,3 +902,11 @@ f: <T, U> fn(x: T, g: U) -> Unknown
 f <- function(x) x |> paste(_, "a")
 #++++
 f: <T> fn(x: T) -> Unknown
+
+#---- a_declared_callback_called_only_by_name_misses_its_positional_slot
+# A declared shape names no parameters, so `arglist = 1` goes to `...` and fills no slot.
+#: fn(f: fn(double, ...: Any) -> double) -> double
+evaluate <- function(f) f(arglist = 1)
+#++++
+evaluate: fn(f: fn(double, ...: Any) -> double) -> double
+165..166 error[type-mismatch] this call supplies 0 positional arguments, but the function requires 1, so a required argument is missing

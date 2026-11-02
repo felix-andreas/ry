@@ -178,6 +178,10 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("List.sum(xs)", "[1] 6\n"),
     ("List.sum(list())", "[1] 0\n"),
+    (
+        "identical(List.sum(as.Array((0:999999) / 999999 * 2 + 1)), sum((0:999999) / 999999 * 2 + 1))",
+        "[1] TRUE\n",
+    ),
     ("List.product(list(2, 2.5))", "[1] 5\n"),
     ("List.min(xs)", ":Ok(1L)\n"),
     ("List.max(list())", ":Err(:ListWasEmpty)\n"),
@@ -332,6 +336,74 @@ const PRINTS: &[(&str, &str)] = &[
     (
         "{ main <- function() { st <- list(seen = Dict.single(\"z\", 0)); st$seen <- Dict.insert(st$seen, \"k\", st); old <- Result.with_default(Dict.get(st$seen, \"k\"), NULL); Dict.len(old$seen) }; main() }",
         "[1] 1\n",
+    ),
+    (
+        "{ kept <- NULL; add <- function(m, k) { m <- Dict.insert(m, k, k); g <- function() m; kept <<- g; m }; f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:3) m <- add(m, i); m <- Dict.insert(m, 9L, 9L); c(Dict.len(m), Dict.len(kept())) }; f() }",
+        "[1] 4 3\n",
+    ),
+    (
+        "{ add <- function(m, k) Dict.insert(m, k, k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:5) m <- add(m, i); keep <- m; m <- add(m, 9L); c(Dict.len(m), Dict.len(keep)) }; f() }",
+        "[1] 6 5\n",
+    ),
+    (
+        "{ saved <- NULL; grab <- function(k) { saved <<- parent.frame(); k }; add <- function(m, k) Dict.insert(m, grab(k), k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:4) m <- add(m, i); c(Dict.len(m), Dict.len(saved$m)) }; f() }",
+        "[1] 4 3\n",
+    ),
+    (
+        "{ h <- function(p, k) { g <- function() Dict.len(p); Dict.insert(p, k, g) }; f <- function() { for (i in 1) NULL; out <- NULL; for (i in 1:4) { d <- Dict.insert(Dict.empty(), \"a\", 0L); d <- h(d, \"z\"); out <- c(out, Result.with_default(Dict.get(d, \"z\"), NULL)()) }; out }; f() }",
+        "[1] 1 1 1 1\n",
+    ),
+    (
+        "{ f <- function() { me <- environment(); d <- Dict.insert(Dict.empty(), 0L, 1); h <- function(p, k, env) Dict.insert(p, k, length(env[[\"d\"]])); d <- h(d, 1L, me); Dict.get(d, 1L) }; f() }",
+        ":Ok(1L)\n",
+    ),
+    (
+        "{ moved_d <- Dict.single(0L, 1); h <- function(p, k) { n <- is.null(moved_d); moved_d <- 0; Dict.insert(p, k, n) }; for (i in 1:3) moved_d <- h(moved_d, i); Result.with_default(Dict.get(moved_d, 3L), NA) }",
+        "[1] FALSE\n",
+    ),
+    (
+        "{ add <- function(xs, x) List.append(xs, x); f <- function() { for (i in 1) NULL; xs <- list(); for (i in 1:5) xs <- add(xs, i); keep <- xs; xs <- add(xs, 9L); c(length(xs), length(keep)) }; f() }",
+        "[1] 6 5\n",
+    ),
+    (
+        "{ put <- function(xs, v) { xs <- List.set(xs, 1L, v); xs }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); for (i in 1:3) xs <- put(xs, i); keep <- xs; xs <- put(xs, 7); c(xs[[1]], keep[[1]], length(xs)) }; f() }",
+        "[1] 7 3 2\n",
+    ),
+    (
+        "{ h <- function(xs, k) { g <- function() length(xs); List.append(xs, g) }; f <- function() { for (i in 1) NULL; xs <- list(); for (i in 1:3) xs <- h(xs, i); c(xs[[1]](), xs[[2]](), xs[[3]]()) }; f() }",
+        "[1] 0 1 2\n",
+    ),
+    (
+        "{ h <- function(d, k) { inc <- function(x) x + 1L; d <- Dict.insert(d, k, inc(k)); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)) }; f() }",
+        "[1]  6  5 10\n",
+    ),
+    (
+        "{ f <- function() { m <- Dict.empty(); h <- function(p, k) { g <- function() Dict.len(m); Dict.insert(p, k, g()) }; for (i in 1:3) m <- h(m, i); Dict.get(m, 3L) }; f() }",
+        ":Ok(2L)\n",
+    ),
+    (
+        "{ kept <- NULL; h <- function(d, k) { g <- function() Dict.len(d); d <- Dict.insert(d, k, 1); list(d, g) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:3) { r <- h(d, i); d <- r[[1]]; kept <- r[[2]] }; c(Dict.len(d), kept()) }; f() }",
+        "[1] 3 3\n",
+    ),
+    (
+        "{ h <- function(d, k) { each <- function(x) Dict.insert(x, k, 1); d <- each(d); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:4) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(d), Dict.len(keep)) }; f() }",
+        "[1] 5 4\n",
+    ),
+    (
+        "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
+        "[1] 4 5\n",
+    ),
+    (
+        "{ add <- function(s, k) { s <- Set.insert(s, k); s }; f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:6) { if (i == 4L) old <- s; s <- add(s, i %% 5L) }; c(Set.len(old), Set.len(s)) }; f() }",
+        "[1] 3 5\n",
+    ),
+    (
+        "{ f <- function(m) { r <- 0L; for (i in 1:50) r <- r + Dict.len(m) + Dict.contains(m, i) + Set.len(Set.single(i)); r }; f(Dict.from_list(list((1L, 1), (2L, 2)))) }",
+        "[1] 152\n",
+    ),
+    (
+        "{ f <- function(m) { r <- NULL; for (i in 1:50) r <- Dict.get(m, if (i > 40L) 2 else 1L); r }; f(Dict.from_list(list((1L, \"a\"), (2L, \"b\")))) }",
+        ":Ok(\"b\")\n",
     ),
     (
         "{ h <- function() eval.parent(quote(x[[1]] <- 99)); f <- function() { for (i in 1) NULL; x <- list(1); r <- list(x, h()); c(r[[1]][[1]], x[[1]]) }; f() }",
@@ -705,6 +777,96 @@ const PRINTS: &[(&str, &str)] = &[
     ("typeof(Num.to_double(3L))", "[1] \"double\"\n"),
     ("Num.to_integer_checked(-3.7)", ":Ok(-3L)\n"),
     ("Num.to_integer_checked(1e10)", ":Err(:OutOfBounds)\n"),
+    ("Num.add(2L, 3L)", "[1] 5\n"),
+    ("Num.sub(2.5, 1L)", "[1] 1.5\n"),
+    ("Num.mul(6L, 7L)", "[1] 42\n"),
+    ("List.walk(xs, 0L, Num.add)", "[1] 6\n"),
+    ("Num.div(7L, 2L)", "[1] 3.5\n"),
+    ("Num.div_trunc(-7L, 2L)", "[1] -3\n"),
+    ("typeof(Num.div_trunc(7L, 2L))", "[1] \"integer\"\n"),
+    ("Num.div_ceil(7L, 2L)", "[1] 4\n"),
+    ("Num.div_ceil(-7.5, 2)", "[1] -3\n"),
+    ("Num.rem(-7L, 2L)", "[1] -1\n"),
+    ("Num.pow_int(3L, 4L)", "[1] 81\n"),
+    ("typeof(Num.pow_int(2L, 0L))", "[1] \"integer\"\n"),
+    ("Num.sqrt(16L)", "[1] 4\n"),
+    ("Num.log(1)", "[1] 0\n"),
+    (
+        "c(Num.asin(1) * 2, Num.acos(-1))",
+        "[1] 3.141593 3.141593\n",
+    ),
+    (
+        "c(Num.is_nan(0 / 0), Num.is_nan(1), Num.is_nan(Inf), Num.is_nan(1L))",
+        "[1]  TRUE FALSE FALSE FALSE\n",
+    ),
+    (
+        "c(Num.bitwise_and(12L, 10L), Num.bitwise_or(12L, 10L), Num.bitwise_xor(12L, 10L))",
+        "[1]  8 14  6\n",
+    ),
+    (
+        "c(Num.bitwise_not(0L), Num.bitwise_not(-6L))",
+        "[1] -1  5\n",
+    ),
+    ("Num.bitwise_and(-1L, 255L)", "[1] 255\n"),
+    ("Num.shift_left_by(3L, 30L)", "[1] -1073741824\n"),
+    (
+        "c(Num.shift_right_by(-16L, 2L), Num.shift_right_zf_by(-16L, 28L), Num.shift_right_zf_by(-16L, 0L))",
+        "[1]  -4  15 -16\n",
+    ),
+    (
+        "c(Num.count_one_bits(255L), Num.count_one_bits(-1L), Num.count_leading_zero_bits(1L), Num.count_leading_zero_bits(0L), Num.count_trailing_zero_bits(8L), Num.count_trailing_zero_bits(0L))",
+        "[1]  8 32 31 32  3 32\n",
+    ),
+    (
+        "c(Num.pi, Num.tau / 2, Num.e)",
+        "[1] 3.141593 3.141593 2.718282\n",
+    ),
+    // Bool.
+    ("c(Bool.true, Bool.false)", "[1]  TRUE FALSE\n"),
+    (
+        "c(Bool.and(TRUE, FALSE), Bool.or(TRUE, FALSE), Bool.not(FALSE))",
+        "[1] FALSE  TRUE  TRUE\n",
+    ),
+    (
+        "c(Bool.is_eq(list(1L, \"a\"), list(1L, \"a\")), Bool.is_eq(1L, 1), Bool.is_not_eq(:A, :B))",
+        "[1]  TRUE FALSE  TRUE\n",
+    ),
+    (
+        "Bool.is_eq(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 1L)))",
+        "[1] TRUE\n",
+    ),
+    (
+        "List.to_vector(List.keep_if(xs, function(x) Bool.not(Num.is_even(x))))",
+        "[1] 3 1\n",
+    ),
+    // Str: UTF-16 and UTF-32.
+    (
+        "List.to_vector(Str.to_utf16(\"h\\u00e9\\U0001F600\"))",
+        "[1]   104   233 55357 56832\n",
+    ),
+    (
+        "Result.with_default(Str.from_utf16(list(104L, 55357L, 56832L)), \"\") == \"h\\U0001F600\"",
+        "[1] TRUE\n",
+    ),
+    ("Str.from_utf16(list(104L, 55357L))", ":Err(:BadUtf16)\n"),
+    ("Str.from_utf16(list(0L))", ":Err(:BadUtf16)\n"),
+    (
+        "Str.from_utf16_lossy(list(104L, 56832L, 105L)) == \"h\\uFFFDi\"",
+        "[1] TRUE\n",
+    ),
+    (
+        "List.to_vector(Str.to_utf32(\"h\\u00e9\"))",
+        "[1] 104 233\n",
+    ),
+    ("Str.from_utf32(list(104L, 105L))", ":Ok(\"hi\")\n"),
+    (
+        "List.all(list(55296L, 1114112L, -1L, 0L), function(c) Result.is_err(Str.from_utf32(list(c))))",
+        "[1] TRUE\n",
+    ),
+    (
+        "Str.from_utf32_lossy(list(104L, -1L, 105L)) == \"h\\uFFFDi\"",
+        "[1] TRUE\n",
+    ),
     // Breadth: Dict and Set.
     (
         "Dict.walk_until(d, 0, function(s, k, v) if (k == \"b\") :Break(s) else :Continue(s + v))",
@@ -737,6 +899,19 @@ const PRINTS: &[(&str, &str)] = &[
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
+    // Compiled loops hand a failing call back to tier 0, which raises the same error.
+    (
+        "{ f <- function(m) { for (i in 1:50) r <- Dict.len(if (i > 40L) 1 else m); r }; f(d) }",
+        "`dict` must be a dict, not a double value",
+    ),
+    (
+        "{ f <- function(m) { for (i in 1:50) r <- Dict.get(m, if (i > 40L) NA_character_ else \"a\"); r }; f(d) }",
+        "`key` must be a single logical, number or string, not `NA`",
+    ),
+    (
+        "{ f <- function(m) { for (i in 1:50) r <- Dict.contains(m, if (i > 40L) 1L else \"a\"); r }; f(d) }",
+        "the dict's keys are character, and this one is integer; a collection holds one type",
+    ),
     (
         "Dict.get(d, 1L)",
         "the dict's keys are character, and this one is integer; a collection holds one type",
@@ -866,6 +1041,69 @@ const ERRORS: &[(&str, &str)] = &[
         "List.sum(list(2147483647L, 1L))",
         "the integer result overflows; convert the elements to doubles first",
     ),
+    (
+        "Num.add(2147483647L, 1L)",
+        "the integer result overflows; `Num.add_checked()` returns `:Err(:Overflow)` instead",
+    ),
+    (
+        "Num.mul(65536L, 65536L)",
+        "the integer result overflows; `Num.mul_checked()` returns `:Err(:Overflow)` instead",
+    ),
+    ("Num.sub(Inf, Inf)", "the result is undefined (`NaN`)"),
+    (
+        "Num.div(1, 0)",
+        "`second` is zero; `Num.div_checked()` returns `:Err(:DivByZero)` instead",
+    ),
+    (
+        "Num.rem(7L, 0L)",
+        "`second` is zero; `Num.rem_checked()` returns `:Err(:DivByZero)` instead",
+    ),
+    (
+        "Num.div_trunc(7L, 0L)",
+        "`second` is zero; `Num.div_trunc_checked()` returns `:Err(:DivByZero)` instead",
+    ),
+    (
+        "Num.pow_int(2L, 31L)",
+        "the integer result overflows; `Num.pow()` returns a double instead",
+    ),
+    (
+        "Num.pow_int(2L, -1L)",
+        "`exponent` must be zero or more, not -1",
+    ),
+    (
+        "Num.sqrt(-4)",
+        "`number` must not be negative, not -4; `Num.sqrt_checked()` returns `:Err(:SqrtOfNegative)` instead",
+    ),
+    (
+        "Num.log(0L)",
+        "`number` must be positive, not 0; `Num.log_checked()` returns `:Err(:LogNeedsPositive)` instead",
+    ),
+    ("Num.asin(2)", "`number` must be from -1 to 1, not 2"),
+    (
+        "Num.is_nan(NA_real_)",
+        "`number` must be a single number, not `NA`",
+    ),
+    (
+        "Num.bitwise_not(2147483647L)",
+        "the result is -2147483648, which an R integer cannot hold because it stands for `NA`",
+    ),
+    ("Num.bitwise_and(1.5, 1L)", "`first` must be a whole number"),
+    (
+        "Num.shift_left_by(1L, 32L)",
+        "`bits` must be from 0 to 31, not 32",
+    ),
+    (
+        "Bool.not(NA)",
+        "`value` must be `TRUE` or `FALSE`, not `NA`",
+    ),
+    (
+        "Bool.and(1, TRUE)",
+        "`first` must be `TRUE` or `FALSE`, not a double value",
+    ),
+    (
+        "Str.from_utf16(list(70000L))",
+        "`units` must be a list of numbers from 0 to 65535",
+    ),
 ];
 
 thread_local! {
@@ -893,7 +1131,11 @@ fn declarations() -> Vec<(String, Vec<String>)> {
             if name.starts_with("as.") || name.starts_with("Ops.") {
                 return None;
             }
-            let parameters = &signature[signature.find("fn(")? + 3..];
+            // A declaration without a function type is a constant such as `Bool.true`.
+            let Some(start) = signature.find("fn(") else {
+                return Some((name.to_owned(), Vec::new()));
+            };
+            let parameters = &signature[start + 3..];
             let mut depth = 0usize;
             let mut names = Vec::new();
             let mut current = String::new();
@@ -1023,6 +1265,7 @@ fn standard_library_at_runtime() {
                 ));
             }
         }
+        failures.extend(move_undo_failures());
         failures.extend(named_argument_failures());
         failures.extend(collection_model_failures());
         assert!(
@@ -1032,6 +1275,76 @@ fn standard_library_at_runtime() {
             failures.join("\n")
         );
     }
+}
+
+/// A helper that updates a moved dictionary and then fails leaves the caller's variable as it
+/// was before the call. The error comes from a builtin: one raised by a closure such as `stop`
+/// would end the move as the closure starts, which restores the variable before the journal is
+/// needed. The failure unwinds past the caller, so each case keeps the caller's
+/// frame in `frame` and reads the variable from it afterwards.
+unsafe fn move_undo_failures() -> Vec<String> {
+    let cases = [
+        (
+            "{ bad <- function(m, k) { m <- Dict.insert(m, k, 1); m <- Dict.insert(m, 1L, 1) }; f <- function() { for (i in 1) NULL; m <- Dict.empty(); frame <<- environment(); m <- bad(m, \"a\") }; f() }",
+            "Dict.len(frame$m)",
+            "[1] 0\n",
+        ),
+        (
+            "{ bad <- function(m, k) { m <- Dict.insert(m, \"new\", 1); m <- Dict.insert(m, k, 2); m <- Dict.insert(m, 1L, 1) }; f <- function() { for (i in 1) NULL; m <- Dict.single(\"a\", 0); m <- Dict.insert(m, \"b\", 0); frame <<- environment(); m <- bad(m, \"a\") }; f() }",
+            "c(Dict.len(frame$m), Result.with_default(Dict.get(frame$m, \"a\"), -1))",
+            "[1] 2 0\n",
+        ),
+        (
+            "{ bad <- function(s, k) { s <- Set.insert(s, k); s <- Set.insert(s, \"x\") }; f <- function() { for (i in 1) NULL; s <- Set.from_list(list(1L, 2L)); frame <<- environment(); s <- bad(s, 3L) }; f() }",
+            "Set.len(frame$s)",
+            "[1] 2\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
+        // Base replacements change a moved list in place without the journal, so the move ends
+        // before them and the caller keeps its value.
+        (
+            "{ bad <- function(xs, v) { xs[[1]] <- v; xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs$a <- v; xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(length(frame$xs), is.null(names(frame$xs)))",
+            "[1] 2 1\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs[1] <- list(v); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs[[1]][[1]] <- v; xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), list(1)), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]][[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (failing, check, expected) in cases {
+        // SAFETY: the interpreter is installed.
+        let reported = unsafe { printed(failing) };
+        if !reported.contains("a collection holds one type") {
+            failures.push(format!(
+                "`{failing}`\n  reported {reported:?}\n  expected a key type error"
+            ));
+        }
+        // SAFETY: as above.
+        let printed = unsafe { printed(check) };
+        if printed != expected {
+            failures.push(format!(
+                "`{check}` after `{failing}`\n  printed  {printed:?}\n  expected {expected:?}"
+            ));
+        }
+    }
+    failures
 }
 
 /// Calls every function with each declared parameter named. A name the runtime does not know is

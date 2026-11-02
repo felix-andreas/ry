@@ -1,0 +1,19 @@
+# AzureStor: Azure blob, file and ADLS storage.
+#
+# R's classes form a hierarchy (a "blob_endpoint" is also a "storage_endpoint", a "blob_container"
+# also a "storage_container"), which nominal types do not have, so each constructor returns the
+# class it is documented to and each consumer names every class it accepts. `storage_endpoint()`
+# picks the concrete class from the URL, so it returns the general one.
+
+@type storage_endpoint
+@type blob_endpoint
+@type storage_container
+@type blob_container
+
+storage_endpoint : @pure fn(endpoint: character, [key]: character | NULL, [token]: AzureToken | character | NULL, [sas]: character | NULL, [api_version]: character, [service]: character) -> storage_endpoint
+blob_endpoint : @pure fn(endpoint: character, [key]: character | NULL, [token]: AzureToken | character | NULL, [sas]: character | NULL, [api_version]: character) -> blob_endpoint
+storage_container : @pure fn(endpoint: storage_endpoint | blob_endpoint, ...: Any) -> storage_container
+blob_container : @pure fn(endpoint: storage_endpoint | blob_endpoint, ...: Any) -> blob_container
+list_blobs : fn(container: storage_container | blob_container, [dir]: character, [info]: character, [prefix]: character | NULL, [recursive]: logical) -> data.frame | character[]
+storage_download : fn(container: storage_container | blob_container, ...: Any) -> raw[] | NULL
+upload_blob : fn(container: storage_container | blob_container, src: Any, [dest]: character, [type]: character, [blocksize]: double, [lease]: character | NULL, [put_md5]: logical, [append]: logical, [use_azcopy]: logical) -> NULL

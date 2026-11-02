@@ -2,20 +2,29 @@
 #@ param ASSETS int 3 8
 #@ param TARGET float 0.001 0.004 4
 # Mean-variance portfolio construction with a quadratic programme.
+#: fn([assets]: integer, [seed]: integer) -> matrix
 covariance_@ID@ <- function(assets = @ASSETS@L, seed = 3L) {
   set.seed(seed)
+  #: matrix
   loadings <- matrix(stats::rnorm(assets * assets), assets)
-  crossprod(loadings) / assets + diag(0.05, assets)
+  #: matrix
+  ridge <- diag(0.05, assets)
+  crossprod(loadings) / assets + ridge
 }
 
+#: fn(sigma: matrix, [expected]: double[] | NULL, [target]: double | NULL) -> double[]
 min_variance_@ID@ <- function(sigma, expected = NULL, target = NULL) {
+  #: integer
   n <- nrow(sigma)
+  #: matrix
   constraints <- matrix(1, n, 1)
   bounds <- 1
   if (!is.null(expected) && !is.null(target)) {
+    #: matrix
     constraints <- cbind(constraints, expected)
     bounds <- c(bounds, target)
   }
+  #: matrix
   constraints <- cbind(constraints, diag(n))
   bounds <- c(bounds, rep(0, n))
   solution <- quadprog::solve.QP(
@@ -27,19 +36,25 @@ min_variance_@ID@ <- function(sigma, expected = NULL, target = NULL) {
   weights
 }
 
+#: fn(weights: double[], sigma: matrix) -> double
 portfolio_risk_@ID@ <- function(weights, sigma) {
   sqrt(drop(t(weights) %*% sigma %*% weights))
 }
 
+#: fn(sigma: matrix) -> double[]
 risk_parity_@ID@ <- function(sigma) {
+  #: integer
   n <- nrow(sigma)
+  #: fn(w: matrix) -> double
   objective <- function(w) {
     contribution <- w * (sigma %*% w)
     sum((contribution - mean(contribution))^2)
   }
+  #: fn(w: matrix) -> list{ceq: double, c: NULL}
+  equality <- function(w) list(ceq = sum(w) - 1, c = NULL)
   result <- NlcOptim::solnl(
     X = rep(1 / n, n), objfun = objective,
-    confun = function(w) list(ceq = sum(w) - 1, c = NULL),
+    confun = equality,
     lb = rep(0, n), ub = rep(1, n)
   )
   drop(result$par)

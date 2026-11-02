@@ -35,6 +35,12 @@ f <- function(x) x
 #++++
 clean
 
+#---- t_bound_in_the_file_is_not_linted
+scale <- function(T, n) T * n
+mean_of <- function(x) { F <- length(x); sum(x) / F }
+#++++
+clean
+
 #==== trailing-comma
 #---- call_trailing_comma_warns
 f <- function(a, b) a

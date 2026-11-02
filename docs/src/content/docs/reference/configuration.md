@@ -9,7 +9,7 @@ CI always agree. This is every key, with its default:
 ```toml
 [check]
 typing = false           # report type errors
-strict = false           # report unknown types and untyped parameters (needs typing for type errors)
+strict = false           # report unknown types and untyped parameters; implies typing
 inline-annotations = true  # type inline annotations such as `x: integer <- 1L`
 object-systems = true    # allow S4, R6 and Reference Classes; false makes each definition an error
 unused = true            # report values that are never read
@@ -32,10 +32,9 @@ indent-width = 2
 line-ending = "auto"     # keep the file's own; or "lf", "cr-lf"
 ```
 
-The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `strict` also raises
-unresolved names to errors, but it does not turn on type errors: set `typing` as well. A
-`# typing: off`, `on`, or `strict` comment in a file overrides both keys for that file, and
-`# typing: strict` does imply type errors.
+The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `strict` turns on type errors
+too and raises unresolved names to errors. A `# typing: off`, `on`, or `strict` comment in a file
+overrides both keys for that file.
 
 ## Which file applies
 

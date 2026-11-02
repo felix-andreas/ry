@@ -15,17 +15,23 @@ Sys.setenv(NOT_CRAN = "true", TESTTHAT_CPUS = "1")
 # pkgload refuses to load a package whose Imports are not installed, and a few of them
 # (polars needs a newer R, Rblpapi needs the Bloomberg SDK) cannot be installed here. The code
 # reaches them only through `::` inside injectable or guarded branches, so the tests run on a
-# copy whose DESCRIPTION leaves the missing packages out.
+# copy whose DESCRIPTION moves the missing packages to Suggests, which keeps ry treating them as
+# used. An installed package can still fail to load (Rglpk without its system library), so the
+# test is loading it, not finding it installed.
 package_dir <- file.path(tempfile("bench"), basename(normalizePath(args[[1]])))
 dir.create(dirname(package_dir))
 file.copy(normalizePath(args[[1]]), dirname(package_dir), recursive = TRUE)
 description <- read.dcf(file.path(package_dir, "DESCRIPTION"))
 imports <- trimws(strsplit(description[, "Imports"], ",")[[1]])
 names <- sub("\\s*\\(.*", "", imports)
-available <- names %in% rownames(installed.packages())
+available <- vapply(names, function(name) suppressWarnings(requireNamespace(name, quietly = TRUE)), logical(1))
 if (any(!available)) {
-  message("not installed, skipped in Imports: ", paste(names[!available], collapse = ", "))
+  message("cannot be loaded, moved from Imports to Suggests: ", paste(names[!available], collapse = ", "))
   description[, "Imports"] <- paste(imports[available], collapse = ",\n    ")
+  suggests <- if ("Suggests" %in% colnames(description)) trimws(strsplit(description[, "Suggests"], ",")[[1]]) else character()
+  suggests <- c(imports[!available], suggests[nzchar(suggests)])
+  if (!"Suggests" %in% colnames(description)) description <- cbind(description, Suggests = "")
+  description[, "Suggests"] <- paste(suggests, collapse = ",\n    ")
   write.dcf(description, file.path(package_dir, "DESCRIPTION"))
 }
 results <- testthat::test_local(package_dir, reporter = reporter, stop_on_failure = FALSE)

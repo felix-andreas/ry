@@ -1,0 +1,27 @@
+# A user lets `ry check --fix` clean up mechanical findings, then opts into the fixes that guess.
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file R/ledger.R
+| balance <- function(entries) {
+|   total = sum(entries, na.rm = T)
+|   c(totl, 0,)
+| }
+
+run ry check
+expect exit 1
+expect stdout "3 fixable with `ry check --fix` (1 more with `--unsafe-fixes`)"
+
+# The safe fixes keep what the code means; the misspelling waits for a person.
+run ry check --fix
+expect exit 1
+expect stdout "applied 3 fixes"
+expect file R/ledger.R "total <- sum(entries, na.rm = TRUE)"
+expect file R/ledger.R "c(totl, 0)"
+expect stdout "1 fixable with `ry check --fix --unsafe-fixes`"
+
+run ry check --fix --unsafe-fixes
+expect exit 0
+expect stdout "applied 1 fix"
+expect file R/ledger.R "c(total, 0)"

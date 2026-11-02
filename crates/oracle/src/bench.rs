@@ -130,7 +130,7 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
     std::fs::create_dir_all(&scratch).map_err(setup_error(&scratch))?;
     let copy = scratch.join(&name);
     copy_tree(&package_dir, &copy)?;
-    drop_missing_imports(&copy)?;
+    suggest_missing_imports(&copy)?;
     let driver = scratch.join("bench.R");
     std::fs::write(&driver, BENCH_DRIVER).map_err(setup_error(&driver))?;
 
@@ -477,9 +477,11 @@ fn package_name(package_dir: &Path) -> Result<String, BenchError> {
 
 /// A few benchmark dependencies cannot be installed everywhere (`polars` needs a newer R than
 /// some hosts have, `Rblpapi` needs the proprietary Bloomberg SDK). The code reaches them only
-/// through `::` inside guarded or injectable branches, so the copy under test leaves the missing
-/// ones out of `Imports`, as `tools/bench/run-tests.R` does.
-fn drop_missing_imports(package: &Path) -> Result<(), BenchError> {
+/// through `::` inside guarded or injectable branches, so the copy under test moves the missing
+/// ones from `Imports` to `Suggests`, as `tools/bench/run-tests.R` does. Deleting them instead
+/// would switch their stubs off, and strict mode would then refuse to load typed code that calls
+/// them.
+fn suggest_missing_imports(package: &Path) -> Result<(), BenchError> {
     let installed = installed_packages()?;
     let path = package.join("DESCRIPTION");
     let text = std::fs::read_to_string(&path).map_err(setup_error(&path))?;
@@ -511,7 +513,30 @@ fn drop_missing_imports(package: &Path) -> Result<(), BenchError> {
         trim_trailing_comma(&mut output);
     }
     if !dropped.is_empty() {
-        eprintln!("not installed, left out of Imports: {}", dropped.join(", "));
+        eprintln!(
+            "not installed, moved from Imports to Suggests: {}",
+            dropped.join(", ")
+        );
+        let suggested: String = dropped
+            .iter()
+            .map(|name| format!("    {name},\n"))
+            .collect();
+        output = match output.find("\nSuggests:") {
+            Some(start) => {
+                let field = start + "\nSuggests:".len();
+                let rest = output[field..].trim_start_matches([' ', '\t']);
+                // A value written on the field's own line becomes a continuation line.
+                let rest = match rest.strip_prefix('\n') {
+                    Some(continued) => continued.to_string(),
+                    None => format!("    {rest}"),
+                };
+                format!("{}\n{suggested}{rest}", &output[..field])
+            }
+            None => {
+                let suggested = suggested.trim_end_matches(",\n");
+                format!("{output}Suggests:\n{suggested}\n")
+            }
+        };
     }
     std::fs::write(&path, output).map_err(setup_error(&path))
 }

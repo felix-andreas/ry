@@ -11,3 +11,11 @@
 .ry_bind_lazily <- function(state, plan, keep) .Internal(ryLoaderBind(state$root, state$ns))
 
 .ry_run <- function(state, plan, i, keep) .Internal(ryLoaderRun(state$root, state$ns, i))
+
+# Holding back S4 definitions relies on the interpreter running them when the methods package
+# looks up one of their classes or generics. A generic over an existing function announces
+# itself as it is created, which must happen at load, so a load with one keeps them all eager.
+.ry_may_defer_s4 <- function(state, deferred) {
+  isTRUE(getOption("ry.load.lazy_s4", TRUE)) && isNamespaceLoaded("methods") &&
+    !any(vapply(deferred$generics, exists, NA, envir = state$ns, mode = "function"))
+}

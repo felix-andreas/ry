@@ -11,9 +11,19 @@
 | [1] "C"
 | [1] "A" "B" "a" "b"
 | [1] ""
+| [1] "incompatible types (from pairlist to integer) in subassignment type fix"
+| List of 2
+|  $ : num 1
+|  $ : num 5
+| [1] "invalid 'time' value"
+| [1] "invalid 'time' value"
+| [1] "C"
+| [1] ff 20 e9
+| [1] "UTF-8"   "unknown"
+| [1] "UTF-8"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| ""
+| "UTF-8"

@@ -1,0 +1,11 @@
+# plumber: HTTP APIs as R functions.
+#
+# A router is an R6 object, so `pr_get()` and `pr_post()` register the endpoint on the router they
+# were given (an effect) and return that same router. A handler may take any arguments plumber
+# matches by name from the request, hence `fn(...: Any) -> Any`, which every function satisfies.
+
+@type Plumber
+
+pr : fn([file]: character | NULL, [filters]: Any, [envir]: environment) -> Plumber
+pr_get : fn(pr: Plumber, path: character, handler: fn(...: Any) -> Any, [preempt]: character, [serializer]: Any, [endpoint]: character, ...: Any) -> Plumber
+pr_post : fn(pr: Plumber, path: character, handler: fn(...: Any) -> Any, [preempt]: character, [serializer]: Any, [endpoint]: character, ...: Any) -> Plumber

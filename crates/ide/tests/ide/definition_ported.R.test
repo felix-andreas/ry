@@ -189,6 +189,7 @@ hover-definition: global 0..8
 definition 0..8
 references: 0..8*, 82..90
 rename: 2 edit(s)
+calls scale_by: in apply_scale [82..90] | out
 signature: fn(x: double, by: double) -> double
 parameters: [x: double] | by: double
 action: Add inferred type annotation for `apply_scale`
@@ -201,3 +202,4 @@ completion (38): scale_by, scale, scale.default, cmdscale, apply_scale, sequence
 hint @8: <T: numeric> fn(x: T, by: T) -> T
 hint @46: fn(x: double) -> double
 hint @74: double
+hint @94by =

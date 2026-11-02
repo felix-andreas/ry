@@ -1,0 +1,9 @@
+# digest: hashes of R objects and files.
+#
+# `digest()` returns a hex string, unless `raw = TRUE` asks for the raw bytes.
+# The first candidate has no `raw` formal, so a call that passes `raw` selects
+# the second, whose result admits both. It is not pure: `file = TRUE` reads a file.
+digest : fn(object: Any, [algo]: character, [serialize]: logical, [file]: logical | character, [length]: double, [skip]: Any, [ascii]: logical, [seed]: double, [errormode]: character, [serializeVersion]: double) -> character
+digest : fn(object: Any, [algo]: character, [serialize]: logical, [file]: logical | character, [length]: double, [skip]: Any, [ascii]: logical, [raw]: logical, [seed]: double, [errormode]: character, [serializeVersion]: double) -> character | raw[]
+sha1 : @pure fn(x: Any, [digits]: integer, [zapsmall]: integer, ...: Any, [algo]: character) -> character
+hmac : @pure fn(key: Any, object: Any, algo: character, [serialize]: logical, [raw]: logical, ...: Any) -> character | raw[]

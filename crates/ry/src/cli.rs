@@ -1,5 +1,6 @@
 use {
     crate::{
+        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Fingerprinter, Plan},
         config::{self, ExperimentalFeatures},
         diagnostics::{apply_suppressions, document_diagnostics},
         namespace,
@@ -11,11 +12,14 @@ use {
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
-    rustc_hash::FxHashSet,
+    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
     salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax},
+        diagnostics::{
+            Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
+            derive_from_syntax, project_fold_shares,
+        },
         metadata::{
             PackageMetadata, attached_union, normalized_imports, parse_description_collate,
             parse_description_dependencies, parse_description_package, parse_namespace,
@@ -30,19 +34,20 @@ use {
         cmp::Reverse,
         collections::{BTreeMap, BTreeSet, HashMap},
         env, fmt, fs,
+        hash::Hasher,
         io::Read,
         iter, mem,
         num::NonZero,
         path::{Path, PathBuf},
         sync::{
-            LazyLock,
+            LazyLock, Mutex, PoisonError,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
         time::{Duration, Instant},
     },
     syntax::{
-        TextRange,
+        Parse, TextRange,
         literate::{is_literate_extension, r_source_of_literate},
     },
 };
@@ -100,10 +105,24 @@ pub enum MinSeverity {
     Error,
 }
 
+/// Which fixes `ry check` applies before it reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixMode {
+    Off,
+    Safe,
+    All,
+}
+
+/// A fix can enable another (removing an arm can expose the next unreachable one), so fixing
+/// repeats until a pass changes nothing, up to this many passes.
+const MAX_FIX_PASSES: usize = 10;
+
 pub fn check(
     maybe_files: Option<&[PathBuf]>,
     output: OutputFormat,
     min_severity: MinSeverity,
+    fix: FixMode,
+    cache: CacheUse,
 ) -> Result<Outcome, CommandError> {
     let root: Vec<PathBuf> = vec![".".into()];
     let files = maybe_files.unwrap_or(&root);
@@ -134,9 +153,30 @@ pub fn check(
     let mut n_files = 0;
     let mut n_diagnostics = 0;
     let mut n_failures = 0;
+    let mut n_fixed = 0;
+    let mut n_fixable = 0;
+    let mut n_unsafe_fixable = 0;
     for (root, config, requested) in groups {
-        let analysis = analyze_project(&root, config, &requested)?;
+        let mut analysis = analyze_project(&root, config.clone(), &requested, cache)?;
+        if fix != FixMode::Off {
+            for _ in 0..MAX_FIX_PASSES {
+                let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
+                if fixed == 0 {
+                    break;
+                }
+                n_fixed += fixed;
+                analysis = analyze_project(&root, config.clone(), &requested, cache)?;
+            }
+        }
         n_failures += analysis.failures;
+        for file in analysis
+            .files
+            .iter()
+            .filter(|file| file.requested && fixes_apply(file))
+        {
+            n_fixable += applicable_fixes(&file.diagnostics, false).len();
+            n_unsafe_fixable += applicable_fixes(&file.diagnostics, true).len();
+        }
         for (path, source, problems) in &analysis.stub_problems {
             n_diagnostics +=
                 render_findings(output, min_severity, path, source, problems, &|_| None);
@@ -167,13 +207,75 @@ pub fn check(
     }
     // Always summarize: silence would read as success on a run that matched nothing.
     if output == OutputFormat::Human {
+        if n_fixed > 0 {
+            let fixes = if n_fixed == 1 { "fix" } else { "fixes" };
+            println!("applied {n_fixed} {fixes}");
+        }
         report_check_summary(n_files, n_diagnostics);
+        let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
+        match (n_fixable, unsafe_only) {
+            (0, 0) => {}
+            (0, more) => println!("{more} fixable with `ry check --fix --unsafe-fixes`"),
+            (safe, 0) => println!("{safe} fixable with `ry check --fix`"),
+            (safe, more) => {
+                println!("{safe} fixable with `ry check --fix` ({more} more with `--unsafe-fixes`)")
+            }
+        }
     }
     Ok(if n_diagnostics == 0 {
         Outcome::Clean
     } else {
         Outcome::Findings
     })
+}
+
+/// Writes the fixes for every requested file back to disk and returns how many changed a file.
+/// The edits apply to the file as it is on disk, which for a literate document still has its
+/// prose: the analysis blanks prose without moving any offset.
+fn apply_check_fixes(
+    analysis: &ProjectAnalysis,
+    include_unsafe: bool,
+) -> Result<usize, CommandError> {
+    let mut applied = 0;
+    for file in analysis
+        .files
+        .iter()
+        .filter(|file| file.requested && fixes_apply(file))
+    {
+        let fixes = applicable_fixes(&file.diagnostics, include_unsafe);
+        if fixes.is_empty() {
+            continue;
+        }
+        let original = fs::read_to_string(&file.path).map_err(|err| {
+            error_because(&format!("failed to read: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        // A file that changed on disk since the analysis would take edits at stale offsets.
+        if analysable_source(&file.path, original.clone()) != analysis.source(file) {
+            continue;
+        }
+        let edited = apply_fixes(&original, &fixes);
+        // A fix whose replacement equals what is there changes nothing, and counting it would
+        // keep the fix loop going until its pass limit.
+        if edited == original {
+            continue;
+        }
+        fs::write(&file.path, edited).map_err(|err| {
+            error_because(&format!("failed to write: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        applied += fixes.len();
+    }
+    Ok(applied)
+}
+
+/// A file with a syntax error takes no fixes, because they were computed on a recovered tree and
+/// may not mean what they say.
+fn fixes_apply(file: &AnalyzedFile) -> bool {
+    !file
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "syntax-error")
 }
 
 /// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
@@ -222,7 +324,58 @@ pub(crate) fn analyze_project(
     root: &Path,
     config: config::Config,
     requested: &[PathBuf],
+    cache: CacheUse,
 ) -> Result<ProjectAnalysis, CommandError> {
+    // A directory that is no project, such as one holding a downloaded script, gets no record.
+    let is_project = config::CONFIG_FILE_NAMES
+        .iter()
+        .chain(["DESCRIPTION"].iter())
+        .any(|name| root.join(name).is_file());
+    let cache = if is_project { cache } else { CacheUse::Off };
+    let (analysis, reused) = analyze_project_with(root, config.clone(), requested, cache)?;
+    // Reused findings must be exactly the ones a fresh run computes.
+    if reused && syntax::testing::invariants_enabled() {
+        let fresh = analyze_project_with(root, config, requested, CacheUse::Off)?.0;
+        let source_files = |analysis: &ProjectAnalysis| -> Vec<SourceFile> {
+            analysis.files.iter().map(|file| file.file).collect()
+        };
+        let (reused_files, fresh_files) = (source_files(&analysis), source_files(&fresh));
+        let comparable = |diagnostics: &[Diagnostic], files: &[SourceFile]| -> Vec<_> {
+            diagnostics
+                .iter()
+                .map(|diagnostic| check_cache::recorded_form(diagnostic, files))
+                .collect()
+        };
+        for (cached, recomputed) in analysis.files.iter().zip(&fresh.files) {
+            assert_eq!(
+                comparable(&cached.diagnostics, &reused_files),
+                comparable(&recomputed.diagnostics, &fresh_files),
+                "the check cache reused stale findings for {}",
+                cached.path.display()
+            );
+        }
+        assert_eq!(
+            analysis
+                .namespace
+                .as_ref()
+                .map(|(_, _, problems)| comparable(problems, &reused_files)),
+            fresh
+                .namespace
+                .as_ref()
+                .map(|(_, _, problems)| comparable(problems, &fresh_files)),
+            "the check cache reused stale NAMESPACE findings"
+        );
+    }
+    Ok(analysis)
+}
+
+/// The analysis, and whether any finding in it came from the check cache.
+fn analyze_project_with(
+    root: &Path,
+    config: config::Config,
+    requested: &[PathBuf],
+    cache: CacheUse,
+) -> Result<(ProjectAnalysis, bool), CommandError> {
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
     let mut paths = collect_r_files(root, exclude.as_ref())?;
@@ -260,31 +413,10 @@ pub(crate) fn analyze_project(
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
         .durability(Durability::HIGH)
         .new(&db);
-    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
-        .durability(Durability::HIGH)
-        .new(&db);
-
-    // A broken override stub silently changes what every file checks against, so
-    // its dropped declarations are reported as findings.
-    let mut stub_problems = Vec::new();
-    for stub in &project_stubs {
-        let stub_text = &stub.text;
-        let stub_index = LineIndex::new(stub_text);
-        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
-            .into_iter()
-            .map(|problem| {
-                let start = stub_index.line_start(problem.line as u32);
-                let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                Diagnostic::new(
-                    TextRange::new(start.into(), end.into()),
-                    Severity::Error,
-                    "stub",
-                    problem.message,
-                )
-            })
-            .collect();
-        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
-    }
+    let _: AnalysisSettings =
+        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
+            .durability(Durability::HIGH)
+            .new(&db);
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
@@ -313,6 +445,30 @@ pub(crate) fn analyze_project(
     .durability(Durability::HIGH)
     .attached_durability(Durability::LOW)
     .new(&db);
+
+    // A broken override stub silently changes what every file checks against, so
+    // its dropped declarations are reported as findings. This reads the stub library, so it
+    // must follow the metadata input: a high-durability memo computed before that input
+    // existed is never re-verified, and would keep every conditional namespace inactive.
+    let mut stub_problems = Vec::new();
+    for stub in &project_stubs {
+        let stub_text = &stub.text;
+        let stub_index = LineIndex::new(stub_text);
+        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
+            .into_iter()
+            .map(|problem| {
+                let start = stub_index.line_start(problem.line as u32);
+                let end = start + stub_index.line_length(problem.line as u32, stub_text);
+                Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    Severity::Error,
+                    "stub",
+                    problem.message,
+                )
+            })
+            .collect();
+        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
+    }
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
@@ -352,10 +508,83 @@ pub(crate) fn analyze_project(
     let _: ProjectFiles = ProjectFiles::builder(project.clone())
         .durability(Durability::HIGH)
         .new(&db);
-    let _: DataFiles = DataFiles::builder(scan_data_files(&root))
+    let data_files = scan_data_files(root);
+    let key = {
+        let mut fingerprinter = Fingerprinter::new();
+        fingerprinter
+            .text(env!("CARGO_PKG_VERSION"))
+            .text(&build_identity())
+            .text(&format!("{config:?}"))
+            .text(&root.to_string_lossy())
+            .text(&format!("{data_files:?}"));
+        for source in [&namespace_source, &description_source] {
+            match source {
+                Some(text) => fingerprinter.bytes(&[1]).text(text),
+                None => fingerprinter.bytes(&[0]),
+            };
+        }
+        for stub in &project_stubs {
+            fingerprinter.text(&stub.stem).text(&stub.text);
+        }
+        fingerprinter.finish()
+    };
+    let _: DataFiles = DataFiles::builder(data_files)
         .durability(Durability::HIGH)
         .new(&db);
     let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
+    let contents: Vec<Fingerprint> = files
+        .iter()
+        .map(|&file| check_cache::fingerprint(file.text(&db)))
+        .collect();
+    let mut plan = match cache {
+        CacheUse::Off => Plan::Fresh,
+        CacheUse::ReadWrite => {
+            check_cache::plan(check_cache::load(root), key, &paths, &contents, |index| {
+                let file = files[index];
+                check_cache::surface(
+                    file.text(&db),
+                    &semantics::parse(&db, file).syntax_node(),
+                    &project_fold_shares(&db, file),
+                )
+            })
+        }
+    };
+    if let Plan::Replay(record) = &plan {
+        let per_file: Option<Vec<Vec<Diagnostic>>> = (0..files.len())
+            .map(|index| record.diagnostics(index, &files))
+            .collect();
+        let namespace = record.namespace(&files);
+        if let (Some(per_file), Some(namespace)) = (per_file, namespace) {
+            let namespace = match (namespace, &namespace_source) {
+                (Some(problems), Some(source)) => Some((namespace_path, source.clone(), problems)),
+                _ => None,
+            };
+            let files = analyzed_files(paths, files, reported, per_file);
+            let analysis = ProjectAnalysis {
+                db,
+                files,
+                stub_problems,
+                namespace,
+                failures,
+            };
+            return Ok((analysis, true));
+        }
+        plan = Plan::Fresh;
+    }
+    // A file whose recorded findings cannot be read back is checked again.
+    let mut recorded: Vec<Option<Vec<Diagnostic>>> = (0..files.len()).map(|_| None).collect();
+    if let Plan::Partial { previous, stale } = &mut plan {
+        for (index, stale) in stale.iter_mut().enumerate() {
+            if !*stale {
+                recorded[index] = previous.diagnostics(index, &files);
+                *stale = recorded[index].is_none();
+            }
+        }
+    }
+    let stale = |index: usize| match &plan {
+        Plan::Partial { stale, .. } => stale.get(index).copied().unwrap_or(true),
+        Plan::Fresh | Plan::Replay(_) => true,
+    };
     // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
     // Workers need the analysis stack: interface resolution recurses per dependency edge.
     let workers = thread::available_parallelism()
@@ -365,43 +594,109 @@ pub(crate) fn analyze_project(
     // Largest files first, so the last file a worker picks up is a small one.
     let mut by_size: Vec<usize> = (0..files.len()).collect();
     by_size.sort_by_cached_key(|&index| Reverse(files[index].text(&db).len()));
+    // Only stale files go through the passes below. A file whose findings are reused is still
+    // analysed when a stale file's check reaches it, but only as far as that check needs.
+    let checked_order: Vec<usize> = by_size
+        .iter()
+        .copied()
+        .filter(|&index| stale(index))
+        .collect();
+    let previous = match &plan {
+        Plan::Partial { previous, .. } => Some(previous),
+        Plan::Fresh | Plan::Replay(_) => None,
+    };
 
     // Everything later passes read from a tree is derived here, across all cores, so a check
     // that reaches another file never walks that file's tree on its own thread.
     let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
-    let mut used_tokens = FxHashSet::default();
-    for (_, tokens) in in_parallel(&db, workers, &by_size, |db, index| {
+    let mut file_tokens: Vec<FxHashSet<&str>> = vec![FxHashSet::default(); files.len()];
+    let mut surfaces = vec![Fingerprint::default(); files.len()];
+    for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
+        let root = semantics::parse(db, file).syntax_node();
         let mut tokens = FxHashSet::default();
         if want_tokens {
-            namespace::collect_used_tokens(
-                &semantics::parse(db, file).syntax_node(),
-                &imported,
-                &mut tokens,
-            );
+            namespace::collect_used_tokens(&root, &imported, &mut tokens);
         }
-        tokens
+        // A partial plan exists only when every surface matches the record.
+        let surface = match (cache, previous) {
+            (CacheUse::ReadWrite, None) => {
+                check_cache::surface(file.text(db), &root, &project_fold_shares(db, file))
+            }
+            (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => Fingerprint::default(),
+        };
+        (tokens, surface)
     }) {
-        used_tokens.extend(tokens);
+        file_tokens[index] = tokens;
+        surfaces[index] = surface;
     }
-    let attached = attached_union(&db, project);
+    if let Some(previous) = previous {
+        for index in 0..files.len() {
+            surfaces[index] = previous.surface(index).unwrap_or_default();
+            if !stale(index) {
+                file_tokens[index] = previous
+                    .tokens(index)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|token| imported.get(token.as_str()).copied())
+                    .collect();
+            }
+        }
+    }
+    // A stale file's check folds project-wide maps over every file, so the reused files' shares
+    // are derived across all cores rather than on the first checking thread.
+    if previous.is_some() {
+        let reused: Vec<usize> = by_size
+            .iter()
+            .copied()
+            .filter(|&index| !stale(index))
+            .collect();
+        in_parallel(&db, workers, &reused, |db, index| {
+            semantics::diagnostics::warm_project_folds(db, files[index]);
+        });
+    }
+    let used_tokens: FxHashSet<&str> = file_tokens.iter().flatten().copied().collect();
+    // Attach calls are part of every file's surface, so a partial run attaches what the
+    // recorded run did.
+    let attached = match previous {
+        Some(previous) => previous.attached(),
+        None => attached_union(&db, project),
+    };
+    // Freeing a million tree nodes takes longer than naming the first files, so each naming
+    // worker frees the tree of the file it is about to name, across all cores. A partial run
+    // keeps its trees: releasing them walks every item of every file on one thread.
+    let mut trees: Vec<Mutex<Option<Parse>>> = (0..files.len()).map(|_| Mutex::new(None)).collect();
+    if previous.is_none() {
+        for (index, tree) in semantics::release_trees(&mut db, &files)
+            .into_iter()
+            .enumerate()
+        {
+            trees[index] = Mutex::new(Some(tree));
+        }
+    }
     if !attached.is_empty() {
         use salsa::Setter;
-        metadata.set_attached(&mut db).to(attached);
+        metadata.set_attached(&mut db).to(attached.clone());
     }
 
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim.
-    in_parallel(&db, workers, &by_size, |db, index| {
+    in_parallel(&db, workers, &checked_order, |db, index| {
+        if let Some(tree) = trees.get(index) {
+            drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
         let file = files[index];
         for &item in semantics::item_tree(db, file) {
             semantics::item_naming(db, item);
         }
     });
-    let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    for (index, diagnostics) in in_parallel(&db, workers, &by_size, |db, index| {
+    let mut per_file: Vec<Vec<Diagnostic>> = recorded
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
+    for (index, diagnostics) in in_parallel(&db, workers, &checked_order, |db, index| {
         let rendered = document_diagnostics(db, files[index], &config);
         apply_suppressions(rendered, files[index].text(db))
     }) {
@@ -409,7 +704,20 @@ pub(crate) fn analyze_project(
     }
     // Computed last so the `unused-import` lint sees the whole package.
     let mut namespace = None;
-    if let Some(namespace_source) = &namespace_source {
+    // The NAMESPACE findings read the project's declarations, which a partial plan leaves
+    // unchanged, and the imports the files use.
+    let recorded_namespace = previous
+        .filter(|previous| {
+            let recorded: FxHashSet<&str> = (0..files.len())
+                .flat_map(|index| previous.tokens(index).unwrap_or_default())
+                .map(String::as_str)
+                .collect();
+            recorded == used_tokens
+        })
+        .and_then(|previous| previous.namespace(&files));
+    if let (Some(namespace_source), Some(problems)) = (&namespace_source, recorded_namespace) {
+        namespace = problems.map(|problems| (namespace_path, namespace_source.clone(), problems));
+    } else if let Some(namespace_source) = &namespace_source {
         let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
@@ -438,7 +746,70 @@ pub(crate) fn analyze_project(
         ));
         namespace = Some((namespace_path, namespace_source.clone(), problems));
     }
-    let files = paths
+    if cache == CacheUse::ReadWrite {
+        let positions: FxHashMap<SourceFile, u32> = files
+            .iter()
+            .enumerate()
+            .map(|(index, &file)| (file, index as u32))
+            .collect();
+        let outcomes = (0..files.len())
+            .map(|index| {
+                let dependencies = match (&plan, stale(index)) {
+                    (Plan::Partial { previous, .. }, false) => {
+                        previous.dependencies(index).unwrap_or_default().to_vec()
+                    }
+                    _ => semantics::file_dependency_files(&db, files[index])
+                        .iter()
+                        .filter_map(|file| positions.get(file).copied())
+                        .collect(),
+                };
+                FileOutcome {
+                    path: &paths[index],
+                    content: contents[index],
+                    surface: surfaces[index],
+                    dependencies,
+                    tokens: file_tokens[index]
+                        .iter()
+                        .map(|&token| token.to_owned())
+                        .collect(),
+                    diagnostics: &per_file[index],
+                }
+            })
+            .collect();
+        let namespace_problems = namespace
+            .as_ref()
+            .map(|(_, _, problems)| problems.as_slice());
+        if let Some(record) =
+            check_cache::record(key, &files, outcomes, namespace_problems, &attached)
+            && let Err(err) = check_cache::store(root, &record)
+        {
+            warn(&format!(
+                "could not write the check cache in {}: {err}",
+                root.join(check_cache::DIRECTORY).display()
+            ));
+        }
+    }
+    let reused = matches!(plan, Plan::Partial { .. });
+    let files = analyzed_files(paths, files, reported, per_file);
+    Ok((
+        ProjectAnalysis {
+            db,
+            files,
+            stub_problems,
+            namespace,
+            failures,
+        },
+        reused,
+    ))
+}
+
+fn analyzed_files(
+    paths: Vec<PathBuf>,
+    files: Vec<SourceFile>,
+    reported: Vec<bool>,
+    per_file: Vec<Vec<Diagnostic>>,
+) -> Vec<AnalyzedFile> {
+    paths
         .into_iter()
         .zip(files)
         .zip(reported)
@@ -449,14 +820,21 @@ pub(crate) fn analyze_project(
             requested,
             diagnostics,
         })
-        .collect();
-    Ok(ProjectAnalysis {
-        db,
-        files,
-        stub_problems,
-        namespace,
-        failures,
-    })
+        .collect()
+}
+
+/// Identifies the running ry binary by its bytes, so a record written by another build is never
+/// read back, even one with the same size and modification time. Hashing the binary takes a few
+/// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
+fn build_identity() -> String {
+    match env::current_exe().and_then(fs::read) {
+        Ok(bytes) => {
+            let mut hasher = FxHasher::default();
+            hasher.write(&bytes);
+            format!("{} {:x}", bytes.len(), hasher.finish())
+        }
+        Err(_) => format!("unreadable {}", std::process::id()),
+    }
 }
 
 /// Runs `work` for every index in `order` across `workers` threads.
@@ -786,6 +1164,9 @@ pub(crate) fn render_findings<'a>(
     let mut line_index = None;
     let mut snippet_lines = None;
     let mut rendered = 0;
+    let fixable = !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "syntax-error");
     for diagnostic in diagnostics {
         if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
             continue;
@@ -796,7 +1177,7 @@ pub(crate) fn render_findings<'a>(
         match output {
             OutputFormat::Human => {
                 let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
-                render_human_diagnostic(path, source, lines, diagnostic, &related)
+                render_human_diagnostic(path, source, lines, diagnostic, &related, fixable)
             }
             OutputFormat::Json => {
                 let index = line_index.get_or_insert_with(|| LineIndex::new(source));
@@ -821,6 +1202,7 @@ fn render_human_diagnostic(
     lines: &LineStarts,
     diagnostic: &Diagnostic,
     related: &[RelatedNote],
+    fixable: bool,
 ) {
     let related_lines: Vec<LineStarts> = related
         .iter()
@@ -852,6 +1234,21 @@ fn render_human_diagnostic(
                 ..Report::default()
             })
             .collect(),
+        help: diagnostic.fix.as_ref().map(|fix| {
+            let command = match fix.applicability {
+                Applicability::Safe => "`ry check --fix`",
+                Applicability::Unsafe => "`ry check --fix --unsafe-fixes`",
+            };
+            // `fixes_apply` refuses a file with a syntax error, so promising the fix would be
+            // wrong until that error is gone.
+            match fixable {
+                true => format!("{} ({command} applies it)", fix.title),
+                false => format!(
+                    "{} ({command} applies it once the syntax error is fixed)",
+                    fix.title
+                ),
+            }
+        }),
         ..Report::default()
     });
     eprintln!();
@@ -929,6 +1326,22 @@ fn render_json_diagnostic(
         "code": diagnostic.code,
         "message": diagnostic.message,
         "related": related,
+        "fix": diagnostic.fix.as_ref().map(|fix| {
+            let start = index.line_column_chars(fix.range.start(), source);
+            let end = index.line_column_chars(fix.range.end(), source);
+            serde_json::json!({
+                "title": fix.title,
+                "applicability": match fix.applicability {
+                    Applicability::Safe => "safe",
+                    Applicability::Unsafe => "unsafe",
+                },
+                "line": start.line + 1,
+                "column": start.column + 1,
+                "endLine": end.line + 1,
+                "endColumn": end.column + 1,
+                "replacement": fix.replacement,
+            })
+        }),
     });
     println!("{record}");
 }
@@ -942,6 +1355,7 @@ struct Report<'a> {
     cause: Option<&'a (dyn std::error::Error + 'static)>,
     snippet: Option<Snippet<'a>>,
     related: Vec<Report<'a>>,
+    help: Option<String>,
 }
 
 #[derive(Debug)]
@@ -959,6 +1373,7 @@ impl<'a> Default for Report<'a> {
             cause: None,
             snippet: None,
             related: Vec::new(),
+            help: None,
         }
     }
 }
@@ -989,6 +1404,12 @@ impl miette::Diagnostic for Report<'_> {
         self.snippet
             .as_ref()
             .map(|snippet| &snippet.source as &dyn SourceCode)
+    }
+
+    fn help(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        self.help
+            .as_ref()
+            .map(|help| Box::new(help) as Box<dyn fmt::Display>)
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
@@ -1555,5 +1976,307 @@ mod tests {
             compared > 1_000,
             "expected a real sweep, compared {compared}"
         );
+    }
+
+    /// Seeded edits to a small package, each followed by a cached run. Invariants are on, so
+    /// every run that reuses recorded findings is compared with a fresh run and panics on any
+    /// difference. `CACHE_SEED=<seed>` replays one sequence; `FUZZ_ITERS` sets how many run.
+    #[test]
+    fn cached_checks_match_fresh_checks_across_seeded_edits() {
+        syntax::testing::enable_invariants();
+        let seeds: Vec<u64> = match env::var("CACHE_SEED")
+            .ok()
+            .and_then(|seed| seed.parse().ok())
+        {
+            Some(seed) => vec![seed],
+            None => (0..syntax::testing::fuzz_iterations(3) as u64).collect(),
+        };
+        for seed in seeds {
+            let outcome = std::panic::catch_unwind(|| simulate_cached_checks(seed, 24));
+            if outcome.is_err() {
+                panic!("check cache seed {seed} failed; replay with CACHE_SEED={seed}");
+            }
+        }
+    }
+
+    struct SimulatedFunction {
+        name: String,
+        parameters: Vec<&'static str>,
+        body: Vec<String>,
+    }
+
+    struct SimulatedFile {
+        /// The `# typing:` mode, since the default of type checking off reports few cross-file
+        /// findings.
+        mode: &'static str,
+        functions: Vec<SimulatedFunction>,
+        top_level: Vec<String>,
+    }
+
+    fn simulate_cached_checks(seed: u64, steps: usize) {
+        let directory = tempfile::tempdir().expect("a temporary project directory");
+        let root = fs::canonicalize(directory.path()).expect("a canonical project root");
+        fs::create_dir_all(root.join("R")).expect("the R directory");
+        fs::create_dir_all(root.join("scripts")).expect("the scripts directory");
+        fs::write(
+            root.join("ry.toml"),
+            "[lint]\nunused-parameter = \"warn\"\n",
+        )
+        .expect("ry.toml");
+        fs::write(
+            root.join("DESCRIPTION"),
+            "Package: simulated\nVersion: 0.1.0\nImports: stats, utils\n",
+        )
+        .expect("DESCRIPTION");
+        fs::write(
+            root.join("NAMESPACE"),
+            "export(f0_0)\nimportFrom(stats, median)\nimportFrom(utils, head)\n",
+        )
+        .expect("NAMESPACE");
+        let mut random = syntax::testing::SplitMix64(seed);
+        let mut files: Vec<Option<SimulatedFile>> = Vec::new();
+        for _ in 0..3 {
+            files.push(Some(SimulatedFile {
+                mode: "on",
+                functions: Vec::new(),
+                top_level: Vec::new(),
+            }));
+        }
+        let mut next_name = 0usize;
+        for index in 0..files.len() {
+            for _ in 0..2 {
+                let function = simulated_function(&mut random, index, &mut next_name, &files);
+                if let Some(file) = &mut files[index] {
+                    file.functions.push(function);
+                }
+            }
+        }
+        for step in 0..=steps {
+            if step > 0 {
+                simulated_edit(&mut random, &mut files, &mut next_name);
+            }
+            for (index, file) in files.iter().enumerate() {
+                // Every fourth file is a script, which the package's folds also reach.
+                let directory = if index % 4 == 3 { "scripts" } else { "R" };
+                let path = root.join(directory).join(format!("file{index}.R"));
+                match file {
+                    Some(file) => {
+                        fs::write(&path, render_simulated_file(file)).expect("a project file")
+                    }
+                    None if path.exists() => fs::remove_file(&path).expect("a removed file"),
+                    None => {}
+                }
+            }
+            let config = config::Config::discover(&root).expect("the simulated ry.toml");
+            let analysis = analyze_project(
+                &root,
+                config,
+                std::slice::from_ref(&root),
+                CacheUse::ReadWrite,
+            );
+            assert!(
+                analysis.is_ok(),
+                "seed {seed} step {step}: the check failed"
+            );
+        }
+    }
+
+    fn simulated_function(
+        random: &mut syntax::testing::SplitMix64,
+        file: usize,
+        next_name: &mut usize,
+        files: &[Option<SimulatedFile>],
+    ) -> SimulatedFunction {
+        // Some functions are S3 methods of another function, which becomes a generic once its
+        // body calls `UseMethod`.
+        let generics: Vec<&str> = files
+            .iter()
+            .flatten()
+            .flat_map(|file| file.functions.iter())
+            .map(|function| function.name.as_str())
+            .filter(|name| !name.contains('.'))
+            .collect();
+        // An S3 method's unused `verbose` is reported only while its generic calls `UseMethod`.
+        let (name, parameters) = match random.below(3) {
+            0 if !generics.is_empty() => (
+                format!("{}.m{next_name}", generics[random.below(generics.len())]),
+                vec!["x", "verbose"],
+            ),
+            _ => (
+                format!("f{file}_{next_name}"),
+                match random.below(3) {
+                    0 => vec!["x"],
+                    1 => vec!["x", "y = 1L"],
+                    _ => vec!["x", "y = \"a\"", "z = TRUE"],
+                },
+            ),
+        };
+        *next_name += 1;
+        let body = (0..1 + random.below(3))
+            .map(|_| simulated_statement(random, files))
+            .collect();
+        SimulatedFunction {
+            name,
+            parameters,
+            body,
+        }
+    }
+
+    fn simulated_statement(
+        random: &mut syntax::testing::SplitMix64,
+        files: &[Option<SimulatedFile>],
+    ) -> String {
+        let names: Vec<&str> = files
+            .iter()
+            .flatten()
+            .flat_map(|file| file.functions.iter().map(|function| function.name.as_str()))
+            .collect();
+        let callee = match names.is_empty() {
+            true => "f0_0",
+            false => names[random.below(names.len())],
+        };
+        match random.below(26) {
+            22..=23 => "UseMethod(\"generic\")".to_owned(),
+            24 => "#: @type Money0 {double}".to_owned(),
+            19 => format!("UseMethod(\"{callee}\")"),
+            20 => format!("#: @type Money{} {{double}}", random.below(2)),
+            21 => format!("#: Money{}\n  amount <- 1", random.below(2)),
+            16 => format!("{callee}(\"a\")"),
+            17 => format!("{callee}(1L) + 1L"),
+            18 => format!("nchar({callee}(2L))"),
+            0 => "x + 1L".to_owned(),
+            12 => format!("counter_{} + 1L", random.below(2)),
+            13 => format!("assigned_{}", random.below(2)),
+            14 => format!("CONSTANT_{} + 1L", random.below(2)),
+            15 => format!("new(\"Point{}\", x = 1)", random.below(2)),
+            1 => format!("{callee}(x)"),
+            2 => format!("{callee}(x, 2L, 3L, 4L)"),
+            3 => format!("undefined_{}", random.below(3)),
+            4 => "\"text\"".to_owned(),
+            5 => format!("{callee}(x) + \"a\""),
+            6 => format!("counter_{} <<- x", random.below(2)),
+            7 => "library(stats)".to_owned(),
+            8 => "median(x)".to_owned(),
+            9 => "head(x, 2L)".to_owned(),
+            10 => format!("assign(\"assigned_{}\", x)", random.below(2)),
+            _ => "paste0(x, \"a\")".to_owned(),
+        }
+    }
+
+    fn simulated_edit(
+        random: &mut syntax::testing::SplitMix64,
+        files: &mut Vec<Option<SimulatedFile>>,
+        next_name: &mut usize,
+    ) {
+        let live: Vec<usize> = (0..files.len())
+            .filter(|&index| files[index].is_some())
+            .collect();
+        let index = live[random.below(live.len())];
+        match random.below(10) {
+            0..=3 => {
+                let statement = simulated_statement(random, files);
+                let Some(file) = &mut files[index] else {
+                    return;
+                };
+                if file.functions.is_empty() {
+                    return;
+                }
+                let target = random.below(file.functions.len());
+                let body = &mut file.functions[target].body;
+                match random.below(3) {
+                    0 if body.len() > 1 => {
+                        body.remove(random.below(body.len()));
+                    }
+                    1 => {
+                        let at = random.below(body.len());
+                        body[at] = statement;
+                    }
+                    _ => body.insert(random.below(body.len() + 1), statement),
+                }
+            }
+            4 => {
+                let Some(file) = &mut files[index] else {
+                    return;
+                };
+                if let Some(function) = file.functions.first_mut() {
+                    match function.parameters.len() {
+                        1 => function.parameters.push("y = 1L"),
+                        _ => {
+                            function.parameters.pop();
+                        }
+                    }
+                }
+            }
+            5 => {
+                let function = simulated_function(random, index, next_name, files);
+                if let Some(file) = &mut files[index] {
+                    file.functions.push(function);
+                }
+            }
+            6 => {
+                let Some(file) = &mut files[index] else {
+                    return;
+                };
+                if !file.functions.is_empty() {
+                    file.functions.remove(random.below(file.functions.len()));
+                }
+            }
+            7 => {
+                let line = match random.below(6) {
+                    4 => format!("#: @type Money{} {{character}}", random.below(2)),
+                    5 => format!(
+                        "#: Money{}\nprice_{} <- \"a\"",
+                        random.below(2),
+                        random.below(2)
+                    ),
+                    0 => format!(
+                        "setClass(\"Point{}\", representation(x = \"numeric\"))",
+                        random.below(2)
+                    ),
+                    1 => "library(utils)".to_owned(),
+                    2 => format!("CONSTANT_{} <- {}", random.below(2), random.below(3)),
+                    _ => format!("f0_0(\"{}\")", random.below(2)),
+                };
+                if let Some(file) = &mut files[index] {
+                    file.top_level.push(line);
+                }
+            }
+            8 => {
+                if let Some(file) = &mut files[index] {
+                    file.top_level.pop();
+                }
+            }
+            _ => match random.below(2) {
+                0 if live.len() > 1 => files[index] = None,
+                _ => {
+                    let function = simulated_function(random, files.len(), next_name, files);
+                    files.push(Some(SimulatedFile {
+                        mode: ["on", "off", "strict"][random.below(3)],
+                        functions: vec![function],
+                        top_level: Vec::new(),
+                    }));
+                }
+            },
+        }
+    }
+
+    fn render_simulated_file(file: &SimulatedFile) -> String {
+        let mut text = format!("# typing: {}\n\n", file.mode);
+        for function in &file.functions {
+            text.push_str(&format!(
+                "{} <- function({}) {{\n",
+                function.name,
+                function.parameters.join(", ")
+            ));
+            for statement in &function.body {
+                text.push_str(&format!("  {statement}\n"));
+            }
+            text.push_str("}\n\n");
+        }
+        for line in &file.top_level {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
     }
 }

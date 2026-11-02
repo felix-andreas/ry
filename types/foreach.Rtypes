@@ -1,0 +1,11 @@
+# foreach: looping constructs over backends.
+#
+# `foreach()` only records its iterators and options. `%do%` evaluates its right operand once per
+# element with the iterator variables bound, so the result's type follows `.combine`.
+
+@type foreach
+
+foreach : @pure fn(...: Any, [.combine]: (fn(...: Any) -> Any) | character, [.init]: Any, [.final]: (fn(...: Any) -> Any) | NULL, [.inorder]: logical, [.multicombine]: logical, [.maxcombine]: double, [.errorhandling]: character[], [.packages]: character[] | NULL, [.export]: character[] | NULL, [.noexport]: character[] | NULL, [.verbose]: logical) -> foreach
+%do% : fn(obj: foreach, ex: Any) -> Any
+%dopar% : fn(obj: foreach, ex: Any) -> Any
+registerDoSEQ : fn() -> Any

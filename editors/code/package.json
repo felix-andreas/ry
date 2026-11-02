@@ -19,12 +19,14 @@
 		"r",
 		"language server",
 		"formatting",
-		"linting"
+		"linting",
+		"debugger"
 	],
 	"categories": [
 		"Formatters",
 		"Linters",
-		"Programming Languages"
+		"Programming Languages",
+		"Debuggers"
 	],
 	"engines": {
 		"vscode": "^1.75.0"
@@ -53,7 +55,9 @@
 	"activationEvents": [
 		"onLanguage:r",
 		"workspaceContains:*.r",
-		"workspaceContains:*.R"
+		"workspaceContains:*.R",
+		"onDebugResolve:ry",
+		"onDebugDynamicConfigurations:ry"
 	],
 	"contributes": {
 		"languages": [
@@ -111,6 +115,47 @@
 			{
 				"title": "ry: Open Logs",
 				"command": "ry.openLogs"
+			},
+			{
+				"title": "Run File",
+				"category": "ry",
+				"command": "ry.runFile",
+				"icon": "$(play)"
+			},
+			{
+				"title": "Run Test",
+				"category": "ry",
+				"command": "ry.runTest"
+			},
+			{
+				"title": "Debug Test",
+				"category": "ry",
+				"command": "ry.debugTest"
+			},
+			{
+				"title": "Show References",
+				"category": "ry",
+				"command": "ry.showReferences"
+			},
+			{
+				"title": "Open Console",
+				"category": "ry",
+				"command": "ry.openConsole"
+			},
+			{
+				"title": "Send Selection or Line to Console",
+				"category": "ry",
+				"command": "ry.sendSelection"
+			},
+			{
+				"title": "Send Function to Console",
+				"category": "ry",
+				"command": "ry.sendFunction"
+			},
+			{
+				"title": "Source File in Console",
+				"category": "ry",
+				"command": "ry.sourceFile"
 			}
 		],
 		"configuration": {
@@ -152,6 +197,144 @@
 					"default": null
 				}
 			}
-		}
+		},
+		"menus": {
+			"commandPalette": [
+				{
+					"command": "ry.runTest",
+					"when": "false"
+				},
+				{
+					"command": "ry.debugTest",
+					"when": "false"
+				},
+				{
+					"command": "ry.showReferences",
+					"when": "false"
+				},
+				{
+					"command": "ry.runFile",
+					"when": "editorLangId == r"
+				},
+				{
+					"command": "ry.sendSelection",
+					"when": "editorLangId == r"
+				},
+				{
+					"command": "ry.sendFunction",
+					"when": "editorLangId == r"
+				},
+				{
+					"command": "ry.sourceFile",
+					"when": "editorLangId == r"
+				}
+			],
+			"editor/title/run": [
+				{
+					"command": "ry.runFile",
+					"when": "resourceLangId == r",
+					"group": "navigation"
+				}
+			]
+		},
+		"keybindings": [
+			{
+				"command": "ry.sendSelection",
+				"key": "ctrl+enter",
+				"mac": "cmd+enter",
+				"when": "editorTextFocus && editorLangId == r"
+			},
+			{
+				"command": "ry.sendFunction",
+				"key": "ctrl+alt+f",
+				"mac": "cmd+alt+f",
+				"when": "editorTextFocus && editorLangId == r"
+			}
+		],
+		"breakpoints": [
+			{
+				"language": "r"
+			}
+		],
+		"debuggers": [
+			{
+				"type": "ry",
+				"label": "ry",
+				"languages": [
+					"r"
+				],
+				"configurationAttributes": {
+					"launch": {
+						"required": [
+							"program"
+						],
+						"properties": {
+							"program": {
+								"type": "string",
+								"description": "The R script to debug.",
+								"default": "${file}"
+							},
+							"args": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								},
+								"description": "Arguments the script reads with `commandArgs(trailingOnly = TRUE)`.",
+								"default": []
+							},
+							"cwd": {
+								"type": "string",
+								"description": "The working directory of the program. Defaults to the workspace folder.",
+								"default": "${workspaceFolder}"
+							},
+							"stopOnEntry": {
+								"type": "boolean",
+								"description": "Stop at the program's first statement.",
+								"default": false
+							},
+							"prelude": {
+								"type": "string",
+								"description": "R code to run before the program, without stopping in it, such as `load_all(\".\")`."
+							},
+							"testName": {
+								"type": "string",
+								"description": "Run only the top-level `test_that` call with this description."
+							}
+						}
+					}
+				},
+				"initialConfigurations": [
+					{
+						"type": "ry",
+						"request": "launch",
+						"name": "Debug R file",
+						"program": "${file}"
+					}
+				],
+				"configurationSnippets": [
+					{
+						"label": "ry: Debug R file",
+						"description": "Debug the active R file on ry's runtime",
+						"body": {
+							"type": "ry",
+							"request": "launch",
+							"name": "Debug R file",
+							"program": "^\"\\${file}\""
+						}
+					},
+					{
+						"label": "ry: Debug package tests",
+						"description": "Load the package, then debug a test file",
+						"body": {
+							"type": "ry",
+							"request": "launch",
+							"name": "Debug tests",
+							"program": "^\"\\${file}\"",
+							"prelude": "load_all(\".\"); library(testthat)"
+						}
+					}
+				]
+			}
+		]
 	}
 }

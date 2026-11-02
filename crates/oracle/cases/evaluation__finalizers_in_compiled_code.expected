@@ -1,0 +1,47 @@
+[stdout]
+| gc in 1 
+|   finalize 1 
+| after gc 1 
+| gc in 2 
+|   finalize 2 
+| after gc 2 
+| gc in 3 
+|   finalize 3 
+| after gc 3 
+| gc in 4 
+|   finalize 4 
+| after gc 4 
+| gc in 5 
+|   finalize 5 
+| after gc 5 
+| gc in 6 
+|   finalize 6 
+| after gc 6 
+| gc in 7 
+|   finalize 7 
+| after gc 7 
+| gc in 8 
+|   finalize 8 
+| after gc 8 
+| gc in 9 
+|   finalize 9 
+| after gc 9 
+| gc in 10 
+|   finalize 10 
+| after gc 10 
+| gc in 11 
+|   finalize 11 
+| after gc 11 
+| gc in 12 
+|   finalize 12 
+| after gc 12 
+|   finalize a 
+| after rm(a)
+|   finalize b 
+| after rm(b)
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -98,7 +98,7 @@ counter: integer
 #---- unused_generic_marks_the_name_string
 setGeneric("area", function(shape) standardGeneric("area"))
 #++++
-Unknown
+character
 12..16 warning[unused] `area` is assigned but never used.
 
 #---- a_walrus_statement_defines_nothing

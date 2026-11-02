@@ -17,3 +17,4 @@ serde = { workspace = true, features = ["derive", "rc"] }
 stacker.workspace = true
 sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
+thin-vec.workspace = true

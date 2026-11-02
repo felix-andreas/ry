@@ -1,0 +1,3 @@
+# azidentity: Azure credentials through the Rust SDK's default credential chain.
+
+default_azure_credential : fn(scopes: character[]) -> character

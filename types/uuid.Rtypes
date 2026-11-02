@@ -1,0 +1,4 @@
+# uuid: UUID generation. The result is a character vector, a raw matrix or a "UUID" vector,
+# depending on the value of `output`, so it is `Any`.
+
+UUIDgenerate : fn([use.time]: logical, [n]: integer, [output]: character) -> Any

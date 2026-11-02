@@ -1,10 +1,12 @@
 #@ weight 2
 #@ param ATTEMPTS int 2 6
 # Retry logic with classed conditions and logged failures.
+#: fn(message: character) -> rlang_error
 transient_error_@ID@ <- function(message) {
   rlang::error_cnd("transient_error", message = message)
 }
 
+#: fn(fail_times: integer) -> fn() -> character
 flaky_@ID@ <- function(fail_times) {
   calls <- 0L
   function() {
@@ -14,9 +16,11 @@ flaky_@ID@ <- function(fail_times) {
   }
 }
 
+#: <T> fn(fn: fn() -> T, [attempts]: integer) -> list{value: T, failures: character[]}
 with_retry_@ID@ <- function(fn, attempts = @ATTEMPTS@L) {
   failures <- character()
   for (attempt in seq_len(attempts)) {
+    #: Any
     result <- tryCatch(
       fn(),
       transient_error = function(condition) {
@@ -29,6 +33,7 @@ with_retry_@ID@ <- function(fn, attempts = @ATTEMPTS@L) {
   rlang::abort("retries exhausted", class = "retry_error", failures = failures)
 }
 
+#: <T> fn(expr: T) -> T | character
 logged_@ID@ <- function(expr) {
   tryCatchLog::tryCatchLog(
     expr,
@@ -38,6 +43,7 @@ logged_@ID@ <- function(expr) {
 }
 #@ test
 test_that("retry @ID@ recovers or gives up", {
+  #: list{value: character, failures: character[]}
   result <- with_retry_@ID@(flaky_@ID@(1L))
   expect_equal(result$value, "ok after 2")
   expect_equal(result$failures, "failure 1")

@@ -26,7 +26,7 @@ SEXP ALTREAL_MAX(SEXP x, Rboolean narm);
 SEXP ALTLOGICAL_SUM(SEXP x, Rboolean narm);
 
 static R_altrep_class_t elt_only_class, pointer_class, string_class, list_class, logical_class,
-    raw_class, complex_class, failing_class, allocating_class;
+    raw_class, complex_class, failing_class, failing_string_class, allocating_class;
 
 static int elt_calls = 0;
 static int region_calls = 0;
@@ -257,6 +257,20 @@ static SEXP failing_sum(SEXP x, Rboolean narm)
     return R_NilValue;
 }
 
+/* failing_string: three strings whose second element cannot be read, so R code that asks for
+   another element must not touch it. */
+static R_xlen_t failing_string_length(SEXP x)
+{
+    return 3;
+}
+
+static SEXP failing_string_elt(SEXP x, R_xlen_t i)
+{
+    if (i == 1)
+        Rf_error("string %d is unavailable", (int) i + 1);
+    return Rf_mkChar("ok");
+}
+
 /* allocating: an integer class over data1 whose methods allocate, for collection stress; it
    has its own Duplicate and Coerce. */
 
@@ -331,6 +345,8 @@ SEXP altreptest_make(SEXP kind, SEXP length)
         return sized(complex_class, n);
     if (strcmp(name, "failing") == 0)
         return sized(failing_class, n);
+    if (strcmp(name, "failing_string") == 0)
+        return sized(failing_string_class, n);
     Rf_error("unknown class '%s'", name);
     return R_NilValue;
 }
@@ -1048,6 +1064,10 @@ void R_init_altreptest(DllInfo *dll)
     R_set_altinteger_Elt_method(failing_class, failing_elt);
     R_set_altvec_Dataptr_method(failing_class, failing_dataptr);
     R_set_altinteger_Sum_method(failing_class, failing_sum);
+
+    failing_string_class = R_make_altstring_class("failing_string", "altreptest", dll);
+    R_set_altrep_Length_method(failing_string_class, failing_string_length);
+    R_set_altstring_Elt_method(failing_string_class, failing_string_elt);
 
     allocating_class = R_make_altinteger_class("allocating", "altreptest", dll);
     R_set_altrep_Length_method(allocating_class, allocating_length);

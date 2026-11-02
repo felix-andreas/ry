@@ -112,10 +112,12 @@
             commonArgsNative
             // {
               cargoArtifacts = cargoArtifactsNative;
-              # libr's own suites drive GNU R binaries and the corpus, which the sandbox lacks.
-              checkPhaseCargoCommand = "cargoWithProfile test -p ry-lang";
-              # No GNU R in the check phase, so the CLI's runtime tests skip: nixpkgs ships R 4.6,
-              # whose base packages ry's runtime does not load yet (MEMORY.md, mid-term).
+              # libr's own suites drive GNU R binaries and the corpus, which the sandbox lacks. The
+              # docs examples test reads docs/, which the source set leaves out so that a docs edit
+              # does not rebuild the package; `cargo test` runs it everywhere else.
+              checkPhaseCargoCommand = "cargoWithProfile test -p ry-lang -- --skip docs_examples_hold";
+              # GNU R lets the CLI's runtime and `ry R` tests run instead of skipping.
+              nativeCheckInputs = [ pkgs.R ];
               # Stub materialization writes to the user cache; the sandbox's HOME is read-only.
               preCheck = ''
                 export XDG_CACHE_HOME="$TMPDIR/.cache"

@@ -38,7 +38,9 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, vscode: linux-arm64 }
           - { os: macos-14, target: aarch64-apple-darwin, vscode: darwin-arm64 }
           - { os: macos-15-intel, target: x86_64-apple-darwin, vscode: darwin-x64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, vscode: win32-x64 }
+          # gnullvm links the UCRT, as Rtools-built packages do, so ry.exe, R.dll and package DLLs
+          # share one C runtime.
+          - { os: windows-latest, target: x86_64-pc-windows-gnullvm, vscode: win32-x64 }
     defaults:
       run:
         shell: bash
@@ -57,19 +59,38 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      # ry's runtime cannot load R 4.6's base packages yet (MEMORY.md, "Bug, blocks the beta"), so
-      # the smoke test's `ry run` steps need the previous release until that is fixed.
+          target: ${{ matrix.target }}
       - uses: r-lib/actions/setup-r@v2
+      # The gnullvm target needs an LLVM mingw toolchain: clang to compile libr's C and drive lld,
+      # the UCRT import libraries, and windres for ry.exe's UTF-8 manifest (crates/ry/build.rs).
+      # MSYS2's clang64 environment is that toolchain. It goes on PATH after setup-r, so its clang
+      # comes before anything Rtools puts there.
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        if: runner.os == 'Windows'
         with:
-          r-version: "4.5"
+          msystem: CLANG64
+          update: false
+          install: mingw-w64-clang-x86_64-toolchain
+      - name: mingw toolchain
+        if: runner.os == 'Windows'
+        run: |
+          echo '${{ steps.msys2.outputs.msys2-location }}\clang64\bin' >> "$GITHUB_PATH"
+          {
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=clang"
+            echo "CC_x86_64_pc_windows_gnullvm=clang"
+            echo "AR_x86_64_pc_windows_gnullvm=llvm-ar"
+            echo "WINDRES=llvm-windres"
+          } >> "$GITHUB_ENV"
       # libR links zlib, bzip2 and xz on Linux (crates/libr/build.rs).
       - name: link libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
       - name: package
-        run: just package "$VERSION"
+        run: just package "$VERSION" ${{ matrix.target }}
       # RY_SMOKE_PACKAGES installs jsonlite with GNU R and loads it under `ry run`: a CRAN binary on
-      # macOS, which proves ry rebinds a GNU R package's libR to its own runtime, and a source
+      # macOS, which proves ry rebinds a GNU R package's libR to its own runtime, a CRAN binary
+      # built with Rtools on Windows, which proves such a DLL binds to ry's R.dll, and a source
       # build on Linux.
       - name: smoke test
         env:
@@ -117,7 +138,7 @@ jobs:
           just build-platform-vsix aarch64-unknown-linux-gnu linux-arm64 ry "$dir" "$kind"
           just build-platform-vsix aarch64-apple-darwin darwin-arm64 ry "$dir" "$kind"
           just build-platform-vsix x86_64-apple-darwin darwin-x64 ry "$dir" "$kind"
-          just build-platform-vsix x86_64-pc-windows-msvc win32-x64 ry.exe "$dir" "$kind"
+          just build-platform-vsix x86_64-pc-windows-gnullvm win32-x64 ry.exe "$dir" "$kind"
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

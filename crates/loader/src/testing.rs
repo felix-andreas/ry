@@ -231,7 +231,7 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
 
     for name in &plan.remove {
         assert!(
-            !new_index.names.contains_key(name),
+            !new_index.binds(name),
             "the plan removes `{name}`, which the edited package still binds"
         );
     }

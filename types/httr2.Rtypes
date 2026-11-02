@@ -1,0 +1,16 @@
+# httr2: request building, performing and response parsing.
+#
+# Building a request only records fields on a list, so the `req_*` builders are pure. Performing
+# one, and reading a body (which may be streamed from a file), are not.
+
+@type httr2_request
+@type httr2_response
+
+request : @pure fn(base_url: character) -> httr2_request
+req_url_path_append : @pure fn(req: httr2_request, ...: character) -> httr2_request
+req_url_query : @pure fn(.req: httr2_request, ...: Any, [.multi]: character, [.space]: character) -> httr2_request
+req_headers : @pure fn(.req: httr2_request, ...: Any, [.redact]: character | NULL) -> httr2_request
+req_user_agent : @pure fn(req: httr2_request, [string]: character | NULL) -> httr2_request
+req_perform : fn(req: httr2_request, [path]: character | NULL, [verbosity]: integer | NULL, [mock]: Any, [error_call]: environment) -> httr2_response
+resp_body_json : fn(resp: httr2_response, [check_type]: logical, [simplifyVector]: logical, ...: Any) -> Any
+response_json : @pure fn([status_code]: double, [url]: character, [method]: character, [headers]: list[named: Any], [body]: Any) -> httr2_response
