@@ -40,6 +40,39 @@ action Inline variable `total`
     (a + b) * 2
   }
 
+#---- parentheses_kept_on_the_right_of_a_left_associative_operator
+f <- function(x, a, b) {
+  $0rest <- a - b
+  x - rest
+}
+#++++
+action Inline variable `rest`
+  f <- function(x, a, b) {
+    x - (a - b)
+  }
+
+#---- no_parentheses_on_the_left_of_a_left_associative_operator
+f <- function(x, a, b) {
+  $0rest <- a - b
+  rest - x
+}
+#++++
+action Inline variable `rest`
+  f <- function(x, a, b) {
+    a - b - x
+  }
+
+#---- parentheses_kept_on_the_left_of_a_right_associative_operator
+f <- function(a, b) {
+  $0power <- a^b
+  power^2
+}
+#++++
+action Inline variable `power`
+  f <- function(a, b) {
+    (a^b)^2
+  }
+
 #---- rebound_operand_is_refused
 f <- function(a) {
   $0doubled <- a * 2

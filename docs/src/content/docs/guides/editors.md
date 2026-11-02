@@ -19,7 +19,10 @@ You get:
   functions; a package without a stub completes the exports listed in its installed `NAMESPACE`;
   among equally good matches, a call's argument names come first, then the enclosing function's
   own variables (unless a `(` already follows the cursor), then names you use often in the project;
-  before a `(`, the functions the project calls most come first
+  before a `(`, the functions the project calls most come first; a name whose type cannot fit
+  where you are typing goes after the ones that can, such as a function that returns `character`
+  in an `if` condition, or as an argument to a parameter that an annotation or a stub declares
+  `logical` (an inferred type never pushes a name down, since it only says how a body ends)
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition
@@ -29,7 +32,8 @@ You get:
 - navigation into installed packages that have no stub: go-to-definition opens the package's R
   code, read from your R library, and hover shows its help page
 - signature help with each parameter's type and default, also for an untyped function from an
-  installed package and for a method of an R6 class called through `self$` or an instance
+  installed package, for a method of an R6 class called through `self$` or an instance, and for
+  data.table's `.()`, which inside a query's brackets is `list()`
 - inlay hints for assignments, loop variables, the inferred types of a function's parameters and
   result (`function<T>(x: T) -> T`), and parameter names in calls with two or more positional
   arguments (`grow(principal = 100, years = 2)`)
@@ -100,6 +104,9 @@ that uses `return()`, `<<-`, `...`, or a function that inspects its caller's fra
 `missing()` or `parent.frame()`. Inlining is refused when a name the value reads is reassigned
 before the last use, and when the value assigns. A value with a call is inlined only into a single
 use that the next statement evaluates first, so the call still runs once, at the same point.
+Inlining adds parentheses only where R's precedence needs them: `fee * n` inlines into
+`total - value` as `total - fee * n`, but `fee + n` inlines into `total * value` as
+`total * (fee + n)`.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
