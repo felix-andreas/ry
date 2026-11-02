@@ -948,7 +948,31 @@ unsafe fn tail_updates(body: Sexp, function: Sexp) -> (Vec<Sexp>, Sexp) {
     }
     let parameter = formals.tag();
     collect_tail_updates(body, parameter, true, &mut calls);
+    // The compiler finds a tail call by identity, and a body built with `bquote` or `body<-`
+    // can share one call object between a tail and a non-tail position, so a call that occurs
+    // more than once gets no update.
+    if !calls.is_empty() {
+        let mut occurrences = vec![0usize; calls.len()];
+        count_occurrences(body, &calls, &mut occurrences);
+        let mut position = 0;
+        calls.retain(|_| {
+            position += 1;
+            occurrences[position - 1] == 1
+        });
+    }
     (calls, parameter)
+}
+
+/// Adds, for each of `calls`, how often the object occurs within `expression`.
+unsafe fn count_occurrences(expression: Sexp, calls: &[Sexp], occurrences: &mut [usize]) {
+    if let Some(position) = calls.iter().position(|&call| call == expression) {
+        occurrences[position] += 1;
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+        count_occurrences(cell.car(), calls, occurrences);
+        cell = cell.cdr();
+    }
 }
 
 /// Adds the tail updates of `expression` to `calls`: the expression itself when `tail`, and the
