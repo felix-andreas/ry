@@ -139,6 +139,8 @@ pub struct LintConfig {
     /// every definition into an error whatever `object_system` says.
     #[serde(skip)]
     pub object_systems_disabled: bool,
+    /// Off by default: data.table code runs unchanged, and moving it to `DataFrame` is optional.
+    pub data_table: LintLevel,
 }
 
 /// Each lint's config key, which is also its code, with its level, for code that sets levels by
@@ -360,6 +362,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 }
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
+                    data_table_lint(&red, config, &mut lints.unless_redefined, diagnostics);
                     call_lints(&red, config, diagnostics);
                 }
                 SyntaxKind::BRACE_EXPR => {
@@ -768,6 +771,73 @@ fn object_system_lint(
     }
 }
 
+/// Like `object_system_lint`, only the calls that create a data.table: every other data.table
+/// function needs one first, so these mark where data.table enters the code.
+fn data_table_lint(
+    call: &SyntaxNode,
+    config: &LintConfig,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
+    always: &mut Vec<Diagnostic>,
+) {
+    if lint_severity(config.data_table, None).is_none() {
+        return;
+    }
+    let Some(callee) = call.first_child() else {
+        return;
+    };
+    let (qualified, name) = match callee.kind() {
+        SyntaxKind::NAME => (false, callee),
+        SyntaxKind::NAMESPACE_EXPR => {
+            let mut names = callee
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME);
+            let (Some(package), Some(name)) = (names.next(), names.next()) else {
+                return;
+            };
+            if package.text() != "data.table" {
+                return;
+            }
+            (true, name)
+        }
+        _ => return,
+    };
+    let function = name.text().to_string();
+    let Some(equivalent) = data_table_equivalent(&function) else {
+        return;
+    };
+    let mut found = Vec::new();
+    push_lint(
+        &mut found,
+        config.data_table,
+        Severity::Warning,
+        "data-table",
+        name.text_range(),
+        format!(
+            "`{function}` creates a data.table. Its typed equivalent is {equivalent}, see https://ry-lang.org/guides/from-data-table/"
+        ),
+        None,
+    );
+    if qualified {
+        always.extend(found);
+    } else {
+        unless_redefined.extend(
+            found
+                .into_iter()
+                .map(|diagnostic| (function.clone(), diagnostic)),
+        );
+    }
+}
+
+/// The DataFrame call that replaces a data.table constructor.
+fn data_table_equivalent(function: &str) -> Option<&'static str> {
+    Some(match function {
+        "data.table" => "`DataFrame()`",
+        "fread" => "`DataFrame.read_csv()`",
+        "as.data.table" | "setDT" => "`as.DataFrame()`",
+        _ => return None,
+    })
+}
+
 fn trailing_comma_lint(
     argument_list: &SyntaxNode,
     config: &LintConfig,
@@ -984,7 +1054,10 @@ fn callee_may_lint(name: &str, config: &LintConfig) -> bool {
             opted(config.length_levels) || is_enabled(config.length_test, Some(Severity::Warning))
         }
         "browser" => opted(config.browser_call),
-        name => object_system_function(name).is_some(),
+        name => {
+            object_system_function(name).is_some()
+                || (opted(config.data_table) && data_table_equivalent(name).is_some())
+        }
     }
 }
 

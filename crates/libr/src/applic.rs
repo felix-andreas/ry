@@ -1575,7 +1575,9 @@ pub unsafe extern "C" fn lbfgsb(
         let expected = size as usize;
         let point = vector(x, size);
         if [point.len(), lower.len(), upper.len(), kinds.len()] != [expected; 4] {
-            return Err(error("lbfgsb: 'x', 'l', 'u' and 'nbd' must hold 'n' values"));
+            return Err(error(
+                "lbfgsb: 'x', 'l', 'u' and 'nbd' must hold 'n' values",
+            ));
         }
         let mut bounds = Vec::with_capacity(kinds.len());
         for &kind in kinds {
@@ -1613,14 +1615,7 @@ pub unsafe extern "C" fn lbfgsb(
             report,
         };
         let mut adapter = CallbackObjective { objective };
-        let outcome = minimize(
-            &mut adapter,
-            point,
-            lower,
-            upper,
-            &bounds,
-            &settings,
-        )?;
+        let outcome = minimize(&mut adapter, point, lower, upper, &bounds, &settings)?;
         *fail = outcome.fail;
         *fmin = outcome.value;
         *fncount = outcome.function_count;

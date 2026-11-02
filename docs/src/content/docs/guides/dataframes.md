@@ -9,7 +9,8 @@ db-benchmark's questions at ten million rows takes about a quarter of the time d
 ([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
 column is reported before the query runs. Code you already wrote for data.table keeps working, and
 most of its queries run on the same engine
-([Existing data.table code](#existing-datatable-code)).
+([Existing data.table code](#existing-datatable-code)). [Moving from data.table](/guides/from-data-table/)
+maps each common data.table idiom to its DataFrame equivalent.
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
@@ -61,8 +62,9 @@ and warnings. Otherwise data.table answers it. These go to data.table:
 - a keyed table, and a table with extra attributes or classes;
 - code inside data.table's own namespace, except a grouped query without `:=`, which is how
   `dcast` aggregates;
-- a `j` that only picks whole columns of every row, such as `x[, .(a, b)]` or
-  `x[, cols, with = FALSE]`, because data.table copies them faster;
+- a query without `by` that only picks rows and whole columns, such as `x[i]`,
+  `x[order(a, -b)]`, `x[a > 0]`, `x[, .(a, b)]` or `x[, cols, with = FALSE]`, because
+  data.table copies them faster and with less memory;
 - a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
 - `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
   summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;

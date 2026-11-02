@@ -14,8 +14,9 @@ use {
     foldhash::fast::FixedState,
     hashbrown::HashTable,
     polars::prelude::{
-        BooleanChunked, DataType, Float64Chunked, FrozenCategories, Int32Chunked, IntoSeries,
-        NewChunkedArray, PlSmallStr, Series, StringChunked, UInt32Chunked,
+        BooleanChunked, CategoricalMapping, DataType, Float64Chunked, FrozenCategories,
+        Int32Chunked, IntoSeries, NewChunkedArray, PlSmallStr, PolarsError, Series, StringChunked,
+        UInt32Chunked,
     },
     polars_arrow::{
         array::{Array, PrimitiveArray, Utf8ViewArray},
@@ -247,10 +248,8 @@ pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
 /// A column can hold millions of distinct strings, and then every random access into one big hash
 /// table misses the cache. So the rows are hashed in parallel and split by hash into partitions,
 /// each partition numbers its own distinct strings in a table small enough to stay warm, and no
-/// string is copied. The distinct strings sort by a 16-byte prefix key, falling back to the whole
-/// string only on a tie, and Polars builds its categories while the codes are renumbered into
-/// level order. Polars' own string-to-`Enum` cast would intern every distinct string twice and look
-/// every row up again.
+/// string is copied. Polars' own string-to-`Enum` cast would intern every distinct string twice
+/// and look every row up again.
 pub fn string_to_factor(series: &Series) -> Result<Series> {
     let strings = series.cast(&DataType::String)?.rechunk();
     let chunked = strings.str()?;
@@ -317,6 +316,55 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
         })
         .collect();
     let distinct: Vec<&str> = locals.into_iter().flatten().collect();
+    let codes: Vec<u32> = (0..rows)
+        .into_par_iter()
+        .map(|row| match partition_of[row] {
+            // A missing row's code is masked by the validity bitmap, so any level stands in for
+            // it.
+            u8::MAX => 0,
+            partition => offsets[partition as usize] + local_codes[row].load(Ordering::Relaxed),
+        })
+        .collect();
+    drop(local_codes);
+    factor_from_codes(
+        series.name().clone(),
+        &distinct,
+        codes,
+        array.validity().cloned(),
+    )
+}
+
+/// The factor of a `Categorical` column given as its `mapping` and its rows' `codes`, which are
+/// renumbered into level order in place.
+pub fn categorical_codes_to_factor(
+    name: PlSmallStr,
+    mapping: &CategoricalMapping,
+    codes: Vec<u32>,
+    validity: Option<Bitmap>,
+) -> Result<Series> {
+    let distinct = (0..mapping.num_cats_upper_bound())
+        .map(|code| {
+            mapping.cat_to_str(code as u32).ok_or_else(|| {
+                Error::Polars(PolarsError::ComputeError(
+                    format!("category {code} of `{name}` has no string").into(),
+                ))
+            })
+        })
+        .collect::<Result<Vec<&str>>>()?;
+    factor_from_codes(name, &distinct, codes, validity)
+}
+
+/// The factor whose levels are `distinct` sorted in byte order, where `codes[row]` is the
+/// position of the row's string in `distinct` (anything for a row `validity` marks missing), and
+/// is renumbered into level order in place. The
+/// strings sort by a 16-byte prefix key, falling back to the whole string only on a tie, and
+/// Polars builds its categories while the codes are renumbered into level order.
+fn factor_from_codes(
+    name: PlSmallStr,
+    distinct: &[&str],
+    mut codes: Vec<u32>,
+    validity: Option<Bitmap>,
+) -> Result<Series> {
     let mut order: Vec<(u128, u32)> = distinct
         .par_iter()
         .enumerate()
@@ -331,31 +379,18 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
     for (position, (_, index)) in order.iter().enumerate() {
         rank[*index as usize] = position as u32;
     }
-    let (categories, codes) = join(
+    let (categories, ()) = join(
         || FrozenCategories::new(order.iter().map(|(_, index)| distinct[*index as usize])),
-        || -> Vec<u32> {
-            (0..rows)
-                .into_par_iter()
-                .map(|row| match partition_of[row] {
-                    // A missing row's code is masked by the validity bitmap, so any level stands
-                    // in for it.
-                    u8::MAX => 0,
-                    partition => {
-                        let local = local_codes[row].load(Ordering::Relaxed);
-                        rank[(offsets[partition as usize] + local) as usize]
-                    }
-                })
-                .collect()
+        || {
+            codes
+                .par_iter_mut()
+                .for_each(|code| *code = rank.get(*code as usize).copied().unwrap_or(0));
         },
     );
     let dtype = DataType::from_frozen_categories(categories?);
     let physical = UInt32Chunked::with_chunk(
-        series.name().clone(),
-        PrimitiveArray::new(
-            ArrowDataType::UInt32,
-            codes.into(),
-            array.validity().cloned(),
-        ),
+        name,
+        PrimitiveArray::new(ArrowDataType::UInt32, codes.into(), validity),
     )
     .into_series()
     .cast(&dtype.to_physical())?;

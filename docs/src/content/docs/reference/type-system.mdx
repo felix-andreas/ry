@@ -1207,6 +1207,32 @@ An unannotated `function(...)` expression gets its type from the definition itse
 `function(count, label = NULL) count` may therefore be called as `f(1L)`, `f(count = 1L)`, or
 `f(1L, "x")`.
 
+#### A return chosen by a flag
+
+A body that ends in `if (flag) a else b`, where `flag` is a formal with a literal `TRUE` or `FALSE`
+default that the body never reassigns and no `return()` leaves early, returns the union of both
+branches, as any `if` does. A call that leaves the flag out, or passes a literal, selects one branch,
+so it returns that branch's type alone:
+
+```r
+p_dist <- function(q, valueOnly = TRUE) {
+  prob <- q * 2
+  if (valueOnly) prob else list(value = prob, error = prob)
+}
+# p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+gap <- function(x, p) p_dist(x) - p
+# gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
+full <- function(x) p_dist(x, valueOnly = FALSE)$error
+# full: <T: numeric> fn(x: T) -> double
+```
+
+Any other flag argument, such as a variable, returns the union. A call that forwards `...` selects
+by its visible arguments, so a flag passed through `...` is not seen: in
+`wrapper <- function(x, ...) p_dist(x, ...)`, the wrapper returns `double` even when its caller
+passes `valueOnly = FALSE`. This is a deliberate limit, because treating every forwarding call as
+unselected reports ordinary wrappers that never pass the flag. An annotation has no syntax for
+the selection, so a declared signature always returns its declared type.
+
 #### Defaults
 
 Defaults are type-checked, and they interact with the parameter's type in four ways:
@@ -2146,7 +2172,27 @@ Arguments are checked for compatibility, not exact equality:
   `col.fun(n = length(levels) + 1)`. An annotated signature
   keeps its scalars: under `#: fn(flag: logical) -> double`, `pick(c(1, 0, 2) > 0)` is a type
   error. A type parameter bound by an earlier argument still widens as usual, and an inferred
-  `character` parameter still rejects a number.
+  `character` parameter still rejects a number. The same holds for an element that the apply family
+  passes to an inferred callback, so `lapply(0:3, not)` over `not <- function(value) if (value)
+  FALSE else TRUE` is `list[logical]`, and `lapply(c("a", "b"), not)` is still reported.
+- An inferred `logical` parameter that the body reads only as the whole condition of an `if` or a
+  `while` accepts a `character` argument the way that condition does: a string literal only when it
+  spells `TRUE` or `FALSE`, and any non-literal string. So `not(Sys.getenv("CHECK", unset =
+  "TRUE"))` and `not("TRUE")` are accepted, and `not("yes")` is reported. A parameter that `!`,
+  `&&` or `||` reads gets no such leniency, because R rejects any string there, so `neg("TRUE")`
+  over `neg <- function(x) !x` is reported.
+- At a base helper that calls `match.fun`, a bare unannotated formal that the body also reads as a
+  value (as an operand, a condition, or an assigned value) is not inferred as a function there,
+  because `match.fun` takes a function or its name and looks a bare name up as a function. So
+  `spread <- function(x, var = 1) { co <- apply(x, 2, var); if (var < 10^-3) stop(); co }` calls
+  base `var` and compares the number, and `lapply(chunks, op, n)` beside `op == "tail"` accepts a
+  string `op`. A formal used only as a function, as in `each <- function(f) lapply(list(1, 2), f)`,
+  still infers as `fn(double) -> T`.
+- An argument bound to a formal that the callee reads only through `substitute()` is code the callee captures, not a value, so it is not typed in the caller's frame.
+  withr's `wrap <- function(f, pre) { pre <- substitute(pre); ... }` splices `pre` into a function
+  that takes `f`'s formals, so `wrap(sink_to, { if (append) "a" else "w" })` reads `sink_to`'s
+  `append`, not base's `append`. A callee that also evaluates the formal checks the argument as usual,
+  and so does one that passes the formal on to another function, which may evaluate it.
 
 #### The native pipe
 
@@ -2223,6 +2269,14 @@ to such a name is resolved separately at each call site:
   is `integer[named]`. Each field of a record or frame is its own element type, and an element no
   candidate accepts is an error. A class whose first argument declares a `sum.<class>` or
   `Summary.<class>` method is dispatched to that method instead of the set, as R dispatches it.
+- `Reduce` with a function named directly, or chosen by an `if` between two names, folds that
+  function over the elements instead of matching it against `fn(U, T) -> U`. R hands each return
+  back as the next accumulator, so the accumulator's type is the join of the start (`init`, or the
+  element type) and every return. With `same <- function(x, y) if (identical(x, y)) x`,
+  `Reduce(same, list(1, 2))` is `double | NULL`. A step the function rejects is an error at that
+  argument, so `Reduce(add, list(1, 2), "start")` with a numeric `add` is reported at `"start"`. A
+  function that closes over the enclosing function's own type variables, `right =`, `accumulate =`
+  and `simplify =` keep the stub's signature.
 
 Only a declaration file can overload a name, because a name with several signatures has no single
 most general type and must be resolved by search rather than inferred. A `#:` annotation on your own
@@ -2410,6 +2464,13 @@ exceptions and additions:
   still forces it, except for a base R parameter that has no default and that the function tests
   with `missing()`: `Reduce(f, x, init = .init)` and `base::tryCatch(expr, finally = finally)` leave
   the formal unforced.
+- Passing the formal bare, under any name or position, to a project function's parameter that the
+  callee may leave unread does not force it either. Such a parameter is optional without a default,
+  or tested with `missing()` in the callee's body. A missing formal passed on does not take the
+  callee's default, so in `table_of <- function(x, format) pick_format(format)`, `format` is
+  optional when `pick_format <- function(format = NULL)` tests `missing(format)`, and required when
+  `pick_format` never tests it. As for a formal's own `missing()` test, the order of the test and
+  the reads is not checked.
 - Passing the formal positionally to a function that the enclosing body defines further down,
   as in `format_advice <- function(x) format_advice_cli(x)` before `format_advice_cli <- function(x)
   "advice"` in the same `local()`, does not force it either. The sibling runs only after its
@@ -2439,9 +2500,11 @@ exceptions and additions:
   read. A project binding of that name still types the read.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
-- A read inside another formal's default does not force a formal, because the default runs only
-  when the call omits that formal. So in `function(x, y = x) y`, `x` is optional, and `g(y = 1)`
-  is accepted. So is `g()`, although R then fails with "argument "x" is missing".
+- A read inside another formal's default forces the formal only when that default runs, which is
+  when the call omits the formal that owns it and the body forces that formal. So in
+  `g <- function(x, y = x) y`, `x` is required exactly when `y` is left out: `g(y = 1)` and `g(2)`
+  are accepted, and `g()` is reported as leaving out `x`, as R fails with "argument "x" is
+  missing". A formal with its own default, or one the body tests with `missing()`, stays optional.
 
 #### `missing()` on a defaultless formal
 
@@ -3144,7 +3207,7 @@ first column it reads, as Polars names it. Its type follows R's rules for the op
 | `a / b`, `a ^ b`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | `double` |
 | comparisons, `&`, `\|`, `!`, `Expr.is_null` | `logical` |
 | `Expr.sum` | `integer` for an `integer` or `logical` column, otherwise `double` |
-| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column |
+| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column, except that `Expr.min` and `Expr.max` of a `logical` column are `integer`, as in R |
 | `Expr.len()`, `Expr.count` | `integer` |
 | `Expr.if_else(test, yes, no)` | the type `yes` and `no` share |
 | `lit(value)`, a plain R value | the value's type |
@@ -3166,6 +3229,35 @@ type-mismatch
 
 An argument whose expression the checker cannot read, such as a variable holding an `Expr`, leaves
 the result's columns unknown.
+
+The operands of an expression must have types the operation takes, as the table engine checks
+before it runs a query. In the rules below, a number is an `integer` or `double` column or value,
+and text is a `character` or `factor` one:
+
+| Operation | Operands |
+| --- | --- |
+| `+`, `-`, `*`, `/`, `^`, `%%`, `%/%`, unary `-` and `+`, `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | numbers or `logical`, never text |
+| `&`, `\|`, `!` | `logical` or numbers, never text |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | never text on one side and a number on the other |
+| the test of `Expr.if_else` | `logical` |
+
+An operand that breaks a rule is a type error on that operand, and a comparison is one on the whole
+comparison:
+
+```text
+type-mismatch
+
+  x `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
+   --[a.R:2:35]
+ 1 | sales <- DataFrame(region = ["eu", "us"], units = [1L, 2L])
+ 2 | kept <- sales |> DataFrame.filter(col("region") > 1L)
+   |                                   ^^^^^^^^^^^^^^^^^^
+```
+
+The engine compares an `integer` with a string by formatting the number, as R does, so that
+comparison runs, but it is still an error here: a schema that puts text against a number almost
+always means the wrong column. The rules check only operands of known type, so an expression over
+a frame whose columns are unknown is never an error.
 
 #### data.table queries
 

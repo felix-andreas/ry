@@ -2,8 +2,9 @@
 #---- namespace_rhs
 pkg::fu$0nc
 #++++
-hover 0..9: Unknown
-definition: none
+hover 0..9: func
+hover-definition: installed func from pkg
+definition: installed func from pkg
 references: none
 rename: none
 signature: none
