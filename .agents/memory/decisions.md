@@ -2813,6 +2813,17 @@ first lines R had already read, leaving R mid-command.
   about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
   benchmarks time the same. Lower them only together with a cheaper first tier or background
   compilation.
+- **A fully typed closure compiles at its first call** (`jit.rs`, `fully_typed` and
+  `first_call`). Typed code must never run slower than the same code untyped, and before this a
+  typed body paid the argument checks and still waited for 1000 entries. The declared types of the
+  formals and of a called closure's return seed the analysis wherever feedback is empty
+  (`analysis.rs`, `load_ty`), so the compile needs no warm-up. The guards stay because inline
+  types are not sound in default mode; a failed guard deoptimizes as for any feedback. A scalar
+  type (`double`) and a vector type (`double[]`) differ in the runtime mask (`annotations.rs`,
+  `SCALAR`), so only scalars are seeded as unboxed. A refusal because an operand is still unknown
+  (`COLD`) or because nothing would run natively does not mark the body as refused: the threshold
+  path may still compile it once real feedback exists. Measured: `fib` typed 0.013 s before,
+  0.007 s after, equal to untyped; `closures` typed 0.37 s against 0.42 s untyped.
 - **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
   (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
   `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
@@ -3354,6 +3365,11 @@ first lines R had already read, leaving R mid-command.
   - Logical widens under the numeric constraint (`widen_numeric_binding`), and a vector partner leaves the flexible operand open with a `double[]` result.
   - A callback called with nothing but forwarded `...` is `fn(...: Any) -> T`.
   - `pkg::name` on a shipped namespace is accepted without attaching it, since R's `::` loads without attaching.
+  - A call to an inferred function narrows a union parameter that its return echoes to the argument's own member (`narrow_echoed_parameter_unions`), so `f(x)` with `x: list` does not return `list | vector`. A remaining member that is a variable of the callee alone, such as a getter-or-setter closure's setter value, makes the return `Unknown` rather than leak.
+  - A union of lists with different elements, passed where a generic callback consumer expects one list, joins element-wise (`joined_list_union`), skipping `list()` members, because each path's list holds only its own elements.
+  - Arithmetic on an operand whose type is still open fits any class with arithmetic methods (`Arith.matrix`, `Ops.Date`), except a method that takes `Any`, like `Arith.data.frame`, and except inside an overload probe, where it would pick `sum`'s `difftime` candidate.
+  - A `<<-` write to a top-level variable is read back in the rest of the writing body, never in other items, so one function's cache write does not change what another item reads. The path that skips the write holds the top-level binding (`materialize_pre_state`), except a top-level `NULL`, which is a lazily filled cache's placeholder.
+  - Untyped arithmetic does not fit an operator method's parameter (`operator_method_depth`), or `day - 2 * x` would take `-.Date`'s `difftime` candidate.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
 - **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
 
@@ -4108,6 +4124,19 @@ check` releases its trees once, and memoized records are compact" below).
 - **`c()` of untagged, unnamed atomic vectors copies slice by slice** into the result
   (`combine_unnamed_atomic`), because the general path records every element and its name first
   and was the largest source of Rust allocations in `sd()`.
+- **The random generators skip work GNU R repeats per call, and stay bit-identical to it.**
+  Measured on the Vasicek simulation (one `rnorm(200)` and one `m[i, ] <- ...` per step), these
+  cut ry from 142.5k to 87.3k instructions per step, against GNU R's 117.7k.
+  - `GetRNGstate` returns early when `.Random.seed` still holds the session's state (same kind
+    code, Mersenne position in range, same words), because rebuilding the generator from the
+    vector is the dominant cost of a short draw. `PutRNGstate` writes into an uninitialized vector.
+  - `rnorm` with scalar, finite `mean` and positive finite `sd` under Mersenne-Twister and
+    Inversion fills the result in two passes (all uniforms, then `qnorm` of each), so the twister
+    and the AS 241 central branch run as tight loops. The arithmetic is GNU R's exactly, with no
+    fused multiply-add, so streams match `set.seed` runs in GNU R. Every other case draws one at a
+    time through a closure that `random_vector` monomorphizes per generator.
+  - `m[i, ]` and `m[i, ] <- v` on a 2-D double, integer or logical matrix with a plain scalar row
+    copy the strided row directly instead of resolving both subscripts.
 
 ## `just ry` builds ry's runtime; ry-lang does not depend on libr
 
@@ -5345,3 +5374,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **When requests are answered** follows GNU R, which serves help only from its event loop: at the console prompt (the `console_server` idle loop, woken through `console_server::wake`), in `Sys.sleep`, in `process.events`, and while an HTTP download runs on its transfer thread, so a session can fetch its own help pages through `url()` or `download.file`. A running command never interleaves with a handler. Off Unix the console idle loop does not serve yet.
 - **Wire format.** Request decoding (path percent-decoding that stops at the first malformed escape, the query vector, the raw body with its `content-type`, the `Request-Method:` header block) and the response rules (error 500 forms, status reason "Code N", HEAD, HTTP version echo, `startHTTPD` return codes 0, -1 and -2) were probed against GNU R and are pinned by `crates/oracle/cases/tools__help_server.R`.
 - **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte apart from the render timestamps.
+
+## `ry test` is `ry load` plus testthat, with affected tests first
+
+- **Previous shape.** `load_all()` loaded a package, but running its tests meant `devtools::test()` under GNU R, which reloads the whole package (about a minute on finbench) before every run.
+- **Shape.** `ry test` is `ry load` running an R driver (`crates/ry/src/test.R`) that calls `testthat::test_dir(load_package = "none", package =)` against the namespace `load_all()` built, so testthat's own reporters print the output and helpers, setup files and the package environment behave as under `devtools::test()`. Nothing in the reporter path is reimplemented, which keeps the output identical for CI.
+- **Watch.** `--watch` polls size and mtime of the sources under `R/` and of `tests/testthat/*.R` (not other files: testthat creates and deletes `_snaps/` during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
+- **Why not a test index in the loader.** Test files are parsed with `all.names()` and cached by stamp; that is a few milliseconds per file and keeps the loader ignorant of testthat.

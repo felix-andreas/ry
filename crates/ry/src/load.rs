@@ -36,6 +36,11 @@ pub fn embedded_runtime() -> String {
 }
 .ry_commit <- function(root) {
   invisible(.Call("ry_loader_commit", root, PACKAGE = "(embedding)"))
+}
+.ry_callers <- function(root, names) {
+  callers <- .Call("ry_loader_callers", root, paste(names, collapse = "\n"), PACKAGE = "(embedding)")
+  if (is.null(callers)) stop("ry's loader panicked; please report this", call. = FALSE)
+  if (!nzchar(callers)) character() else strsplit(callers, "\n", fixed = TRUE)[[1L]]
 }"#,
     )
 }
@@ -66,7 +71,8 @@ pub fn process_runtime() -> String {
   pending <- paste0(state, ".pending")
   if (file.exists(pending)) file.rename(pending, state)
   invisible(TRUE)
-}}"#,
+}}
+.ry_callers <- function(root, names) names"#,
         executable = r_string(&executable)
     ))
 }
@@ -156,7 +162,7 @@ fn runtime(transport: &str) -> String {
 }
 
 /// A raw R string literal (R >= 4.0) holding `text`, with a delimiter `text` never contains.
-fn r_string(text: &str) -> String {
+pub fn r_string(text: &str) -> String {
     let mut dashes = String::from("-");
     while text.contains(&format!("]{dashes}\"")) {
         dashes.push('-');
@@ -190,6 +196,11 @@ pub fn call_routines() -> Vec<CallRoutine> {
             name: c"ry_loader_commit",
             function: ry_loader_commit as *const (),
             arguments: 1,
+        },
+        CallRoutine {
+            name: c"ry_loader_callers",
+            function: ry_loader_callers as *const (),
+            arguments: 2,
         },
     ]
 }
@@ -242,6 +253,27 @@ extern "C" fn ry_loader_commit(root: Sexp) -> Sexp {
         return libr::string_value("ry's loader panicked; please report this");
     }
     libr::null()
+}
+
+/// [`Loader::callers`], with the names in and out joined by line breaks, which spares the
+/// embedding a character-vector API.
+extern "C" fn ry_loader_callers(root: Sexp, names: Sexp) -> Sexp {
+    let callers = catch_unwind(|| {
+        // SAFETY: R passes R objects to a `.Call` routine.
+        let (root, names) = unsafe { (libr::string_argument(root), libr::string_argument(names)) };
+        let root = loader::find_package_root(Path::new(&root?)).ok()?;
+        let changed: Vec<String> = names?.lines().map(str::to_owned).collect();
+        let callers = LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .callers(&root, &changed);
+        Some(callers.join("\n"))
+    });
+    match callers {
+        Ok(Some(callers)) => libr::string_value(&callers),
+        Ok(None) => libr::string_value(""),
+        Err(_) => libr::null(),
+    }
 }
 
 /// Starts analyzing the package at `root` on a thread of its own, so the analysis overlaps

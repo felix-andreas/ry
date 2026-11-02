@@ -87,6 +87,23 @@ fn main() -> ExitCode {
         return run_load(path, expressions, file.as_deref(), *runtime);
     }
 
+    if let Command::Test {
+        path,
+        filter,
+        reporter,
+        watch,
+        runtime,
+    } = &cli.command
+    {
+        return run_test(
+            path,
+            filter.as_deref(),
+            reporter.as_deref(),
+            *watch,
+            *runtime,
+        );
+    }
+
     if let Command::DebugAdapter = &cli.command {
         return run_debug_adapter();
     }
@@ -166,6 +183,7 @@ fn main() -> ExitCode {
         | Command::R { .. }
         | Command::Repl { .. }
         | Command::Load { .. }
+        | Command::Test { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -326,6 +344,33 @@ fn run_debug_adapter() -> ExitCode {
 
 /// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
 /// it, and exits with the session's status.
+/// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
+fn run_test(
+    path: &Path,
+    filter: Option<&str>,
+    reporter: Option<&str>,
+    watch: bool,
+    runtime: Option<Runtime>,
+) -> ExitCode {
+    let root = match load::package_root(path) {
+        Ok(root) => root,
+        Err(error) => {
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    let argument = |value: Option<&str>| value.map_or_else(|| "NULL".to_owned(), load::r_string);
+    let run = format!(
+        "if (!({driver})({root}, {filter}, {reporter}, {watch})) quit(status = 1L)",
+        driver = include_str!("test.R").trim_end(),
+        root = load::r_string(&root.to_string_lossy()),
+        filter = argument(filter),
+        reporter = argument(reporter),
+        watch = if watch { "TRUE" } else { "FALSE" },
+    );
+    run_load(path, &[run], None, runtime)
+}
+
 fn run_load(
     path: &Path,
     expressions: &[String],
