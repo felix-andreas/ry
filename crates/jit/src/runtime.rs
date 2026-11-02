@@ -248,8 +248,12 @@ pub fn compiles(state: i32) -> i32 {
 }
 
 pub fn cold_refusals(state: i32) -> i32 {
-    state / COLD_REFUSAL
+    (state / COLD_REFUSAL) & 0xff
 }
+
+/// A tier state flag: the body's compiled code would hand most of its instructions to tier 0,
+/// so calls no longer compile it and only a hot loop in it does.
+pub const LOOPS_ONLY: i32 = 1 << 16;
 
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it
 /// keep running, so the objects it embeds stay rooted for the rest of the session.

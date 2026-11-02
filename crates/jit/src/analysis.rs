@@ -847,6 +847,13 @@ pub struct Plan<'a> {
     pub loop_headers: List<'a, usize>,
 }
 
+/// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
+/// runs itself. Each instruction it hands back costs a call into tier 0 on top of the work, and
+/// such bodies are mostly large ones (`[.data.frame`, S4 dispatch) whose compilation costs as
+/// much as tens of thousands of interpreted calls. A loop in the body still compiles once it is
+/// hot, because there the compiled loop control and the native instructions repeat.
+pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
+
 impl Plan<'_> {
     pub fn block_at(&self, pc: usize) -> Option<usize> {
         self.block_at
@@ -949,23 +956,36 @@ impl Plan<'_> {
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
-        !self.loop_headers.is_empty()
-            || self.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    Action::Inline { .. }
-                        | Action::Traverse { .. }
-                        | Action::Call { .. }
-                        | Action::NativeCall { .. }
-                        | Action::Arithmetic { .. }
-                        | Action::Comparison { .. }
-                        | Action::Intrinsic { .. }
-                        | Action::SubAssign { .. }
-                        | Action::LogicLeft { .. }
-                        | Action::LogicRight { .. }
-                )
-            })
+        !self.loop_headers.is_empty() || self.native_actions() > 0
     }
+
+    /// How many actions compiled code does itself, and how many it hands to tier 0.
+    pub fn native_actions(&self) -> usize {
+        self.actions.iter().filter(|action| native(action)).count()
+    }
+
+    pub fn tier0_actions(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|action| matches!(action, Action::Step { .. }))
+            .count()
+    }
+}
+
+fn native(action: &Action<'_>) -> bool {
+    matches!(
+        action,
+        Action::Inline { .. }
+            | Action::Traverse { .. }
+            | Action::Call { .. }
+            | Action::NativeCall { .. }
+            | Action::Arithmetic { .. }
+            | Action::Comparison { .. }
+            | Action::Intrinsic { .. }
+            | Action::SubAssign { .. }
+            | Action::LogicLeft { .. }
+            | Action::LogicRight { .. }
+    )
 }
 
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in

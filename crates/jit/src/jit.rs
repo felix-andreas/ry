@@ -135,7 +135,7 @@ unsafe fn fully_typed(machine: &Machine<'_>) -> bool {
 /// counting against it, so it then tiers up like any other body once it is hot.
 unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
     unsafe {
-        let result = compile(machine, true);
+        let result = compile(machine, true, false);
         let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
         match result {
             Ok(compiled) => {
@@ -152,7 +152,9 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                         describe(machine.code)
                     );
                 }
-                if reason != analysis::COLD && reason != analysis::NOTHING_NATIVE {
+                if reason == analysis::MOSTLY_TIER0 {
+                    counters[profile::TIER_STATE] |= runtime::LOOPS_ONLY;
+                } else if reason != analysis::COLD && reason != analysis::NOTHING_NATIVE {
                     counters[profile::TIER_STATE] = -1;
                 }
                 None
@@ -224,12 +226,16 @@ unsafe fn compiled_for<'a>(
         if !hot || state < 0 {
             return None;
         }
+        if state & runtime::LOOPS_ONLY != 0 && !in_loop {
+            counters[profile::ENTRIES] = 0;
+            return None;
+        }
         if runtime::compiles(state) >= MAX_COMPILES {
             counters[profile::TIER_STATE] = -1;
             return None;
         }
         let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
-        let result = compile(machine, patient);
+        let result = compile(machine, patient, in_loop);
         // Compiling reads the profile too, so the counters are borrowed again afterwards.
         let counters = values::ints_mut(constants.element(PROFILE));
         match result {
@@ -241,7 +247,10 @@ unsafe fn compiled_for<'a>(
                 if logging() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
-                if reason == analysis::COLD {
+                if reason == analysis::MOSTLY_TIER0 {
+                    counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
+                    counters[profile::ENTRIES] = 0;
+                } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.
                     counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
@@ -274,16 +283,20 @@ pub(crate) unsafe fn describe(code: Sexp) -> String {
     }
 }
 
-unsafe fn compile<'a>(machine: &Machine<'_>, patient: bool) -> Result<&'a Compiled, Refusal> {
+unsafe fn compile<'a>(
+    machine: &Machine<'_>,
+    patient: bool,
+    in_loop: bool,
+) -> Result<&'a Compiled, Refusal> {
     ARENA.with(|arena| match arena.try_borrow_mut() {
         Ok(mut arena) => {
-            let compiled = compile_in(&arena, machine, patient);
+            let compiled = compile_in(&arena, machine, patient, in_loop);
             arena.reset();
             compiled
         }
         // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
         // that ever changes.
-        Err(_) => compile_in(&Bump::new(), machine, patient),
+        Err(_) => compile_in(&Bump::new(), machine, patient, in_loop),
     })
 }
 
@@ -291,6 +304,7 @@ unsafe fn compile_in<'a>(
     arena: &Bump,
     machine: &Machine<'_>,
     patient: bool,
+    in_loop: bool,
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
@@ -307,6 +321,12 @@ unsafe fn compile_in<'a>(
         // glues tier 0's steps together.
         if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
             return Err(Refusal(analysis::NOTHING_NATIVE));
+        }
+        if !in_loop
+            && plan.native_actions() < plan.tier0_actions()
+            && MODE.with(Cell::get) != Mode::Force
+        {
+            return Err(Refusal(analysis::MOSTLY_TIER0));
         }
         let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
@@ -334,12 +354,14 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations; tier 0 runs: {})",
+                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations; {} native, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
                 generated.as_micros(),
                 plan.speculations.len(),
+                plan.native_actions(),
+                plan.loop_headers.len(),
                 if steps.is_empty() {
                     "nothing".to_string()
                 } else {
