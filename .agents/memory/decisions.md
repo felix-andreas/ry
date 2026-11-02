@@ -5570,3 +5570,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   session equal to a fresh start. Its read of `file_source_calls` retries on cancellation, because
   the set must be complete before the project file list is rebuilt.
 - **Package files' `source()` calls are ignored**, since a package's namespace is its `R/` files.
+
+## A masked argument is its own scope, and the base masking family is typed
+
+- **Before.** `subset`, `transform`, `with` and `within` were bare `Any` values in `base.Rtypes`,
+  so every call gave `Unknown` and a strict finding. A masked argument resolved in the caller's
+  scope, so `within(d, c <- a * 2)` bound `c` at the top level of a package (a conditional
+  definition that then shadowed `base::c`) and reported it unused.
+- **Shape.** naming pushes a `ScopeKind::Mask` scope around each non-data argument of a masking
+  call (the base family and `@masked` verbs) and pre-mints its assignments there; the enclosing
+  frame's pre-mint skips those arguments (`syntactic_masking_family`). A write in a mask scope is
+  never reportable as unused, because `within` copies the data environment back. `top_level`
+  walks a base-family masked argument with fresh locals, as for `local()`. The stubs type the
+  results and are `@pure`, because the arguments are walked for effects on their own.
+- **Ambiguous overloads propagate `Unknown` silently.** An overloaded call that only an
+  already-`Unknown` argument leaves ambiguous returns `Unknown` without a new strict origin. The
+  argument's own origin is the report (or it was silenced on purpose, as a masked read is), so the
+  old extra origin on the call only duplicated it (`unknown-origins.R.test`).

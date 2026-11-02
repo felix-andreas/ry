@@ -10190,7 +10190,6 @@ impl<'db> Checker<'db, '_> {
             }) {
                 return any(self.db);
             }
-            self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
         if !unchecked_argument

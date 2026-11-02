@@ -3107,7 +3107,11 @@ strict-mode origin. The recognized masks are:
   formal first (`data` for the `with` pair, `x` for `subset`, `_data` for `transform`), and the
   remaining positional arguments fill what is left, so `with(speed > 20, data = frame)` masks the
   condition. The `base::` spelling masks exactly like the bare one, while another package's export of
-  the same name masks nothing.
+  the same name masks nothing. Each masked argument is its own scope, because R evaluates it in an
+  environment made from the data: `within(d, total <- a + b)` binds `total` there, never in the
+  caller, and such a write is never reported as unused. The results are typed: `subset` keeps a data
+  frame, a matrix, or a vector's element type, `transform` and `within` give a `data.frame`, and
+  `with` gives `Any`, since its value is whatever its expression computes.
 - A call to a [`@masked`](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat) stub
   declaration.
 

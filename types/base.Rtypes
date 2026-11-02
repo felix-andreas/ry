@@ -690,11 +690,19 @@ parse : fn([file]: Any, [n]: Any, [text]: Any, [prompt]: Any, [keep.source]: log
 body : fn(fun: Any) -> Any
 formals : fn([fun]: Any, [envir]: Any) -> Any
 args : fn(name: Any) -> Any
-# NSE data-masking helpers: deliberately not modeled beyond resolution.
-subset : Any
-transform : Any
-with : Any
-within : Any
+# Data-masking helpers: every argument but the data evaluates inside it, which naming handles,
+# so the stubs type only the result. They are `@pure` because the masked arguments are walked
+# for effects on their own. `subset` keeps a frame, a matrix (its `drop` defaults to FALSE) or a
+# vector's element type, `transform` turns anything into a frame, and `within` keeps a frame.
+# `with` returns whatever its expression does, so its result is deliberately untyped.
+subset : @pure fn(x: data.frame, ...: Any) -> data.frame
+subset : @pure fn(x: matrix, ...: Any) -> matrix
+subset : @pure <T> fn(x: T[], ...: Any) -> T[]
+subset : @pure fn(x: Any, ...: Any) -> Any
+transform : @pure fn(...: Any) -> data.frame
+with : @pure fn(data: Any, ...: Any) -> Any
+within : @pure fn(data: data.frame, ...: Any) -> data.frame
+within : @pure fn(data: Any, ...: Any) -> Any
 
 # Attach and load. `library` returns the attached-package list or a logical depending on
 # `logical.return` (value-dependent); `require`'s logical is genuine (`if (require(pkg))`).

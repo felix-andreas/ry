@@ -227,6 +227,10 @@ enum ScopeKind {
     /// `local({...})`: writes vanish with it, but it runs immediately, so it is no capture
     /// boundary.
     Local,
+    /// A masked argument such as `within(d, total <- a + b)`: like `Local`, but the data's
+    /// environment outlives the expression (`within` copies it back into the frame), so a
+    /// write there is never a dead store.
+    Mask,
     TopLevel,
 }
 
@@ -350,7 +354,9 @@ impl Context<'_> {
         }
         let owned = match self.current_scope().kind {
             ScopeKind::TopLevel => true,
-            ScopeKind::Function | ScopeKind::Local => self.current_scope().slots.contains_key(name),
+            ScopeKind::Function | ScopeKind::Local | ScopeKind::Mask => {
+                self.current_scope().slots.contains_key(name)
+            }
         };
         if owned {
             let range = module.range(target);
@@ -373,7 +379,7 @@ impl Context<'_> {
     fn assignment_binding_kind(&mut self) -> BindingKind {
         match self.current_scope().kind {
             ScopeKind::TopLevel => BindingKind::TopLevel,
-            ScopeKind::Function | ScopeKind::Local => BindingKind::Local,
+            ScopeKind::Function | ScopeKind::Local | ScopeKind::Mask => BindingKind::Local,
         }
     }
 
@@ -586,32 +592,28 @@ impl Context<'_> {
                     self.resolve_arguments(&module[arguments]);
                     return;
                 };
-                // R matches named arguments first and fills the rest positionally, so a
-                // positional argument takes the next data formal no name has claimed.
-                let claimed_by_name = module[arguments]
-                    .iter()
-                    .filter_map(|argument| module.argument_name(argument))
-                    .filter(|name| leading.contains(&name.as_str()))
-                    .count();
-                let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
-                for argument in &module[arguments] {
-                    let data_argument = match module.argument_name(argument) {
-                        Some(name) => leading.contains(&name.as_str()),
-                        None => {
-                            let takes_a_data_slot = unclaimed > 0;
-                            unclaimed = unclaimed.saturating_sub(1);
-                            takes_a_data_slot
-                        }
-                    };
+                let flags = data_argument_flags(module, &module[arguments], &leading);
+                for (argument, data_argument) in module[arguments].iter().zip(flags) {
                     let Some(value) = argument.value else {
                         continue;
                     };
                     if data_argument {
                         self.resolve(value);
                     } else {
+                        // The argument evaluates in an environment made from the data, so an
+                        // assignment in it, as in `within(d, total <- a + b)`, binds there and
+                        // never in the caller's scope.
+                        let scope_id = self.stable_scope_id(value);
+                        self.scopes.push(Scope {
+                            id: scope_id,
+                            kind: ScopeKind::Mask,
+                            slots: FxHashMap::default(),
+                        });
+                        self.premint_frame_assignments(value);
                         self.quiet_depth += 1;
                         self.resolve(value);
                         self.quiet_depth -= 1;
+                        self.scopes.pop();
                     }
                 }
             }
@@ -1022,6 +1024,20 @@ impl Context<'_> {
                     self.premint_frame_assignments(arm.body);
                 }
             }
+            // A masked argument gets its own scope when it is resolved, so its assignments
+            // mint nothing in this frame.
+            ExpressionKind::Call { callee, arguments }
+                if let Some(leading) =
+                    syntactic_masking_family(module, self.masked_verbs, *callee) =>
+            {
+                self.premint_frame_assignments(*callee);
+                let flags = data_argument_flags(module, &module[arguments], &leading);
+                for (argument, data_argument) in module[arguments].iter().zip(flags) {
+                    if let Some(value) = argument.value.filter(|_| data_argument) {
+                        self.premint_frame_assignments(value);
+                    }
+                }
+            }
             _ => {
                 let module = self.module;
                 module.for_each_child(id, |child| self.premint_frame_assignments(child));
@@ -1254,7 +1270,8 @@ impl Context<'_> {
                         let kind = self.assignment_binding_kind();
                         let slot = self.frame_slot(name, range, kind);
                         self.naming.resolutions.insert(target, slot);
-                        let reportable = kind == BindingKind::Local;
+                        let reportable = kind == BindingKind::Local
+                            && self.current_scope().kind != ScopeKind::Mask;
                         self.record_write_site(assignment, name, range, slot, reportable);
                     }
                 }
@@ -1594,6 +1611,27 @@ fn declared_names(module: &Module, value: ExprId) -> Vec<Symbol> {
     }
 }
 
+/// The masking family of a call by its spelling alone, before resolution can tell whether a
+/// local definition shadows the callee. Pre-minting runs before resolution, so it uses this.
+fn syntactic_masking_family<'a>(
+    module: &Module,
+    masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    callee: ExprId,
+) -> Option<Vec<&'a str>> {
+    match module.kind(callee) {
+        ExpressionKind::NameRef(name) => base_masking_family(name.as_str())
+            .or_else(|| declared_masked_verb(masked_verbs, name.as_str())),
+        ExpressionKind::Namespace {
+            package,
+            name: Some(name),
+            ..
+        } => base_masking_family(name)
+            .filter(|_| package.as_deref() == Some("base"))
+            .or_else(|| declared_masked_verb(masked_verbs, name)),
+        _ => None,
+    }
+}
+
 fn declared_masked_verb<'a>(
     masked_verbs: &'a FxHashMap<String, Vec<String>>,
     name: &str,
@@ -1739,7 +1777,7 @@ pub(crate) const MATCH_FUN_CALLERS: [&str; 20] = [
 const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.
-fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
+pub(crate) fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "with" | "within" => Some(vec!["data"]),
         "subset" => Some(vec!["x"]),
@@ -1748,6 +1786,33 @@ fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
         "transform" => Some(vec!["_data"]),
         _ => None,
     }
+}
+
+/// Which arguments of a masking call are its data. R matches named arguments first and fills
+/// the rest positionally, so a positional argument takes the next data formal no name has
+/// claimed.
+pub(crate) fn data_argument_flags(
+    module: &Module,
+    arguments: &[Argument],
+    leading: &[&str],
+) -> Vec<bool> {
+    let claimed_by_name = arguments
+        .iter()
+        .filter_map(|argument| module.argument_name(argument))
+        .filter(|name| leading.contains(&name.as_str()))
+        .count();
+    let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
+    arguments
+        .iter()
+        .map(|argument| match module.argument_name(argument) {
+            Some(name) => leading.contains(&name.as_str()),
+            None => {
+                let takes_a_data_slot = unclaimed > 0;
+                unclaimed = unclaimed.saturating_sub(1);
+                takes_a_data_slot
+            }
+        })
+        .collect()
 }
 
 /// A slot present on only one path was unassigned on the other.

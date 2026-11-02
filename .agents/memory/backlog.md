@@ -91,10 +91,6 @@ False reports on correct R, worst first:
   no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
   `::` loads without attaching; validating it against the shipped manifest and stub types without
   activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
-- **`with`, `subset` and `transform` are strict findings.** base declares them as bare `Any`
-  values, so calls to them give `Unknown`. `data.frame()` now returns `data.frame` through an
-  `...: Any` rest; the same shape (`-> data.frame` for `subset` and `transform` on a data frame,
-  `-> Any` for `with`) would make these results deliberate too.
 - **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
   c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`

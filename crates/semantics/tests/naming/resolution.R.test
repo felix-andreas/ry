@@ -270,3 +270,31 @@ outside <- function() self
   b0 outside top-level 0..7
   0..7 outside <- b0
   22..26 self -> non-local deferred
+
+#==== masked_arguments
+#---- an_assignment_inside_within_binds_in_the_data_not_the_caller
+f <- function(d) {
+  out <- within(d, {
+    total <- a + b
+    share <- total / 2
+  })
+  total
+}
+#++++
+# f
+  b0 d parameter 14..15
+  b1 out local 21..24
+  b2 total local 44..49
+  b3 share local 63..68
+  b4 f top-level 0..1
+  0..1 f <- b4
+  21..24 out <- b1
+  28..34 within -> non-local deferred
+  35..36 d -> b0
+  44..49 total <- b2
+  53..54 a -> quiet deferred
+  57..58 b -> quiet deferred
+  63..68 share <- b3
+  72..77 total -> b2
+  89..94 total -> non-local deferred
+  unused out 21..24
