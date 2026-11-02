@@ -331,6 +331,13 @@ pub mod gp {
     pub const TYPED_DEFINITION: u16 = 1 << 12;
     /// A promise whose value an inline parameter annotation checks when it is forced.
     pub const CHECKED_PROMISE: u16 = 1 << 12;
+    /// A closure `debug()` flagged, GNU R's `RDEBUG`: every call stops at its first statement
+    /// while a debugger is attached.
+    pub const CLOSURE_DEBUG: u16 = 1 << 15;
+    /// A closure `debugonce()` flagged, GNU R's `RSTEP`: its next call stops, and the flag clears.
+    pub const CLOSURE_STEP: u16 = 1 << 14;
+    /// A closure `trace()` flagged, GNU R's `RTRACE`.
+    pub const CLOSURE_TRACE: u16 = 1 << 13;
 }
 
 pub(crate) mod gc_bits {

@@ -101,6 +101,13 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   invisible(last)
 }
 
+# A lazy `View()`: the editor connected to the console pages through `x` and formats only the
+# rows it shows, where utils' version formats the whole object first.
+View <- function(x, title) {
+  if (missing(title)) title <- paste("Data:", deparse(substitute(x))[1])
+  invisible(.ry_view(x, title))
+}
+
 .ry_find_root <- function(path) {
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
   current <- path

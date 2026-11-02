@@ -1643,17 +1643,6 @@ because it does not know the type. So only the stub spelling is unreachable.
 Decide whether a stub source should see a project's `@type` declarations at all, or whether the
 R-side declaration is simply the answer and the docs should say so.
 
-### Literate documents are analysed by `check` but not by the editor
-
-An `.Rmd`, `.qmd` or `.Rnw` chunk is converted to an R program by blanking every non-R character, in
-`syntax::literate`, so ranges need no translation and `check` reports at the original line and
-column.
-
-The LSP path still ignores them. `did_change` hands the engine incremental edits against the
-document the editor holds, and the converted text is a different buffer, so wiring it up needs the
-original text kept alongside the analysed one, or the conversion applied per edit. The formatter
-deliberately stays out, because most of an `.Rmd` is prose.
-
 ### The stronger suppression form
 
 A type error inside `expect_error(...)` stays reported, and `# ry: allow(type-mismatch)` is the
@@ -2356,6 +2345,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
+- **R Markdown and Quarto in the editor.** Chunks of a `.Rmd`/`.qmd`/`.Rnw` are one script for diagnostics, hover, completion and goto, and `ry fmt` formats each chunk. `decisions.md`, "Literate documents keep their offsets".
 - **Arrays.** `[1, 2, 3]` parses, formats, types as `Array<T>` and runs as a flagged R vector with strict operators and indexing. `decisions.md`, "An Array is a flagged R vector".
 - **`ry load` on ry's own runtime.** Lazy bindings are promises over the analysis's syntax trees, both runtimes apply the same plan, and `test_load.rs` runs on both. `decisions.md`, "the loader on ry's runtime".
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
@@ -2651,7 +2642,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 - **`fmt` on a target with no R in it reports that it formatted no files and exits 0**, as `check`
   already did. A stage with nothing to do must not fail a pipeline, and a pre-commit hook handing the
-  formatter a literate document it deliberately skips must not fail the commit.
+  formatter a file with no R in it must not fail the commit.
 
 - **`setkey`, `setorder` and `unique(DT, by=)` work.** `setkey` and `setorder` name columns rather
   than values, so they are `@masked` like the other non-standard-evaluation verbs, while the
@@ -3008,12 +2999,14 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 - More quick fixes: a missing `library()` for a namespaced name.
 - Semantic tokens: coloring of `$` fields and frame columns.
-- Hover does not read the console's environment: a value defined only in the "ry console" terminal
-  has no type in the editor. It needs the console to publish its global bindings (a libR export
-  read by the server), which the console's owners should design with it.
-- Debugger: it cannot attach to a running console yet, and `debugonce()`/`trace()` do not map
-  onto it. Columns come from the srcref's tab-expanded column, so they are off on lines with
+- Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs, and `browser()` in code without a srcref does not stop.
+- The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
+  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`.
+- `browser()` typed at a console with no debugger attached runs past instead of giving GNU R's
+  text `Browse>` prompt.
+- The data viewer has no sorting, filtering or column search; each would be a request the
+  runtime answers per page (`interp::viewer`), never a client-side copy of the data.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
