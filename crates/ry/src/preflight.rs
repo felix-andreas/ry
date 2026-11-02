@@ -207,7 +207,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             OutputFormat::Human,
             MinSeverity::Warning,
             &file.path,
-            analysis.source(file),
+            analysis.shown_source(file),
             errors,
             &resolve_note,
         );
