@@ -837,3 +837,51 @@ fn a_reserved_batch_survives_the_collections_that_follow_it() {
         }
     }
 }
+
+/// The intern table against a model through growth, removal by minor and major collections,
+/// and the rebuilds that drop its tombstones: a rooted string always interns to itself, and
+/// after a major collection the table holds exactly the strings still rooted.
+#[test]
+fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
+    let mut random = SplitMix64(0x5EED_7AB1E);
+    let mut heap = Heap::new();
+    unsafe {
+        let base = heap.string_count();
+        let base_mark = heap.handle_mark();
+        let mut rooted: Vec<(Vec<u8>, Sexp)> = Vec::new();
+        for round in 0..fuzz_iterations(24) {
+            for _ in 0..random.below(20_000) {
+                let bytes = format!("s{round}_{}", random.below(50_000)).into_bytes();
+                let string = heap.mk_char(&bytes, Encoding::Native).unwrap();
+                if random.chance(1, 4) {
+                    heap.root(string);
+                    rooted.push((bytes, string));
+                }
+            }
+            rooted.retain(|_| !random.chance(1, 3));
+            // The kept strings move into one list while every string is still rooted.
+            let holder = heap
+                .alloc_vector(SexpType::List, rooted.len() as isize)
+                .unwrap();
+            for (index, (_, string)) in rooted.iter().enumerate() {
+                heap.set_element(holder, index, *string);
+            }
+            heap.release_handles(base_mark);
+            heap.root(holder);
+            let kind = if random.chance(1, 3) {
+                Collection::Major
+            } else {
+                Collection::Minor
+            };
+            heap.collect(kind);
+            for (bytes, string) in &rooted {
+                assert_eq!(heap.mk_char(bytes, Encoding::Native).unwrap(), *string);
+            }
+            if kind == Collection::Major {
+                let distinct: HashSet<&[u8]> =
+                    rooted.iter().map(|(bytes, _)| bytes.as_slice()).collect();
+                assert_eq!(heap.string_count(), base + distinct.len(), "round {round}");
+            }
+        }
+    }
+}

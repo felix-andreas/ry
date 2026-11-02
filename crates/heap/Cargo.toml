@@ -10,7 +10,6 @@ publish = false
 path = "src/heap.rs"
 
 [dependencies]
-hashbrown = "0.16"
 libc = "0.2"
 rustc-hash.workspace = true
 smallvec = { version = "1.15", features = ["union"] }

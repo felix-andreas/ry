@@ -7,10 +7,10 @@
 
 use {
     crate::{
-        object::{Sexp, gp},
+        object::{Header, Sexp, gp},
         space::Space,
     },
-    hashbrown::HashTable,
+    std::ptr::NonNull,
 };
 
 /// R's `cetype_t`, numbered as in GNU R.
@@ -61,12 +61,34 @@ impl Encoding {
     }
 }
 
-#[derive(Default)]
+/// The intern table, open-addressed with linear probing over one dense array of 8-byte slots.
+///
+/// A slot packs a string's address and a tag of its hash, so a probe reads one cache line and
+/// dereferences only a string whose tag matches. A lookup that finds its string costs two
+/// dependent memory reads (the slot and the string), and one that misses costs one, however
+/// many strings are live. A chained or control-byte table would add a third read, which in a
+/// table of millions of strings is a cache miss on every call to `mk_char`.
 pub(crate) struct StringTable {
-    table: HashTable<Sexp>,
+    /// A power-of-two count of slots: 0 for empty, [`TOMBSTONE`] for a removed entry, and
+    /// otherwise a string's address over 16 in the low [`ADDRESS_BITS`] with the low
+    /// [`TAG_BITS`] of its hash above.
+    slots: Vec<u64>,
+    /// Live entries, and removed ones still marked by a tombstone.
+    len: usize,
+    tombstones: usize,
     /// Strings interned since the last collection, the only ones a minor collection can free.
     young: Vec<Sexp>,
 }
+
+/// Objects are 16-byte aligned and user-space addresses fit in 47 bits on every supported
+/// platform, so an address over 16 takes 43 bits and leaves 21 for the tag.
+const ADDRESS_BITS: u32 = 43;
+const ADDRESS_MASK: u64 = (1 << ADDRESS_BITS) - 1;
+const TAG_BITS: u32 = 64 - ADDRESS_BITS;
+const EMPTY: u64 = 0;
+/// No string lives at the top of the address space, so this slot names none.
+const TOMBSTONE: u64 = ADDRESS_MASK;
+const INITIAL_SLOTS: usize = 1 << 12;
 
 /// What one pass over a string's bytes tells `mk_char`: whether they hold a NUL byte, whether
 /// they are all ASCII, and their hash before the encoding is mixed in.
@@ -176,31 +198,60 @@ unsafe fn same_bytes(candidate: Sexp, bytes: &[u8]) -> bool {
     }
 }
 
-/// The table's hash for a stored 32-bit hash. The table takes its control bits from the top of
-/// the hash, so the stored bits are spread over all 64.
-fn spread(hash: u32) -> u64 {
-    u64::from(hash).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+impl Default for StringTable {
+    fn default() -> StringTable {
+        StringTable {
+            slots: vec![EMPTY; INITIAL_SLOTS],
+            len: 0,
+            tombstones: 0,
+            young: Vec::new(),
+        }
+    }
 }
 
 impl StringTable {
     pub fn len(&self) -> usize {
-        self.table.len()
+        self.len
     }
 
     #[inline]
     pub unsafe fn find(&self, hash: u32, bytes: &[u8], encoding_bits: u16) -> Option<Sexp> {
-        self.table
-            .find(spread(hash), |&candidate| unsafe {
-                candidate.gp() & gp::ENCODING == encoding_bits && same_bytes(candidate, bytes)
-            })
-            .copied()
+        let mask = self.slots.len() - 1;
+        let tag = tag(hash);
+        let mut index = home(hash, mask);
+        loop {
+            let slot = self.slots[index];
+            if slot == EMPTY {
+                return None;
+            }
+            if slot & !ADDRESS_MASK == tag && slot != TOMBSTONE {
+                let candidate = unsafe { unpack(slot) };
+                if unsafe { candidate.gp() } & gp::ENCODING == encoding_bits
+                    && unsafe { same_bytes(candidate, bytes) }
+                {
+                    return Some(candidate);
+                }
+            }
+            index = (index + 1) & mask;
+        }
     }
 
+    /// Adds `string`, which the table must not hold.
     pub unsafe fn insert(&mut self, hash: u32, string: Sexp) {
-        self.table
-            .insert_unique(spread(hash), string, |candidate| unsafe {
-                spread(candidate.char_hash())
-            });
+        if (self.len + self.tombstones + 1) * 4 > self.slots.len() * 3 {
+            unsafe { self.rebuild() };
+        }
+        let mask = self.slots.len() - 1;
+        let mut index = home(hash, mask);
+        // The string is absent, so it may take the first tombstone on its probe path.
+        while self.slots[index] != EMPTY && self.slots[index] != TOMBSTONE {
+            index = (index + 1) & mask;
+        }
+        if self.slots[index] == TOMBSTONE {
+            self.tombstones -= 1;
+        }
+        self.slots[index] = pack(string, hash);
+        self.len += 1;
         self.young.push(string);
     }
 
@@ -212,22 +263,98 @@ impl StringTable {
     /// Drops the entries for young strings the current minor collection did not mark.
     pub unsafe fn remove_dead_young(&mut self, space: &Space) {
         for string in std::mem::take(&mut self.young) {
-            if unsafe { space.is_marked(string) } {
-                continue;
-            }
-            let hash = spread(unsafe { string.char_hash() });
-            if let Ok(entry) = self
-                .table
-                .find_entry(hash, |&candidate| candidate == string)
-            {
-                entry.remove();
+            if unsafe { !space.is_marked(string) } {
+                unsafe { self.remove(string) };
             }
         }
     }
 
     pub unsafe fn remove_dead(&mut self, space: &Space) {
-        self.table
-            .retain(|&mut string| unsafe { space.is_marked(string) });
+        // A pass in slot order reads the slots sequentially, and the marks it checks are
+        // independent loads the processor overlaps.
+        let mut removed = 0;
+        for slot in &mut self.slots {
+            if *slot != EMPTY && *slot != TOMBSTONE && unsafe { !space.is_marked(unpack(*slot)) } {
+                *slot = TOMBSTONE;
+                removed += 1;
+            }
+        }
+        self.len -= removed;
+        self.tombstones += removed;
         self.young.clear();
+        if self.tombstones * 8 > self.slots.len() {
+            unsafe { self.rebuild() };
+        }
     }
+
+    unsafe fn remove(&mut self, string: Sexp) {
+        let mask = self.slots.len() - 1;
+        let hash = unsafe { string.char_hash() };
+        let wanted = pack(string, hash);
+        let mut index = home(hash, mask);
+        loop {
+            let slot = self.slots[index];
+            if slot == wanted {
+                self.slots[index] = TOMBSTONE;
+                self.len -= 1;
+                self.tombstones += 1;
+                return;
+            }
+            if slot == EMPTY {
+                return;
+            }
+            index = (index + 1) & mask;
+        }
+    }
+
+    /// Re-places every live entry into a table sized for twice their number, which drops the
+    /// tombstones. Each entry's hash is read from its string, in slot order, so the reads are
+    /// independent and overlap.
+    unsafe fn rebuild(&mut self) {
+        let wanted = ((self.len + 1) * 2).next_power_of_two().max(INITIAL_SLOTS);
+        let old = std::mem::replace(&mut self.slots, vec![EMPTY; wanted]);
+        let mask = wanted - 1;
+        for slot in old {
+            if slot == EMPTY || slot == TOMBSTONE {
+                continue;
+            }
+            let hash = unsafe { unpack(slot).char_hash() };
+            let mut index = home(hash, mask);
+            while self.slots[index] != EMPTY {
+                index = (index + 1) & mask;
+            }
+            self.slots[index] = slot;
+        }
+        self.tombstones = 0;
+    }
+}
+
+/// The first slot to probe for a hash. The bits above the tag pick it, after a multiply spreads
+/// all 32 hash bits into them.
+#[inline]
+fn home(hash: u32, mask: usize) -> usize {
+    (u64::from(hash).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & mask
+}
+
+#[inline]
+fn tag(hash: u32) -> u64 {
+    (u64::from(hash) & ((1 << TAG_BITS) - 1)) << ADDRESS_BITS
+}
+
+#[inline]
+fn pack(string: Sexp, hash: u32) -> u64 {
+    let address = string.as_ptr() as u64;
+    assert!(
+        address & 15 == 0 && address >> (ADDRESS_BITS + 4) == 0,
+        "a string's address {address:#x} does not fit the intern table's slot"
+    );
+    (address >> 4) | tag(hash)
+}
+
+/// # Safety
+/// `slot` must hold a string, neither empty nor a tombstone.
+#[inline]
+unsafe fn unpack(slot: u64) -> Sexp {
+    let pointer = ((slot & ADDRESS_MASK) << 4) as *mut Header;
+    Sexp::from_non_null(unsafe { NonNull::new_unchecked(pointer) })
 }
