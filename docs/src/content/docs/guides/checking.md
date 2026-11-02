@@ -167,6 +167,12 @@ Type findings work the same way, as in `# ry: allow(type-mismatch)`.
 A suppression covers its own line and the line below, so it can sit at the end of the line or above
 it. To turn a check off everywhere, set it in [`ry.toml`](/reference/configuration).
 
+lintr's comments work too, so code written for lintr keeps its suppressions. `# nolint` silences
+every finding on its line except a syntax error, `# nolint start` and `# nolint end` do the same for
+the lines between them, and either can name lintr linters, as in `# nolint: seq_linter.`. A named
+linter silences the ry code that reports the same thing, such as `length-sequence` for
+`seq_linter`, and a linter ry has no counterpart for silences nothing.
+
 ## In CI
 
 `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file is not

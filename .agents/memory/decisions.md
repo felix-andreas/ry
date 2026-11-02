@@ -4784,6 +4784,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `trailing-comma` stays on inside rlang's dynamic dots (`mutate(d, y = 1, )`), where the comma
   is harmless: it is a warning whose safe fix only removes the comma, and stub `@masked` cannot
   mark dynamic dots because it also covers data.table verbs, whose `...` is not rlang's.
+- lintr's `# nolint` comments are honored (`apply_suppressions` in `crates/ry/src/diagnostics.rs`),
+  because 15 packages in the CRAN corpus carry them and the mandate is that existing code keeps
+  working. A bare `# nolint` keeps syntax errors, and lintr names map to ry codes in `lintr_codes`;
+  keep that table in step when a lint is ported.
 - Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
   reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their
   opt-in lints are off. A fix whose replacement binds more loosely than what it replaces goes
