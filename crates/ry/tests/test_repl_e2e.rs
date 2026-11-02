@@ -1506,6 +1506,35 @@ fn an_editor_attaches_to_a_running_console() {
             .any(|binding| binding["name"] == "df" && binding["columns"][1]["name"] == "b"),
         "{globals}"
     );
+    // A flood far past the queue's bound is slowed down, not dropped: every request is answered.
+    let mut writer = client
+        .stream
+        .get_ref()
+        .try_clone()
+        .expect("clone the socket");
+    let flood = std::thread::spawn(move || {
+        for seq in 10_000..10_500 {
+            let body = serde_json::json!({
+                "type": "request", "seq": seq, "command": "ryGlobals", "arguments": {},
+            })
+            .to_string();
+            writer
+                .write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+                .expect("write to the console");
+        }
+    });
+    let mut answered: Vec<u64> = (0..500)
+        .map(|_| {
+            client
+                .until(|message| message["type"] == "response" && message["command"] == "ryGlobals")
+                ["request_seq"]
+                .as_u64()
+                .expect("a request seq")
+        })
+        .collect();
+    flood.join().expect("the flood is written");
+    answered.sort_unstable();
+    assert_eq!(answered, (10_000..10_500).collect::<Vec<u64>>());
     client.request("rySubscribe", serde_json::json!({}));
     input.write_all(b"View(df)\n").expect("type a command");
     let event = client.until(|message| message["event"] == "ryView");

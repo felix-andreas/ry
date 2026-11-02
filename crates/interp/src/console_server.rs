@@ -124,6 +124,8 @@ mod platform {
 
     static EVENTS: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
     static ARRIVED: Condvar = Condvar::new();
+    /// Signalled when the interpreter takes an event, so a reader waiting for room can go on.
+    static TAKEN: Condvar = Condvar::new();
     static CONNECTIONS: Mutex<BTreeMap<u64, Connection>> = Mutex::new(BTreeMap::new());
     static SERVER: Mutex<Option<Server>> = Mutex::new(None);
     /// The prompt's input, when it arrived while code run for a request was stopped.
@@ -246,9 +248,26 @@ mod platform {
         serde_json::from_slice(&body).ok()
     }
 
+    /// The requests one connection may have waiting before its reader stops reading. The peer
+    /// then blocks on a full socket buffer, so a client that floods the console slows itself
+    /// down instead of growing the queue, and no request is dropped unanswered.
+    const QUEUED_PER_CONNECTION: usize = 64;
+
     fn push(event: Event) {
         let poke = !matches!(event, Event::Input(_));
-        lock(&EVENTS).push_back(event);
+        let mut events = lock(&EVENTS);
+        if let Event::Request(id, _) = event {
+            while events
+                .iter()
+                .filter(|queued| matches!(queued, Event::Request(other, _) if *other == id))
+                .count()
+                >= QUEUED_PER_CONNECTION
+            {
+                events = TAKEN.wait(events).unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+        events.push_back(event);
+        drop(events);
         ARRIVED.notify_all();
         if poke {
             SERVICE_REQUESTED.store(true, Ordering::Relaxed);
@@ -260,6 +279,7 @@ mod platform {
         let mut events = lock(&EVENTS);
         loop {
             if let Some(event) = events.pop_front() {
+                TAKEN.notify_all();
                 return Some(event);
             }
             if !wait {
