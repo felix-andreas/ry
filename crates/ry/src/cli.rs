@@ -774,7 +774,9 @@ fn analyze_project_with(
         .filter(|&index| checked(index))
         .collect();
     // Every item is named across cores first: a file's check names the items of other files its
-    // interface reaches, and two threads reaching the same item would block on one claim.
+    // interface reaches, and two threads reaching the same item would block on one claim. The
+    // interface edges follow for the same reason, and because the walk that finds the project's
+    // cyclic groups reads every item's edges on one thread.
     in_parallel(&db, workers, &checked_order, |db, index| {
         if let Some(tree) = trees.get(index) {
             drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
@@ -783,10 +785,20 @@ fn analyze_project_with(
             return;
         }
         let file = files[index];
-        for &item in semantics::item_tree(db, file) {
+        let items = semantics::item_tree(db, file);
+        for &item in items {
             semantics::item_naming(db, item);
         }
+        for &item in items {
+            semantics::item_interface_edges(db, item);
+        }
     });
+    // The group walk records one dependency edge per item, and salsa keeps that capacity in the
+    // handle's reused query-stack frame, so every later query at the same depth would clear a
+    // table sized for the whole project. A throwaway handle takes the walk and drops the frame.
+    if let Some(project) = ProjectFiles::try_get(&db) {
+        semantics::project_interface_groups(&db.clone(), project);
+    }
     let mut per_file: Vec<Vec<Diagnostic>> = recorded
         .into_iter()
         .map(Option::unwrap_or_default)
