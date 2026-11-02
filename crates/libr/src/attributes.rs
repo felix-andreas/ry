@@ -104,21 +104,26 @@ unsafe fn pairlist_names(list: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn set_attrib(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
     let nil = runtime.nil();
-    if object == nil {
-        return Err(error("attempt to set an attribute on NULL"));
-    }
     if object.kind() == SexpType::Char {
         return Err(error("cannot set attribute on a CHARSXP"));
     }
     let name = attribute_symbol(name)?;
     runtime.heap.root(name);
     runtime.heap.root(value);
+    // GNU R removes before it rejects NULL, so removing an attribute from NULL succeeds, which
+    // data.table's `:=` relies on.
     if value == nil {
+        if object == nil {
+            return Ok(value);
+        }
         remove_attribute(object, name);
         if name == R_ClassSymbol.get() {
             object.set_object(false);
         }
         return Ok(value);
+    }
+    if object == nil {
+        return Err(error("attempt to set an attribute on NULL"));
     }
     if name == R_NamesSymbol.get() {
         return names_gets(object, value);

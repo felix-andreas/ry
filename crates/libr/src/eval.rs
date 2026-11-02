@@ -81,6 +81,13 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         write_console: |text, is_error| crate::boundary::write_console(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
+        compact_intseq: |length, first, increment| unsafe {
+            Ok(Some(crate::altrep::compact_intseq(
+                length as crate::R_xlen_t,
+                first,
+                increment,
+            )?))
+        },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_task_callbacks: |expression, value, succeeded, visible| unsafe {
             run_task_callbacks(expression, value, succeeded, visible)

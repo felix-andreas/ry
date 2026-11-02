@@ -2283,8 +2283,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
-- **Compact sequences are not ALTREP.** `1:2e9` allocates the whole vector; GNU R's compact
-  intseq does not.
+- **Only long sequences are compact.** `1:n`, `n:1` and `seq_len(n)` of at least 2^20 elements are
+  libr's `compact_intseq` (`integer_sequence` in `crates/interp/src/arith.rs`); shorter ones are
+  ordinary vectors, so `serialize(1:10)` writes plain `INTSXP` where GNU R writes `ALTREP_SXP`,
+  and `seq()` and `seq_along()` never return compact ones. Most interpreter paths still expand a
+  compact sequence on first read rather than computing elements.
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function

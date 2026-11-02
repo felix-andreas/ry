@@ -7,6 +7,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
         conditions,
+        interp,
         long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
@@ -3252,19 +3253,8 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
         && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
             <= i32::MAX as f64;
     if use_integer {
-        let result = alloc(SexpType::Integer, count)?;
-        let start = start as i64;
-        let output = values::ints_mut(result);
-        if start <= end as i64 || end >= start as f64 {
-            for (index, slot) in output.iter_mut().enumerate() {
-                *slot = (start + index as i64) as i32;
-            }
-        } else {
-            for (index, slot) in output.iter_mut().enumerate() {
-                *slot = (start - index as i64) as i32;
-            }
-        }
-        return Ok(result);
+        let increment = if end >= start { 1 } else { -1 };
+        return integer_sequence(count, start as i32, increment);
     }
     let result = alloc(SexpType::Real, count)?;
     let step = if start <= end { 1.0 } else { -1.0 };
@@ -3286,10 +3276,24 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     if count.is_nan() || count < 0.0 {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
-    let count = count as usize;
+    integer_sequence(count as usize, 1, 1)
+}
+
+/// The integers `first`, `first + increment`, ... of length `count`, for an increment of 1 or
+/// -1. A sequence this long is compact when the host supports it, as GNU R's `1:n` is: code such
+/// as vctrs builds `seq_len(2^31 - 1)` only to read its length, and expanding that would allocate
+/// 8 GB. A shorter one is cheaper to expand at once than to read through ALTREP dispatch later.
+unsafe fn integer_sequence(count: usize, first: i32, increment: i32) -> R<Sexp> {
+    const COMPACT_LENGTH: usize = 1 << 20;
+    if count >= COMPACT_LENGTH
+        && let Some(sequence) = (interp().hooks.compact_intseq)(count, first, increment)?
+    {
+        return Ok(sequence);
+    }
     let result = alloc(SexpType::Integer, count)?;
+    let (first, increment) = (first as i64, increment as i64);
     for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
+        *slot = (first + increment * index as i64) as i32;
     }
     Ok(result)
 }
@@ -3528,6 +3532,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .filter(|&value| value != NA_INTEGER)
         .unwrap_or(1)
         .max(0) as usize;
+    if !is_replicable(object) && !matches!(object.kind(), SexpType::Nil | SexpType::Pairlist) {
+        return Err(call.error(format!(
+            "attempt to replicate an object of type '{}'",
+            object.kind().name()
+        )));
+    }
     let object = values::materialize(object)?;
     let count = length(object);
     // An empty `x` returns before `times` is checked, as in GNU R, so `rep(NULL, c(1, 1))` is
@@ -3637,14 +3647,26 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     keep_factor(object, crate::subset::select_elements(object, &indices)?)
 }
 
+/// GNU R's `isVector`, the objects `rep` and `rep_len` replicate.
+unsafe fn is_replicable(object: Sexp) -> bool {
+    let kind = object.kind();
+    kind.is_atomic() || matches!(kind, SexpType::List | SexpType::Expression)
+}
+
 unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     if let Some(value) = rep_classed(call, "length.out", true)? {
         return Ok(value);
     }
+    if !is_replicable(call.arg(0)) && call.arg(0) != nil() {
+        return Err(error("attempt to replicate non-vector"));
+    }
     let object = values::materialize(call.arg(0))?;
     let out = values::as_integer_scalar(call.arg(1));
     if out == NA_INTEGER || out < 0 {
-        return Err(call.error("invalid 'length.out' value"));
+        return Err(error("invalid 'length.out' value"));
+    }
+    if object == nil() && out > 0 {
+        return Err(error("cannot replicate NULL to a non-zero length"));
     }
     let count = length(object);
     let indices: Vec<usize> = (0..out as usize)
