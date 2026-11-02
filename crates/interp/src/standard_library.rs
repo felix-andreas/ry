@@ -974,7 +974,7 @@ unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_repeat(call: &Call<'_>) -> R<Sexp> {
     let [value, times] = arguments(call, ["value", "count"])?;
-    let times = count(call, "count", times)?;
+    let times = list_size(call, count(call, "count", times)?)?;
     let mut items = Vec::new();
     items
         .try_reserve_exact(times)
@@ -988,7 +988,7 @@ unsafe fn list_range(call: &Call<'_>) -> R<Sexp> {
     let [start, end] = arguments(call, ["start", "end"])?;
     let start = whole(call, "start", start)?;
     let end = whole(call, "end", end)?;
-    let size = usize::try_from(end - start + 1).unwrap_or(0);
+    let size = list_size(call, usize::try_from(end - start + 1).unwrap_or(0))?;
     let mut items = Vec::new();
     items
         .try_reserve_exact(size)
@@ -998,6 +998,19 @@ unsafe fn list_range(call: &Call<'_>) -> R<Sexp> {
         items.push(scalar_integer(number as i32)?);
     }
     list_vector(&items)
+}
+
+/// The longest list `List.repeat` and `List.range` build: R's longest vector that an integer index
+/// still reaches, so `l[[i]]` with an integer `i` can read every element.
+const MAX_LIST_SIZE: usize = i32::MAX as usize;
+
+fn list_size(call: &Call<'_>, size: usize) -> R<usize> {
+    if size > MAX_LIST_SIZE {
+        return Err(call.error(format!(
+            "the list would have {size} elements, more than the limit of {MAX_LIST_SIZE}"
+        )));
+    }
+    Ok(size)
 }
 
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {

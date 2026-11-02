@@ -186,6 +186,12 @@ corpus; without it the annotations are stripped and the package is plain R. The 
 code without annotations, so a typed and an untyped run with the same seed generate the same program. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
 
+A template can also differ between the two programs. A run of `#:= CODE` lines replaces, line for
+line, the lines right after it in the typed program, and the untyped program drops them like any
+other `#:` line. The finance `ledger` and data-science `readings` templates use this to model
+their data as tags, tuples and records when typed and as `list(kind = ...)` when untyped, so both
+programs compute the same results from the same instances.
+
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is
 reached. Services that cannot run in a test (Azure, Bloomberg, ODBC) take an injectable client,

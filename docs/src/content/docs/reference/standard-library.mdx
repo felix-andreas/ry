@@ -605,6 +605,9 @@ fn(start: integer, end: integer) -> list[integer]
 The integers from `start` up to and including `end`, or an empty list when `end` is smaller. Unlike
 R's `:`, it never counts down.
 
+Both `List.range` and `List.repeat` stop with an error when the list would hold more than
+2,147,483,647 elements, the longest vector an R integer index reaches.
+
 ```r ry run runtime=ry dput
 List.range(2L, 5L)
 #> list(2L, 3L, 4L, 5L)

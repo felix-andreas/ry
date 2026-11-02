@@ -422,10 +422,6 @@ protects construction but nothing after it.
   escape check on the closure's body; closures the helper creates itself are already covered
   (`decisions.md`, "Moving a collection into a helper's parameter").
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
-- `l[[i]]` on a list compiles to `Intrinsic::Element` with a boxed result, so arithmetic on the
-  element runs in tier 0. Tuple items and record fields speculate on the site's type feedback
-  (`Analysis::slot_read`) and stay native; a list element read should do the same, with a type
-  check that hands off to tier 0 on a mismatch.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
 - The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
@@ -549,6 +545,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)
   and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
   give native entry a stack-limit check, before raising the depth limit.
+- **An integer and a double joined at a merge point leave the value untyped.** A `match` whose
+  arms return `v` (integer) and `0` (double), summed into a double, runs at tier-0 speed: 0.67 s
+  per 2M iterations against 0.10 s when the arm is `0L`. Join `Int` and `Dbl` to `Dbl` with a
+  coercion at the merge instead of widening to unknown.
 - **Tier 0 makes `return(y <- x)` invisible.** GNU R and native functions keep it visible.
 - **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
   compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
