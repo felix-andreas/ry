@@ -2231,7 +2231,11 @@ primitives, and nothing built or installed packages.
 - **ALTREP methods have three states:** default, native (through a C trampoline) and built in
   (Rust returning `ApiResult`, no `setjmp`), so ry's own compact sequences cost nothing at the
   boundary. A class handle has GNU R's layout (a raw vector whose attribute is the class,
-  package and type), registered by (class, package) symbols. `Rf_coerceVector` of a plain
+  package and type), registered by (class, package) symbols. Its bytes start with GNU R's
+  method table (`altinteger_methods_t` and relatives) because vctrs calls `Extract_subset`
+  straight through `STDVEC_DATAPTR(ALTREP_CLASS(x))`; every slot is a trampoline into ry's
+  dispatch, so the table depends only on the type and ry's own three-state table stays the
+  single source of truth. `Rf_coerceVector` of a plain
   integer or double vector to character returns a deferred string, as GNU R does.
 - **Serialization writes ALTREP objects as `ALTREP_SXP` in version 3** and reads them through
   the class registry (loading the package's namespace for an unknown class when an interpreter is
@@ -2239,8 +2243,10 @@ primitives, and nothing built or installed packages.
   the expression in its constant pool, because ry does not run GNU R bytecode. Environments are
   written unhashed. Namespace and package references go through a resolver the interpreter
   replaces; the default creates registered placeholders.
-- **A connection's `conn_id` external pointer holds its `Rconn` address,** validated on use, so
+- **A connection is identified by its `conn_id` external pointer object,** validated on use, so
   a stale connection object errors with "invalid connection" instead of reaching a reused slot.
+  The pointer's address is not the identity, because packages overwrite it (curl stores its
+  multi handle there with `R_SetExternalPtrAddr`).
   Buffering lives in each connection kind, not in `Rconn`'s `buff` fields, so
   `R_ReadConnection` after `readLines` sees exactly the unread bytes.
 - **Header export coverage is checked by the compiler** (`-aux-info` and `-E` in
@@ -5687,6 +5693,32 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
+
+## Runtime semantics settled by the corpus package tests
+
+- **A loop accepts a jump from another call only when GNU R's compiler would give it a context**
+  (`eval.rs`): its body calls `eval`, `evalq` or `source`, or writes `break` or `next` inside an
+  ordinary call. Previously any `break` evaluated in the loop's environment ended it, so
+  `h <- function() eval(quote(break), parent.frame())` broke a caller's loop where GNU R reports
+  "no loop for break/next". Each loop records its call depth and whether it has a context, and
+  compiled closures apply the same test. Pinned by `base__loop_jumps_from_other_calls`.
+- **One implementation per attribute setter.** libr's `Rf_dimnamesgets` and the `row.names` arm of
+  `Rf_setAttrib` call the interpreter's `set_dimnames` and `set_row_names` (`subset.rs`). The libr
+  copies had drifted: libr's `row_names_gets` missed the double `c(NA, -n)` form, so readr's
+  chunked reader saw two-row frames forever.
+- **A user interrupt is a condition first.** `Rf_onintr`, `R_CheckUserInterrupt` and the
+  evaluator's interrupt poll call `conditions::signal_interrupt`, which offers an
+  `interrupt` condition to calling and exiting handlers and unwinds to top level only when none
+  takes it, as GNU R's `onintr` does. Previously `Unwind::Interrupt` bypassed the handler stack,
+  so `tryCatch(rlang::interrupt(), interrupt = )` halted the script (later's tests).
+- **Long integer sequences are compact; short ones are plain vectors.** `:` and `seq_len` build
+  sequences of 2^20 or more elements through the `compact_intseq` host hook, which libr answers
+  with its `compact_intseq` ALTREP class (the interpreter cannot name libr, so a host without
+  ALTREP gets `None` and allocates). Previously every sequence was expanded, so vctrs's
+  `seq_len(2^31 - 1)`, built only to read its length, allocated 8 GB and the parallel package run
+  was killed for memory. Short sequences stay plain because reading one through ALTREP dispatch
+  costs more than filling it once, and the evaluator's and the JIT's fast paths read plain
+  integer data directly. Pinned by `base__long_sequences`.
 
 ## utils' sockets, internal downloads and allocation profiling
 

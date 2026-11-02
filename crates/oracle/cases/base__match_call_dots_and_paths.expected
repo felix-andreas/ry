@@ -1,0 +1,24 @@
+[stdout]
+| inner(x = ..1, file = ..2, row.names = FALSE)
+| List of 4
+|  $          : symbol inner
+|  $ x        : symbol ..1
+|  $ file     : symbol ..2
+|  $ row.names: logi FALSE
+| NULL
+| NULL
+| [1] "variable names are limited to 10000 bytes"
+| [1] "variable names are limited to 10000 bytes"
+| [1] "x"
+| [1] "W: file(\"\") only supports open = \"w+\" and open = \"w+b\": using the former"
+| [1] "invalid 'path' argument"
+| [1] "path[1]=NA"
+| [1] NA     "/tmp"
+| [1] "invalid 'path' argument"
+| [1] "invalid 'path' argument"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid 'path' argument"

@@ -1,0 +1,11 @@
+[stdout]
+| [1] "attempt to replicate non-vector"
+| [1] "attempt to replicate an object of type 'S4'"
+| [1] "attempt to replicate an object of type 'language'"
+| [1] "attempt to replicate an object of type 'closure'"
+| NULL
+[messages]
+[warnings]
+[errors]
+- cannot replicate NULL to a non-zero length (in rep_len(NULL, 2))
+[value]

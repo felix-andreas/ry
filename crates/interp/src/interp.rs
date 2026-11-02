@@ -58,6 +58,8 @@ mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
+// The fork routines exist only on Unix, as in GNU R, whose Windows build of parallel has none.
+#[cfg(unix)]
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
@@ -100,7 +102,10 @@ use {
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
     },
-    heap::{Heap, Marker, RootSource, object::Sexp},
+    heap::{
+        Heap, Marker, RootSource,
+        object::{Sexp, SexpType},
+    },
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
 };
@@ -135,9 +140,14 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
-    /// A compact ALTREP integer sequence of the length, first element and increment (1 or
-    /// -1), or `None` when the host has no ALTREP classes.
-    pub compact_intseq: unsafe fn(usize, i32, i32) -> R<Option<Sexp>>,
+    /// A compact sequence (GNU R's `compact_intseq` or `compact_realseq`) of an integer or
+    /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
+    /// host has no compact sequences.
+    pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
+    /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
+    /// when the class has none. A class may expand into storage it keeps, as compact sequences
+    /// do, so repeated reads do not copy the vector each time.
+    pub altrep_dataptr: unsafe fn(Sexp) -> R<Option<*const u8>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -221,8 +231,8 @@ pub struct Interp {
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
     /// adds a binding nor invalidates the lookup caches.
     pub tmp_values: Vec<(Sexp, Sexp)>,
-    /// The environments of the loops the tree-walking interpreter is running, innermost last.
-    pub loop_envs: Vec<Sexp>,
+    /// The loops the tree-walking interpreter is running, innermost last.
+    pub loops: Vec<eval::LoopContext>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
@@ -267,6 +277,7 @@ pub struct Interp {
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
+    #[cfg(unix)]
     pub forks: parallel::Forks,
 }
 
@@ -353,7 +364,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         returned_values: Vec::new(),
         assignment_call: None,
         tmp_values: Vec::new(),
-        loop_envs: Vec::new(),
+        loops: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),
@@ -377,6 +388,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
+        #[cfg(unix)]
         forks: parallel::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
@@ -398,7 +410,8 @@ pub fn default_hooks() -> Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
-        compact_intseq: |_, _, _| Ok(None),
+        compact_sequence: |_, _, _, _| Ok(None),
+        altrep_dataptr: |_| Ok(None),
         defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
