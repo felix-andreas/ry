@@ -2314,9 +2314,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
     (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
   - Bitmap pages are written when the device closes rather than per page.
-  - The plot gallery (`oracle gallery`) leaves small agg residuals: `pa_risk_return` (0.22% of
-    pixels, above the 0.2% tolerance), `pch_table` (the join at pch 11's apex), and
-    `ts_decomposition` (rotated side-2 axis labels one pixel off).
+  - The plot gallery (`oracle gallery`) passes on every device, and three figures are not
+    pixel-exact on agg: `pch_table` (the join at pch 11's apex), `ts_decomposition` (rotated
+    side-2 axis labels one pixel off) and `margin_text_and_titles`.
   - GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
