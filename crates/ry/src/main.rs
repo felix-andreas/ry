@@ -278,6 +278,59 @@ fn main() -> ExitCode {
         .expect("command thread should not panic")
 }
 
+/// Drops this executable's resident code pages once the script's check is done. The check runs
+/// the analysis core, whose code is most of what the executable has resident (about 6 MB), and
+/// the script then runs in `libR` without returning to it. The pages are file-backed and
+/// unmodified, so dropping them loses nothing: the few the runtime's callbacks into the
+/// executable touch, and the check of a strict package the script loads, fault back in from the
+/// file. Under a debugger the pages may hold breakpoints written into private copies, which
+/// dropping would erase, so a traced process keeps them.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn release_executable_code() {
+    let traced = fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("TracerPid:"))
+            .is_some_and(|pid| pid.trim() != "0")
+    });
+    if traced {
+        return;
+    }
+    unsafe extern "C" fn release(
+        info: *mut libc::dl_phdr_info,
+        _size: libc::size_t,
+        _data: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        // SAFETY: the loader passes a valid description of one loaded object, and the first one
+        // it passes is the executable.
+        let info = unsafe { &*info };
+        let headers = unsafe { std::slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum.into()) };
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        for header in headers {
+            if header.p_type != libc::PT_LOAD || header.p_flags & libc::PF_X == 0 {
+                continue;
+            }
+            let start = (info.dlpi_addr + header.p_vaddr).next_multiple_of(page);
+            let end = (info.dlpi_addr + header.p_vaddr + header.p_filesz) / page * page;
+            if start < end {
+                // A failure leaves the pages resident, which is only a missed saving.
+                // SAFETY: the range is the executable's read-only, file-backed code.
+                unsafe {
+                    libc::madvise(
+                        start as *mut std::ffi::c_void,
+                        (end - start) as usize,
+                        libc::MADV_DONTNEED,
+                    )
+                };
+            }
+        }
+        1
+    }
+    // SAFETY: the callback only reads the loader's description and advises on its pages.
+    unsafe { libc::dl_iterate_phdr(Some(release), std::ptr::null_mut()) };
+}
+
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
@@ -296,17 +349,16 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
         return ExitCode::from(1);
     }
+    let flags = runtime_flags(preflight.config());
+    drop(preflight);
     match runtime {
-        Runtime::Ry => runtime_exit(checking_loads().and_then(|()| {
-            repl::run_on_ry_runtime(
-                Some(file),
-                None,
-                &arguments,
-                runtime_flags(preflight.config()),
-                None,
-                None,
-            )
-        })),
+        Runtime::Ry => {
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            release_executable_code();
+            runtime_exit(checking_loads().and_then(|()| {
+                repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
+            }))
+        }
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
             startup: vec![load::embedded_runtime()],

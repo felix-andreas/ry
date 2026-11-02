@@ -1,0 +1,42 @@
+[stdout]
+| [1] NA
+| [1] NA
+| [1]  1 NA NA
+| [1] NA
+| [1] NA
+| [1] 0
+| [1] 0
+| [1] NaN
+| 
+| Call:
+| 	density.default(x = c(1, 2, Inf))
+| 
+| Data: c(1, 2, Inf) (3 obs.);	Bandwidth 'bw' = 0.2923
+| 
+|        x                y           
+|  Min.   :0.1230   Min.   :0.005108  
+|  1st Qu.:0.8115   1st Qu.:0.086397  
+|  Median :1.5000   Median :0.249476  
+|  Mean   :1.5000   Mean   :0.241507  
+|  3rd Qu.:2.1885   3rd Qu.:0.386322  
+|  Max.   :2.8770   Max.   :0.456119  
+| [[1]]
+| [[1]]$...
+| [1] 1
+| 
+| 
+[messages]
+[warnings]
+- NAs introduced by coercion to integer range
+- NAs introduced by coercion to integer range
+- NAs introduced by coercion
+- NAs introduced by coercion to integer range
+- NAs introduced by coercion to integer range
+- bessel_j(1,nu=170.5): precision lost in result (in besselY(1, -170.5))
+- bessel_j(1,nu=200.5): precision lost in result (in besselJ(1, 200.5))
+- besselY(x, nu): nu=4.61169e+18 too large for bessel_y() algorithm (in besselY(1, 2^62))
+- NaNs produced (in besselY(1, 2^62))
+[errors]
+[value]
+list
+| list(list(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1))

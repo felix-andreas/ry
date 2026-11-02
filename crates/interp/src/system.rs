@@ -29,7 +29,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
     internal("pcre_config", 0, |_| unsafe {
-        let result = values::logical_vector(&[1, 1, 1, 1])?;
+        // PCRE2 from 10.30 on matches without recursion, so it never needs the C stack.
+        let result = values::logical_vector(&[1, 1, 1, 0])?;
         let names = string_vector(&["UTF-8", "Unicode properties", "JIT", "stack"])?;
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
@@ -260,10 +261,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("capabilities", 0, do_capabilities),
     internal("capabilitiesX11", 0, |_| unsafe { scalar_bool(false) }),
     internal("gc", 3, do_gc),
-    internal("gcinfo", 1, |_| unsafe { scalar_bool(false) }).invisible(),
+    internal("gcinfo", 1, do_gcinfo).invisible(),
     internal("gctorture", 1, do_gctorture).invisible(),
     internal("gctorture2", 3, do_gctorture2).invisible(),
-    builtin("gc.time", -1, |_| unsafe { values::real_vector(&[0.0; 5]) }),
+    builtin("gc.time", -1, do_gc_time),
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
@@ -1378,7 +1379,10 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     };
     let utc = name == "UTC" || name == "GMT";
     for (index, &value) in seconds.iter().enumerate() {
-        if !value.is_finite() {
+        // A year beyond the integer range cannot be broken down either, so it is kept like a
+        // non-finite time.
+        let years_since_1970 = value / (365.2425 * 86400.0);
+        if !value.is_finite() || (years_since_1970 + 70.0).abs() > i32::MAX as f64 {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
             values::reals_mut(fields[0])[index] = value;
             for &field in &fields[1..8] {
@@ -1440,6 +1444,24 @@ unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// GNU R rejects a POSIXlt in which some times exist but one of `components` is empty.
+unsafe fn require_nonempty_components(list: Sexp, components: &[usize]) -> R<()> {
+    let fields = length(list);
+    if (0..fields).all(|index| length(list.element(index)) == 0) {
+        return Ok(());
+    }
+    if let Some(&empty) = components
+        .iter()
+        .find(|&&index| index < fields && length(list.element(index)) == 0)
+    {
+        return Err(error(format!(
+            "zero-length component [[{}]] in non-empty \"POSIXlt\" structure",
+            empty + 1
+        )));
+    }
+    Ok(())
+}
+
 unsafe fn require_posixlt(list: Sexp) -> R<()> {
     if list.kind() != SexpType::List || length(list) < 9 {
         return Err(error(
@@ -1488,6 +1510,8 @@ unsafe fn posixlt_zone(list: Sexp) -> R<String> {
 /// A POSIXlt's wall-clock fields as seconds since the epoch read as UTC.
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
     require_posixlt(list)?;
+    // `wday` and `yday` are derived, so only formatting needs them present.
+    require_nonempty_components(list, &[0, 1, 2, 3, 4, 5, 8])?;
     let field = |index: usize| -> Sexp {
         if length(list) > index {
             list.element(index)
@@ -1713,6 +1737,9 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     } else {
         values::as_integer_scalar(digits).clamp(0, 6)
     };
+    require_posixlt(list)?;
+    let every: Vec<usize> = (0..length(list)).collect();
+    require_nonempty_components(list, &every)?;
     let seconds = posixlt_seconds(list)?;
     // A longer `format` recycles the times, as in GNU R.
     let count = if seconds.is_empty() {
@@ -1808,13 +1835,16 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     }
     let year_names = values::names(field(5));
     if count > seconds.len() && year_names != nil() {
+        // The names are padded with NA to the number of times, then recycled with the times.
         let recycled = alloc(SexpType::String, count)?;
         for position in 0..count {
-            values::set_elt(
-                recycled,
-                position,
-                year_names.element(position % length(year_names)),
-            );
+            let time = position % seconds.len();
+            let name = if time < length(year_names) {
+                year_names.element(time)
+            } else {
+                values::na_string()
+            };
+            values::set_elt(recycled, position, name);
         }
         values::set_attr(result, symbols().names, recycled)?;
     } else {
@@ -2263,6 +2293,12 @@ unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
     for (index, &value) in seconds.iter().enumerate() {
         if value.is_finite() {
             values::set_elt(zones, index, label);
+        }
+    }
+    // A date whose year is beyond the integer range keeps its day count in `sec`.
+    for (index, &days) in values::reals(dates).iter().enumerate() {
+        if days.is_finite() && values::ints(result.element(5))[index] == NA_INTEGER {
+            values::reals_mut(result.element(0))[index] = days;
         }
     }
     values::set_attr(result, values::install("tzone")?, scalar_string(&tz)?)?;
@@ -3107,28 +3143,95 @@ unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
-    crate::heap().collect(heap::Collection::Major);
+/// `gc(verbose, reset, full)`: runs a collection, a major one unless `full` is false, and
+/// returns GNU R's fourteen numbers: objects (`Ncells`) and vector cells (`Vcells`) in use, the
+/// same in megabytes, the trigger of the next major collection in both units and in megabytes,
+/// the limits (none, so `NA`), and the peak usage in both units and in megabytes.
+unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
+    let verbose = values::as_logical_scalar(call.arg(0)) == 1;
+    let reset = values::as_logical_scalar(call.arg(1)) == 1;
+    let full = values::as_logical_scalar(call.arg(2)) != 0;
+    let kind = if full {
+        heap::Collection::Major
+    } else {
+        heap::Collection::Minor
+    };
+    // As in GNU R, `verbose` alone decides whether this collection is reported, whatever
+    // `gcinfo()` set for the collections that allocation triggers.
+    let heap = crate::heap();
+    let reporter = heap.policy().reporter;
+    heap.update_policy(|policy| policy.reporter = None);
+    heap.collect(kind);
+    heap.update_policy(|policy| policy.reporter = reporter);
+    if verbose {
+        write_collection_report(&heap.report(kind));
+    }
     (interp().hooks.run_finalizers)();
     crate::frame::release_worker_memory();
-    let stats = crate::heap().stats();
+    let heap = crate::heap();
+    if reset {
+        heap.reset_max_usage();
+    }
+    let usage = heap.usage();
     let result = values::real_vector(&[
-        stats.live_objects as f64,
-        0.0,
-        (stats.live_bytes as f64) / 1048576.0,
-        0.0,
+        usage.objects as f64,
+        usage.vector_cells as f64,
+        usage.object_megabytes,
+        usage.vector_megabytes,
+        usage.object_trigger as f64,
+        usage.vector_trigger as f64,
+        usage.object_trigger_megabytes,
+        usage.vector_trigger_megabytes,
         NA_REAL,
         NA_REAL,
-        NA_REAL,
-        NA_REAL,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
+        usage.max_objects as f64,
+        usage.max_vector_cells as f64,
+        usage.max_object_megabytes,
+        usage.max_vector_megabytes,
     ])?;
     Ok(result)
+}
+
+/// `gcinfo(verbose)`: whether each collection prints a report to the console. Returns the
+/// previous setting.
+unsafe fn do_gcinfo(call: &Call<'_>) -> R<Sexp> {
+    let heap = crate::heap();
+    let previous = heap.policy().reporter.is_some();
+    let verbose = values::as_logical_scalar(call.arg(0));
+    if verbose != NA_LOGICAL {
+        heap.update_policy(|policy| {
+            policy.reporter = (verbose == 1).then_some(write_collection_report as unsafe fn(&str));
+        });
+    }
+    scalar_bool(previous)
+}
+
+unsafe fn write_collection_report(text: &str) {
+    (interp().hooks.write_console)(text.as_bytes(), true);
+}
+
+/// `gc.time(on = TRUE)`: the user, system and elapsed seconds spent collecting while timing
+/// was on, then two zeros where GNU R reports child processes' collection time, which ry has
+/// none of. Timing starts with the first call, as GNU R's does.
+unsafe fn do_gc_time(call: &Call<'_>) -> R<Sexp> {
+    let on = if call.is_empty() {
+        true
+    } else {
+        match values::as_logical_scalar(call.arg(0)) {
+            NA_LOGICAL => return Err(call.error("invalid 'on' argument")),
+            on => on == 1,
+        }
+    };
+    let heap = crate::heap();
+    heap.update_policy(|policy| policy.timing = on);
+    let stats = heap.stats();
+    values::real_vector(&[
+        stats.user_time.as_secs_f64(),
+        stats.system_time.as_secs_f64(),
+        stats.elapsed_time.as_secs_f64(),
+        0.0,
+        0.0,
+    ])
 }
 
 /// `gctorture(on)`: with `on`, every allocation collects first, which turns a missing root into
@@ -3181,6 +3284,9 @@ unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
+    // GNU R prints the warnings still deferred when it quits, such as a failed `require()`'s
+    // in `if (!require(pkg)) q()`.
+    crate::conditions::print_warnings()?;
     crate::console_server::finish();
     crate::session::finish();
     use std::io::Write;

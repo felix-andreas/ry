@@ -361,7 +361,9 @@ object. Long vectors use `R_xlen_t` lengths throughout.
 
 - **Interned strings.** `CHARSXP`s live in a global, weakly held intern table keyed by bytes and
   encoding, so pointer equality means string equality, as native code expects. Encoding flags
-  (`IS_UTF8`, `IS_ASCII`) are stored at interning time.
+  (`IS_UTF8`, `IS_ASCII`) are stored at interning time. The table is one open-addressed array of
+  slots that pack each address with hash bits, so a lookup touches a string only when the hash
+  bits match and its cost does not grow with the number of live strings.
 - **Symbols** are interned `SYMSXP`s with a cached global binding cell, which is what makes base
   function lookup and JIT watchpoints cheap.
 - **Pairlists** are kept for language objects, attributes and `.External` arguments, because native
