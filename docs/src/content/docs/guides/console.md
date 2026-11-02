@@ -27,6 +27,14 @@ balance  double
 owner    character
 ```
 
+## Debugging and viewing data
+
+`debug(f)` and `debugonce(f)` stop in `f` the next time it is called, and `trace()` works as in R.
+Stopping needs a debugger attached from your editor: in VS Code, run "ry: Attach to Console" (see
+[editors](/guides/editors#running-and-debugging)); without one, `f` runs as usual. The same connection lets `View(df)` open the
+editor's data viewer and gives hover and completion the console's live values. Without an editor,
+`View()` stops with an error that says how to connect one.
+
 ## Two runtimes
 
 `ry run` runs on ry's own runtime, which runs [records, tags](/type-checking/records-and-tags) and

@@ -24,6 +24,15 @@ pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub fn poll_interrupt() -> R<()> {
     if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
         INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
+        // An editor's request to the console shares the flag, so the fast path stays one load.
+        // A Ctrl-C that lands in the same instant as a request is lost, and the user presses it
+        // again.
+        if crate::console_server::SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {
+            crate::console_server::service();
+            if interp().parked_unwind.is_none() {
+                return Ok(());
+            }
+        }
         return Err(interp().parked_unwind.take().unwrap_or(Unwind::Interrupt));
     }
     Ok(())

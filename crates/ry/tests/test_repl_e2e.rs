@@ -1288,3 +1288,361 @@ fn a_runtime_with_another_build_identity_is_refused() {
     }
     assert!(!String::from_utf8_lossy(&output.stdout).contains("unreached"));
 }
+
+/// A DAP-framed client of a running console's socket.
+#[cfg(unix)]
+struct ConsoleClient {
+    stream: std::io::BufReader<std::os::unix::net::UnixStream>,
+    seq: u64,
+}
+
+#[cfg(unix)]
+impl ConsoleClient {
+    fn send(&mut self, command: &str, arguments: serde_json::Value) {
+        use std::io::Write;
+        self.seq += 1;
+        let body = serde_json::json!({
+            "type": "request", "seq": self.seq, "command": command, "arguments": arguments,
+        })
+        .to_string();
+        let framed = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        self.stream
+            .get_mut()
+            .write_all(framed.as_bytes())
+            .expect("write to the console");
+    }
+
+    fn receive(&mut self) -> serde_json::Value {
+        use std::io::{BufRead, Read};
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            self.stream.read_line(&mut line).expect("read a header");
+            assert!(!line.is_empty(), "the console closed the connection");
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length:") {
+                length = value.trim().parse().expect("a length");
+            }
+        }
+        let mut body = vec![0; length];
+        self.stream.read_exact(&mut body).expect("read a body");
+        serde_json::from_slice(&body).expect("JSON")
+    }
+
+    /// Skips messages until one matches, and returns it.
+    fn until(&mut self, wanted: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        loop {
+            let message = self.receive();
+            if wanted(&message) {
+                return message;
+            }
+        }
+    }
+
+    fn request(&mut self, command: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.send(command, arguments);
+        self.until(|message| message["type"] == "response" && message["command"] == command)
+    }
+}
+
+/// An editor reaches a running `ry run` console through the socket its registry file names: it
+/// attaches the debugger, stops at a breakpoint and at a `debugonce()` function, pages through a
+/// data frame, and receives `View()`. Detaching leaves the console running.
+#[cfg(unix)]
+#[test]
+fn an_editor_attaches_to_a_running_console() {
+    use std::{io::Write, process::Stdio, time::Duration};
+    if !ry_runtime_available() {
+        return;
+    }
+    let project = tempfile::tempdir().expect("temp dir");
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let script = project.path().join("f.R");
+    fs::write(&script, "g <- function(x) {\n  y <- x + 1\n  y * 2\n}\n").expect("write f.R");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .current_dir(project.path())
+        .env("TMPDIR", temporary.path())
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start ry run");
+    let mut input = child.stdin.take().expect("stdin");
+    let registry = (0..300)
+        .find_map(|_| {
+            let found = fs::read_dir(temporary.path())
+                .ok()?
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("ry-"))
+                .find_map(|directory| {
+                    let path = directory
+                        .path()
+                        .join(format!("console-{}.json", child.id()));
+                    fs::read_to_string(path).ok()
+                });
+            if found.is_none() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            found
+        })
+        .or_else(|| {
+            let ended = child.try_wait().ok().flatten();
+            panic!("the console never announced itself (exit: {ended:?})")
+        })
+        .expect("the console announces itself");
+    let registry: serde_json::Value = serde_json::from_str(&registry).expect("registry JSON");
+    assert_eq!(
+        fs::canonicalize(registry["cwd"].as_str().expect("cwd")).expect("cwd exists"),
+        fs::canonicalize(project.path()).expect("project exists"),
+    );
+    let socket =
+        std::os::unix::net::UnixStream::connect(registry["socket"].as_str().expect("socket"))
+            .expect("connect to the console");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("set a timeout");
+    let mut client = ConsoleClient {
+        stream: std::io::BufReader::new(socket),
+        seq: 0,
+    };
+
+    client.send("initialize", serde_json::json!({ "adapterID": "ry" }));
+    client.until(|message| message["event"] == "initialized");
+    assert_eq!(
+        client.request("attach", serde_json::json!({}))["success"],
+        true
+    );
+    let path = script.to_string_lossy().into_owned();
+    let breakpoints =
+        serde_json::json!({ "source": { "path": path }, "breakpoints": [{ "line": 3 }] });
+    client.request("setBreakpoints", breakpoints);
+    client.request("configurationDone", serde_json::json!({}));
+    input
+        .write_all(b"source(\"f.R\"); g(1)\n")
+        .expect("type a command");
+    let stopped = client.until(|message| message["event"] == "stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint");
+    let trace = client.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    assert_eq!(trace["body"]["stackFrames"][0]["line"], 3);
+    let scopes = client.request("scopes", serde_json::json!({ "frameId": 1 }));
+    let locals = scopes["body"]["scopes"][0]["variablesReference"].clone();
+    let variables = client.request(
+        "variables",
+        serde_json::json!({ "variablesReference": locals }),
+    );
+    let names: Vec<_> = variables["body"]["variables"]
+        .as_array()
+        .expect("variables")
+        .iter()
+        .map(|variable| (variable["evaluateName"].clone(), variable["value"].clone()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (serde_json::json!("x"), serde_json::json!("1")),
+            (serde_json::json!("y"), serde_json::json!("2")),
+        ]
+    );
+    client.request("continue", serde_json::json!({}));
+
+    input
+        .write_all(b"h <- function(a) {\n  b <- a * 3\n  b\n}\ndebugonce(h); h(2); h(3)\n")
+        .expect("type a command");
+    let stopped = client.until(|message| message["event"] == "stopped");
+    assert_eq!(stopped["body"]["reason"], "function breakpoint");
+    let trace = client.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    let frame = &trace["body"]["stackFrames"][0];
+    assert_eq!(
+        (frame["name"].as_str(), frame["line"].as_u64()),
+        (Some("h"), Some(2))
+    );
+    let reference = frame["source"]["sourceReference"].clone();
+    let source = client.request(
+        "source",
+        serde_json::json!({ "sourceReference": reference }),
+    );
+    assert!(
+        source["body"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("b <- a * 3")),
+        "{source}"
+    );
+    client.request("continue", serde_json::json!({}));
+    client.request("disconnect", serde_json::json!({}));
+
+    input
+        .write_all(b"df <- data.frame(a = 1:5, b = letters[1:5])\n")
+        .expect("type a command");
+    let view = (0..100)
+        .find_map(|_| {
+            let view = client.request("ryView", serde_json::json!({ "expression": "df" }));
+            if view["success"] == true {
+                return Some(view);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            None
+        })
+        .expect("df is viewable once defined");
+    assert_eq!(view["body"]["rows"], 5);
+    let page = client.request(
+        "ryTable",
+        serde_json::json!({ "viewId": view["body"]["viewId"], "start": 1, "count": 2 }),
+    );
+    assert_eq!(
+        page["body"]["rows"],
+        serde_json::json!([["2", "b"], ["3", "c"]])
+    );
+    let globals = client.request("ryGlobals", serde_json::json!({}));
+    assert!(
+        globals["body"]["globals"]
+            .as_array()
+            .expect("globals")
+            .iter()
+            .any(|binding| binding["name"] == "df" && binding["columns"][1]["name"] == "b"),
+        "{globals}"
+    );
+    client.request("rySubscribe", serde_json::json!({}));
+    input.write_all(b"View(df)\n").expect("type a command");
+    let event = client.until(|message| message["event"] == "ryView");
+    assert_eq!(event["body"]["title"], "Data: df");
+
+    input
+        .write_all(b"cat(\"still running\\n\")\n")
+        .expect("type a command");
+    drop(input);
+    let output = child.wait_with_output().expect("the console ends");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[1] 4") && stdout.contains("[1] 6") && stdout.contains("[1] 9"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("still running"), "{stdout}");
+    let left: Vec<_> = fs::read_dir(temporary.path())
+        .expect("temp dir")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("ry-"))
+        .flat_map(|directory| {
+            fs::read_dir(directory.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
+        .map(|entry| entry.file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the console removes its socket and registry: {left:?}"
+    );
+}
+
+/// Hovers `df` and completes `df$` in a file of `project` through `ry server`, which finds the
+/// console running there. Returns the hover's text and the completion labels from the console.
+#[cfg(unix)]
+fn ask_language_server(
+    project: &std::path::Path,
+    temporary: &std::path::Path,
+) -> (String, Vec<String>) {
+    use std::{io::Write, process::Stdio};
+    let text = "summary(df)\ndf$\n";
+    let file = project.join("analysis.R");
+    fs::write(&file, text).expect("write analysis.R");
+    let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("server")
+        .current_dir(project)
+        .env("TMPDIR", temporary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start ry server");
+    let mut writer = server.stdin.take().expect("stdin");
+    let mut reader = std::io::BufReader::new(server.stdout.take().expect("stdout"));
+    let mut send = |message: serde_json::Value| {
+        let body = message.to_string();
+        write!(writer, "Content-Length: {}\r\n\r\n{body}", body.len())
+            .expect("write to the server");
+        writer.flush().expect("flush");
+    };
+    let root = url_of(project);
+    let uri = url_of(&file);
+    send(
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "rootUri": root, "capabilities": {} } }),
+    );
+    let receive = |reader: &mut std::io::BufReader<std::process::ChildStdout>, id: u64| loop {
+        let message = read_framed(reader);
+        if message["id"] == id && message.get("method").is_none() {
+            return message;
+        }
+    };
+    receive(&mut reader, 1);
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    send(
+        serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": { "uri": uri, "languageId": "r", "version": 1, "text": text } } }),
+    );
+    send(
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
+        "textDocument": { "uri": uri }, "position": { "line": 0, "character": 9 } } }),
+    );
+    let hover = receive(&mut reader, 2);
+    send(
+        serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "textDocument/completion", "params": {
+        "textDocument": { "uri": uri }, "position": { "line": 1, "character": 3 } } }),
+    );
+    let completion = receive(&mut reader, 3);
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": "shutdown" }));
+    receive(&mut reader, 4);
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
+    drop(send);
+    server.wait().expect("the server exits");
+    let hover = hover["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let columns = completion["result"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.ends_with("(console)"))
+        })
+        .filter_map(|item| item["label"].as_str().map(str::to_owned))
+        .collect();
+    (hover, columns)
+}
+
+#[cfg(unix)]
+fn url_of(path: &std::path::Path) -> String {
+    format!(
+        "file://{}",
+        fs::canonicalize(path).expect("the path exists").display()
+    )
+}
+
+#[cfg(unix)]
+fn read_framed(reader: &mut impl std::io::BufRead) -> serde_json::Value {
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read a header");
+        assert!(!line.is_empty(), "the server closed its output");
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            length = value.trim().parse().expect("a length");
+        }
+    }
+    let mut body = vec![0; length];
+    std::io::Read::read_exact(reader, &mut body).expect("read a body");
+    serde_json::from_slice(&body).expect("JSON")
+}

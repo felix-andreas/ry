@@ -2181,6 +2181,13 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
         output.push('\n');
     }
     print(file, output.as_bytes())?;
+    // GNU R flushes the connection after `cat`, so a reader opened on the same file sees the
+    // text at once, although `writeLines` stays buffered. A connection `print` opened is
+    // closed again, which flushed it already.
+    let con = resolve_con(file)?.1;
+    if (*con).isopen != 0 {
+        method_fflush(con)?;
+    }
     Ok(nil())
 }
 

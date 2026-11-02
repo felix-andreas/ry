@@ -685,8 +685,8 @@ definition 12..16
 references: 12..16*, 52..56, 71..75
 rename: 3 edit(s)
 calls area: in  | out
-signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
-parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
+signature: fn(f: character | (fn(...: Any) -> Any), [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: [f: character | (fn(...: Any) -> Any)] | [signature]: character[] | [definition]: Any | ...: Any
 completion: none
 hint @11name =
 hint @19def =

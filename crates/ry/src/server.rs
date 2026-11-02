@@ -19,6 +19,7 @@ use {
             CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, INLINE_ANNOTATIONS_OFF,
             LINTR_FILE_NAME, suggested_table,
         },
+        console_link::{ConsoleLink, identifier_at},
         diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
         namespace::namespace_import_problems,
         position::{LineColumn, LineIndex},
@@ -59,7 +60,7 @@ use {
     simulation::Outgoing,
     std::{
         cmp::Reverse,
-        collections::{BTreeSet, HashMap},
+        collections::{BTreeSet, HashMap, HashSet},
         env, fs,
         hash::{DefaultHasher, Hash, Hasher},
         mem,
@@ -76,7 +77,11 @@ use {
         thread,
         time::{Duration, Instant},
     },
-    syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name},
+    syntax::{
+        SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenAtOffset,
+        is_syntactic_name,
+        literate::{is_literate_extension, r_regions, r_source_of_literate},
+    },
     tokio::{runtime::Handle, sync::oneshot},
     tower::ServiceBuilder,
 };
@@ -96,6 +101,7 @@ pub async fn run(debug: bool) {
                 runtime: runtime.clone(),
             },
             debug,
+            consoles: true,
             cancel: cancel.clone(),
             executable: env::current_exe().unwrap_or_default(),
         };
@@ -242,6 +248,9 @@ struct WorkerSeed {
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
+    /// Whether hover and completion may ask a running console in the workspace. Off in the
+    /// simulator, which must not depend on processes outside it.
+    consoles: bool,
     /// The ry binary whose `ry check` records the server may trust: a record is keyed by the
     /// binary that wrote it.
     executable: PathBuf,
@@ -420,6 +429,7 @@ struct Worker {
     supports_label_offsets: bool,
     supports_snippets: bool,
     workspace_root: PathBuf,
+    console: ConsoleLink,
     config: Config,
     pending_config_error: Option<String>,
     db: RootDatabase,
@@ -461,6 +471,12 @@ struct Worker {
     /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
     /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
     published_fixes: HashMap<SourceFile, PublishedFixes>,
+    /// The text the editor holds for each open literate document (`.Rmd`, `.qmd`, `.Rnw`).
+    /// Analysis reads the document as one R script with its prose blanked
+    /// (`syntax::literate`), which has the same bytes offsets and line breaks, so ranges need
+    /// no translation; positions are counted on this text, because a blanked character can
+    /// have a different UTF-16 width.
+    literate_documents: HashMap<SourceFile, String>,
     /// Findings restored from the last `ry check` record at startup, for files whose text and
     /// dependencies are unchanged since. The first wave shows them until analysis catches up,
     /// so opening a large project shows its findings at once. Any change to the inputs drops
@@ -562,6 +578,7 @@ impl Worker {
             supports_diagnostic_refresh,
             supports_label_offsets,
             supports_snippets,
+            console: ConsoleLink::new(seed.consoles.then_some(workspace_root.as_path())),
             workspace_root,
             config,
             pending_config_error: pending_config_error.as_ref().map(config_message),
@@ -582,6 +599,7 @@ impl Worker {
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
             published_fixes: HashMap::new(),
+            literate_documents: HashMap::new(),
             recorded_diagnostics: HashMap::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
@@ -1180,7 +1198,10 @@ impl Worker {
     }
 
     fn text(&self, file: SourceFile) -> String {
-        file.text(&self.db).to_owned()
+        match self.literate_documents.get(&file) {
+            Some(document) => document.clone(),
+            None => file.text(&self.db).to_owned(),
+        }
     }
 
     fn to_offset(&self, text: &str, position: lsp_types::Position) -> TextSize {
@@ -1423,6 +1444,15 @@ impl Worker {
         }
 
         let kind = document_kind(&path, &self.workspace_root);
+        let literate = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(is_literate_extension);
+        let document = literate.then(|| params.text_document.text.clone());
+        let mut params = params;
+        if literate {
+            params.text_document.text = r_source_of_literate(&params.text_document.text);
+        }
         match self.files.get(&path) {
             // Opening usually shows the text already on disk, so lowering its durability
             // waits for idle time: the drop defeats backdating, and everything derived from
@@ -1446,6 +1476,9 @@ impl Worker {
                 self.files.insert(path.clone(), file);
                 self.rebuild_project_files();
             }
+        }
+        if let (Some(document), Some(&file)) = (document, self.files.get(&path)) {
+            self.literate_documents.insert(file, document);
         }
         self.open_documents.insert(path.clone());
         self.refresh_attached(&path);
@@ -1485,7 +1518,12 @@ impl Worker {
             .get(&path)
             .expect("open documents are always tracked");
         let text = self.text(file);
-        let updated = self.apply_content_changes(text, &params.content_changes);
+        let mut updated = self.apply_content_changes(text, &params.content_changes);
+        if self.literate_documents.contains_key(&file) {
+            let analysed = r_source_of_literate(&updated);
+            self.literate_documents.insert(file, updated);
+            updated = analysed;
+        }
         self.pending_lowering.retain(|owed| owed != &path);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
@@ -1568,6 +1606,7 @@ impl Worker {
         self.open_documents.remove(&path);
         if let Some(file) = self.files.get(&path) {
             self.published_fixes.remove(file);
+            self.literate_documents.remove(file);
         }
         self.pending_semantic_publishes.retain(|owed| owed != &path);
         self.pending_lowering.retain(|owed| owed != &path);
@@ -2276,8 +2315,35 @@ impl LanguageServer for ServerState {
             } else {
                 Vec::new()
             };
+            let names_global = worker
+                .cancellable(|worker| {
+                    names_a_console_global(
+                        &semantics::parse(&worker.db, file).syntax_node(),
+                        offset,
+                        hover.as_ref().and_then(|hover| hover.definition.as_ref()),
+                    )
+                })
+                .unwrap_or(false);
+            let live = names_global
+                .then(|| console_value(worker, &text, usize::from(offset)))
+                .flatten();
+            if hover.is_none()
+                && let Some(live) = live
+            {
+                return Ok(Some(lsp_types::Hover {
+                    contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                        kind: lsp_types::MarkupKind::Markdown,
+                        value: live,
+                    }),
+                    range: None,
+                }));
+            }
             Ok(hover.map(|hover| {
                 let mut value = format!("```r\n{}\n```", hover.lines.join("\n"));
+                if let Some(live) = &live {
+                    value.push_str("\n\n---\n\n");
+                    value.push_str(live);
+                }
                 if let Some(summary) = hover
                     .definition
                     .as_ref()
@@ -2561,24 +2627,46 @@ impl LanguageServer for ServerState {
         params: lsp_types::CompletionParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::CompletionResponse>, Self::Error>> {
         self.read(move |worker| {
-            let Some((file, _, offset)) = worker.document_at(&params.text_document_position) else {
+            let Some((file, text, offset)) = worker.document_at(&params.text_document_position)
+            else {
                 return Ok(None);
             };
+            // Prose is blank to analysis, where every name would complete.
+            if worker.literate_documents.contains_key(&file)
+                && !r_regions(&text).iter().any(|region| {
+                    region.range.start <= usize::from(offset)
+                        && usize::from(offset) <= region.range.end
+                })
+            {
+                return Ok(None);
+            }
             let files = ProjectFiles::get(&worker.db);
             let result = worker
                 .cancellable(|worker| ide::completion(&worker.db, files, file, offset))
                 .unwrap_or_default();
-            Ok(result.map(|result| {
-                let items = result
-                    .items
-                    .into_iter()
-                    .enumerate()
-                    .map(|(rank, item)| {
-                        convert_completion_item(item, rank, worker.supports_snippets)
-                    })
-                    .collect();
+            let (mut items, is_incomplete) = match result {
+                Some(result) => (
+                    result
+                        .items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(rank, item)| {
+                            convert_completion_item(item, rank, worker.supports_snippets)
+                        })
+                        .collect::<Vec<_>>(),
+                    result.is_incomplete,
+                ),
+                None => (Vec::new(), false),
+            };
+            items.extend(console_completions(
+                worker,
+                &text,
+                usize::from(offset),
+                &items,
+            ));
+            Ok((!items.is_empty()).then(|| {
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
-                    is_incomplete: result.is_incomplete,
+                    is_incomplete,
                     items,
                 })
             }))
@@ -2745,10 +2833,26 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some((_, text)) = worker.document(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            Ok(worker.format_edits(&text, format::format_edits(&text, worker.config.format)))
+            // A literate document formats chunk by chunk, so its prose is never touched.
+            let edits = match worker.literate_documents.contains_key(&file) {
+                true => format::format_chunks(&text, worker.config.format).map(|edits| {
+                    edits
+                        .into_iter()
+                        .map(|(range, new_text)| format::TextEdit {
+                            range: TextRange::new(
+                                TextSize::try_from(range.start).unwrap_or_default(),
+                                TextSize::try_from(range.end).unwrap_or_default(),
+                            ),
+                            new_text,
+                        })
+                        .collect()
+                }),
+                false => format::format_edits(&text, worker.config.format),
+            };
+            Ok(worker.format_edits(&text, edits))
         })
     }
 
@@ -2759,9 +2863,13 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentRangeFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some((_, text)) = worker.document(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
+            // A selection in a literate document can span prose; formatting it is whole chunks.
+            if worker.literate_documents.contains_key(&file) {
+                return Ok(None);
+            }
             let selection = worker.to_text_range(&text, params.range);
             Ok(worker.format_edits(
                 &text,
@@ -2900,9 +3008,14 @@ impl LanguageServer for ServerState {
             let Some((file, text)) = worker.document(&uri) else {
                 return Ok(None);
             };
-            let lenses = worker
+            let literate = worker.literate_documents.contains_key(&file);
+            // A literate document is rendered, not run, so it only gets reference counts.
+            let lenses: Vec<_> = worker
                 .cancellable(|worker| ide::code_lenses(&worker.db, file))
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|lens| !literate || lens.kind == ide::CodeLensKind::References)
+                .collect();
             let uri_argument = serde_json::Value::String(uri.to_string());
             let mut result = Vec::new();
             for lens in lenses {
@@ -3245,6 +3358,124 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
         DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
         // The kind RStudio's outline and the R language server use for sections.
         DocumentSymbolKind::Section => lsp_types::SymbolKind::STRING,
+    }
+}
+
+/// Whether the name at `offset` can refer to a variable of the console's global environment: an
+/// identifier, not a word in a string or comment, and not a function's own local, which only
+/// shares the name with a global.
+fn names_a_console_global(
+    root: &SyntaxNode,
+    offset: TextSize,
+    definition: Option<&HoverDefinition>,
+) -> bool {
+    let token = match root.token_at_offset(offset) {
+        TokenAtOffset::Single(token) => token,
+        TokenAtOffset::Between(left, right) => match right.kind() == SyntaxKind::IDENT {
+            true => right,
+            false => left,
+        },
+        TokenAtOffset::None => return false,
+    };
+    if token.kind() != SyntaxKind::IDENT {
+        return false;
+    }
+    let in_function = token
+        .parent_ancestors()
+        .any(|node| node.kind() == SyntaxKind::FUNCTION_DEF);
+    !(in_function && matches!(definition, Some(HoverDefinition::Local { .. })))
+}
+
+/// The live value of the variable at `offset` in the workspace's running console, as hover text.
+fn console_value(worker: &mut Worker, text: &str, offset: usize) -> Option<String> {
+    let (name, owner) = identifier_at(text, offset)?;
+    if name.is_empty() || owner.is_some() {
+        return None;
+    }
+    let globals = worker.console.globals()?;
+    let global = globals.get(name)?;
+    let class = global.class.as_deref().unwrap_or(&global.kind);
+    let mut value = format!("In the console: `{class}`");
+    if let Some(summary) = &global.summary {
+        value.push_str(&format!("\n\n```r\n{summary}\n```"));
+    }
+    if !global.columns.is_empty() {
+        let columns: Vec<String> = global
+            .columns
+            .iter()
+            .map(|(name, kind)| format!("`{name}` {kind}"))
+            .collect();
+        value.push_str(&format!("\n\nColumns: {}", columns.join(", ")));
+    }
+    Some(value)
+}
+
+/// Completions only the running console knows: after `name$`, the columns of the data frame
+/// `name` holds there; otherwise the console's variables that analysis did not already offer.
+fn console_completions(
+    worker: &mut Worker,
+    text: &str,
+    offset: usize,
+    existing: &[lsp_types::CompletionItem],
+) -> Vec<lsp_types::CompletionItem> {
+    let Some((_, owner)) = identifier_at(text, offset) else {
+        return Vec::new();
+    };
+    // `identifier_at` checked that `offset` is a char boundary within the text.
+    let before = &text[..offset.min(text.len())];
+    let prefix = &before[before
+        .trim_end_matches(|character: char| {
+            character.is_alphanumeric() || character == '.' || character == '_'
+        })
+        .len()..];
+    if owner.is_none() && prefix.is_empty() {
+        return Vec::new();
+    }
+    let Some(globals) = worker.console.globals() else {
+        return Vec::new();
+    };
+    let offered: HashSet<&str> = existing.iter().map(|item| item.label.as_str()).collect();
+    let item = |label: &str, kind, detail: String| lsp_types::CompletionItem {
+        label: label.to_owned(),
+        kind: Some(kind),
+        detail: Some(detail),
+        sort_text: Some(format!("~{label}")),
+        ..Default::default()
+    };
+    match owner {
+        Some(owner) => globals
+            .get(owner)
+            .map(|global| {
+                global
+                    .columns
+                    .iter()
+                    .filter(|(column, _)| {
+                        column.starts_with(prefix) && !offered.contains(column.as_str())
+                    })
+                    .map(|(column, kind)| {
+                        item(
+                            column,
+                            lsp_types::CompletionItemKind::FIELD,
+                            format!("{kind} (console)"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => globals
+            .values()
+            .filter(|global| {
+                global.name.starts_with(prefix) && !offered.contains(global.name.as_str())
+            })
+            .map(|global| {
+                let class = global.class.as_deref().unwrap_or(&global.kind);
+                item(
+                    &global.name,
+                    lsp_types::CompletionItemKind::VARIABLE,
+                    format!("{class} (console)"),
+                )
+            })
+            .collect(),
     }
 }
 

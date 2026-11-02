@@ -1398,6 +1398,8 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
             SexpType::Closure if values::inherits(method, "internalDispatchMethod") => {
                 return Ok(None);
             }
+            // As in GNU R, a method called straight from the table sees `.Generic` as the
+            // primitive's name, which a group method such as `Summary`'s needs.
             SexpType::Closure => {
                 let vars = cached_method_vars(method, generic)?;
                 let value = apply_closure(call, method, &promised, env, Some(&vars))?;
