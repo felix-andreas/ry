@@ -407,7 +407,7 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     db.edit(files[0], "x <- function() 3L\n".to_owned());
     settle(&db, &files);
     assert_eq!(
-        db.validations_since(&["parse", "item_syntax"]),
+        db.validations_since(&["parse_memo", "item_syntax_memo"]),
         [0, 0],
         "the untouched files' trees sit below memos that verify by durability alone"
     );
@@ -511,7 +511,7 @@ fn a_cold_check_parses_each_file_once() {
     let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
-    assert_eq!(db.executions_since(&["parse"]), [files.len()]);
+    assert_eq!(db.executions_since(&["parse_memo"]), [files.len()]);
     let codes = |file: SourceFile| -> Vec<&'static str> {
         file_diagnostics(&db, file)
             .iter()
@@ -548,7 +548,7 @@ fn an_edit_after_a_cold_check_reparses_and_relints_only_the_edited_file() {
     db.edit(files[0], edited);
     report(&mut db, &files, &lints);
     assert_eq!(
-        db.executions_since(&["parse", "file_syntax_lints", "item_check"]),
+        db.executions_since(&["parse_memo", "file_syntax_lints", "item_check"]),
         [1, 1, 1]
     );
 }

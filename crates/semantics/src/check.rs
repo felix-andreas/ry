@@ -853,27 +853,40 @@ fn check_item_in<'db>(
         }
     }
     let recorded = mem::take(&mut context.recorded.0);
-    let expression_types: ExpressionTypes = recorded
-        .into_iter()
-        .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
-        .collect();
-    let mut pattern_types = vec![None; module.pattern_count()];
-    for (&id, &ty) in &context.recorded_patterns {
-        if let Some(slot) = pattern_types.get_mut(id.index()) {
-            *slot = Some(context.table.resolve(context.db, ty));
+    let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
+        let ty = (*recorded.get(scrutinee.index())?)?;
+        Some(context.table.resolve(db, ty))
+    });
+    // Only editor features read the per-expression facts, and resolving every recorded type is a
+    // large share of a check's cost, so a one-shot host skips them.
+    let editor_facts = !db.one_shot();
+    let mut expression_types = ExpressionTypes::default();
+    let mut pattern_types = PatternTypes::default();
+    let mut literal_expectations = SortedMap::default();
+    let mut loop_variables = SortedMap::default();
+    if editor_facts {
+        expression_types = recorded
+            .into_iter()
+            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+            .collect();
+        let mut patterns = vec![None; module.pattern_count()];
+        for (&id, &ty) in &context.recorded_patterns {
+            if let Some(slot) = patterns.get_mut(id.index()) {
+                *slot = Some(context.table.resolve(context.db, ty));
+            }
         }
+        pattern_types = PatternTypes(ThinVec::from(patterns));
+        literal_expectations = context
+            .recorded_expectations
+            .iter()
+            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .collect();
+        loop_variables = context
+            .recorded_loop_variables
+            .iter()
+            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .collect();
     }
-    let pattern_types = PatternTypes(ThinVec::from(pattern_types));
-    let literal_expectations = context
-        .recorded_expectations
-        .iter()
-        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
-        .collect();
-    let loop_variables = context
-        .recorded_loop_variables
-        .iter()
-        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
-        .collect();
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -907,7 +920,6 @@ fn check_item_in<'db>(
         };
         top_level_bindings.push((info.name, binding_scheme));
     }
-    let match_findings = match_findings(db, context.table.definitions, module, &expression_types);
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         expression_types,
@@ -917,8 +929,16 @@ fn check_item_in<'db>(
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,
-        selected_overloads: context.selected_overloads.into_iter().collect(),
-        callee_targets: context.callee_targets.into_iter().collect(),
+        selected_overloads: if editor_facts {
+            context.selected_overloads.into_iter().collect()
+        } else {
+            SortedMap::default()
+        },
+        callee_targets: if editor_facts {
+            context.callee_targets.into_iter().collect()
+        } else {
+            SortedMap::default()
+        },
         masked_reads: context.masked_reads.into_iter().collect(),
         column_misses: context.column_misses.into_iter().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
@@ -952,7 +972,7 @@ fn close_scheme<'db>(
 }
 
 struct ResidualCloser<'db> {
-    binders: Vec<(Name<'db>, Constraint)>,
+    binders: ThinVec<(Name<'db>, Constraint)>,
     generalized: FxHashMap<InferenceVar, Ty<'db>>,
     /// Only variables some parameter abstracts generalize; any other constrained
     /// variable is one fixed type nobody chooses, so it takes the constraint's default.
@@ -15149,7 +15169,10 @@ impl<'db> Checker<'db, '_> {
         let mut binders = Vec::new();
         let mut mapping: FxHashMap<InferenceVar, Name<'db>> = FxHashMap::default();
         let body = self.abstract_vars(resolved, &mut binders, &mut mapping);
-        TypeScheme { binders, body }
+        TypeScheme {
+            binders: ThinVec::from(binders),
+            body,
+        }
     }
 
     fn abstract_vars(

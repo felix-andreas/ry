@@ -96,21 +96,34 @@ unsafe impl GlobalAlloc for Allocator {
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
+/// `mi_option_purge_delay` in mimalloc v3's `mi_option_e`, which `libmimalloc-sys` does not
+/// export as a constant either.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
 /// zeroing cost a cold check more time than parsing did. The first arena is reserved before
 /// `main`, so the option is set from a constructor, as a default that
 /// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
 /// same option in `crates/libr/src/libr.rs`.
+///
+/// The purge delay drops from mimalloc's default of a second to 10 ms. A cold check runs for
+/// about a second and frees its parse trees file by file, so with the default delay none of that
+/// memory went back to the OS before the peak, which added about 15 MiB to peak RSS on a
+/// 300,000-line project at no measurable cost in time.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static LAZY_ARENA_COMMIT: extern "C" fn() = {
-    extern "C" fn lazy_arena_commit() {
+static ALLOCATOR_OPTIONS: extern "C" fn() = {
+    extern "C" fn allocator_options() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe {
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, 10);
+        }
     }
-    lazy_arena_commit
+    allocator_options
 };
 
 fn main() -> ExitCode {

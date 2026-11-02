@@ -43,14 +43,14 @@ use {
         num::NonZero,
         path::{Path, PathBuf},
         sync::{
-            LazyLock, Mutex, PoisonError,
+            LazyLock,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
         time::{Duration, Instant},
     },
     syntax::{
-        Parse, TextRange,
+        TextRange,
         literate::{is_literate_extension, r_source_of_literate},
     },
 };
@@ -635,26 +635,28 @@ fn analyze_project_with(
     let mut surfaces = vec![Fingerprint::default(); files.len()];
     for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
-        // A file that is not checked contributes only its share of the project-wide maps.
-        if checked(index) {
-            derive_from_syntax(db, file, &config.lint);
-        } else {
-            semantics::diagnostics::warm_project_folds(db, file);
-            semantics::metadata::file_attached_namespaces(db, file);
-        }
-        let root = semantics::parse(db, file).syntax_node();
-        let mut tokens = FxHashSet::default();
-        if want_tokens {
-            namespace::collect_used_tokens(&root, &imported, &mut tokens);
-        }
-        // A partial plan exists only when every surface matches the record.
-        let surface = match (cache, previous) {
-            (CacheUse::ReadWrite, None) => {
-                check_cache::surface(file.text(db), &root, &project_fold_shares(db, file))
+        semantics::with_held_tree(db, file, || {
+            // A file that is not checked contributes only its share of the project-wide maps.
+            if checked(index) {
+                derive_from_syntax(db, file, &config.lint);
+            } else {
+                semantics::diagnostics::warm_project_folds(db, file);
+                semantics::metadata::file_attached_namespaces(db, file);
             }
-            (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => Fingerprint::default(),
-        };
-        (tokens, surface)
+            let root = semantics::parse(db, file).syntax_node();
+            let mut tokens = FxHashSet::default();
+            if want_tokens {
+                namespace::collect_used_tokens(&root, &imported, &mut tokens);
+            }
+            // A partial plan exists only when every surface matches the record.
+            let surface = match (cache, previous) {
+                (CacheUse::ReadWrite, None) => {
+                    check_cache::surface(file.text(db), &root, &project_fold_shares(db, file))
+                }
+                (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => Fingerprint::default(),
+            };
+            (tokens, surface)
+        })
     }) {
         file_tokens[index] = tokens;
         surfaces[index] = surface;
@@ -691,18 +693,6 @@ fn analyze_project_with(
         Some(previous) => previous.attached(),
         None => attached_union(&db, project),
     };
-    // Freeing a million tree nodes takes longer than naming the first files, so each naming
-    // worker frees the tree of the file it is about to name, across all cores. A partial run
-    // keeps its trees: releasing them walks every item of every file on one thread.
-    let mut trees: Vec<Mutex<Option<Parse>>> = (0..files.len()).map(|_| Mutex::new(None)).collect();
-    if previous.is_none() {
-        for (index, tree) in semantics::release_trees(&mut db, &files)
-            .into_iter()
-            .enumerate()
-        {
-            trees[index] = Mutex::new(Some(tree));
-        }
-    }
     if !attached.is_empty() {
         metadata.set_attached(&mut db).to(attached.clone());
     }
@@ -717,9 +707,6 @@ fn analyze_project_with(
     // interface edges follow for the same reason, and because the walk that finds the project's
     // cyclic groups reads every item's edges on one thread.
     in_parallel(&db, workers, &checked_order, |db, index| {
-        if let Some(tree) = trees.get(index) {
-            drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
-        }
         if !checked(index) {
             return;
         }
