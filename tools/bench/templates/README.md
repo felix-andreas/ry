@@ -3,9 +3,21 @@
 Each `.R` file here is one template. The generator instantiates a template many times with
 fresh parameters, appends the code part to a package file, and appends the test part to the
 matching test file. A template is ry code with inline type annotations, apart from the `#@`
-header lines and the `@NAME@` placeholders. An untyped run erases the annotations, so a template
-must still mean plain R once they are gone: ry's records, tuples and tags have no erasure and stay
-out of the templates.
+header lines and the `@NAME@` placeholders. An untyped run erases the annotations, which gives the
+plain R program. ry's records, tuples and tags have no erasure, so code that uses them gives its
+plain-R spelling beside it in a variant block:
+
+```r
+#@ typed
+  (time = times, flow = flows)
+#@ untyped
+  list(time = times, flow = flows)
+#@ end
+```
+
+The typed run keeps the first branch and the untyped run the second. Both runs count the untyped
+branch toward the line target, so the same seed picks the same instances. The typed branch is where
+the typed code base models its data with records and tags instead of lists, S4 or R6.
 
 - `shared/` holds infrastructure used by all three code bases (settings, caching, logging,
   serialization, files, strings, conditions, parallelism, HTTP, markup, calendars, S4,
@@ -22,6 +34,7 @@ Header lines, all before the code:
 | `#@ param NAME choice a\|b\|c` | One of the listed words. |
 | `#@ ns LINE` | A line added to the package `NAMESPACE`, for S4 exports and imports. |
 | `#@ test` | Everything after this line is the test code. |
+| `#@ typed`, `#@ untyped`, `#@ end` | A variant block, in the code or the test. An `#@ ns` line inside one belongs to that variant only. |
 
 `@ID@` is always available and is unique per instance across the package, so every function
 name must end in `@ID@` (or contain it). Top-level `name <- function` and `name <- R6::R6Class`

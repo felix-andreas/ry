@@ -107,9 +107,13 @@ def load_templates(directory, domain):
 
 
 def parse_template(name, domain, text):
-    weight, params, ns, code, test, in_test = 1, [], [], [], [], False
+    weight, params, ns, code, test, in_test, branch = 1, [], [], [], [], False, None
     for line in text.splitlines():
-        if line.startswith("#@"):
+        marker = VARIANT.match(line)
+        if marker:
+            branch = None if marker.group(1) == "end" else marker.group(1)
+            (test if in_test else code).append(line)
+        elif line.startswith("#@"):
             fields = line[2:].strip().split(None, 1)
             key, rest = fields[0], fields[1] if len(fields) > 1 else ""
             if key == "test":
@@ -119,7 +123,8 @@ def parse_template(name, domain, text):
             elif key == "param":
                 params.append(parse_param(rest))
             elif key == "ns":
-                ns.append(rest)
+                # A NAMESPACE line inside a variant block belongs to that variant only.
+                ns.append((branch, rest))
             else:
                 raise SystemExit(f"{domain}/{name}: unknown header `{key}`")
         else:
@@ -128,6 +133,23 @@ def parse_template(name, domain, text):
 
 
 ANNOTATION = re.compile(r"^[ \t]*#:.*\n", flags=re.M)
+VARIANT = re.compile(r"^[ \t]*#@ (typed|untyped|end)[ \t]*$")
+
+
+def variant(text, typed):
+    """The text between `#@ typed` and `#@ untyped` (or `#@ end`) is the typed run's, and the text
+    between `#@ untyped` and `#@ end` the untyped run's. ry's records, tuples and tags have no
+    erasure to plain R, so code that uses them carries its plain-R spelling beside it."""
+    kept, branch = [], None
+    for line in text.split("\n"):
+        marker = VARIANT.match(line)
+        if marker:
+            branch = None if marker.group(1) == "end" else marker.group(1)
+        elif branch is None or (branch == "typed") == typed:
+            kept.append(line)
+    if branch is not None:
+        raise SystemExit(f"a `#@ {branch}` block has no `#@ end`")
+    return "\n".join(kept)
 
 
 def parse_param(spec):
@@ -171,15 +193,15 @@ def generate_package(args, domain, domain_templates, shared_templates):
             identifier = f"{counter:05d}"
             values = dict(draw(rng, param) for param in template.params)
             values["ID"] = identifier
-            code = fill(template.code, values)
+            code = fill(variant(template.code, args.typed), values)
             code_parts.append(code)
-            test_parts.append(fill(template.test, values))
-            namespace.update(fill(line, values) for line in template.ns)
+            test_parts.append(fill(variant(template.test, args.typed), values))
+            namespace.update(fill(line, values) for branch, line in template.ns if branch is None or (branch == "typed") == args.typed)
             exports.extend(exported_names(code))
-            used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", code + template.test))
+            used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", code + variant(template.test, args.typed)))
             # Counting the same text in both runs makes `--typed` generate the same program as an
             # untyped run with the same seed, so the two can be timed against each other.
-            lines += ANNOTATION.sub("", code).count("\n") + 1
+            lines += ANNOTATION.sub("", fill(variant(template.code, False), values)).count("\n") + 1
             label = label or template.name
         stem = f"{label.replace('_', '-')}-{index:04d}"
         write(os.path.join(root, "R", f"{stem}.R"), f"# {package}: {label}\n\n" + "\n".join(code_parts))

@@ -3,14 +3,22 @@
 #@ param YEARS int 2 30
 #@ param FREQ choice 1|2|4
 # Fixed-rate bond analytics for instrument @ID@.
+#@ typed
+type Cashflows_@ID@ = Record{time: double[], flow: double[]}
+#@ untyped
 type Cashflows_@ID@ = list{time: double[], flow: double[]}
+#@ end
 
 bond_cashflows_@ID@ <- function(face: double = 100, coupon: double = @COUPON@, years: integer = @YEARS@L, freq: integer = @FREQ@L) -> Cashflows_@ID@ {
   periods <- years * freq
   times <- seq_len(periods) / freq
   flows <- rep(face * coupon / freq, periods)
   flows[[periods]] <- flows[[periods]] + face
+#@ typed
+  @Cashflows_@ID@((time = times, flow = flows))
+#@ untyped
   @Cashflows_@ID@(list(time = times, flow = flows))
+#@ end
 }
 
 bond_price_@ID@ <- function(yield: double, flows: Cashflows_@ID@ = bond_cashflows_@ID@(), freq: integer = @FREQ@L) -> double {

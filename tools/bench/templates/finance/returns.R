@@ -17,8 +17,13 @@ compute_returns_@ID@ <- function(prices: xts) -> xts {
   returns[-1, ]
 }
 
+#@ typed
+performance_table_@ID@ <- function(returns: xts) -> Record{annualised: data.frame, drawdown: matrix | double, sharpe: matrix} {
+  (
+#@ untyped
 performance_table_@ID@ <- function(returns: xts) -> list{annualised: data.frame, drawdown: matrix | double, sharpe: matrix} {
   list(
+#@ end
     annualised = PerformanceAnalytics::table.AnnualizedReturns(returns, scale = 252),
     drawdown = PerformanceAnalytics::maxDrawdown(returns),
     sharpe = PerformanceAnalytics::SharpeRatio.annualized(returns, scale = 252)

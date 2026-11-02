@@ -2,6 +2,23 @@
 #@ param LIMIT int 5 90
 #@ param RETRIES int 1 6
 # Validated settings object for component @ID@.
+#@ typed
+type Settings@ID@ = Record{limit: integer, retries: integer, label: character}
+
+settings_@ID@ <- function(limit: integer = @LIMIT@L, retries: integer = @RETRIES@L, label: character = "component-@ID@") -> Settings@ID@ {
+  if (limit < 1L || retries < 1L) {
+    rlang::abort("limit and retries must be positive counts", class = "settings_error")
+  }
+  @Settings@ID@((limit = limit, retries = retries, label = label))
+}
+
+settings_summary_@ID@ <- function(settings: Settings@ID@) -> character {
+  paste0(
+    snakecase::to_snake_case(settings$label), ":",
+    settings$limit, "/", settings$retries
+  )
+}
+#@ untyped
 alias SettingsObject@ID@ = list{values: list[named: Any], get: fn(name: character) -> Any, set: fn(name: character, value: Any) -> Any}
 
 Settings@ID@: list{new: fn(...: Any) -> SettingsObject@ID@} <- R6::R6Class( # ry: allow(object-system)
@@ -53,7 +70,23 @@ settings_summary_@ID@ <- function(settings: SettingsObject@ID@) -> character {
     settings$get("limit"), "/", settings$get("retries")
   )
 }
+#@ end
 #@ test
+#@ typed
+test_that("settings @ID@ validate and summarise", {
+  settings <- settings_@ID@(limit = 3L)
+  expect_equal(settings$limit, 3L)
+  expect_equal(settings_summary_@ID@(settings), "component_@ID@:3/@RETRIES@")
+  expect_error({
+    settings_@ID@(limit = -1L)
+    NULL
+  }, class = "settings_error")
+  changed <- settings
+  changed$limit <- 5L
+  expect_equal(settings$limit, 3L)
+  expect_equal(changed$limit, 5L)
+})
+#@ untyped
 test_that("settings @ID@ validate and summarise", {
   settings: SettingsObject@ID@ <- Settings@ID@$new(limit = 3L)
   expect_equal(settings$get("limit"), 3L)
@@ -62,3 +95,4 @@ test_that("settings @ID@ validate and summarise", {
   expect_error(settings$set("limit", -1))
   expect_error(settings$get("missing"), class = "settings_error")
 })
+#@ end

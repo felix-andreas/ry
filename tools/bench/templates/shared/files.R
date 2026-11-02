@@ -1,7 +1,11 @@
 #@ weight 3
 #@ param ROWS int 3 25
 # Tabular files in three formats, written to and read back from a scratch directory.
+#@ typed
+write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@) -> Record{csv: character, xlsx: character, txt: character, table: data.frame} {
+#@ untyped
 write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@) -> list{csv: character, xlsx: character, txt: character, table: data.frame} {
+#@ end
   fs::dir_create(directory)
   table: data.frame <- data.frame(
     id = seq_len(rows),
@@ -17,11 +21,20 @@ write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@) -> l
   labels: character[] <- table$name
   amounts: double[] <- table$value
   brio::write_lines(paste(labels, amounts), txt)
+#@ typed
+  (csv = csv, xlsx = xlsx, txt = txt, table = table)
+#@ untyped
   list(csv = csv, xlsx = xlsx, txt = txt, table = table)
+#@ end
 }
 
+#@ typed
+read_tables_@ID@ <- function(paths: Record{csv: character, xlsx: character, txt: character, table: data.frame}) -> Record{csv: data.frame, xlsx: data.frame, txt: character[]} {
+  (
+#@ untyped
 read_tables_@ID@ <- function(paths: list{csv: character, xlsx: character, txt: character, table: data.frame}) -> list{csv: data.frame, xlsx: data.frame, txt: character[]} {
   list(
+#@ end
     csv = readr::read_csv(paths$csv, show_col_types = FALSE),
     xlsx = readxl::read_excel(paths$xlsx),
     txt = brio::read_lines(paths$txt)

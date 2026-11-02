@@ -14,7 +14,11 @@ flaky_@ID@ <- function(fail_times: integer) -> fn() -> character {
   }
 }
 
+#@ typed
+with_retry_@ID@ <- function<T>(fn: fn() -> T, attempts: integer = @ATTEMPTS@L) -> Record{value: T, failures: character[]} {
+#@ untyped
 with_retry_@ID@ <- function<T>(fn: fn() -> T, attempts: integer = @ATTEMPTS@L) -> list{value: T, failures: character[]} {
+#@ end
   failures <- character()
   for (attempt in seq_len(attempts)) {
     result: Any <- tryCatch(
@@ -24,7 +28,11 @@ with_retry_@ID@ <- function<T>(fn: fn() -> T, attempts: integer = @ATTEMPTS@L) -
         NULL
       }
     )
+#@ typed
+    if (!is.null(result)) return((value = result, failures = failures))
+#@ untyped
     if (!is.null(result)) return(list(value = result, failures = failures))
+#@ end
   }
   rlang::abort("retries exhausted", class = "retry_error", failures = failures)
 }
@@ -38,10 +46,17 @@ logged_@ID@ <- function<T>(expr: T) -> T | character {
 }
 #@ test
 test_that("retry @ID@ recovers or gives up", {
+#@ typed
+  result: Record{value: character, failures: character[]} <- with_retry_@ID@(flaky_@ID@(1L))
+#@ untyped
   result: list{value: character, failures: character[]} <- with_retry_@ID@(flaky_@ID@(1L))
+#@ end
   expect_equal(result$value, "ok after 2")
   expect_equal(result$failures, "failure 1")
-  expect_error(with_retry_@ID@(flaky_@ID@(@ATTEMPTS@L)), class = "retry_error")
+  expect_error({
+    with_retry_@ID@(flaky_@ID@(@ATTEMPTS@L))
+    NULL
+  }, class = "retry_error")
   suppressMessages(suppressWarnings(
     expect_s3_class(logged_@ID@(stop("broken")), "logged_failure")
   ))

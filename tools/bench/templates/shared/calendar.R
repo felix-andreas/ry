@@ -9,15 +9,28 @@ business_days_@ID@ <- function(start: Date, days: integer = @DAYS@L) -> Date {
   business
 }
 
+#@ typed
+span_summary_@ID@ <- function(dates: Date) -> Record{first: Date, last: Date, months: double[], quarters: double[]} {
+#@ untyped
 span_summary_@ID@ <- function(dates: Date) -> list{first: Date, last: Date, months: double[], quarters: double[]} {
+#@ end
   bounds: Date <- range(dates)
   c(first, last) %<-% bounds
+#@ typed
+  (
+    first = first,
+    last = last,
+    months = lubridate::interval(first, last) %/% months(1),
+    quarters = unique(lubridate::quarter(dates, with_year = TRUE))
+  )
+#@ untyped
   list(
     first = first,
     last = last,
     months = lubridate::interval(first, last) %/% months(1),
     quarters = unique(lubridate::quarter(dates, with_year = TRUE))
   )
+#@ end
 }
 
 month_ends_@ID@ <- function(year: double) -> Date {
