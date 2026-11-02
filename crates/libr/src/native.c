@@ -996,6 +996,8 @@ RY_EXPORT char *R_HomeDir(void)
 }
 
 extern void ry_run_exit_finalizers(void);
+extern void ry_remove_session_temp_dir(void);
+void R_CleanTempDir(void);
 
 RY_EXPORT void R_Suicide(const char *message)
 {
@@ -1012,6 +1014,7 @@ RY_EXPORT void R_CleanUp(RySaveAction save, int status, int run_last)
     if (ptr_R_CleanUp != NULL)
         ptr_R_CleanUp(save, status, run_last);
     ry_run_exit_finalizers();
+    R_CleanTempDir();
     exit(status);
 }
 
@@ -1028,7 +1031,7 @@ RY_EXPORT int R_EditFiles(int nfile, const char **file, const char **title, cons
 
 RY_EXPORT void R_CleanTempDir(void)
 {
-    /* The runtime removes its session directory itself at exit. */
+    ry_remove_session_temp_dir();
 }
 
 RY_EXPORT void R_SaveGlobalEnv(void) {}

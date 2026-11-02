@@ -601,8 +601,16 @@ struct Loop {
     step: u32,
 }
 
-/// Compiles a closure body, or reports that it is better left to the AST evaluator.
+/// Compiles a closure body, or reports that it is better left to the AST evaluator. The
+/// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
 unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
+    let threshold = crate::heap().swap_report_threshold(usize::MAX);
+    let compiled = compile_unreported(body, function);
+    crate::heap().swap_report_threshold(threshold);
+    compiled
+}
+
+unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {

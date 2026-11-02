@@ -50,8 +50,9 @@ hint @5: DataFrame{region: character[], units: integer[]}
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 x <- DataFrame.$0
 #++++
-hover 67..77: DataFrame.: Unknown
-definition: none
+hover 67..77: DataFrame.
+hover-definition: installed DataFrame. from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed DataFrame. from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -65,9 +66,9 @@ sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 u <- sales$un$0its
 #++++
 hover 73..78: units: integer[]
-definition: none
-references: none
-rename: none
+definition 43..48
+references: 43..48*, 73..78
+rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `u`
   edit 63..63 -> ": integer[]"
@@ -86,9 +87,9 @@ p <- make_point()
 v <- p$x$0
 #++++
 hover 25..26: x: double
-definition: none
-references: none
-rename: none
+definition R/a.R:26..27
+references: R/a.R:26..27*, R/b.R:25..26
+rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `v`
   edit 19..19 -> ": double"
@@ -169,8 +170,9 @@ hint @6: integer
 helper <- function(first, second = 2L) first
 helper(1L, se$0)
 #++++
-hover 56..58: se: Unknown
-definition: none
+hover 56..58: se
+hover-definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: <T, U> fn(first: T, second: U = 2L) -> T
@@ -188,8 +190,9 @@ hint @56second =
 #---- completion_stdlib_namespace
 x <- Str.$0
 #++++
-hover 5..9: Str.: Unknown
-definition: none
+hover 5..9: Str.
+hover-definition: installed Str. from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed Str. from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -306,3 +309,569 @@ action: Add inferred type annotations for the whole file
   edit 4..4 -> ": matrix"
 completion (17): grid, graphics.off, gray, gray.colors, grconvertX, grconvertY, gregexec, gregexpr
 hint @4: matrix
+
+#---- named_argument_navigates_to_its_parameter
+scale <- function(values, factor = 2) values * factor
+scale(c(1, 2), fac$0tor = 3)
+#++++
+hover 69..75: factor: double[] = 2
+definition 26..32
+references: 26..32*, 47..53, 69..75
+rename: 3 edit(s)
+signature: fn(values: double[], factor: double[] = 2) -> double[]
+parameters: values: double[] | [factor: double[] = 2]
+action: Add inferred type annotations for the whole file
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
+completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+
+#---- parameter_renames_its_named_arguments
+scale <- function(values, fac$0tor = 2) values * factor
+scale(c(1, 2), factor = 3)
+scale(factor = 4, values = 1)
+#++++
+hover 26..32: factor: T
+definition 26..32
+references: 26..32*, 47..53, 69..75, 87..93
+rename: 4 edit(s)
+signature: none
+action: Add inferred type annotation for `scale`
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
+action: Add inferred type annotations for the whole file
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
+completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+
+#---- named_argument_in_another_file_renames_with_its_parameter
+#~~~~ R/def.R
+scale <- function(values, factor = 2) values * factor
+#~~~~ R/use.R
+doubled <- scale(1, fac$0tor = 2)
+tripled <- scale(factor = 3, 1)
+#++++
+hover 20..26: factor: double = 2
+definition R/def.R:26..32
+references: R/def.R:26..32*, R/def.R:47..53, R/use.R:20..26, R/use.R:49..55
+rename: 4 edit(s)
+signature: fn(values: double, factor: double = 2) -> double
+parameters: values: double | [factor: double = 2]
+action: Add inferred type annotation for `doubled`
+  edit 7..7 -> ": double"
+action: Add inferred type annotations for the whole file
+  edit 7..7 -> ": double"
+  edit 39..39 -> ": double"
+completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @7: double
+hint @39: double
+
+#---- named_argument_of_a_local_function
+outer <- function() {
+  shift <- function(x, by) x + by
+  shift(1, b$0y = 2)
+}
+#++++
+hover 67..69: by: double
+definition 45..47
+references: 45..47*, 53..55, 67..69
+rename: 3 edit(s)
+signature: fn(x: double, by: double) -> double
+parameters: x: double | [by: double]
+action: Add inferred type annotation for `outer`
+  edit 19..19 -> " -> double"
+action: Add inferred type annotations for the whole file
+  edit 19..19 -> " -> double"
+completion (72): break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default, bartlett.test
+hint @5: fn() -> double
+hint @29: fn(x: T, by: T) -> T
+
+#---- named_argument_of_a_different_function_stays
+scale <- function(values, fac$0tor = 2) values * factor
+other <- function(factor) factor
+other(factor = 1)
+scale(1, factor = 2)
+#++++
+hover 26..32: factor: T
+definition 26..32
+references: 26..32*, 47..53, 114..120
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `scale`
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
+action: Add inferred type annotations for the whole file
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
+  edit 71..71 -> "<T>"
+  edit 78..78 -> ": T"
+  edit 79..79 -> " -> T"
+completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+hint @59: <T> fn(factor: T) -> T
+
+#---- named_argument_into_dots_widens_to_the_call
+wrap <- function(...) list(...)
+wrap(fi$0eld = 1)
+#++++
+hover 37..42: field: double
+definition: none
+references: none
+rename: none
+signature: fn(...: Any) -> list[named: Unknown]
+parameters: [...: Any]
+completion (47): fifo, file, file.access, file.append, file.choose, file.copy, file.create, file.edit
+
+#---- qualified_library_name_navigates_to_its_stub
+x <- base::past$0e("a", "b")
+#++++
+hover 5..16: paste: fn(
+hover 5..16:   ...: Any,
+hover 5..16:   [sep]: character,
+hover 5..16:   [collapse]: character | NULL,
+hover 5..16:   [recycle0]: logical,
+hover 5..16: ) -> character
+definition: stub source base at `paste`
+references: none
+rename: none
+signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+parameters: [...: Any] | [sep]: character | [collapse]: character | NULL | [recycle0]: logical
+action: Add inferred type annotation for `x`
+  edit 1..1 -> ": character"
+action: Add inferred type annotations for the whole file
+  edit 1..1 -> ": character"
+completion (13): paste, paste0, packageStartupMessage, pairlist, print.NativeRoutineList, duplicated.POSIXlt, suppressPackageStartupMessages, .deparseOpts
+hint @1: character
+
+#---- qualified_name_of_another_package_stays_put
+x <- utils::past$0e("a", "b")
+#++++
+hover 5..17: paste
+hover-definition: installed paste from utils
+definition: installed paste from utils
+references: none
+rename: none
+signature: none
+completion (6): package.skeleton, packageDescription, packageStatus, getParseData, getParseText, make.packages.html
+
+#---- abbreviated_argument_is_not_followed
+grow <- function(principal, rate) principal * (1 + rate)
+grow(100, ra$0 = 0.05)
+#++++
+hover 67..69: ra: double
+definition: none
+references: none
+rename: none
+signature: fn(principal: double, rate: double) -> double
+parameters: principal: double | [rate: double]
+action: Add inferred type annotations for the whole file
+  edit 16..16 -> "<T: numeric, U: numeric>"
+  edit 26..26 -> ": T"
+  edit 32..32 -> ": U"
+  edit 33..33 -> " -> double"
+completion (15): rainbow, randu, range, range.Date, range.default, range.POSIXct, rank, rapply
+hint @4: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double
+
+#---- field_list_literal
+config <- list(host = "localhost", port = 8080L)
+config$po$0rt
+#++++
+hover 56..60: port: integer
+definition 35..39
+references: 35..39*, 56..60
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 6..6 -> ": list{host: character, port: integer}"
+completion (1): port
+hint @6: list{host: character, port: integer}
+
+#---- field_element_declares_itself
+config <- list(host = "localhost", po$0rt = 8080L)
+x <- config$port
+other <- list(port = 80L)
+y <- other$port
+#++++
+hover 35..39: port: integer
+definition 35..39
+references: 35..39*, 61..65
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `config`
+  edit 6..6 -> ": list{host: character, port: integer}"
+action: Add inferred type annotations for the whole file
+  edit 6..6 -> ": list{host: character, port: integer}"
+  edit 50..50 -> ": integer"
+  edit 71..71 -> ": list{port: integer}"
+  edit 93..93 -> ": integer"
+completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
+hint @6: list{host: character, port: integer}
+hint @50: integer
+hint @71: list{port: integer}
+hint @93: integer
+
+#---- field_function_return
+make_config <- function() {
+  list(host = "localhost", port = 8080L)
+}
+config <- make_config()
+config$ho$0st
+#++++
+hover 102..106: host: character
+definition 35..39
+references: 35..39*, 102..106
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 25..25 -> " -> list{host: character, port: integer}"
+  edit 77..77 -> ": list{host: character, port: integer}"
+completion (1): host
+hint @11: fn() -> list{host: character, port: integer}
+hint @77: list{host: character, port: integer}
+
+#---- field_if_branches
+make <- function(flag) {
+  if (flag) list(size = 1L) else list(size = 2L)
+}
+make(TRUE)$si$0ze
+#++++
+hover 87..91: size: integer
+definition 42..46
+definition 63..67
+references: 42..46*, 63..67*, 87..91
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 21..21 -> ": logical"
+  edit 22..22 -> " -> list{size: integer}"
+completion (1): size
+hint @4: fn(flag: logical) -> list{size: integer}
+
+#---- field_write
+state <- list()
+state$count <- 0L
+state$cou$0nt + 1L
+#++++
+hover 40..45: count: integer
+definition 22..27
+references: 22..27*, 40..45
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": list{}"
+completion (1): count
+hint @5: list{}
+
+#---- field_r6_self
+Counter <- R6::R6Class("Counter",
+  public = list(
+    count = 0L,
+    add = function(n = 1L) {
+      self$cou$0nt <- self$count + n
+      invisible(self)
+    }
+  )
+)
+#++++
+hover 107..112: count: Unknown
+definition 107..112
+references: 107..112*, 121..126
+rename: 2 edit(s)
+signature: none
+completion (1): count
+
+#---- field_r6_private
+Account <- R6::R6Class("Account",
+  public = list(
+    deposit = function(amount) {
+      private$bal$0ance <- private$balance + amount
+    }
+  ),
+  private = list(balance = 0)
+)
+#++++
+hover 98..105: balance: Unknown
+definition 98..105
+references: 98..105*, 117..124
+rename: 2 edit(s)
+signature: none
+completion (1): balance
+
+#---- field_r6_new
+Counter <- R6::R6Class("Counter",
+  public = list(
+    count = 0L,
+    add = function() invisible(self)
+  )
+)
+counter <- Counter$new()
+counter$ad$0d()
+#++++
+hover 143..146: add: Unknown
+definition 71..74
+references: 71..74*, 143..146
+rename: 2 edit(s)
+signature: none
+completion (1): add
+
+#---- field_r6_inherit
+Base <- R6::R6Class("Base", public = list(greet = function() "hi"))
+Child <- R6::R6Class("Child",
+  inherit = Base,
+  public = list(run = function() self$gre$0et())
+)
+#++++
+hover 154..159: greet: Unknown
+definition 42..47
+references: 42..47*, 154..159
+rename: 2 edit(s)
+signature: none
+completion (1): greet
+
+#---- field_record
+point <- (x = 1, y = 2)
+point$$0x
+#++++
+hover 30..31: x: double
+definition 10..11
+references: 10..11*, 30..31
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": Record{x: double, y: double}"
+completion (2): x, y
+hint @5: Record{x: double, y: double}
+
+#---- field_parameter_fallback
+total <- function(order) order$amo$0unt
+order <- list(amount = 3L)
+#++++
+hover 31..37: amount: Unknown
+definition 52..58
+references: 31..37, 52..58*
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 43..43 -> ": list{amount: integer}"
+completion (1): amount
+hint @43: list{amount: integer}
+
+#---- field_library_producer
+result <- optim(c(1, 2), function(p) sum(p^2))
+result$p$0ar
+#++++
+hover 54..57: par: Unknown
+hover-definition: package stats (1 declaration(s), declared in stub source stats at `optim`)
+definition: stub source stats at `optim`
+references: none
+rename: none
+signature: none
+completion (1): par
+
+#---- field_namespaced_producer
+fit <- stats::uniroot(function(x) x - 1, c(0, 2))$ro$0ot
+#++++
+hover 50..54: root: double
+definition: stub source stats at `uniroot`
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `fit`
+  edit 3..3 -> ": double"
+action: Add inferred type annotations for the whole file
+  edit 3..3 -> ": double"
+completion (1): root
+hint @3: double
+hint @41interval =
+
+#---- field_write_hover
+config <- list()
+config$po$0rt <- 8080L
+#++++
+hover 24..28: port: integer
+definition 24..28
+references: 24..28*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 6..6 -> ": list{}"
+completion (1): port
+hint @6: list{}
+
+#---- field_method_argument
+Counter <- R6::R6Class("Counter", public = list(
+  copy = function(deep = FALSE) deep
+))
+counter <- Counter$new()
+counter$copy(de$0ep = TRUE)
+#++++
+hover 127..131: deep: logical
+definition 67..71
+references: 67..71*, 81..85, 127..131
+rename: 3 edit(s)
+signature: none
+completion (53): de, de.ncols, de.restore, de.setup, debug, debugcall, debugger, debuggingState
+
+#---- block_function_argument
+encapsulate <- function(expr) eval(substitute(expr), globalenv())
+encapsulate({
+  helper <- function(x, envir = NULL) x
+})
+f <- function(y) helper(y, env$0ir = NULL)
+#++++
+hover 150..155: [envir]: NULL
+definition 104..109
+references: 104..109*, 150..155
+rename: 2 edit(s)
+signature: fn(x: T, [envir]: NULL) -> T
+parameters: x: T | [[envir]: NULL]
+action: Add inferred type annotation for `f`
+  edit 136..136 -> "<T>"
+  edit 138..138 -> ": T"
+  edit 139..139 -> " -> T"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
+  edit 136..136 -> "<T>"
+  edit 138..138 -> ": T"
+  edit 139..139 -> " -> T"
+completion (63): env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv, new.env
+hint @11: <T> fn([expr]: T) -> Any
+hint @35expr =
+hint @53envir =
+hint @88: fn(x: T, [envir]: U) -> T
+hint @124: <T> fn(y: T) -> T
+
+#---- field_forwarded_through_dots
+new_rate <- function(.subclass, ..., jitter = TRUE) {
+  structure(list(..., jitter = jitter), class = .subclass)
+}
+rate_delay <- function(pause = 1) new_rate("delay", pause = pause)
+rate_sleep <- function(rate) rate$pa$0use
+#++++
+hover 216..221: pause: Unknown
+definition 167..172
+references: 167..172*, 216..221
+rename: none
+signature: none
+completion (1): pause
+
+#---- field_rename_closes_over_branches
+x <- if (runif(1) > 0.5) list(a$0 = 1) else list(a = 2)
+x$a
+#++++
+hover 30..31: a: double
+definition 30..31
+references: 30..31*, 47..48*, 56..57
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `x`
+  edit 1..1 -> ": list{a: double}"
+action: Add inferred type annotations for the whole file
+  edit 1..1 -> ": list{a: double}"
+completion (128+): abbreviate, ability.cov, abline, abs, acf, acf2AR, acos, acosh
+hint @1: list{a: double}
+
+#---- field_rename_refuses_untraced_read
+cfg <- list(po$0rt = 1)
+f <- function(p) p$port
+f(cfg)
+cfg$port
+#++++
+hover 12..16: port: double
+definition 12..16
+references: 12..16*, 57..61
+rename: none
+signature: none
+action: Add inferred type annotation for `cfg`
+  edit 3..3 -> ": list{port: double}"
+action: Add inferred type annotations for the whole file
+  edit 3..3 -> ": list{port: double}"
+completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
+hint @3: list{port: double}
+
+#---- field_constructor_parameter
+df <- data.frame(x = 1, stringsAsFac$0tors = FALSE)
+#++++
+hover 24..40: [stringsAsFactors]: logical
+definition: stub source base at `data.frame`
+references: none
+rename: none
+type-definition: stub source base at `data.frame`
+signature: fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.names]: logical, [fix.empty.names]: logical, [stringsAsFactors]: logical) -> data.frame
+parameters: ...: Any | [row.names]: Any | [check.rows]: logical | [check.names]: logical | [fix.empty.names]: logical | [[stringsAsFactors]: logical]
+action: Add inferred type annotation for `df`
+  edit 2..2 -> ": data.frame"
+action: Add inferred type annotations for the whole file
+  edit 2..2 -> ": data.frame"
+completion (1): default.stringsAsFactors
+hint @2: data.frame
+
+#---- field_self_reassigned
+f <- function() {
+  s <- list(k = 1)
+  s <- structure(s, class = "c1")
+  s <- structure(s, class = "c2")
+  s <- structure(s, class = "c3")
+  s <- structure(s, class = "c4")
+  s <- structure(s, class = "c5")
+  s <- structure(s, class = "c6")
+  s <- structure(s, class = "c7")
+  s <- structure(s, class = "c8")
+  s <- structure(s, class = "c9")
+  s <- structure(s, class = "c10")
+  s <- structure(s, class = "c11")
+  s <- structure(s, class = "c12")
+  s <- structure(s, class = "c13")
+  s <- structure(s, class = "c14")
+  s <- structure(s, class = "c15")
+  s <- structure(s, class = "c16")
+  s <- structure(s, class = "c17")
+  s <- structure(s, class = "c18")
+  s <- structure(s, class = "c19")
+  s <- structure(s, class = "c20")
+  s$$0k
+}
+#++++
+hover 732..733: k: double
+definition 30..31
+references: 30..31*, 732..733
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 15..15 -> " -> double"
+action: Add inferred type annotations for the whole file
+  edit 15..15 -> " -> double"
+completion (1): k
+hint @1: fn() -> double
+hint @21: list{k: double}
+hint @40: list{k: double}
+hint @74: list{k: double}
+hint @108: list{k: double}
+hint @142: list{k: double}
+hint @176: list{k: double}
+hint @210: list{k: double}
+hint @244: list{k: double}
+hint @278: list{k: double}
+hint @312: list{k: double}
+hint @346: list{k: double}
+hint @381: list{k: double}
+hint @416: list{k: double}
+hint @451: list{k: double}
+hint @486: list{k: double}
+hint @521: list{k: double}
+hint @556: list{k: double}
+hint @591: list{k: double}
+hint @626: list{k: double}
+hint @661: list{k: double}
+hint @696: list{k: double}

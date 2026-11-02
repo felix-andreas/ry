@@ -9,6 +9,7 @@ use {
     console::style,
     ide::{InferredAnnotation, TextEdit, inferred_annotations},
     ignore::gitignore::{Gitignore, GitignoreBuilder},
+    loader::SourceEncoding,
     miette::{
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
@@ -549,7 +550,8 @@ fn analyze_project_with(
 
     let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
-    for (path, read) in read_sources(paths) {
+    let encoding = SourceEncoding::of(description_source.as_deref().unwrap_or_default());
+    for (path, read) in read_sources(paths, encoding) {
         let (source, document) = match read {
             Ok(read) => read,
             Err(err) => {
@@ -936,8 +938,12 @@ fn analyzed_files(
 }
 
 /// Reads every source across cores, in `paths` order. A cold check reads a thousand files
-/// before anything else can start, so a serial read is a visible slice of its wall time.
-fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<(String, Option<String>)>)> {
+/// before anything else can start, so a serial read is a visible slice of its wall time. Each
+/// file is decoded in `encoding`, the package's declared one, as R reads its code.
+fn read_sources(
+    paths: Vec<PathBuf>,
+    encoding: SourceEncoding,
+) -> Vec<(PathBuf, io::Result<(String, Option<String>)>)> {
     let workers = thread::available_parallelism()
         .map_or(1, usize::from)
         .min(paths.len())
@@ -951,7 +957,7 @@ fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<(String, Option
                     chunk
                         .iter()
                         .map(|path| {
-                            fs::read_to_string(path).map(|text| {
+                            read_encoded(path, encoding).map(|text| {
                                 if is_literate_path(path) {
                                     (r_source_of_literate(&text), Some(text))
                                 } else {
@@ -969,6 +975,16 @@ fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<(String, Option
             .collect()
     });
     paths.into_iter().zip(read).collect()
+}
+
+fn read_encoded(path: &Path, encoding: SourceEncoding) -> io::Result<String> {
+    encoding.decode(fs::read(path)?).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the file is not valid UTF-8; a package whose code is latin1 declares \
+             `Encoding: latin1` in DESCRIPTION",
+        )
+    })
 }
 
 /// Runs `work` for every index in `order` across `workers` threads.
