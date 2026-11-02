@@ -35,7 +35,8 @@ The quality bar is four things.
 
 - **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings took 1.1 s against GNU R's 0.46 s (one thread); re-measure.
 - **Grouping:** `order` on two keys runs at 0.88 of GNU R's time at 1e6 rows. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
-- **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes about 1.3 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s, so code layout is the lever here: profile-guided optimization or BOLT on the release binary, and keeping cold paths out of `execute_code` and the call path. The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
+- **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes 1.4 to 1.5 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s. They are spread thinly (`execute_code` about 460 per period, then `run_closure`, `native_call`, `bind_arguments`, `match_args` and `mk_char` at 120 to 190 each), so outlining cold arms of `step` alone has little room; the open lever is function ordering and keeping cold paths out of the whole call path. Profile-guided optimization made things worse (`decisions.md`, "PGO is not used for the release build"), and BOLT is not installed in the cloud environment. Closure-call overhead is a broader target than this one case: a closure call costs 0.75 µs against GNU R's 0.35 µs, `vapply` 8.2 µs against 3.4 and `pmin` 15.7 µs against 6.2, and this per-call cost is why ggplot2, lattice and PerformanceAnalytics take 1.2 to 1.9x GNU R's time to render. The aim is a closure call at or below GNU R, measured with `oracle gallery` (149 timed figures) beside period.apply. Two more levers are queued: the `frame_cell` lookups in the fill loop of the finance benchmark's `ledger` template (`tools/bench/templates/finance/ledger.R`, cost not yet measured in isolation), and the S4 metadata-cache-miss path (`slot<-`, `list()`, `possibleExtends`; see the start-up item in `MEMORY.md`). The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
+- **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows: `rollmean`, `rollapply`, `na.locf`, `endpoints`, `to.period`, `str_detect`, `str_replace_all` and `read_csv` are at or below GNU R. Still slower: `str_split` 1.54x, xts `period.apply` 1.39x (per-call interpreter cost, tier-0 work), `ymd` 1.29x, `fromJSON` 1.26x and `toJSON` 1.20x. `str_split` executes only 1.14x GNU R's instructions, so the rest of its gap is memory traffic in `allocVector` and `mkCharLenCE` (the heap's allocation path and string table). The jsonlite simplify step and lubridate's format training are R-level interpreter cost. At 1e6 rows these ratios swing by 30% between runs.
 - **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.1 times GNU R's for `paste0` (1.07), `format` (1.10), `sprintf`, `formatC` and most kernels, and kernels that allocate little sit about 4 MB above GNU R (`decisions.md`, "Start-up memory: release relocation tables and preflight code pages"). Still above 1.15:
   - `paste(collapse =)` 1.37, `xts period.apply` 1.36, `order(chr)` 1.26, `gsub(perl = TRUE)` 1.20, `sort`/`order` on doubles 1.18 to 1.19, `unsplit` 1.18, `merge` and `as.character(double)` 1.17.
   - Base `order` on two keys is at 1.07 (157 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
@@ -322,6 +323,11 @@ type-level function the annotation language does not have.
 - A call that fails against a generic signature types its statement as the leaked rigid name, so
   `twice("a")` against `<T: numeric> fn(x: T) -> T` renders `T` in the typing fixtures. It should
   be `Unknown`.
+- Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
+  which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
+- httr2's argument-name definition role (about 90%) counts arguments collected into `...` and
+  passed on to a list or a form body (`req_body_form(req, scope = scope)`), which have no
+  definition site; the role should leave them out rather than count them as misses.
 - The add-annotation code action writes a `#:` comment even in a project that uses inline
   annotations. It could offer the inline form where inline annotations are on.
 - Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
@@ -907,24 +913,20 @@ wants the generated arms shrunk across the board. This one measures per-arm cost
 and `format` grown, at 0.19 to 0.31 ms per input, while `ide` and `semantics` shrink, at 257 to
 644 ms per input. Both conclude independently that `format::fuzz_random_bytes` should be deleted.
 
-### CI runs 171 of the workspace's 712 tests, and its second job runs none
+### The live CI runs 171 of the workspace's tests
 
-The root `Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow omits `--workspace`.
-`cargo test --all-targets --all-features -- --list` therefore reports 171 tests, all in `crates/ry`,
-against the workspace's 712. Every fuzz arm lives in another crate. The second job runs
-`-- --ignored`, which lists no tests for the same reason, so it is a full release build with
-`lto = true` followed by an empty test run, on every push, under a 45-minute timeout.
+The live workflow tests only `crates/ry` (`default-members`). Its staged replacement in
+`.github/pending/workflows/ci.yml` runs `just gate`'s recipes over the whole workspace and no
+ignored suite, so a human moving it into place closes this (`decisions.md`, "CI runs `just gate`
+against GNU R 4.3.3").
 
-### `ide::fuzz_deep` makes a workspace-wide CI run time out
+### `ide::fuzz_deep` cannot be shortened
 
 `ide::fuzz_deep` runs `iterations().max(5000)` sweeps. That `.max` floor means `FUZZ_ITERS` cannot
 lower it, which is the bug. Measured in release on that exact input shape, which is 1 to 12
-concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms. Five
-thousand sweeps is 55.4 minutes on 4 cores, against the job's 45-minute timeout on a 2-to-4 vCPU
-runner. That is before `semantics::fuzz_deep`, projected at about 4 minutes.
-
-Fix the floor and raise the timeout with measured headroom. Both come before the human moves
-`.github/pending-ci.yml` into place.
+concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms, so five
+thousand sweeps take 55.4 minutes on 4 cores. CI no longer runs ignored suites, so this blocks a
+future scheduled deep-fuzz job, not the CI move.
 
 ### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
 
@@ -1049,9 +1051,8 @@ An agent can land all of these today: completion sampling, the release profile i
 syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
 type-check guard, the `fuzz_deep` floor that unblocks the CI move, and the dead-arm cleanup.
 
-A human is required for three things: the `git mv` of `.github/pending-ci.yml`, which needs workflow
-scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
-corpus cache, and an OSS-Fuzz submission.
+A human is required for three things: moving the staged workflows in `.github/pending/` into place,
+which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.
 
 ## Open: robustness harnesses
 
@@ -1946,9 +1947,9 @@ tagging fences `r` for Zed if that proves distant.
   0.80 s even in the throttled container. And same-query blocking is negligible, at 53 blocks per
   5,657 executions, while the interface graph is wide, with ggplot2 at 1,198 items and depth 22, so
   no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
-- **CI gates only the product crate.** The widened whole-workspace workflow is staged in
-  `.github/pending-ci.yml`, and a human must `git mv` it into `.github/workflows/`, because an
-  automated token lacks workflow scope. Until then the workspace battery runs locally per change.
+- **CI gates only the product crate.** The whole-workspace workflow is staged in
+  `.github/pending/workflows/ci.yml`, and a human must move it into `.github/workflows/`, because
+  an automated token lacks workflow scope. Until then the workspace battery runs locally per change.
   Authoritative performance numbers need the CI runner.
 
 ## Open: website and docs
@@ -2250,10 +2251,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
     of i is -10" warning), froll misses the warnings of 6000.114 and 6000.115, nafill fails
     3.07, and `programming.Rraw` stops on "invalid type/length (symbol/0) in vector allocation".
-  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
-    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
-    group, order, runs, split, expand and slice-chop files also fail; run them with
-    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -2297,12 +2294,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
-- **Only long sequences are compact.** `1:n`, `n:1` and `seq_len(n)` of at least 2^20 elements are
-  libr's compact sequences (`sequence` in `crates/interp/src/arith.rs`; doubles past `INT_MAX`);
-  shorter ones are ordinary vectors, so `serialize(1:10)` writes plain `INTSXP` where GNU R
-  writes `ALTREP_SXP`, and `seq()` and `seq_along()` never return compact ones. Interpreter
-  paths expand a compact sequence on first read (once, kept in data2) rather than computing
-  elements, so subsetting `seq_len(2^31)` allocates 16 GB where GNU R reads elements.
+- **Indexing a compact sequence materializes it.** `1:n`, `n:1`, `seq_len` and `seq_along` of at
+  least 2^20 elements are compact ALTREP objects (`sequence` in `crates/interp/src/arith.rs`;
+  doubles past `INT_MAX`), but `x[i]` and `x[[i]]` on one expand the whole vector once, keeping
+  the expansion in data2, because subsetting does not call `Elt` or `Extract_subset` (the item
+  above). Subsetting `seq_len(2^31)` therefore allocates 16 GB where GNU R reads elements.
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
@@ -3034,6 +3030,8 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
 - Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
 - Joins without `on =` (key joins) and `x[]`.
+- `roll = "nearest"`: at a tie data.table takes the earlier row and Polars' as-of join the later one, so the bridge declines it. Accepting it needs a tie-break toward the earlier key.
+- `.EACHI` over a non-equi join, or with a `j` that reads a join column: data.table reports `i`'s bounds there, so these decline.
 - The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
 
 ## Open: findings from the records, library and frame round
@@ -3140,8 +3138,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
     callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
     build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
+  - Done: a cold check holds one parse tree per worker, skips the per-item syntax memos and the
+    editor-only check facts, and purges freed memory after 10 ms (`decisions.md`, "A cold check
+    holds one parse tree per worker"). Peak RSS is 298-306 MiB on the three benches, under the
+    300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
+    1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
   - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
-    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut.
+    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut. It is also
+    the next memory cut: salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
+  - `collect_used_tokens` slices every token through `token_ref` (about 318 M instructions on
+    finance); skipping trivia before slicing is a cheap CPU cut.
   - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
     and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k

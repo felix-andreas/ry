@@ -153,7 +153,7 @@ f <- function(x) {
 action Inline variable `a`
   f <- function(x) {
     b <- x + 2
-    (x + 1) + b
+    x + 1 + b
   }
 
 #---- return_is_refused

@@ -2106,7 +2106,7 @@ simplify <- function(x, reals = TRUE) Reduce(if (reals) merge_a else merge_b, la
 #++++
 merge_a: <T, U> fn(x: T, y: U) -> Unknown
 merge_b: <T, U> fn(x: T, y: U) -> Unknown
-simplify: <T, U> fn(x: T, [reals]: U) -> Unknown
+simplify: <T, U> fn(x: T, [reals]: U) -> list[Any]
 
 #---- a_fold_start_the_function_rejects_is_reported
 add <- function(count, value) count + 1L

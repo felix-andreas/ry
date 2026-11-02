@@ -1840,6 +1840,20 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
+**PGO is not used for the release build, because it measured slower.** An instrumented libR
+(`-Cprofile-generate` on the `interp`, `heap`, `libr` and `R` crates through a
+`RUSTC_WORKSPACE_WRAPPER`, so dependency fingerprints stay unchanged) was trained on every oracle
+case with the JIT off and on, and rebuilt with `-Cprofile-use`. On held-out scripts with the JIT
+off, best of three, it ran 1.4 to 1.9x slower than the plain release build: period.apply 2.10 s
+against 1.47 s, 300k `sd` calls 7.11 s against 4.44 s, row `apply` 1.28 s against 0.66 s, `fib(27)`
+0.55 s against 0.29 s, a 200k-record `lapply` 1.28 s against 0.79 s, and 50k S4 `new`/`slot<-` 13.9
+s against 8.7 s. The cause is unverified. The likeliest suspects are applying the profile only to
+the runtime crates under fat LTO, or a profile that went stale against the merged module, either of
+which leaves hot code optimized as cold. Retrying needs the profile applied to every crate linked
+into libR (cargo-pgo does this), a check for `-Wbackend-plugin` profile-mismatch warnings, and BOLT,
+which is not installed in the cloud environment. Until a retry measures a gain, the release workflow
+stays as it is.
+
 **S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
 calling frames to their top environment uncached, because function frames gain and lose bindings
 without moving any epoch. The rest of the walk (the top environment, the generic's registered
@@ -4216,6 +4230,8 @@ check` releases its trees once, and memoized records are compact" below).
     raises the capacity to one, touches every tree on one thread, calls
     `trigger_lru_eviction`, and lowers it again. The CLI calls it after the syntax pass and hands
     each file tree to the naming worker that names that file, which frees it.
+    Superseded: a cold check now holds one tree per worker and memoizes none ("A cold check
+    holds one parse tree per worker").
   - `AnalysisSettings` carries `[check] strict`, and `semantics::file_is_strict` decides a
     file's mode for the check (the loader's `load_index::file_is_strict` reads the package
     default). The checker records strict origins only when it is true.
@@ -4456,14 +4472,33 @@ check` releases its trees once, and memoized records are compact" below).
   ry's runtime is a second artifact (`libR.so`/`libR.dylib`) that links zlib, bzip2 and xz on
   Linux, which zig's glibc 2.17 sysroot does not carry, and macOS cross-linking has only
   libSystem stubs.
-- **Shape.** `.github/pending-release.yml` (moved into `.github/workflows/` by a maintainer)
-  builds each platform on its own runner with `just package VERSION`, smoke-tests the archive with
-  `tools/smoke-test.sh`, and publishes. `just package` is the one recipe CI and
-  `just release-dry-run` share, so a local dry run exercises the same packaging. An archive is
-  flat (`ry`, the runtime library, `LICENSE`), because `ry run` looks beside the executable first
-  and the Zed extension expects `ry` at the archive root; installers may move the library to
-  `../lib/ry/`, the other place ry looks. Windows archives carry `ry.exe` alone and use the MSVC
-  target, which native Windows runners build without MinGW.
+- **Shape.** `.github/workflows/release.yml` (staged in `.github/pending/workflows/` until a
+  maintainer moves it) builds each platform on its own runner with `just package VERSION`,
+  smoke-tests the archive with `tools/smoke-test.sh`, and publishes. `just package` is the one
+  recipe CI and `just release-dry-run` share, so a local dry run exercises the same packaging. An
+  archive is flat (`ry`, the runtime library, `ry-rcmd`, `LICENSE`), because `ry run` looks beside
+  the executable first, `ry load` finds `ry-rcmd` beside the runtime, and the Zed extension expects
+  `ry` at the archive root; installers may move the library to `../lib/ry/`, another place ry
+  looks.
+- **Targets.** Linux x86_64, macOS arm64 and Windows x86_64, the three the VS Code extension has
+  always bundled. Linux arm64 and Intel macOS were dropped for the first runtime release, because
+  their runtimes had never run anywhere; `ry.vsix` without a binary still serves them, and adding
+  a matrix row brings them back.
+- **Windows is `x86_64-pc-windows-gnullvm`, not MSVC.** The archive carries `ry.exe`, `R.dll` and
+  `ry-rcmd.exe`, built with MSYS2's clang64 toolchain, so all three link the UCRT as Rtools-built
+  package DLLs do and can share one C runtime with them. `just package` refuses a Windows binary
+  that imports a toolchain runtime the archive does not carry.
+- **The VS Code extension bundles the whole archive.** `just build-platform-vsix` copies every file
+  but `LICENSE` into `editors/code/bin`, so the bundled `ry` finds its runtime beside itself.
+- **Publishing.** The GitHub release uses the workflow's `GITHUB_TOKEN`. The extension goes to the
+  VS Code Marketplace only, by user decision; Positron and VSCodium users install the `.vsix` files
+  attached to the GitHub release, and there is no Open VSX step or token. The Marketplace step uses
+  trusted publishing (`vsce publish --oidc`, which needs vsce 4.1 and a policy on the publisher; packaging stays on the locked vsce 3.6, because 4.1 rejects bun's `node_modules` layout),
+  because the only token the Marketplace accepts is an Azure DevOps global PAT, and those are
+  retired on December 1, 2026. A `VSCE_PAT` secret, when set, is used instead, as a fallback.
+- **One version per release.** `just bump-version` sets the CLI to `X.Y.Z-beta` and both
+  extensions to `X.Y.Z`; the Zed extension's version used to be bumped by hand, which let it drift.
+  The news page is the release record, and the stale `CHANGELOG.md` was removed so there is one.
 - **Linux glibc floor.** Native builds on `ubuntu-22.04` need glibc 2.35, up from 2.17. Accepted
   for the beta; a manylinux-style container is the fix if users on older distributions ask.
 - **Nix.** The flake's toolchain comes from `rust-toolchain.toml` (rust-overlay's
@@ -6006,6 +6041,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`rmultinom` carries the remaining probability as a double-double.** GNU R uses a `long double`; in plain `f64` ten probabilities of 0.1 leave a conditional probability just above 0.5, `rbinom` then draws the complement, and the counts differ from GNU R's for the same seed. RcppArmadillo compares R's draws with its own (`crates/interp/src/distributions.rs`, `rmultinom`).
 - **`[` subsets a parsed expression's `srcref` list.** plumber locates each endpoint's comment block with `attr(exprs[i], "srcref")` (`crates/interp/src/subset.rs`, `subset`).
 - **`Rf_setAttrib(R_NilValue, name, R_NilValue)` succeeds.** GNU R checks for removal before it rejects a `NULL` target, and data.table's `C_unlock` runs on a `j` result that is often `NULL` (`crates/libr/src/attributes.rs`, `set_attrib`).
+- **Integer sequences of at least 2^20 elements are compact ALTREP objects** (`colon`, `seq_len`, `seq_along` in `crates/interp/src/arith.rs`, through the `compact_intseq` interpreter hook). GNU R compacts every `1:n`; ry keeps short ones ordinary because the evaluator reads them without an indirection, and only long ones matter for memory. vctrs' tests build `seq_len(2^31 - 1)` twice and ran out of memory when it was materialized.
 - **`row.names<-` stores a real compact form `c(NA, n)` as integers**, as GNU R's `row_names_gets` does. cpp11's `data_frame::nrow` reads only the integer form, and readr's chunked reader loops forever on the real one.
 - **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
 
@@ -6062,6 +6098,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** The join is `Ty::Num`: the value as an `f64` in the register's or slot's double variable and an "is integer" flag in its integer variable. An edge from `Int` or `Dbl` converts (an integer `NA` becomes the double `NA`), and boxing, write-back and deoptimization rebuild exactly the R value the flag names (`runtime::jit_box_num`, `call_flush`), so `typeof`, integer overflow and `NA` behave as in tier 0. Widening to a plain double instead would change `typeof` and integer arithmetic, which R code observes.
 - **Who reads it unboxed.** Only `Move`, `SetVar` and arithmetic whose result is a double whatever the flag says: a comparison, `/`, `^`, or `+ - *` with a double operand. `Builder::box_operands` retypes every other reader's `Num` operand as boxed and `Plan::boxings` tells code generation to box it first, so no other action ever sees a `Num`. An inlined body refuses a `Num` slot, and a direct call passes one boxed from its slot cell after the flush.
 - **Impact.** The mixed `match` loop runs compiled; correctness is pinned by `test_tiers` seeds that observe `typeof`, `NA` and integer arithmetic after the join, and the fuzzer's final statement can print the types.
+
+## data.table's own test suite is the bridge's acceptance test
+
+- **Previous shape.** The bridge and the base builtins under data.table were checked by the `datatable__*` oracle cases only, and `test.data.table()` stopped after test 471.3 under ry.
+- **Target shape.** `test.data.table()` passes in full (all 9021 tests, as under GNU R 4.3.3), so a change to the bridge, the C API or a base builtin that data.table reaches reruns it. The suite lives in the installed package (`tests/tests.Rraw.bz2`) and runs with `library(data.table); test.data.table()` under `ry run --runtime ry`; `crates/oracle/cases/datatable__suite_shapes.R` pins the shapes it caught.
+- **What the suite forced on the bridge.** It declines `roll = "nearest"` (Polars breaks ties toward the later row, data.table toward the earlier), `.EACHI` over a non-equi join or with a `j` that reads a join column (data.table reports `i`'s bounds there), a non-equi join whose join columns differ in type between `x` and `i` (data.table keeps `x`'s types), `:=` with `nomatch`, and a table with a `_nqgrp_` column. `.EACHI` is recognized while parsing the call (`frame::parse_parts`), so every check after it sees `each_i`. A rolling join answers exact matches with an equi-join filtered by `mult` and rolls only the rows of `i` that matched nothing (`table::query`), as data.table does.
+- **What it forced on the runtime.** A comparison of two plain scalars and `Rf_ScalarLogical` return the shared `TRUE`, `FALSE` and `NA` (they are marked not mutable, so assignment copies them), because data.table's `setattr` compares addresses against them. Outside a UTF-8 locale a non-ASCII string of unknown encoding compares unequal to a marked string with the same text, and `Rf_translateCharUTF8` writes its non-ASCII bytes as `<xx>`, as GNU R's conversion from the C locale does. `read.table(fill = TRUE)` pads a short record by converting empty fields, so character columns get `""`.
+- **Impact.** Correctness only: every new decline costs data.table's own speed on rare shapes, and the shared logicals save an allocation per scalar comparison.
 
 ## A hashed frame counts complex assignment's `*tmp*`
 
@@ -6309,6 +6353,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
 
+## CI runs `just gate` against GNU R 4.3.3, and nothing ignored
+
+- **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
+- **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R 4.3.3 is installed because the runtime's suites skip without an installation, which would leave the runtime untested; 4.3.3 is the oldest version the runtime supports and the one the suites are run against locally. The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
+- **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits.
+- **Impact.** CI covers every crate except `zed_ry` (wasm), at most once an hour on main, or on any ref when started by hand.
+
 ## Alias cycles are reported at the declaration, and short names get narrow suggestions
 
 - **Previous shape.** An alias cycle was found only when an annotation used the alias, and reported on that use with a whole-statement range; an unused cyclic alias was never reported. `nearest_name` returned nothing for a name under four characters, so `person$nam` got no suggestion.
@@ -6433,3 +6484,70 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
+
+## Completion pushes down names whose declared type cannot fit, and never promotes
+
+- **Before.** Completion ranked equally good matches by source and use counts only, so in
+  `if (is_|)` a helper declared `-> character` ranked beside one declared `-> logical`.
+- **Shape.** `expected_type` in `crates/ide/src/ide.rs` reads what the code around the cursor
+  wants: a logical for an `if`/`while` condition and an operand of `!`, `&&` or `||`, and for an
+  argument the parameter type its global or stub callee *declares*. It reads the declared
+  scheme, not the call's instance, because the instance took its parameter types from the
+  argument being typed (`print(i)` made the slot `integer` and pushed `iconv` down), and it
+  unions the parameter across every stub overload, because the argument picks the overload only
+  once it is written (`lapply`'s first overload takes a named list, which pushed `seq_along`
+  down). A candidate is compared by coarse value shape (`type_mismatch`), with R's
+  logical-to-integer-to-double widening allowed, and a known mismatch sorts after the fits within
+  the same match score and source group. Inferred function types are ignored on both sides,
+  since they say how a body ends, not what callers may pass.
+- **Rejected:** promoting candidates that fit. Project helpers with an inferred `logical` result
+  then outranked `is.na` and friends, and two characters on call heads lost 2 points on purrr and
+  1.3 on R6.
+- **Impact.** Neutral on httr2, purrr and R6 and +0.3 points on finbench at two characters,
+  with completion still about 2 ms median on the packages and 8 ms on finbench; the gain is in
+  annotated code, which the `completion_expected_type` fixtures pin.
+
+# Decision record: a cold check holds one parse tree per worker
+
+- **Previous source.** `ry check` memoized every file's tree in the syntax pass and then released
+  them all at once (`release_trees`, a serial LRU eviction of about 56 ms on finance). Per-item
+  `item_syntax` memos and the `file_item_annotations` memo pinned windows of those trees, the item
+  check stored editor-only per-expression facts nobody reads in a CLI run, and `sourced_definition`
+  interned a query key for every name read even in files that source nothing.
+- **Weakness.** Every tree was live at the end of the syntax pass (128 MiB of the heap), so the
+  peak was 383-407 MiB of RSS on the benchmark code bases. The release was serial work, and the
+  per-item memos and edges were bookkeeping a run that never edits cannot use.
+- **Target shape.**
+  - `semantics::with_held_tree` parses a file and parks the tree in a thread-local slot that
+    `parse` serves while the file's syntax-pass work runs, and the tree is freed when the worker
+    moves on. Any other read goes through the tracked `parse_memo`, which keeps that tree for the
+    run; a full cold check makes none, while partial cached runs, the cache planner and
+    `--annotate` do. `a_one_shot_cold_check_memoizes_no_tree` in `test_incremental.rs` pins it.
+  - On a one-shot host `item_syntax` and `item_annotation_syntax` compute their value without a
+    memo; on other hosts they go through `item_syntax_memo` and `item_annotation_syntax_memo`, the
+    firewalls `test_incremental.rs` pins.
+  - `file_item_annotations` stores detached subtrees (`syntax::Tree::detach`), so an annotation
+    memo never pins its file's tree on any host.
+  - `Db::editor_facts` (false on `RootDatabase::one_shot`) makes an item check leave the
+    editor-only facts (expression and pattern types, literal expectations, loop variables,
+    selected overloads, callee targets) empty. It is separate from `Db::one_shot` because
+    `ry migrate` is one-shot but its rewrites read expression types
+    (`RootDatabase::one_shot_with_editor_facts`, chosen by `cli::Purpose`). `match_findings`
+    reads types straight from the inference table, so exhaustiveness does not need them.
+  - `sourced_definition` returns early for a file that sources nothing; the tracked part is
+    `sourced_name_definition`.
+  - `item_frame_binders` is a `SortedMap` instead of a hash table, and `TypeScheme::binders` is a
+    `ThinVec`, because one of each lives per item for the whole run.
+  - mimalloc's purge delay is 10 ms instead of a second (`crates/ry/src/main.rs`), so the trees
+    freed during the run return to the OS before the peak, which is late in the check.
+- **Correctness.** JSON findings are byte-identical against main on all three benchmark code bases.
+- **Performance.** Interleaved runs against main (4 cores, `--no-cache --output json`): peak RSS
+  383-407 MiB to 304-306 MiB on finance, 374-390 to 305-306 on data science, 384-398 to 298-299 on
+  biostatistics; wall time about 1.35-1.6 s to 1.18-1.36 s on a busy machine. The heap peak under
+  the system allocator went from 305 to 261 MiB before the frame-binder and scheme cuts; what remains is real data (HIR kinds and
+  ranges about 54 MiB, salsa edges about 29 MiB, source text 14 MiB, the naming and check memos).
+  Instruction counts barely moved (23.4 G to 23.0 G), so the wall gain is less contention and less
+  serial work.
+- **Incremental.** The server path keeps every memo and firewall; only the tracked names changed
+  (`parse_memo`, `item_syntax_memo`, `item_annotation_syntax_memo`), and `test_incremental.rs`
+  pins the first two under those names.

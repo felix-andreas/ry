@@ -892,6 +892,15 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
     {
         return false;
     }
+    // Outside a UTF-8 locale, GNU R reads a non-ASCII string of unknown encoding as native bytes
+    // that do not translate to the text of a marked string.
+    let native_non_ascii =
+        |text: Sexp| !text.has_gp(gp::LATIN1) && !text.has_gp(gp::UTF8) && !text.bytes().is_ascii();
+    if (native_non_ascii(left) || native_non_ascii(right))
+        && !crate::platform::native_codeset().eq_ignore_ascii_case("UTF-8")
+    {
+        return false;
+    }
     char_str(left) == char_str(right)
 }
 
