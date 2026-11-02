@@ -120,7 +120,7 @@ it on a Mac.
 The Zed extension is not in Zed's registry yet, so install it as a dev extension:
 
 1. Install [rustup](https://rustup.rs), which Zed uses to compile dev extensions. The first build
-   downloads the nightly toolchain that the repository pins.
+   downloads the stable toolchain that `editors/zed/rust-toolchain.toml` pins.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 

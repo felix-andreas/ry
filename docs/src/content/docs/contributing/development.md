@@ -12,7 +12,9 @@ together. The editor extensions live in `editors/code` (VS Code) and `editors/ze
 The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
 API and other unstable features are worth having before they stabilize (the policy is in
 `.agents/memory/decisions.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
-downloads that toolchain, with clippy, rustfmt and the `wasm32-wasip2` target, on the first build.
+downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
+exception: `editors/zed/rust-toolchain.toml` pins a stable toolchain, because the nightly's
+`wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet.
 The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
 `rustfmt.toml`, so `cargo fmt` keeps a single `use { ... }` tree per file.
 
