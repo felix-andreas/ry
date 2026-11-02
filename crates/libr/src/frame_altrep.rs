@@ -146,6 +146,21 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
                         .map(Option::unwrap_or_default)
                         .collect();
                     RVector::Factor { codes, levels }
+                } else if is_date(vector)? {
+                    // R stores some dates as whole days in an integer vector, `seq()` of dates
+                    // among them, and they must not arrive as plain integers.
+                    RVector::Date(
+                        codes
+                            .into_iter()
+                            .map(|day| {
+                                if day == NA_INTEGER {
+                                    NA_REAL
+                                } else {
+                                    f64::from(day)
+                                }
+                            })
+                            .collect(),
+                    )
                 } else {
                     RVector::Integer(codes)
                 }
@@ -153,13 +168,7 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
             SexpType::Logical => RVector::Logical(read_slice::<i32>(vector, length)?.to_vec()),
             SexpType::Real => {
                 let values = read_slice::<f64>(vector, length)?.to_vec();
-                let class = get_attrib(vector, R_ClassSymbol.get())?;
-                let is_date = class.kind() == SexpType::String
-                    && read_strings(class)?
-                        .iter()
-                        .flatten()
-                        .any(|class| class == "Date");
-                if is_date {
+                if is_date(vector)? {
                     RVector::Date(values)
                 } else {
                     RVector::Double(values)
@@ -174,6 +183,18 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
             }
         };
         to_series(name, r_vector).map_err(table_error)
+    }
+}
+
+/// Whether `vector` has class `"Date"`.
+unsafe fn is_date(vector: Sexp) -> ApiResult<bool> {
+    unsafe {
+        let class = get_attrib(vector, R_ClassSymbol.get())?;
+        Ok(class.kind() == SexpType::String
+            && read_strings(class)?
+                .iter()
+                .flatten()
+                .any(|class| class == "Date"))
     }
 }
 

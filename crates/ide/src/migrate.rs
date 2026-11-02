@@ -1,13 +1,19 @@
 //! Rewrites common data.table code into DataFrame code. The editor offers each rewrite as a code
 //! action and `ry migrate data-table` applies them to whole files, so both read this one engine.
 //!
-//! A rewrite is offered only for a form whose DataFrame equivalent computes the same table, and
-//! every other form is left alone: a wrong rewrite would be worse than none. Two facts decide
+//! A rewrite is offered only for a form whose DataFrame equivalent computes the same table, up to
+//! the differences `guides/from-data-table.md` lists (DataFrame aggregations skip `NA`, and a sort
+//! puts `NA` last), and every other form is left alone: a wrong rewrite would be worse than none. Two facts decide
 //! whether a form qualifies, and both come from the checker. A query `x[...]` is rewritten only
 //! when `x` types as a table (a `data.table` or a `DataFrame`), because the same brackets index
 //! plain vectors. And a bare name inside the brackets is a column when the table's columns are
 //! known and include it; when they are not known, it is a column unless it names a variable of
 //! the enclosing function or the project, since data.table looks a name up in the table first.
+//!
+//! The DataFrame verbs refuse a data.table, so a rewritten query, `:=` or `setorder()` whose table
+//! is still a data.table converts it with `as.DataFrame()`. The whole-file migration drops that
+//! conversion for a name every assignment of which the migration itself turns into a DataFrame,
+//! such as `sales <- fread("sales.csv")`; a single rewrite applied alone always keeps it.
 
 use {
     semantics::{
@@ -33,7 +39,10 @@ pub struct DataTableRewrite {
     /// What the rewrite does, as a code action title.
     pub title: &'static str,
     pub range: TextRange,
+    /// The code in the whole-file migration, where the file's other rewrites also apply.
     pub replacement: String,
+    /// The code when this rewrite is applied on its own.
+    pub standalone: String,
 }
 
 /// Every form in `file` that has a DataFrame equivalent, outermost first and in source order. A
@@ -41,6 +50,36 @@ pub struct DataTableRewrite {
 pub fn data_table_rewrites(db: &dyn Db, file: SourceFile) -> Vec<DataTableRewrite> {
     let globals = ProjectFiles::try_get(db).map(|files| project_global_names(db, files));
     let is_project_name = |name: Symbol| globals.is_some_and(|names| names.contains(&name));
+    let alone = collect_rewrites(db, file, &is_project_name, &HashSet::new());
+    let converted = converted_names(db, file, &alone);
+    let together = collect_rewrites(db, file, &is_project_name, &converted);
+    // The conversions change only the code a rewrite emits, never which forms qualify, so the
+    // two passes find the same forms in the same order.
+    assert_eq!(
+        alone.len(),
+        together.len(),
+        "the data.table migration found different forms with and without conversions"
+    );
+    alone
+        .into_iter()
+        .zip(together)
+        .map(|(alone, together)| DataTableRewrite {
+            title: alone.title,
+            range: alone.range,
+            replacement: together.replacement,
+            standalone: alone.replacement,
+        })
+        .collect()
+}
+
+/// One pass over the file, with `converted` naming the tables the rest of the migration has
+/// already turned into DataFrames.
+fn collect_rewrites(
+    db: &dyn Db,
+    file: SourceFile,
+    is_project_name: &dyn Fn(Symbol) -> bool,
+    converted: &HashSet<String>,
+) -> Vec<Rewrite> {
     let text = file.text(db);
     let mut rewrites = Vec::new();
     for &item in item_tree(db, file) {
@@ -55,7 +94,8 @@ pub fn data_table_rewrites(db: &dyn Db, file: SourceFile) -> Vec<DataTableRewrit
             offset,
             check: item_check(db, item),
             naming: item_naming(db, item).as_ref(),
-            is_project_name: &is_project_name,
+            is_project_name,
+            converted,
             expressions: hir
                 .map(|hir| {
                     let mut expressions = HashMap::new();
@@ -79,6 +119,72 @@ pub fn data_table_rewrites(db: &dyn Db, file: SourceFile) -> Vec<DataTableRewrit
     rewrites
 }
 
+/// The names that are DataFrames once every rewrite applies: each assignment of the name in the
+/// file assigns a rewritten `fread()`, `data.table()`, `as.data.table()` or query, and no function
+/// takes a parameter of that name. Any other binding, such as a parameter or a `data.frame()`,
+/// may hold a data.table, so the name keeps its conversion.
+fn converted_names(db: &dyn Db, file: SourceFile, rewrites: &[Rewrite]) -> HashSet<String> {
+    let rewritten: HashSet<TextRange> = rewrites.iter().map(|rewrite| rewrite.range).collect();
+    let converts = |value: &SyntaxNode| {
+        rewritten.contains(&value.text_range())
+            || (value.kind() == CALL_EXPR
+                && value
+                    .first_child()
+                    .is_some_and(|callee| rewritten.contains(&callee.text_range())))
+    };
+    let mut converted = HashSet::new();
+    let mut unconverted = HashSet::new();
+    for &item in item_tree(db, file) {
+        let Some(root) = item_node(db, item) else {
+            continue;
+        };
+        for node in root.descendants() {
+            match node.kind() {
+                PARAMETER => {
+                    if let Some(name) = node.children_with_tokens().find_map(|child| {
+                        child
+                            .into_token()
+                            .filter(|token| token.kind() == IDENT)
+                            .map(|token| token.text().to_owned())
+                    }) {
+                        unconverted.insert(name);
+                    }
+                }
+                BINARY_EXPR => {
+                    let Some(operator) = node
+                        .children_with_tokens()
+                        .filter_map(|child| child.into_token())
+                        .find(|token| !token.kind().is_trivia())
+                    else {
+                        continue;
+                    };
+                    let mut operands = node.children();
+                    let (Some(left), Some(right)) = (operands.next(), operands.next()) else {
+                        continue;
+                    };
+                    let (name, value) = match operator.kind() {
+                        LESS_MINUS | LESS2_MINUS | EQ => (left, right),
+                        MINUS_GREATER | MINUS_GREATER2 => (right, left),
+                        _ => continue,
+                    };
+                    if name.kind() != NAME {
+                        continue;
+                    }
+                    let name = name_text(&name);
+                    if converts(&value) {
+                        converted.insert(name);
+                    } else {
+                        unconverted.insert(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    converted.retain(|name| !unconverted.contains(name));
+    converted
+}
+
 /// `text` with every rewrite applied. The rewrites must not overlap, as
 /// [`data_table_rewrites`] guarantees.
 pub fn apply_data_table_rewrites(text: &str, rewrites: &[DataTableRewrite]) -> String {
@@ -100,6 +206,13 @@ pub fn apply_data_table_rewrites(text: &str, rewrites: &[DataTableRewrite]) -> S
     result
 }
 
+/// A rewrite as one pass of the migration finds it.
+struct Rewrite {
+    title: &'static str,
+    range: TextRange,
+    replacement: String,
+}
+
 /// The facts one item's rewrites read: its expressions' types and what its names resolve to.
 struct Migration<'a, 'db> {
     db: &'db dyn Db,
@@ -109,6 +222,8 @@ struct Migration<'a, 'db> {
     check: Option<&'a ItemCheck<'db>>,
     naming: Option<&'a ItemNaming>,
     is_project_name: &'a dyn Fn(Symbol) -> bool,
+    /// Names the rest of the migration turns into DataFrames, see [`converted_names`].
+    converted: &'a HashSet<String>,
     /// Each item-relative range to the first expression that spans it.
     expressions: HashMap<TextRange, ExprId>,
 }
@@ -185,7 +300,7 @@ const BASE_CONSTANTS: &[&str] = &[
 const QUERY_SYMBOLS: &[&str] = &[".N", ".SD", ".I", ".GRP", ".NGRP", ".BY", ".EACHI"];
 
 impl<'db> Migration<'_, 'db> {
-    fn rewrite(&self, node: &SyntaxNode) -> Option<DataTableRewrite> {
+    fn rewrite(&self, node: &SyntaxNode) -> Option<Rewrite> {
         match node.kind() {
             SUBSET_EXPR => self.rewrite_subset(node),
             CALL_EXPR => self.rewrite_call(node),
@@ -193,11 +308,11 @@ impl<'db> Migration<'_, 'db> {
         }
     }
 
-    fn rewrite_subset(&self, node: &SyntaxNode) -> Option<DataTableRewrite> {
+    fn rewrite_subset(&self, node: &SyntaxNode) -> Option<Rewrite> {
         let query = self.query(node)?;
         if query.j.as_ref().is_some_and(is_update) {
             let replacement = self.update(node, &query)?;
-            return Some(DataTableRewrite {
+            return Some(Rewrite {
                 title: "Rewrite `:=` with `DataFrame.with_columns`",
                 range: node.text_range(),
                 replacement,
@@ -209,7 +324,7 @@ impl<'db> Migration<'_, 'db> {
         } else {
             fragment.text
         };
-        Some(DataTableRewrite {
+        Some(Rewrite {
             title,
             range: node.text_range(),
             replacement,
@@ -277,30 +392,45 @@ impl<'db> Migration<'_, 'db> {
                 return None;
             }
             // data.table prefixes a clashing column of `i` with `i.`, a DataFrame join suffixes
-            // it with `_right`, so a join with clashing columns has no equivalent.
-            if let (Table::Known(left), Table::Known(right)) = (&table, &other_table) {
-                let clashes = right.iter().any(|(name, _)| {
-                    !keys.contains(name) && left.iter().any(|(other, _)| other == name)
-                });
-                if clashes
-                    || keys.iter().any(|key| {
-                        !left.iter().any(|(name, _)| name == key)
-                            || !right.iter().any(|(name, _)| name == key)
-                    })
-                {
-                    return None;
-                }
+            // it with `_right`, so a join with clashing columns has no equivalent, and one whose
+            // columns are not known might have them.
+            let (Table::Known(left), Table::Known(right)) = (&table, &other_table) else {
+                return None;
+            };
+            let clashes = right.iter().any(|(name, _)| {
+                !keys.contains(name) && left.iter().any(|(other, _)| other == name)
+            });
+            if clashes
+                || keys.iter().any(|key| {
+                    !left.iter().any(|(name, _)| name == key)
+                        || !right.iter().any(|(name, _)| name == key)
+                })
+            {
+                return None;
             }
             return Some((
                 "Rewrite the join with `DataFrame.join`",
                 Fragment {
+                    // `x[i, on =]` lists `x`'s columns first and then `i`'s other columns, while
+                    // the join keeps `i`'s rows in order and lists its columns first.
                     text: format!(
-                        "DataFrame.join({}, {target}, on = {}, how = \"left\")",
-                        node_text(other),
-                        node_text(on)
+                        "DataFrame.join({}, {target}, on = {}, how = \"left\") |> DataFrame.select({})",
+                        self.as_data_frame(other),
+                        node_text(on),
+                        left.iter()
+                            .map(|(name, _)| name)
+                            .chain(
+                                right
+                                    .iter()
+                                    .map(|(name, _)| name)
+                                    .filter(|name| !keys.contains(name))
+                            )
+                            .map(|name| quote(name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                     is_expression: true,
-                    piped: false,
+                    piped: true,
                 },
             ));
         }
@@ -346,7 +476,25 @@ impl<'db> Migration<'_, 'db> {
         {
             return fragment.text;
         }
-        node_text(target)
+        self.as_data_frame(target)
+    }
+
+    /// A table's code where a DataFrame verb reads it: a data.table goes through `as.DataFrame()`
+    /// unless the migration already makes it a DataFrame.
+    fn as_data_frame(&self, node: &SyntaxNode) -> String {
+        let text = node_text(node);
+        let is_data_table = self
+            .expression_id(node)
+            .and_then(|id| self.check?.expression_types.get(&id))
+            .is_some_and(|ty| match ty.kind(self.db) {
+                TyKind::Frame(FrameKind::DataTable, _) => true,
+                TyKind::Named(name, _) => name.text(self.db) == "data.table",
+                _ => false,
+            });
+        if !is_data_table || (node.kind() == NAME && self.converted.contains(&name_text(node))) {
+            return text;
+        }
+        format!("as.DataFrame({text})")
     }
 
     /// `i` as the conditions of `DataFrame.filter`, one per operand of a top-level `&`. Any
@@ -543,9 +691,10 @@ impl<'db> Migration<'_, 'db> {
         if columns.is_empty() {
             return None;
         }
+        let source = self.as_data_frame(target);
         let target = node_text(target);
         Some(format!(
-            "{target} <- {target} |> DataFrame.with_columns({})",
+            "{target} <- {source} |> DataFrame.with_columns({})",
             render_columns(&columns)
         ))
     }
@@ -563,7 +712,7 @@ impl<'db> Migration<'_, 'db> {
         fragment.is_expression.then_some(fragment.text)
     }
 
-    fn rewrite_call(&self, node: &SyntaxNode) -> Option<DataTableRewrite> {
+    fn rewrite_call(&self, node: &SyntaxNode) -> Option<Rewrite> {
         let callee = node.first_child()?;
         let function = self.data_table_function(&callee)?;
         let list = child_node(node, ARGUMENT_LIST)?;
@@ -585,17 +734,17 @@ impl<'db> Migration<'_, 'db> {
                     }
                 }
                 let path = path?;
-                // A literal names the file outright; `DataFrame.read_csv` reads only CSV, while
-                // `fread` also sniffs other separators and reads literal text.
-                if path.kind() == LITERAL
-                    && !string_value(&path)?.to_ascii_lowercase().ends_with(".csv")
+                // `DataFrame.read_csv` reads only CSV, while `fread` also sniffs other separators
+                // and reads literal text, so only a literal path ending in `.csv` qualifies.
+                if path.kind() != LITERAL
+                    || !string_value(&path)?.to_ascii_lowercase().ends_with(".csv")
                 {
                     return None;
                 }
                 let factors = factors
                     .map(|value| format!(", strings_as_factors = {}", node_text(&value)))
                     .unwrap_or_default();
-                Some(DataTableRewrite {
+                Some(Rewrite {
                     title: "Rewrite `fread()` as `DataFrame.read_csv()`",
                     range: node.text_range(),
                     replacement: format!("DataFrame.read_csv({}{factors})", node_text(&path)),
@@ -617,20 +766,18 @@ impl<'db> Migration<'_, 'db> {
                         None => return None,
                     }
                 }
-                Some(DataTableRewrite {
+                Some(Rewrite {
                     title: "Rewrite `data.table()` as `DataFrame()`",
                     range: callee.text_range(),
                     replacement: "DataFrame".to_owned(),
                 })
             }
             "as.data.table" => match arguments.as_slice() {
-                [argument] if argument.tag.is_none() && argument.value.is_some() => {
-                    Some(DataTableRewrite {
-                        title: "Rewrite `as.data.table()` as `as.DataFrame()`",
-                        range: callee.text_range(),
-                        replacement: "as.DataFrame".to_owned(),
-                    })
-                }
+                [argument] if argument.tag.is_none() && argument.value.is_some() => Some(Rewrite {
+                    title: "Rewrite `as.data.table()` as `as.DataFrame()`",
+                    range: callee.text_range(),
+                    replacement: "as.DataFrame".to_owned(),
+                }),
                 _ => None,
             },
             "setDT" => match arguments.as_slice() {
@@ -640,7 +787,7 @@ impl<'db> Migration<'_, 'db> {
                         return None;
                     }
                     let name = node_text(value);
-                    Some(DataTableRewrite {
+                    Some(Rewrite {
                         title: "Rewrite `setDT()` as `as.DataFrame()`",
                         range: node.text_range(),
                         replacement: format!("{name} <- as.DataFrame({name})"),
@@ -699,12 +846,13 @@ impl<'db> Migration<'_, 'db> {
                         .collect();
                     format!(", descending = c({})", flags.join(", "))
                 };
+                let source = self.as_data_frame(target);
                 let target = node_text(target);
-                Some(DataTableRewrite {
+                Some(Rewrite {
                     title: "Rewrite `setorder()` with `DataFrame.sort`",
                     range: node.text_range(),
                     replacement: format!(
-                        "{target} <- {target} |> DataFrame.sort({}{descending})",
+                        "{target} <- {source} |> DataFrame.sort({}{descending})",
                         keys.join(", ")
                     ),
                 })

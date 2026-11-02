@@ -239,6 +239,11 @@ sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
 sales <- sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 ```
 
+The DataFrame verbs do not accept a data.table, so a rewritten query, `:=` or `setorder()` on a
+table that is still a data.table converts it first, as in `as.DataFrame(sales) |> DataFrame.filter(...)`.
+The whole-file rewrite leaves the conversion out for a name like `sales` above, whose every
+assignment it rewrites into a DataFrame; a function parameter typed `data.table` keeps it.
+
 Delete `library(data.table)` once nothing in the file needs it, and run `ry fmt` to break the long
 chains over several lines.
 
@@ -260,10 +265,10 @@ Anything without an exact equivalent is left as it is rather than rewritten appr
 - `dt[i, col := value]` unless the checker knows the columns: a new column takes `NA` in the other
   rows, and an existing one is rewritten only for a constant of the column's own type;
 - a join after `setkey()`, since finding the key needs the order the statements run in, and a join
-  on `on =` whose tables share a non-key column, which data.table names `i.col` and
-  `DataFrame.join` names `col_right`;
-- `fread()` of a literal path that does not end in `.csv`, or with any argument other than the path
-  and `stringsAsFactors`, and `data.table()` with `key`, `keep.rownames`, `check.names` or
+  on `on =` unless the checker knows both tables' columns and they share none but the keys, because
+  data.table names a shared column `i.col` and `DataFrame.join` names it `col_right`;
+- `fread()` of anything but a literal path ending in `.csv`, or with any argument other than the
+  path and `stringsAsFactors`, and `data.table()` with `key`, `keep.rownames`, `check.names` or
   `stringsAsFactors`.
 
 Two differences remain after a rewrite. The DataFrame aggregations skip missing values, so

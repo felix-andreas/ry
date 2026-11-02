@@ -2885,6 +2885,18 @@ fn expect_truthy(kind: ColumnType, what: &str) -> Result<()> {
 /// formatting (`1e+06`, fifteen significant digits) has no Polars equivalent, so that mix is
 /// refused rather than compared wrongly.
 pub(crate) fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+    // Without this, a date against anything else would meet at character and compare as text.
+    if (left == ColumnType::Date) != (right == ColumnType::Date) {
+        let other = if left == ColumnType::Date {
+            right
+        } else {
+            left
+        };
+        return Err(Error::Query(format!(
+            "a Date compares only with a Date, not with {}",
+            other.name()
+        )));
+    }
     let textual = |kind| matches!(kind, ColumnType::Character | ColumnType::Factor);
     if (textual(left) && right == ColumnType::Double)
         || (left == ColumnType::Double && textual(right))

@@ -8758,8 +8758,9 @@ impl<'db> Checker<'db, '_> {
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
     /// other than its keys, with `suffix` added to a name the left already has. A semi or anti
-    /// join keeps only the left's columns, and a cross join has no keys. `DataFrame.join_asof(left, right, on, by)` joins on
-    /// `by` and then `on`, with a left join's columns.
+    /// join keeps only the left's columns, and a cross join has no keys.
+    /// `DataFrame.join_asof(left, right, on, by)` joins on `by` and then `on`, with a left join's
+    /// columns.
     fn join_type(
         &mut self,
         lazy: bool,

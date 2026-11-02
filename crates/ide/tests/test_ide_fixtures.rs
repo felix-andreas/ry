@@ -551,6 +551,12 @@ fn render_migration(source: &str) -> String {
         for line in rewrite.replacement.lines() {
             output.push_str(&format!("+ {line}\n"));
         }
+        if rewrite.standalone != rewrite.replacement {
+            output.push_str("applied alone:\n");
+            for line in rewrite.standalone.lines() {
+                output.push_str(&format!("+ {line}\n"));
+            }
+        }
     }
     output
 }

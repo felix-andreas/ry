@@ -39,11 +39,13 @@ fn main() -> ExitCode {
         eprintln!("usage: db_benchmark <data-dir> [--groupby-only | --joins-only]");
         return ExitCode::FAILURE;
     };
-    let only = env::args().skip(1).find_map(|argument| match argument.as_str() {
-        "--groupby-only" => Some(Only::Groupby),
-        "--joins-only" => Some(Only::Joins),
-        _ => None,
-    });
+    let only = env::args()
+        .skip(1)
+        .find_map(|argument| match argument.as_str() {
+            "--groupby-only" => Some(Only::Groupby),
+            "--joins-only" => Some(Only::Joins),
+            _ => None,
+        });
     match run(&PathBuf::from(dir), only) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

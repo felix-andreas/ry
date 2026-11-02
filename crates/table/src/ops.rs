@@ -517,7 +517,7 @@ pub fn dcast(
 /// label is numbered by its rank among the distinct values (from the sort's order codes), so the
 /// cell a row lands in is `row * labels + label`, with no grouping of the (row, label) pairs and
 /// no sort. Without `function`, a table whose cells each hold one value takes the values as they
-/// are. `None` when the keys' codes do not pack into a `u64` or the cells overflow a `u32`.
+/// are. `None` when the keys' codes do not pack into a `u64` or the cells overflow an `i32`.
 fn dcast_dense(
     table: &Table,
     rows: &[&str],

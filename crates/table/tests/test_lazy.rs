@@ -449,6 +449,24 @@ fn a_date_only_adds_days() {
     );
 }
 
+/// Without the check, a date against a number would meet at character and compare as text.
+#[test]
+fn a_date_compares_only_with_a_date() {
+    let table = frame(vec![("day", RVector::Date(vec![19753.0]))]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Filter(binary(
+        BinaryOp::Greater,
+        column("day"),
+        Expr::Integer(19000),
+    )));
+    let error = lazy::collect(plan).err().map(|error| error.to_string());
+    assert!(
+        error.as_deref().is_some_and(
+            |error| error.contains("a Date compares only with a Date, not with integer[]")
+        ),
+        "{error:?}"
+    );
+}
+
 /// A filter that reads which rows come first must not move below the sort that orders them.
 #[test]
 fn a_filter_on_rank_stays_above_the_sort() {

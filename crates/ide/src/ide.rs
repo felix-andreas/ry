@@ -2458,7 +2458,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             kind: CodeActionKind::MigrateDataTable,
             edits: vec![TextEdit {
                 range: rewrite.range,
-                replacement: rewrite.replacement.clone(),
+                replacement: rewrite.standalone.clone(),
             }],
         });
     }
