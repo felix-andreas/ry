@@ -115,6 +115,7 @@ export default defineConfig({
 						{ slug: 'reference/diagnostic-codes' },
 						{ slug: 'reference/formatting-rules' },
 						{ slug: 'reference/type-system' },
+						{ slug: 'reference/std' },
 					],
 				},
 				{
