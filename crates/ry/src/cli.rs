@@ -1610,12 +1610,14 @@ pub(crate) fn collect_r_files(
         .filter_map(|entry| match entry {
             Ok(entry) => {
                 let path = entry.into_path();
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension == "R" || extension == "r" || is_literate_extension(extension)
-                    })
-                    .then_some(Ok(path))
+                (is_package_source(&path)
+                    || path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            extension == "R" || extension == "r" || is_literate_extension(extension)
+                        }))
+                .then_some(Ok(path))
             }
             Err(err) => {
                 error(&err.to_string());
@@ -1623,6 +1625,19 @@ pub(crate) fn collect_r_files(
             }
         })
         .collect()
+}
+
+/// R CMD INSTALL sources every `.R`, `.r`, `.S`, `.s` and `.q` file directly in a package's `R/`
+/// directory, and Hmisc, VGAM and boot keep code in the S-era extensions. Elsewhere, such as in
+/// `src/`, a `.s` file is assembly, so only `R/` widens the set.
+pub(crate) fn is_package_source(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|directory| directory == "R")
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
 }
 
 /// `<root>/stubs/*.Rtypes` in path order, each with its file stem (the namespace label).
