@@ -1201,7 +1201,7 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
                 .map_err(|failure| call.error(failure.to_string()))?
         }
         4 => {
-            let options = lzma_rust2::XzOptions::with_preset(9);
+            let options = crate::connections::xz_options(9);
             let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options)
                 .map_err(|failure| call.error(failure.to_string()))?;
             std::io::Write::write_all(&mut encoder, from)

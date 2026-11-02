@@ -32,7 +32,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
-    lzma_rust2::{XzOptions, XzReader, XzWriter},
+    lzma_rust2::{CheckType, XzOptions, XzReader, XzWriter},
     std::{
         borrow::Cow,
         ffi::{CStr, CString, c_char, c_int, c_void},
@@ -3648,6 +3648,14 @@ pub(crate) fn os_message(failure: &std::io::Error) -> String {
     }
 }
 
+/// xz options at `preset`, with the CRC32 integrity check GNU R writes, so files match its
+/// size byte for byte.
+pub(crate) fn xz_options(preset: u32) -> XzOptions {
+    let mut options = XzOptions::with_preset(preset);
+    options.set_check_sum_type(CheckType::Crc32);
+    options
+}
+
 fn io_error(failure: std::io::Error) -> Unwind {
     error(os_message(&failure))
 }
@@ -3876,7 +3884,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
                 file,
                 bzip2::Compression::new(level.clamp(1, 9)),
             )),
-            Compressed::Xz => Encoder::Xz(XzWriter::new(file, XzOptions::with_preset(level))?),
+            Compressed::Xz => Encoder::Xz(XzWriter::new(file, xz_options(level))?),
             Compressed::Zstd => {
                 Encoder::Zstd(zstd::stream::write::Encoder::new(file, level as i32)?)
             }
