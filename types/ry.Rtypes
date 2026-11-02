@@ -669,6 +669,7 @@ DataFrame.tail : fn(df: DataFrame, [n]: integer | double) -> DataFrame
 DataFrame.join : fn(df: DataFrame, other: DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> DataFrame
 DataFrame.join_asof : fn(df: DataFrame, other: DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> DataFrame
 DataFrame.lazy : fn(df: DataFrame) -> LazyFrame
+DataFrame.pivot : fn(df: DataFrame, on: character, index: character, values: character, [agg]: character | NULL) -> DataFrame
 GroupBy.agg : fn(group: GroupBy, ...: Expr) -> DataFrame
 LazyFrame.scan_csv : fn(path: character) -> LazyFrame
 LazyFrame.scan_parquet : fn(path: character) -> LazyFrame
@@ -683,12 +684,13 @@ LazyFrame.join : fn(lf: LazyFrame, other: LazyFrame | DataFrame, [on]: character
 LazyFrame.join_asof : fn(lf: LazyFrame, other: LazyFrame | DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> LazyFrame
 LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
 LazyFrame.explain : fn(lf: LazyFrame) -> character
+LazyFrame.pivot : fn(lf: LazyFrame, on: character, index: character, values: character, [agg]: character | NULL) -> DataFrame
 LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
 
 # Arithmetic, comparison and logic on an expression build a bigger expression, and a plain value
 # on the other side is a literal.
-Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical) -> Expr
-Ops.Expr : fn(e1: double | integer | character | logical, e2: Expr) -> Expr
+Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical | Date) -> Expr
+Ops.Expr : fn(e1: double | integer | character | logical | Date, e2: Expr) -> Expr
 
 col : fn(x: character, [as.factor]: logical) -> Expr
 col : fn(x: Any, [as.factor]: logical) -> Any
@@ -709,3 +711,5 @@ Expr.is_null : fn(expr: Expr) -> Expr
 Expr.len : fn() -> Expr
 Expr.if_else : fn(test: Expr, yes: Any, no: Any) -> Expr
 Expr.cor : fn(first: Expr, second: Expr) -> Expr
+Expr.over : fn(expr: Expr, ...: character) -> Expr
+Expr.rank : fn(expr: Expr, [descending]: logical) -> Expr

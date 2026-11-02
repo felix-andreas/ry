@@ -7,15 +7,17 @@ use {
     ide::{
         CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, Formal, HoverDefinition,
         Installed, PackageTarget, call_hierarchy_item, code_actions, code_lenses, completion,
-        completion_with, definition, diagnostic_fixes, document_symbols, folding_ranges, hover,
-        import_fixes, incoming_calls, inlay_hints, outgoing_calls, references, rename,
-        selection_ranges, semantic_tokens, signature_help, signature_help_with, type_definition,
-        workspace_symbols,
+        completion_with, data_table_rewrites, definition, diagnostic_fixes, document_symbols,
+        folding_ranges, hover, import_fixes, incoming_calls, inlay_hints, outgoing_calls,
+        references, rename, selection_ranges, semantic_tokens, signature_help, signature_help_with,
+        type_definition, workspace_symbols,
     },
+    salsa::Setter,
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Applicability, file_diagnostics},
         lints::{LintConfig, lint_file},
+        metadata::{PackageMetadata, attached_union},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
         testing::{ProbeDatabase, with_fixture_project},
@@ -516,6 +518,76 @@ fn ide_fixtures() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide"),
         &render,
     );
+}
+
+#[test]
+fn migrate_fixtures() {
+    run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/migrate"),
+        &render_migration,
+    );
+}
+
+/// Each rewrite renders as its title, then the code it replaces and the code it writes, line by
+/// line. With a `$0` cursor, the data.table code actions offered there come first.
+/// Each case gets a fresh database whose attached packages are the ones the script attaches, as
+/// the hosts set them up, so `library(data.table)` types `data.table()` and `fread()`.
+fn render_migration(source: &str) -> String {
+    let cursor = source.find("$0");
+    let text = source.replacen("$0", "", 1);
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let file = SourceFile::new(&db, text.clone(), DocumentKind::Script);
+    ProjectFiles::new(&db, vec![file]);
+    let attached = attached_union(&db, [file]);
+    let metadata = PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        Default::default(),
+        None,
+        Default::default(),
+    );
+    metadata.set_attached(&mut db).to(attached);
+    let mut output = String::new();
+    if let Some(cursor) = cursor {
+        let at = TextSize::from(cursor as u32);
+        for action in code_actions(&db, file, TextRange::new(at, at)) {
+            if matches!(
+                action.kind,
+                CodeActionKind::MigrateDataTable | CodeActionKind::MigrateDataTableFile
+            ) {
+                output.push_str(&format!(
+                    "action: {} ({} edit(s))\n",
+                    action.title,
+                    action.edits.len()
+                ));
+            }
+        }
+    }
+    let rewrites = data_table_rewrites(&db, file);
+    if rewrites.is_empty() {
+        output.push_str("no rewrite\n");
+    }
+    for rewrite in &rewrites {
+        output.push_str(&format!("{}\n", rewrite.title));
+        let original = text
+            .get(usize::from(rewrite.range.start())..usize::from(rewrite.range.end()))
+            .unwrap_or("<out of range>");
+        for line in original.lines() {
+            output.push_str(&format!("- {line}\n"));
+        }
+        for line in rewrite.replacement.lines() {
+            output.push_str(&format!("+ {line}\n"));
+        }
+        if rewrite.standalone != rewrite.replacement {
+            output.push_str("applied alone:\n");
+            for line in rewrite.standalone.lines() {
+                output.push_str(&format!("+ {line}\n"));
+            }
+        }
+    }
+    output
 }
 
 #[test]

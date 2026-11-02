@@ -85,6 +85,7 @@ pub unsafe fn expose_column(table: &Table, name: &str) -> ApiResult<Sexp> {
                 Payload::Character(first_chunk(series.str().map_err(polars_error)?)?)
             }
             Some(ColumnType::Factor) => return factor_vector(&series),
+            Some(ColumnType::Date) => return date_vector(&series),
             None => return Err(error(format!("column `{name}` has no R type"))),
         };
         new_altrep(payload)
@@ -145,12 +146,34 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
                         .map(Option::unwrap_or_default)
                         .collect();
                     RVector::Factor { codes, levels }
+                } else if is_date(vector)? {
+                    // R stores some dates as whole days in an integer vector, `seq()` of dates
+                    // among them, and they must not arrive as plain integers.
+                    RVector::Date(
+                        codes
+                            .into_iter()
+                            .map(|day| {
+                                if day == NA_INTEGER {
+                                    NA_REAL
+                                } else {
+                                    f64::from(day)
+                                }
+                            })
+                            .collect(),
+                    )
                 } else {
                     RVector::Integer(codes)
                 }
             }
             SexpType::Logical => RVector::Logical(read_slice::<i32>(vector, length)?.to_vec()),
-            SexpType::Real => RVector::Double(read_slice::<f64>(vector, length)?.to_vec()),
+            SexpType::Real => {
+                let values = read_slice::<f64>(vector, length)?.to_vec();
+                if is_date(vector)? {
+                    RVector::Date(values)
+                } else {
+                    RVector::Double(values)
+                }
+            }
             SexpType::String => RVector::Character(read_strings(vector)?),
             other => {
                 return Err(error(format!(
@@ -160,6 +183,18 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
             }
         };
         to_series(name, r_vector).map_err(table_error)
+    }
+}
+
+/// Whether `vector` has class `"Date"`.
+unsafe fn is_date(vector: Sexp) -> ApiResult<bool> {
+    unsafe {
+        let class = get_attrib(vector, R_ClassSymbol.get())?;
+        Ok(class.kind() == SexpType::String
+            && read_strings(class)?
+                .iter()
+                .flatten()
+                .any(|class| class == "Date"))
     }
 }
 
@@ -563,6 +598,19 @@ unsafe fn factor_vector(series: &Series) -> ApiResult<Sexp> {
         let levels: Vec<&str> = levels.iter().map(String::as_str).collect();
         set_attrib(vector, R_LevelsSymbol.get(), strings(&levels)?)?;
         set_attrib(vector, R_ClassSymbol.get(), strings(&["factor"])?)?;
+        Ok(vector)
+    }
+}
+
+/// A date column materializes as a double vector of days with class `Date`, R's own layout.
+unsafe fn date_vector(series: &Series) -> ApiResult<Sexp> {
+    unsafe {
+        let RVector::Date(days) = to_r(series).map_err(table_error)? else {
+            return Err(error("a date column must convert to dates"));
+        };
+        let vector = alloc_vector(SexpType::Real, days.len() as R_xlen_t)?;
+        vector.slice_mut::<f64>().copy_from_slice(&days);
+        set_attrib(vector, R_ClassSymbol.get(), strings(&["Date"])?)?;
         Ok(vector)
     }
 }

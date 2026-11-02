@@ -2082,6 +2082,22 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** At 2e7 rows the five
+  joins take 3.7 s against data.table's 22.3 s but peak at 11.6 GB against 5.2 GB, and nearly all
+  of it is reading the CSVs (`join_x` 4.9 GB, `join_big` 4.2 GB more). Two causes, both measured:
+  - A Polars Enum stores every level twice (a `Utf8ViewArray` plus `CategoricalMapping`'s hash
+    table and boxcar vector), about 135 bytes per level, and the read peaks at about twice its
+    resident size (2e7 `join_x` with factors: 4.87 GB peak, 2.37 GB resident, 0.64 GB of column
+    data). The fix is a factor type outside Polars: u32 codes plus one levels array beside the
+    frame (`Table.string_codes` is precedent), converted to an Enum only where a Polars plan needs
+    one. About 50 sites read the Enum: `query.rs`, `ops.rs`, `convert.rs`, `table.rs`,
+    `kernel.rs`, `io.rs`, `join.rs`, `group.rs`, interp's `data_table.rs` and `frame.rs`, libr's
+    `frame_altrep.rs`, and the lazy plans' string expressions.
+  - Reading the id columns as text (`strings_as_factors = FALSE`) holds slices and final columns
+    at once: 2.44 GB peak and 1.4 GB resident at 2e7, and an 11.7 GB peak for the 5.1 GB 1e8
+    `join_x`, after which `join_big` no longer fits.
+  At 1e8, data.table runs out of memory reading `join_x` with factors as well, so "at or below
+  data.table's memory" is met trivially there; the target is that ry completes.
 - **A factor column with a missing value costs a second whole-file parse.** The sliced reader
   (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
   `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
@@ -2108,10 +2124,10 @@ The end-to-end guard rests on the corpus suites.
   a factor type outside Polars (codes plus a plain levels array, mapped to an Enum only when a
   Polars plan needs one), which every kernel and the lazy planner must handle (`decisions.md`,
   "Factors stay Polars Enums").
-- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
-  `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
-  `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
-  chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
+- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`, so
+  `lubridate::floor_date` runs on R vectors in the `trials` module), no `cast`, `n_unique`,
+  `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
+  `unpivot`, or `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
 - **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
@@ -2121,9 +2137,10 @@ The end-to-end guard rests on the corpus suites.
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
   and the numeric aggregations.
-- **data-table lint:** flags only the constructors (`data.table`, `fread`, `as.data.table`,
-  `setDT`); it offers no fix, because a query rewrite from bracket syntax to verbs is not
-  mechanical in general.
+- **Building a DataFrame copies every column** into the engine, where `data.table()` keeps R's
+  vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
+  and `enrol` (`contributing/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
+  columns could share R's buffers once the collector can pin them for a Polars buffer's life.
 - **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 

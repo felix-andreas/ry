@@ -387,6 +387,9 @@ pub fn dcast(
     for name in rows.iter().chain([&spread, &value]) {
         require(table, name)?;
     }
+    if let Some(executed) = dcast_dense(table, rows, spread, value, function)? {
+        return Ok(executed);
+    }
     let mut warnings = Vec::new();
     let mut by: Vec<&str> = rows.to_vec();
     by.push(spread);
@@ -429,42 +432,54 @@ pub fn dcast(
             .with_nulls_last(false)
             .with_maintain_order(true),
     )?;
-    // A label is the value as R's `as.character` spells it, which for a double is the shortest
-    // round-tripping form; an `NA` stays `None` so that it never meets a literal "NA" string.
-    let label_text = |series: &Series| -> Result<Vec<Option<String>>> {
-        if let Ok(doubles) = series.f64() {
-            return Ok(doubles
+    // Cells find their label's position by the value itself (a double's bits, or the borrowed
+    // text), so no cell allocates a string of its own.
+    let (labels, cell_positions): (Vec<Option<String>>, Vec<Option<usize>>) =
+        if let (Ok(label_doubles), Ok(cell_doubles)) = (labels_series.f64(), spread_column.f64()) {
+            let labels = pivot_labels(&labels_series)?;
+            // `-0` and `0` are one label, and so is every `NaN`, as in the grouping.
+            let key = |value: f64| {
+                if value == 0.0 {
+                    0
+                } else if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                }
+            };
+            let positions: HashMap<Option<u64>, usize> = label_doubles
                 .iter()
-                .map(|label| {
-                    label.map(|value| {
-                        let mut buffer = Vec::new();
-                        write_double(&mut buffer, value);
-                        String::from_utf8_lossy(&buffer).into_owned()
-                    })
-                })
-                .collect());
-        }
-        let text = series.cast(&DataType::String)?;
-        Ok(text
-            .str()?
-            .iter()
-            .map(|label| label.map(str::to_string))
-            .collect())
-    };
-    let labels = label_text(&labels_series)?;
-    let positions: HashMap<Option<&str>, usize> = labels
-        .iter()
-        .enumerate()
-        .map(|(position, label)| (label.as_deref(), position))
-        .collect();
-    let cell_labels = label_text(spread_column)?;
+                .enumerate()
+                .map(|(position, label)| (label.map(key), position))
+                .collect();
+            let cells = cell_doubles
+                .iter()
+                .map(|cell| positions.get(&cell.map(key)).copied())
+                .collect();
+            (labels, cells)
+        } else {
+            let label_text = labels_series.cast(&DataType::String)?;
+            let cell_text = spread_column.cast(&DataType::String)?;
+            let positions: HashMap<Option<&str>, usize> = label_text
+                .str()?
+                .iter()
+                .enumerate()
+                .map(|(position, label)| (label, position))
+                .collect();
+            let cells = cell_text
+                .str()?
+                .iter()
+                .map(|cell| positions.get(&cell).copied())
+                .collect();
+            (pivot_labels(&labels_series)?, cells)
+        };
     let mut cells: Vec<Vec<Option<IdxSize>>> = vec![vec![None; row_count]; labels.len()];
-    for (index, (row, label)) in row_ids.iter().zip(&cell_labels).enumerate() {
-        if let Some(position) = positions.get(&label.as_deref())
-            && let Some(slot) = cells
-                .get_mut(*position)
+    for (index, (row, position)) in row_ids.iter().zip(&cell_positions).enumerate() {
+        if let Some(slot) = position.and_then(|position| {
+            cells
+                .get_mut(position)
                 .and_then(|column| column.get_mut(*row as usize))
-        {
+        }) {
             *slot = Some(index as IdxSize);
         }
     }
@@ -496,6 +511,193 @@ pub fn dcast(
         output: Output::Table(table),
         warnings,
     })
+}
+
+/// `dcast` on dense ids, which covers every column type the engine stores: each row key and each
+/// label is numbered by its rank among the distinct values (from the sort's order codes), so the
+/// cell a row lands in is `row * labels + label`, with no grouping of the (row, label) pairs and
+/// no sort. Without `function`, a table whose cells each hold one value takes the values as they
+/// are. `None` when the keys' codes do not pack into a `u64` or the cells overflow an `i32`.
+fn dcast_dense(
+    table: &Table,
+    rows: &[&str],
+    spread: &str,
+    value: &str,
+    function: Option<Aggregate>,
+) -> Result<Option<Executed>> {
+    let frame = table.frame();
+    let height = frame.height();
+    let mut row_digits = Vec::with_capacity(rows.len());
+    for name in rows {
+        match order_digits(frame.column(name)?, false)? {
+            Some(digit) => row_digits.push(digit),
+            None => return Ok(None),
+        }
+    }
+    let Some(spread_digit) = order_digits(frame.column(spread)?, false)? else {
+        return Ok(None);
+    };
+    let (Some((row_ids, row_firsts)), Some((label_ids, label_firsts))) = (
+        dense_ids(&row_digits, height),
+        dense_ids(std::slice::from_ref(&spread_digit), height),
+    ) else {
+        return Ok(None);
+    };
+    drop((row_digits, spread_digit));
+    let (row_count, label_count) = (row_firsts.len(), label_firsts.len());
+    let Some(cell_count) = row_count
+        .checked_mul(label_count)
+        .filter(|count| i32::try_from(*count).is_ok())
+    else {
+        return Ok(None);
+    };
+    let cell_of = |row: usize| row_ids[row] as usize * label_count + label_ids[row] as usize;
+
+    let mut warnings = Vec::new();
+    // The input row (or, after aggregating, the output row) each cell takes its value from.
+    let mut owner = vec![IdxSize::MAX; cell_count];
+    let (values, function) = match function {
+        None => {
+            let mut duplicated = false;
+            for row in 0..height {
+                if let Some(slot) = owner.get_mut(cell_of(row)) {
+                    duplicated |= *slot != IdxSize::MAX;
+                    *slot = row as IdxSize;
+                }
+            }
+            if duplicated {
+                warnings.push(Warning::CastCounted);
+                owner.fill(IdxSize::MAX);
+                (None, Aggregate::Length)
+            } else {
+                (
+                    Some(frame.column(value)?.as_materialized_series().clone()),
+                    Aggregate::First,
+                )
+            }
+        }
+        Some(function) => (None, function),
+    };
+    let values = match values {
+        Some(values) => values,
+        None => {
+            let cell_name = crate::group::temporary(0);
+            let cells = Int32Chunked::from_vec(
+                cell_name.clone(),
+                fill_rows(height, |row| cell_of(row) as i32),
+            );
+            let mut subject = Table::from_normalized(DataFrame::new(
+                height,
+                vec![cells.into_column(), frame.column(value)?.clone()],
+            )?);
+            let query = Query {
+                select: Select::Columns(vec![(
+                    PlSmallStr::from(value),
+                    build::aggregate(function, build::column(value)),
+                )]),
+                by: vec![(cell_name.clone(), build::column(&cell_name))],
+                ..Query::default()
+            };
+            let grouped = match execute(&mut subject, query)?.output {
+                Output::Table(grouped) => grouped,
+                _ => return Err(Error::Query("dcast's grouping gave no table".into())),
+            };
+            let grouped = grouped.frame();
+            for (index, cell) in grouped.column(&cell_name)?.i32()?.iter().enumerate() {
+                if let Some(slot) = cell.and_then(|cell| owner.get_mut(cell as usize)) {
+                    *slot = index as IdxSize;
+                }
+            }
+            grouped.column(value)?.as_materialized_series().clone()
+        }
+    };
+
+    let row_firsts = IdxCa::from_vec(PlSmallStr::EMPTY, row_firsts);
+    let mut columns: Vec<Column> = Vec::with_capacity(rows.len() + label_count);
+    for name in rows {
+        columns.push(frame.column(name)?.take(&row_firsts)?);
+    }
+    let labels = frame
+        .column(spread)?
+        .as_materialized_series()
+        .take(&IdxCa::from_vec(PlSmallStr::EMPTY, label_firsts))?;
+    for (label, name) in pivot_labels(&labels)?.into_iter().enumerate() {
+        let indices = IdxCa::from_iter_options(
+            PlSmallStr::EMPTY,
+            (0..row_count).map(|row| {
+                owner
+                    .get(row * label_count + label)
+                    .copied()
+                    .filter(|owner| *owner != IdxSize::MAX)
+            }),
+        );
+        let taken = values
+            .take(&indices)?
+            .with_name(PlSmallStr::from(name.as_deref().unwrap_or("NA")));
+        columns.push(fill_empty(taken, function)?.into_column());
+    }
+    let key = rows.iter().map(|name| PlSmallStr::from(*name)).collect();
+    Ok(Some(Executed {
+        output: Output::Table(
+            Table::from_normalized(DataFrame::new(row_count, columns)?).with_key(key),
+        ),
+        warnings,
+    }))
+}
+
+/// The column names a pivot gives its labels: each value as R's `as.character` spells it, which
+/// for a double is the shortest round-tripping form, and `None` for `NA`, so that it never meets
+/// a literal "NA" string.
+fn pivot_labels(labels: &Series) -> Result<Vec<Option<String>>> {
+    if let Ok(doubles) = labels.f64() {
+        return Ok(doubles
+            .iter()
+            .map(|label| {
+                label.map(|value| {
+                    let mut buffer = Vec::new();
+                    write_double(&mut buffer, value);
+                    String::from_utf8_lossy(&buffer).into_owned()
+                })
+            })
+            .collect());
+    }
+    Ok(labels
+        .cast(&DataType::String)?
+        .str()?
+        .iter()
+        .map(|label| label.map(str::to_string))
+        .collect())
+}
+
+/// Numbers each row's combination of `digits` by its rank among the distinct combinations, and
+/// gives each number's first row. `None` when the codes do not pack into one `u64`.
+fn dense_ids(digits: &[Digit], height: usize) -> Option<(Vec<u32>, Vec<IdxSize>)> {
+    let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
+    if bits > u64::BITS || u32::try_from(height).is_err() {
+        return None;
+    }
+    let packed: Vec<u64> = fill_rows(height, |row| {
+        digits.iter().fold(0u64, |code, digit| {
+            code.checked_shl(digit.bits).unwrap_or(0) | digit.codes[row]
+        })
+    });
+    let mut distinct = packed.clone();
+    THREAD_POOL.install(|| distinct.par_sort_unstable());
+    distinct.dedup();
+    let ids: Vec<u32> = THREAD_POOL.install(|| {
+        packed
+            .par_iter()
+            .with_min_len(CHUNK_ROWS)
+            .map(|code| distinct.partition_point(|probe| probe < code) as u32)
+            .collect()
+    });
+    let mut firsts = vec![0 as IdxSize; distinct.len()];
+    for (row, id) in ids.iter().enumerate().rev() {
+        if let Some(first) = firsts.get_mut(*id as usize) {
+            *first = row as IdxSize;
+        }
+    }
+    Some((ids, firsts))
 }
 
 /// Shifts a column by `offset` places, as `shift(x, n)` does: a positive offset lags, so the
@@ -1071,6 +1273,10 @@ fn key_digits(frame: &DataFrame, names: &[String]) -> Result<Option<Vec<Digit>>>
 fn order_digits(column: &Column, descending: bool) -> Result<Option<Digit>> {
     if u32::try_from(column.len()).is_err() {
         return Ok(None);
+    }
+    // A date orders as its day number.
+    if matches!(column.dtype(), DataType::Date) {
+        return order_digits(&column.to_physical_repr(), descending);
     }
     let digit = |codes: Vec<u64>, top: u64| Digit {
         codes,
@@ -1785,6 +1991,7 @@ fn type_name(dtype: &DataType) -> &'static str {
         Some(ColumnType::Double) => "double",
         Some(ColumnType::Character) => "character",
         Some(ColumnType::Factor) => "factor",
+        Some(ColumnType::Date) => "Date",
         None => "unsupported",
     }
 }

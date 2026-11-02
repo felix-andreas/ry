@@ -1,0 +1,40 @@
+# A script written with data.table moves to ry's DataFrame: the command shows the rewrite as a
+# diff first, and `--write` applies it in place.
+
+file ry.toml
+| [check]
+| typing = true
+file sales.csv
+| region,units,price
+| eu,3,1.5
+| us,5,2
+file analysis.R
+| library(data.table)
+| sales <- fread("sales.csv")
+| big <- sales[units > 2L & region != "asia"]
+| totals <- sales[, .(units = sum(units), n = .N), by = region]
+| sales[, revenue := units * price]
+| setorder(sales, region, -units)
+| scores <- c(1, 5, 3)
+| high <- scores[scores > 2]
+
+run ry migrate data-table analysis.R
+expect exit 0
+expect stdout "5 rewrites in 1 file; apply them with `ry migrate data-table --write`"
+expect stderr "Diff in"
+expect stderr "+sales <- DataFrame.read_csv(\"sales.csv\")"
+expect file analysis.R "sales <- fread(\"sales.csv\")"
+
+run ry migrate data-table --write analysis.R
+expect exit 0
+expect stdout "applied 5 rewrites in 1 file"
+expect file analysis.R "sales <- DataFrame.read_csv(\"sales.csv\")"
+expect file analysis.R "big <- sales |> DataFrame.filter(col(\"units\") > 2L, col(\"region\") != \"asia\")"
+expect file analysis.R "totals <- sales |> DataFrame.group_by(\"region\") |> GroupBy.agg(units = col(\"units\") |> Expr.sum(), n = Expr.len())"
+expect file analysis.R "sales <- sales |> DataFrame.with_columns(revenue = col(\"units\") * col(\"price\"))"
+expect file analysis.R "sales <- sales |> DataFrame.sort(\"region\", \"units\", descending = c(FALSE, TRUE))"
+expect file analysis.R "high <- scores[scores > 2]"
+
+run ry migrate data-table analysis.R
+expect exit 0
+expect stdout "no data.table code to rewrite"
