@@ -212,6 +212,13 @@ fn seeds_agree_across_tiers() {
             "(n = 9L)",
             false,
         ),
+        // A list element read speculates on the doubles it saw, and an integer, a length-two
+        // vector and a logical each fail the check and take tier 0's path.
+        (
+            "l <- list(1.5, 2.5, 3.5)\ns <- 0\nfor (i in 1:n) { if (i == 5L) l[[2L]] <- 7L; if (i == 7L) l[[2L]] <- c(1, 2); if (i == 9L) l[[2L]] <- TRUE; s <- s + l[[2L]] * l[[(i %% 3L) + 1L]] }\ns",
+            "(n = 12L)",
+            false,
+        ),
         // A compiled `match` over tags, tuples, records and literals, with nested payloads.
         (
             "s <- 0\nfor (i in 1:n) { v <- if (i %% 4L == 0L) :Some((i, 2)) else if (i %% 4L == 1L) :None else if (i %% 4L == 2L) (x = i, y = 1L) else \"k\"\ns <- s + match (v) { :Some((a, b)) => a * b, :None => 1, (x = a, y = 1L) => a, \"k\" | \"j\" => 0.5, _ => 100 } }\ns",

@@ -1314,7 +1314,8 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let join = self.builder.create_block();
                 self.builder.ins().brif(in_range, fast, &[], slow, &[]);
                 self.builder.switch_to_block(fast);
-                let width = if matches!(result, Ty::Int | Ty::Lgl) {
+                let list = types[0] == Ty::List;
+                let width = if !list && matches!(result, Ty::Int | Ty::Lgl) {
                     4
                 } else {
                     8
@@ -1323,6 +1324,15 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let scaled = self.builder.ins().imul_imm_s(offset, width);
                 let address = self.builder.ins().iadd(vector, scaled);
                 match result {
+                    // A list element speculated to be a scalar is checked, then unboxed; any
+                    // other element hands the read to tier 0.
+                    Ty::Int | Ty::Lgl | Ty::Dbl if list => {
+                        let element = self.builder.ins().load(I64, flags(), address, DATA);
+                        let fits = self.check(element, result);
+                        self.hand_off_unless(position, before, fits);
+                        let value = self.unbox(element, result);
+                        self.def_register(dst, result, value);
+                    }
                     Ty::Int | Ty::Lgl => {
                         let value = self.builder.ins().load(I32, flags(), address, DATA);
                         self.builder.def_var(self.integers[dst], value);

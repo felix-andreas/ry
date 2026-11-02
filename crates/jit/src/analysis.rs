@@ -2509,7 +2509,12 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|&register| state.registers[register])
             .collect();
-        if untagged && let Some((intrinsic, result)) = intrinsic_for(name, &types) {
+        if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
+            // A list element is boxed, so its type comes from what the site has read so far,
+            // which the compiled read checks before it unboxes the element.
+            if intrinsic == Intrinsic::Element && types[0] == Ty::List && feedback.is_unboxed() {
+                result = feedback;
+            }
             state.registers[dst] = result;
             state.visible = Some(true);
             return Ok(Action::Intrinsic {
