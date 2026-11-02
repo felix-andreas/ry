@@ -19,12 +19,12 @@ use {
             Traversal, Ty, jump_target, status,
         },
         native,
-        runtime::{self, Activation, offset, outcome, reason, representation},
+        runtime::{self, Activation, Exit, offset, outcome, reason, representation},
     },
     cranelift_codegen::{
         ir::{
-            AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, StackSlotData,
-            StackSlotKind, Type, Value,
+            AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, StackSlot,
+            StackSlotData, StackSlotKind, Type, Value,
             condcodes::{FloatCC, IntCC},
             immediates::Ieee64,
             types::{F64, I8, I32, I64},
@@ -68,7 +68,7 @@ const ALTREP_FLAG: i64 = 1 << 1;
 const ARRAY_FLAG: i64 = 1 << 4;
 const OBJECT_FLAG: i64 = 1 << 0;
 
-pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
+pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>), Refusal> {
     MODULE.with(|cell| {
         let mut module_slot = cell.borrow_mut();
         if module_slot.is_none() {
@@ -82,13 +82,14 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
         context.func.signature.params.push(AbiParam::new(I64));
         context.func.signature.returns.push(AbiParam::new(I64));
         let mut function_context = FunctionBuilderContext::new();
-        {
+        let exits = {
             let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
             let mut translator = Translator::new(plan, code, builder, call_conv);
-            translator.translate()?;
+            let exits = translator.translate()?;
             translator.builder.seal_all_blocks();
             translator.builder.finalize(frontend_config);
-        }
+            exits
+        };
         if std::env::var_os("RY_JIT_DUMP").is_some() {
             eprintln!("{}", context.func.display());
         }
@@ -107,7 +108,10 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
             .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
         let pointer = module.get_finalized_function(id);
         // SAFETY: the function was built with exactly this signature.
-        Ok(unsafe { std::mem::transmute::<*const u8, Entry>(pointer) })
+        Ok((
+            unsafe { std::mem::transmute::<*const u8, Entry>(pointer) },
+            exits,
+        ))
     })
 }
 
@@ -195,6 +199,17 @@ struct Translator<'p, 'b> {
     nil: i64,
 }
 
+/// A value's [`representation`] in a deoptimization exit.
+fn exit_kind(ty: Ty) -> i32 {
+    match ty {
+        Ty::Int => representation::INTEGER,
+        Ty::Lgl => representation::LOGICAL,
+        Ty::Dbl => representation::DOUBLE,
+        Ty::Num => representation::NUM,
+        _ => representation::BOXED,
+    }
+}
+
 fn flags() -> MemFlagsData {
     MemFlagsData::trusted()
 }
@@ -243,7 +258,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         }
     }
 
-    unsafe fn translate(&mut self) -> Result<(), Refusal> {
+    unsafe fn translate(&mut self) -> Result<Box<[Exit]>, Refusal> {
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
@@ -342,11 +357,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 }
             }
         }
-        let deopts = std::mem::take(&mut self.deopts);
-        for deopt in deopts {
-            self.emit_deopt(deopt);
-        }
-        Ok(())
+        Ok(self.emit_deopts())
     }
 
     /// Enters at a loop header with tier 0's registers in the window and every variable in the
@@ -2807,39 +2818,91 @@ impl<'p, 'b> Translator<'p, 'b> {
         label
     }
 
-    unsafe fn emit_deopt(&mut self, deopt: Deopt) {
+    /// The registers and slots `deopt` writes back.
+    fn exit(&self, deopt: &Deopt) -> Exit {
+        let state = self.plan.state(deopt.state);
+        let registers = state
+            .registers
+            .iter()
+            .enumerate()
+            .filter(|&(register, ty)| {
+                ty.in_variables()
+                    && deopt.boxed != Some(register)
+                    && self.plan.live.get(deopt.live, register)
+            })
+            .map(|(register, &ty)| (register as u32, exit_kind(ty)))
+            .collect();
+        let slots = state
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, current)| current.may_be(status::DIRTY))
+            .map(|(slot, current)| (slot as u32, exit_kind(current.ty)))
+            .collect();
+        Exit {
+            pc: deopt.pc,
+            why: deopt.why,
+            registers,
+            slots,
+        }
+    }
+
+    /// Stores the raw values `exit` lists into the scratch area and jumps to the shared exit.
+    fn emit_deopt(
+        &mut self,
+        deopt: &Deopt,
+        exit: &Exit,
+        number: usize,
+        scratch: StackSlot,
+        shared: Label,
+    ) {
         self.builder.switch_to_block(deopt.label);
         self.builder.set_cold_block(deopt.label);
-        let state = self.plan.state(deopt.state);
-        for (register, &ty) in state.registers.iter().enumerate() {
-            if ty.in_variables()
-                && deopt.boxed != Some(register)
-                && self.plan.live.get(deopt.live, register)
-            {
-                let boxed = self.box_register(register, ty);
-                self.store_register(register, boxed);
+        let mut cell = 0;
+        let mut store = |builder: &mut FunctionBuilder<'b>, ty: Type, value: Value| {
+            builder.ins().stack_store(ty, value, scratch, 8 * cell);
+            cell += 1;
+        };
+        for &(register, kind) in &exit.registers {
+            let register = register as usize;
+            match kind {
+                representation::DOUBLE => {
+                    let value = self.builder.use_var(self.doubles[register]);
+                    store(&mut self.builder, F64, value);
+                }
+                representation::NUM => {
+                    let value = self.builder.use_var(self.doubles[register]);
+                    store(&mut self.builder, F64, value);
+                    let flag = self.builder.use_var(self.integers[register]);
+                    store(&mut self.builder, I32, flag);
+                }
+                _ => {
+                    let value = self.builder.use_var(self.integers[register]);
+                    store(&mut self.builder, I32, value);
+                }
             }
         }
-        for slot in 0..state.slots.len() {
-            let current = state.slots[slot];
-            if !current.may_be(status::DIRTY) {
-                continue;
-            }
+        for &(slot, kind) in &exit.slots {
+            let slot = slot as usize;
             let status = self.builder.use_var(self.statuses[slot]);
-            let dirty = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
-            let flush = self.builder.create_block();
-            let done = self.builder.create_block();
-            self.builder.ins().brif(dirty, flush, &[], done, &[]);
-            self.builder.switch_to_block(flush);
-            self.builder.set_cold_block(flush);
-            // A failure parks its error, which the deoptimization below then raises.
-            self.call_flush(slot, current.ty);
-            self.builder.ins().jump(done, &[]);
-            self.builder.switch_to_block(done);
-            self.builder.set_cold_block(done);
+            store(&mut self.builder, I32, status);
+            match kind {
+                representation::BOXED => {}
+                representation::DOUBLE => {
+                    let value = self.builder.use_var(self.slot_doubles[slot]);
+                    store(&mut self.builder, F64, value);
+                }
+                representation::NUM => {
+                    let value = self.builder.use_var(self.slot_doubles[slot]);
+                    store(&mut self.builder, F64, value);
+                    let flag = self.builder.use_var(self.slot_integers[slot]);
+                    store(&mut self.builder, I32, flag);
+                }
+                _ => {
+                    let value = self.builder.use_var(self.slot_integers[slot]);
+                    store(&mut self.builder, I32, value);
+                }
+            }
         }
         for index in 0..self.plan.loops {
             let value = self.builder.use_var(self.loop_indexes[index]);
@@ -2851,16 +2914,42 @@ impl<'p, 'b> Translator<'p, 'b> {
                 .ins()
                 .store(flags(), count, self.loops, (16 * index + 8) as i32);
         }
-        let pc = iconst(&mut self.builder, deopt.pc);
-        let why = self.builder.ins().iconst(I32, deopt.why as i64);
+        let number = iconst(&mut self.builder, number);
+        self.builder.ins().jump(shared, &[number.into()]);
+    }
+
+    /// Emits every deoptimization point and the one exit they share, which calls
+    /// [`runtime::jit_deopt_exit`] with the point's number.
+    fn emit_deopts(&mut self) -> Box<[Exit]> {
+        let deopts = std::mem::take(&mut self.deopts);
+        if deopts.is_empty() {
+            return Box::default();
+        }
+        let exits: Box<[Exit]> = deopts.iter().map(|deopt| self.exit(deopt)).collect();
+        let cells = exits.iter().map(Exit::cells).max().unwrap_or(0).max(1);
+        let scratch = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (8 * cells) as u32,
+            3,
+        ));
+        let shared = self.builder.create_block();
+        self.builder.append_block_param(shared, I64);
+        self.builder.set_cold_block(shared);
+        for (number, (deopt, exit)) in deopts.iter().zip(&exits).enumerate() {
+            self.emit_deopt(deopt, exit, number, scratch, shared);
+        }
+        self.builder.switch_to_block(shared);
+        let number = self.builder.block_params(shared)[0];
+        let pointer = self.builder.ins().stack_addr(I64, scratch, 0);
         let result = self.call(
-            runtime::jit_deopt as *const () as usize,
-            &[I64, I64, I32],
+            runtime::jit_deopt_exit as *const () as usize,
+            &[I64, I64, I64],
             Some(I64),
-            &[self.activation, pc, why],
+            &[self.activation, pointer, number],
         );
-        let result = result.unwrap_or(pc);
+        let result = result.unwrap_or(number);
         self.builder.ins().return_(&[result]);
+        exits
     }
 
     fn guard(&mut self, condition: Value, failed: Label) {

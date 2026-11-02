@@ -276,7 +276,7 @@ unsafe fn compile_in<'a>(
         if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
             return Err(Refusal(analysis::NOTHING_NATIVE));
         }
-        let entry = codegen::compile(&plan, machine.code)?;
+        let (entry, exits) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
         if std::env::var_os("RY_JIT_LOG").is_some() {
             // The instructions left to tier 0 are where compiled code is slow.
@@ -336,6 +336,7 @@ unsafe fn compile_in<'a>(
                 .map(|_| Cell::new(u64::MAX))
                 .collect(),
             osr,
+            exits,
         });
         // Everything the machine code and the speculations point to stays reachable from the
         // external pointer while the enclosure lives, so the collector never frees an object

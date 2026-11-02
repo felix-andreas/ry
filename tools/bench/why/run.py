@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Measures the programs behind the benchmark table in docs/src/content/docs/why-ry.mdx: each one
 untyped on GNU R, untyped on ry, and typed in strict mode on ry. Engines alternate per program so
-they never share the CPU. Prints the machine, the R version and a Markdown table of best times.
+they never share the CPU. Prints the machine, the R version and two Markdown tables: the best warm
+time of each program, and the time of its first, cold run, which includes compiling it.
 
 Usage: tools/bench/why/run.py [--ry PATH] [--filter NAME]
 """
@@ -11,6 +12,7 @@ here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
 
 def run(command, variant, program, env):
+    """The best warm time, the cold time and the checksum, or `None` and why it failed."""
     # The scratch file sits beside the variant's ry.toml, so the typed run is checked in strict
     # mode, and `ry run` refuses to run it if strict mode finds an error.
     text = (here / variant / "harness.R").read_text() + "\n" + (here / variant / program).read_text()
@@ -22,9 +24,9 @@ def run(command, variant, program, env):
         scratch.unlink()
     lines = [line for line in output.stdout.splitlines() if line.strip()]
     if output.returncode != 0 or not lines:
-        return None, ((output.stderr.strip() or output.stdout.strip()).splitlines() or ["failed"])[-1]
-    _, checksum, seconds = lines[-1].split()
-    return float(seconds), checksum
+        return None, None, ((output.stderr.strip() or output.stdout.strip()).splitlines() or ["failed"])[-1]
+    _, checksum, seconds, cold = lines[-1].split()
+    return float(seconds), float(cold), checksum
 
 def machine():
     cpu = platform.processor() or platform.machine()
@@ -52,19 +54,26 @@ def main():
         ("ry, typed and strict", ry, "typed"),
     ]
     print(f"Machine: {machine()}\n")
-    print("| program | " + " | ".join(name for name, _, _ in engines) + " | ry vs GNU R |")
-    print("| --- | " + " | ".join("---:" for _ in engines) + " | ---: |")
+    rows = []
     for program in sorted((here / "untyped").glob("*.R")):
         if program.name == "harness.R" or args.filter not in program.stem:
             continue
         results = [run(command, variant, program.name, base) for _, command, variant in engines]
-        checksums = {checksum for seconds, checksum in results if seconds is not None}
-        cells = [f"{seconds:.3f} s" if seconds is not None else f"fails ({detail[:60]})" for seconds, detail in results]
-        ratio = ""
-        if results[0][0] and results[1][0]:
-            ratio = f"{results[0][0] / max(results[1][0], 1e-4):.1f}x"
+        checksums = {checksum for seconds, _, checksum in results if seconds is not None}
         note = "" if len(checksums) <= 1 else " (results differ: " + ", ".join(sorted(checksums)) + ")"
-        print(f"| {program.stem}{note} | " + " | ".join(cells) + f" | {ratio} |")
-        sys.stdout.flush()
+        rows.append((program.stem + note, results))
+    for title, column in [("Best warm run", 0), ("First, cold run", 1)]:
+        print(f"{title}:\n")
+        print("| program | " + " | ".join(name for name, _, _ in engines) + " | ry vs GNU R |")
+        print("| --- | " + " | ".join("---:" for _ in engines) + " | ---: |")
+        for name, results in rows:
+            times = [result[column] for result in results]
+            cells = [f"{seconds:.3f} s" if seconds is not None else f"fails ({result[2][:60]})" for seconds, result in zip(times, results)]
+            ratio = ""
+            if times[0] and times[1]:
+                ratio = f"{times[0] / max(times[1], 1e-4):.1f}x"
+            print(f"| {name} | " + " | ".join(cells) + f" | {ratio} |")
+        print()
+    sys.stdout.flush()
 
 main()

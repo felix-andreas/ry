@@ -108,6 +108,40 @@ pub struct Compiled {
     pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
+    /// Each deoptimization point's write-back, indexed by the number compiled code passes to
+    /// [`jit_deopt_exit`].
+    pub exits: Box<[Exit]>,
+}
+
+/// What one deoptimization point writes back before tier 0 resumes at `pc`.
+///
+/// Every deoptimization point used to box and flush its values in its own cold block, which
+/// made those blocks most of a function's code and most of its compile time. Now each point only
+/// stores its raw values into a scratch area, one 8-byte cell each in the order below, and
+/// jumps to one shared exit that calls [`jit_deopt_exit`] with this point's number.
+pub struct Exit {
+    pub pc: usize,
+    pub why: i32,
+    /// Registers held unboxed, with their [`representation`]: one cell for the value, and a
+    /// second for the integer flag of a [`representation::NUM`].
+    pub registers: Box<[(u32, i32)]>,
+    /// Slots that may be dirty: one cell for the status, then the value cells as for a
+    /// register, none for a [`representation::BOXED`] slot.
+    pub slots: Box<[(u32, i32)]>,
+}
+
+impl Exit {
+    /// The scratch cells this exit uses.
+    pub fn cells(&self) -> usize {
+        let value = |kind: i32| match kind {
+            representation::NUM => 2,
+            representation::BOXED => 0,
+            _ => 1,
+        };
+        let registers: usize = self.registers.iter().map(|&(_, kind)| value(kind)).sum();
+        let slots: usize = self.slots.iter().map(|&(_, kind)| 1 + value(kind)).sum();
+        registers + slots
+    }
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
@@ -492,6 +526,70 @@ pub mod representation {
     pub const INTEGER: i32 = 1;
     pub const DOUBLE: i32 = 2;
     pub const LOGICAL: i32 = 3;
+    /// A [`crate::analysis::Ty::Num`]: a double and a flag saying it holds an integer. Only
+    /// deoptimization exits use it.
+    pub const NUM: i32 = 4;
+}
+
+/// Boxes the registers and flushes the dirty slots that exit `exit` lists, reading their raw
+/// values from `scratch`, then deoptimizes like [`jit_deopt`].
+pub unsafe extern "C" fn jit_deopt_exit(
+    activation: *mut Activation,
+    scratch: *const i64,
+    exit: i64,
+) -> *mut Header {
+    unsafe {
+        let Some(exit) = compiled(&*activation).exits.get(exit as usize) else {
+            panic!("compiled code named a deoptimization exit it does not have");
+        };
+        let mut cell = scratch;
+        let mut next = || {
+            let current = cell;
+            cell = cell.add(1);
+            current
+        };
+        for &(register, kind) in &exit.registers {
+            let value = next();
+            let boxed = match kind {
+                representation::INTEGER => jit_box_integer(activation, value.cast::<i32>().read()),
+                representation::LOGICAL => jit_box_logical(activation, value.cast::<i32>().read()),
+                representation::DOUBLE => jit_box_double(activation, value.cast::<f64>().read()),
+                _ => jit_box_num(
+                    activation,
+                    value.cast::<f64>().read(),
+                    next().cast::<i32>().read(),
+                ),
+            };
+            // The window roots each box before the next allocation can collect. Boxing never
+            // returns null: a failure parks its error and returns `NULL`.
+            if let Some(boxed) = Sexp::from_raw(boxed) {
+                *(*activation).registers.add(register as usize) = boxed;
+            }
+        }
+        for &(slot, kind) in &exit.slots {
+            let status = next().cast::<i32>().read();
+            let (kind, bits) = match kind {
+                representation::BOXED => (kind, 0),
+                representation::DOUBLE => (kind, next().read()),
+                representation::NUM => {
+                    let double = next().cast::<f64>().read();
+                    if next().cast::<i32>().read() == 0 {
+                        (representation::DOUBLE, double.to_bits() as i64)
+                    } else if double.is_nan() {
+                        (representation::INTEGER, i64::from(NA_INTEGER))
+                    } else {
+                        (representation::INTEGER, i64::from(double as i32))
+                    }
+                }
+                _ => (kind, i64::from(next().cast::<i32>().read())),
+            };
+            if i64::from(status) == crate::analysis::status::RUNTIME_DIRTY {
+                // A failure parks its error, which the deoptimization below then raises.
+                jit_flush(activation, i64::from(slot), kind, bits);
+            }
+        }
+        jit_deopt(activation, exit.pc as i64, exit.why)
+    }
 }
 
 /// Writes a dirty slot back to the environment. A boxed value hands the reference compiled
