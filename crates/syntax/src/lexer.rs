@@ -18,7 +18,8 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     let mut lexer = Lexer {
         text,
         pos: 0,
-        tokens: Vec::new(),
+        // R averages a little over four bytes a token, so this rarely regrows.
+        tokens: Vec::with_capacity(text.len() / 4),
         errors: Vec::new(),
         in_annotation: false,
     };
@@ -68,7 +69,10 @@ impl Lexer<'_> {
     }
 
     fn peek(&self) -> Option<char> {
-        self.text[self.pos..].chars().next()
+        match *self.text.as_bytes().get(self.pos)? {
+            byte if byte.is_ascii() => Some(char::from(byte)),
+            _ => self.text[self.pos..].chars().next(),
+        }
     }
 
     fn bump(&mut self) -> Option<char> {
@@ -118,7 +122,11 @@ impl Lexer<'_> {
                     self.in_annotation = true;
                     ANNOTATION_MARKER
                 } else {
-                    self.eat_while(|c| c != '\n' && c != '\r');
+                    // A line break is ASCII, so a byte scan cannot stop inside a character.
+                    self.pos += self.text.as_bytes()[self.pos..]
+                        .iter()
+                        .position(|&byte| byte == b'\n' || byte == b'\r')
+                        .unwrap_or(self.text.len() - self.pos);
                     COMMENT
                 }
             }
@@ -195,6 +203,11 @@ impl Lexer<'_> {
                 }
             }
         }
+        let ascii = self.text.as_bytes()[self.pos..]
+            .iter()
+            .position(|&byte| !(byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_'))
+            .unwrap_or(self.text.len() - self.pos);
+        self.pos += ascii;
         self.eat_while(is_ident_continue);
         let text = &self.text[start..self.pos];
         if text == "..." {

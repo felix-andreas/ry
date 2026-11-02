@@ -374,8 +374,9 @@ JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, 
 and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
 --count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
 its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
-`RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
-allocation, which is too slow for a debug build today.
+`just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
+in a debug build. `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup`
+from the first allocation, which takes about seven seconds on an empty script in a debug build.
 
 `crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
 Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
@@ -664,6 +665,11 @@ pin these contracts:
 - An inserted statement re-checks only the reads it intercepts.
 - A body edit re-derives one item's load facts and its own file's index layer, a `NAMESPACE` edit
   re-derives no item, and a statement that only moved keeps its load facts.
+- A one-shot check (`ProbeDatabase::one_shot`) runs no `package_name`, `test_name` or
+  `interface_group` and one `project_interface_groups`, reports exactly what the incremental check
+  reports, and agrees with the per-name and per-item answers under invariants (checked in a child
+  process, because invariants are process-wide and would perturb the counting tests). The
+  incremental database still goes through the per-name and per-item firewalls.
 
 The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to
 `Unknown`, and that a chain of 4,096 links resolves without overflowing the analysis thread's stack.

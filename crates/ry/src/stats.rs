@@ -6,7 +6,9 @@ use {
         cli::{self, CommandError},
         config::Config,
         diagnostics::document_diagnostics,
+        installed::InstalledPackages,
     },
+    ide::{DefinitionTarget, HoverDefinition},
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -22,7 +24,7 @@ use {
     },
     std::{
         cmp::Reverse,
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         fs,
         path::{Path, PathBuf},
         sync::atomic::Ordering,
@@ -312,6 +314,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     }
     if let Some(&median) = by_loc.get(by_loc.len() / 2) {
         editor_requests(&mut db, &records, median, &config);
+        editor_coverage(&db, &records, &root);
     }
 
     Ok(())
@@ -379,6 +382,181 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
         .with_durability(Durability::LOW)
         .to(edited.source.clone());
     let _ = document_diagnostics(db, edited.file, config);
+}
+
+/// How often hover and goto-definition answer at identifiers in package files, by the role the
+/// identifier plays, with a few unanswered positions per role to show where the gaps are.
+fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return;
+    };
+    let mut tallies: BTreeMap<IdentifierRole, CoverageTally> = BTreeMap::new();
+    let mut sampled = 0usize;
+    // Answers that name an installed package count only when the library really has the name,
+    // as the server would show it.
+    let mut installed = InstalledPackages::new(root, None);
+    for record in records {
+        if record.file.kind(db) != &DocumentKind::Package {
+            continue;
+        }
+        for offset in identifier_offsets(&record.source)
+            .into_iter()
+            .step_by(COVERAGE_POSITION_STRIDE)
+        {
+            if sampled == COVERAGE_SAMPLES {
+                break;
+            }
+            let Some(role) = identifier_role(&record.source, usize::from(offset)) else {
+                continue;
+            };
+            sampled += 1;
+            let tally = tallies.entry(role).or_default();
+            tally.total += 1;
+            let hovered = ide::hover(db, files, record.file, offset);
+            let hover_text = hovered
+                .as_ref()
+                .map(|hover| hover.lines.join(" | "))
+                .unwrap_or_default();
+            let documented = match hovered.and_then(|hover| hover.definition) {
+                Some(HoverDefinition::Package(target)) => {
+                    installed.documentation(&target).is_some()
+                }
+                _ => false,
+            };
+            // A hover that only says `Unknown` tells the reader nothing.
+            let hover = documented || (!hover_text.is_empty() && hover_text != "Unknown");
+            let definition = ide::definition(db, files, record.file, offset)
+                .iter()
+                .any(|target| match target {
+                    DefinitionTarget::Package(target) => installed.definition(target).is_some(),
+                    _ => true,
+                });
+            tally.hover += usize::from(hover);
+            tally.definition += usize::from(definition);
+            if !(hover && definition) && tally.misses.len() < COVERAGE_EXAMPLES {
+                let line_start = record.source[..usize::from(offset)]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1);
+                let line_end = record.source[line_start..]
+                    .find('\n')
+                    .map_or(record.source.len(), |index| line_start + index);
+                let line = record.source[..line_start].matches('\n').count() + 1;
+                tally.misses.push(format!(
+                    "{}{} {}:{line}: {}   [{hover_text}]",
+                    if hover { ' ' } else { 'H' },
+                    if definition { ' ' } else { 'D' },
+                    record
+                        .path
+                        .file_name()
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                    record.source[line_start..line_end].trim(),
+                ));
+            }
+        }
+    }
+    println!();
+    println!("editor coverage ({sampled} identifiers in package files):");
+    for (role, tally) in &tallies {
+        let share = |answered: usize| answered as f64 * 100.0 / tally.total.max(1) as f64;
+        println!(
+            "  {:<16} {:>6}   hover {:>5.1}%   definition {:>5.1}%",
+            role.label(),
+            tally.total,
+            share(tally.hover),
+            share(tally.definition),
+        );
+        for miss in &tally.misses {
+            println!("      {miss}");
+        }
+    }
+}
+
+const COVERAGE_SAMPLES: usize = 20_000;
+const COVERAGE_POSITION_STRIDE: usize = 3;
+const COVERAGE_EXAMPLES: usize = 12;
+
+#[derive(Default)]
+struct CoverageTally {
+    total: usize,
+    hover: usize,
+    definition: usize,
+    misses: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum IdentifierRole {
+    Namespaced,
+    Field,
+    ArgumentName,
+    CallHead,
+    Variable,
+}
+
+impl IdentifierRole {
+    fn label(self) -> &'static str {
+        match self {
+            IdentifierRole::Namespaced => "pkg::name",
+            IdentifierRole::Field => "$ or @ field",
+            IdentifierRole::ArgumentName => "argument name",
+            IdentifierRole::CallHead => "call head",
+            IdentifierRole::Variable => "variable",
+        }
+    }
+}
+
+/// The role of the identifier starting at `start`, from the surrounding text, or `None` for a
+/// keyword or constant that no editor request answers.
+fn identifier_role(source: &str, start: usize) -> Option<IdentifierRole> {
+    let rest = source.get(start..)?;
+    let length = rest
+        .find(|character: char| {
+            !(character.is_alphanumeric() || character == '_' || character == '.')
+        })
+        .unwrap_or(rest.len());
+    let word = &rest[..length];
+    if matches!(
+        word,
+        "function"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "repeat"
+            | "in"
+            | "next"
+            | "break"
+            | "TRUE"
+            | "FALSE"
+            | "NULL"
+            | "NA"
+            | "Inf"
+            | "NaN"
+            | "NA_integer_"
+            | "NA_real_"
+            | "NA_character_"
+            | "T"
+            | "F"
+    ) {
+        return None;
+    }
+    let before = source[..start].trim_end_matches([' ', '\t']);
+    let after = rest[length..].trim_start_matches([' ', '\t']);
+    if before.ends_with("::") {
+        return Some(IdentifierRole::Namespaced);
+    }
+    if before.ends_with('$') || before.ends_with('@') {
+        return Some(IdentifierRole::Field);
+    }
+    if after.starts_with('(') {
+        return Some(IdentifierRole::CallHead);
+    }
+    if after.starts_with('=')
+        && !after.starts_with("==")
+        && (before.ends_with('(') || before.ends_with(','))
+    {
+        return Some(IdentifierRole::ArgumentName);
+    }
+    Some(IdentifierRole::Variable)
 }
 
 const REQUEST_SAMPLES: usize = 200;

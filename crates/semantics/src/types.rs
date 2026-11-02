@@ -23,15 +23,61 @@ pub struct Name<'db> {
 }
 
 impl<'db> Name<'db> {
-    pub fn new<D: ?Sized>(_db: &'db D, text: impl AsRef<str>) -> Name<'db> {
+    pub fn new<D: ?Sized>(_db: &'db D, text: impl IntoSymbol) -> Name<'db> {
         Name {
-            symbol: Symbol::new(text.as_ref()),
+            symbol: text.into_symbol(),
             db: PhantomData,
         }
     }
 
+    pub fn symbol(self) -> Symbol {
+        self.symbol
+    }
+
     pub fn text<D: ?Sized>(self, _db: &D) -> &'static str {
         self.symbol.as_str()
+    }
+}
+
+/// A spelling, or a symbol that already interns one: a symbol passes through without the
+/// hash and table probe that interning its text again would cost.
+pub trait IntoSymbol {
+    fn into_symbol(self) -> Symbol;
+}
+
+impl IntoSymbol for Symbol {
+    fn into_symbol(self) -> Symbol {
+        self
+    }
+}
+
+impl IntoSymbol for &Symbol {
+    fn into_symbol(self) -> Symbol {
+        *self
+    }
+}
+
+impl IntoSymbol for &str {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(self)
+    }
+}
+
+impl IntoSymbol for &&str {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(self)
+    }
+}
+
+impl IntoSymbol for String {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(&self)
+    }
+}
+
+impl IntoSymbol for &String {
+    fn into_symbol(self) -> Symbol {
+        Symbol::new(self)
     }
 }
 
@@ -279,6 +325,39 @@ pub struct FunctionType<'db> {
     /// The signature was inferred from an unannotated body, so a scalar parameter type is a
     /// claim of how the body uses the value, not a declared length.
     pub inferred: bool,
+    /// The body returns one of two values chosen by a logical flag with a literal default,
+    /// so a call that leaves the flag out or passes a literal returns that branch alone.
+    pub flag_return: Option<FlagReturn<'db>>,
+    /// Formals the body reads only through `substitute()`, so a call's argument there is code
+    /// the callee captures rather than a value the caller computes. Inferred only.
+    pub quoted: Vec<Name<'db>>,
+    /// Optional formals that a forced formal's default reads: `function(x, y = x) y` may be
+    /// called as `g(y = 1)` but not as `g()`. Inferred only.
+    pub default_reads: Vec<DefaultRead<'db>>,
+    /// Formals the body tests with `missing()`, so a missing formal the caller forwards there
+    /// may stay unread even when the formal has a default. Inferred only.
+    pub missing_tested: Vec<Name<'db>>,
+    /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
+    /// string through `as.logical`. Inferred only.
+    pub condition_only: Vec<Name<'db>>,
+}
+
+/// `formal` is required by a call that leaves out `default_of`, whose default reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct DefaultRead<'db> {
+    pub formal: Name<'db>,
+    pub default_of: Name<'db>,
+}
+
+/// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
+/// union of both branches, and these are the branches themselves. Inferred only, since an
+/// annotation has no syntax for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct FlagReturn<'db> {
+    pub parameter: Name<'db>,
+    pub default: bool,
+    pub when_true: Ty<'db>,
+    pub when_false: Ty<'db>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -689,6 +768,15 @@ fn mapped_kind<'db>(
             }),
             ret: map(function.ret),
             inferred: function.inferred,
+            flag_return: function.flag_return.map(|flag| FlagReturn {
+                when_true: map(flag.when_true),
+                when_false: map(flag.when_false),
+                ..flag
+            }),
+            quoted: function.quoted.clone(),
+            default_reads: function.default_reads.clone(),
+            missing_tested: function.missing_tested.clone(),
+            condition_only: function.condition_only.clone(),
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -737,6 +825,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
                 .iter()
                 .for_each(|rest| visit(rest.element));
             visit(function.ret);
+            if let Some(flag) = function.flag_return {
+                visit(flag.when_true);
+                visit(flag.when_false);
+            }
         }
         TyKind::Named(_, arguments) => arguments.iter().copied().for_each(visit),
     }
@@ -908,6 +1000,11 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Integer),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
 
@@ -934,6 +1031,11 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
         let f2 = Ty::new(
@@ -944,6 +1046,11 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
         assert_eq!(f1, f2);

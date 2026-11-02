@@ -6,8 +6,9 @@ wrapper <- function(parameter, partner) {
   }
 }
 #++++
-hover 85..87: pa: Unknown
-definition: none
+hover 85..87: pa
+hover-definition: installed pa from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed pa from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -20,8 +21,9 @@ wrapper <- function(value) {
   }
 }
 #++++
-hover 62..64: va: Unknown
-definition: none
+hover 62..64: va
+hover-definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -35,13 +37,12 @@ wrapper <- function() {
   }
 }
 #++++
-hover 72..79: outer_v: Unknown
-definition: none
+hover 72..79: outer_v
+hover-definition: installed outer_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed outer_v from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 24..24 -> "  #: integer\n"
 completion (1): outer_value
 hint @37: integer
 
@@ -57,14 +58,12 @@ wrapper <- function() {
   }
 }
 #++++
-hover 118..120: va: Unknown
-definition: none
+hover 118..120: va
+hover-definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 46..46 -> "    #: integer\n"
-  edit 98..98 -> "    #: integer\n"
 completion (11): var_b, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
 hint @55: integer
 hint @107: integer
@@ -72,12 +71,13 @@ hint @107: integer
 #---- na_keyword_prefix
 na_$0
 #++++
-hover 0..3: na_: Unknown
-definition: none
+hover 0..3: na_
+hover-definition: installed na_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed na_ from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
-completion (18): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.count_leading_zero_bits
+completion (20): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.count_leading_zero_bits
 
 #---- block_body_local
 wrapper <- function(x) {
@@ -87,13 +87,12 @@ wrapper <- function(x) {
   }
 }
 #++++
-hover 55..62: block_v: Unknown
-definition: none
+hover 55..62: block_v
+hover-definition: installed block_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed block_v from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 29..29 -> "    #: integer\n"
 completion (1): block_value
 hint @44: integer
 
@@ -108,13 +107,12 @@ wrapper <- function(x) {
   )
 }
 #++++
-hover 83..91: switch_v: Unknown
-definition: none
+hover 83..91: switch_v
+hover-definition: installed switch_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed switch_v from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 52..52 -> "      #: integer\n"
 completion (1): switch_value
 hint @70: integer
 
@@ -125,15 +123,20 @@ wrapper <- function(values) {
   }
 }
 #++++
-hover 59..62: ite: Unknown
-definition: none
+hover 59..62: ite
+hover-definition: installed ite from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed ite from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> NULL"
 completion (128+): item, inheritedSlotNames, is.finite, is.finite.POSIXlt, is.infinite, is.infinite.POSIXlt, cite, citeNatbib
 hint @7: <T> fn(values: T) -> NULL
 
@@ -144,14 +147,14 @@ wrapper <- function() {
   va$0
 }
 #++++
-hover 65..67: va: Unknown
-definition: none
+hover 65..67: va
+hover-definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> NULL\n"
-  edit 49..49 -> "  #: integer\n"
+  edit 19..19 -> " -> NULL"
 completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
 hint @5: fn() -> NULL
 hint @56: integer
@@ -166,7 +169,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{alpha: double, beta: character}\n"
+  edit 6..6 -> ": list{alpha: double, beta: character}"
 completion (2): alpha, beta
 hint @6: list{alpha: double, beta: character}
 
@@ -185,8 +188,9 @@ completion (2): fi, first_field
 #---- single_colon_not_namespace
 pkg:al$0
 #++++
-hover 0..6: Unknown
-definition: none
+hover 4..6: al
+hover-definition: installed al from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed al from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -196,13 +200,14 @@ completion: none
 MyValue <- 1L
 my$0
 #++++
-hover 14..16: my: Unknown
-definition: none
+hover 14..16: my
+hover-definition: installed my from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed my from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 7..7 -> ": integer"
 completion (1): MyValue
 hint @7: integer
 
@@ -212,13 +217,14 @@ wrapper <- function(fortune) {
   fo$0
 }
 #++++
-hover 49..51: fo: Unknown
-definition: none
+hover 49..51: fo
+hover-definition: installed fo from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed fo from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 9..9 -> ": integer"
 completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, Formaldehyde, formals
 hint @9: integer
 
@@ -226,12 +232,13 @@ hint @9: integer
 value <- 1L
 zz$0
 #++++
-hover 12..14: zz: Unknown
-definition: none
+hover 12..14: zz
+hover-definition: installed zz from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed zz from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion: none
 hint @5: integer

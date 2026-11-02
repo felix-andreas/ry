@@ -106,13 +106,21 @@ fn render_index(index: &PackageIndex) -> String {
     for directive in &namespace.unsupported {
         output.push_str(&format!("unsupported {directive}\n"));
     }
-    for file in &index.files {
+    let effect_free: std::collections::HashSet<(u32, u32)> = index
+        .bindings
+        .eager
+        .iter()
+        .filter(|eager| eager.effect_free)
+        .map(|eager| eager.at)
+        .collect();
+    for (file_position, file) in index.files.iter().enumerate() {
         output.push_str(&format!("== {}\n", file.path));
         for (line, message) in &file.items.syntax_errors {
             output.push_str(&format!("syntax error {line}: {message}\n"));
         }
-        for item in &file.items.items {
+        for (item_position, item) in file.items.items.iter().enumerate() {
             let position = format!("{}:{}", item.span.line, item.span.column);
+            let at = (file_position as u32, item_position as u32);
             let mut line = match index.lazy_name(item) {
                 Some(name) => {
                     let at = item.binding.as_ref().map_or(String::new(), |binding| {
@@ -127,6 +135,9 @@ fn render_index(index: &PackageIndex) -> String {
                 }
                 None => {
                     let mut line = format!("{position} eager");
+                    if effect_free.contains(&at) {
+                        line.push_str(" effect-free");
+                    }
                     if !item.binds.is_empty() {
                         line.push_str(&format!(" binds [{}]", item.binds.join(" ")));
                     }

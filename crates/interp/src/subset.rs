@@ -728,6 +728,31 @@ unsafe fn array_subset(
     call: Sexp,
 ) -> R<Sexp> {
     let dimnames = get_attr(object, symbols().dimnames);
+    // `m[i, ]` on a plain numeric matrix is a strided copy of one row, the shape of a
+    // simulation that keeps one row per step. A single column drops to a scalar whose name
+    // depends on both dimnames, which the general path works out.
+    if drop
+        && let ([row, column], &[rows, columns]) = (indices, dims)
+        && *column == missing_arg()
+        && columns != 1
+        && let Some(row) = matrix_row(*row, rows)
+        && matches!(
+            object.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+        )
+    {
+        let result = values::alloc_uninit(object.kind(), columns)?;
+        if object.kind() == SexpType::Real {
+            gather_row(values::reals_mut(result), values::reals(object), row, rows);
+        } else {
+            gather_row(values::ints_mut(result), values::ints(object), row, rows);
+        }
+        if dimnames.kind() == SexpType::List && dimnames.element(1) != nil() {
+            let names = values::duplicate(dimnames.element(1))?;
+            values::set_attr(result, symbols().names, names)?;
+        }
+        return Ok(result);
+    }
     let mut selections: Vec<Vec<usize>> = Vec::with_capacity(dims.len());
     for (dimension, (&index, &extent)) in indices.iter().zip(dims).enumerate() {
         let names = if dimnames.kind() == SexpType::List {
@@ -811,6 +836,43 @@ unsafe fn array_subset(
         values::set_attr(result, symbols().dimnames, list)?;
     }
     Ok(result)
+}
+
+/// The zero-based row a scalar subscript selects in a matrix of `rows` rows, when it is a plain
+/// positive in-range number; anything else takes the general path, which also reports errors.
+unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
+    if index.is_altrep() || length(index) != 1 || values::has_attributes(index) {
+        return None;
+    }
+    let position = match index.kind() {
+        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
+            f64::from(index.slice::<i32>()[0])
+        }
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NaN fails both comparisons, and `m[2.7, ]` truncates to the second row.
+    (position >= 1.0 && position < rows as f64 + 1.0).then(|| position as usize - 1)
+}
+
+/// Copies row `row` of a column-major matrix with `rows` rows into `target`, one element per
+/// column.
+fn gather_row<T: Copy>(target: &mut [T], matrix: &[T], row: usize, rows: usize) {
+    for (slot, &element) in target.iter_mut().zip(matrix.iter().skip(row).step_by(rows)) {
+        *slot = element;
+    }
+}
+
+/// Writes `value`, recycled, over row `row` of a column-major matrix with `rows` rows.
+fn scatter_row<T: Copy>(matrix: &mut [T], value: &[T], row: usize, rows: usize) {
+    for (slot, &element) in matrix
+        .iter_mut()
+        .skip(row)
+        .step_by(rows)
+        .zip(value.iter().cycle())
+    {
+        *slot = element;
+    }
 }
 
 /// The column-major offsets of every combination of `selections`, the first dimension varying
@@ -1510,6 +1572,15 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    // `s[o] <- s` writes into the vector it reads from, so the value must be a copy, as in GNU
+    // R's `SubassignN`; Matrix reorders its results this way.
+    let value = if value == object {
+        let copy = values::shallow_duplicate(value)?;
+        crate::heap().root(copy);
+        copy
+    } else {
+        value
+    };
     // A value an Array cannot hold, such as an NA, makes the result a plain R vector.
     let object = if object.is_array() {
         match crate::arrays::subassign(object, indices, value, call)? {
@@ -1690,6 +1761,27 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 call,
                 "incorrect number of subscripts",
             ));
+        }
+        // `m[i, ] <- value` on a plain numeric matrix writes one strided row in place.
+        if let ([row, column], &[rows, columns]) = (indices, &dims[..])
+            && *column == missing_arg()
+            && let Some(row) = matrix_row(*row, rows)
+            && value != result
+            && value.kind() == result.kind()
+            && value_count > 0
+            && columns.is_multiple_of(value_count)
+        {
+            match result.kind() {
+                SexpType::Real => {
+                    scatter_row(values::reals_mut(result), values::reals(value), row, rows);
+                    return Ok(result);
+                }
+                SexpType::Integer | SexpType::Logical => {
+                    scatter_row(values::ints_mut(result), values::ints(value), row, rows);
+                    return Ok(result);
+                }
+                _ => {}
+            }
         }
         let dimnames = get_attr(result, symbols().dimnames);
         let mut selections = Vec::new();
@@ -2545,9 +2637,14 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     let use_names = values::as_logical_scalar(call.arg(1)) != 0;
     let count = length(object);
     let result = alloc(SexpType::Integer, count)?;
+    crate::heap().root(result);
     for index in 0..count {
         let element = match object.kind() {
-            SexpType::List | SexpType::Expression => length(object.element(index)),
+            // A classed element answers with its own `length` method, S4 ones included
+            // (Matrix's sparse vectors).
+            SexpType::List | SexpType::Expression => {
+                dispatch_length(object.element(index), call.env)?
+            }
             _ => 1,
         };
         values::ints_mut(result)[index] = element as i32;
@@ -2610,6 +2707,22 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
     } else {
         coerce_vector(names, SexpType::String)?
     };
+    let is_vector_or_list = matches!(
+        object.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+            | SexpType::Pairlist
+            | SexpType::Language
+    );
+    if !is_vector_or_list && !object.has_gp(gp::S4_OBJECT) {
+        return Err(error("names() applied to a non-vector"));
+    }
     let count = length(object);
     if length(names) > count {
         return Err(error(format!(

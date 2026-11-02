@@ -113,10 +113,6 @@ macro_rules! symbol_table {
                         .unwrap_or_else(|error| panic!("cannot install `{}`: {error}", $name)),)*
                 }
             }
-
-            pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
-                $(marker.mark(self.$field);)*
-            }
         }
     };
 }

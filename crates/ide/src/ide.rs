@@ -3,6 +3,7 @@
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
 use {
+    bumpalo::Bump,
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
@@ -10,14 +11,14 @@ use {
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
-            Argument, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId, PatternKind,
-            Symbol,
+            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId,
+            PatternKind, Symbol,
         },
         infer::apply_definition,
-        item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
-        item_naming, item_node, item_tree,
-        metadata::is_own_package,
-        naming::{BindingId, BindingKind, dot_dot_variable},
+        inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
+        item_name_range, item_naming, item_node, item_tree,
+        metadata::{PackageMetadata, is_own_package},
+        naming::{BindingId, BindingKind, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
         types::{
@@ -41,6 +42,7 @@ use {
     },
 };
 
+mod fields;
 pub mod testing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,8 @@ pub enum HoverDefinition {
         /// The declaration's `#'` lines, as Markdown.
         documentation: Option<String>,
     },
+    /// The host renders the package's help page for the name.
+    Package(PackageTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,17 +78,30 @@ pub struct DebugSection {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NavigationTarget {
     pub file: SourceFile,
     pub range: TextRange,
 }
 
 /// Stub sources are not project files: the host maps `source_index` to a file on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionTarget {
     Project(NavigationTarget),
     Stub(StubTarget),
+    Package(PackageTarget),
+}
+
+/// A name that neither the project nor a stub declares, so only an installed package can
+/// define it. Analysis never reads the library: the host looks the name up in the first of
+/// `packages` whose namespace binds it, lazily, when a request needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageTarget {
+    /// In R's lookup order for the reference: the qualifier of `pkg::name`, or for a bare name
+    /// its `importFrom` sources, then `import`ed and attached packages, then the default search
+    /// path.
+    pub packages: Vec<String>,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +117,75 @@ pub struct Occurrence {
     pub is_declaration: bool,
 }
 
+/// A name only an installed package defines hovers with that package's help page, which the
+/// host renders, whether or not the checker knows its type.
 pub fn hover(
+    db: &dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<Hover> {
+    let typed = typed_hover(db, files, file, offset);
+    if typed
+        .as_ref()
+        .is_some_and(|hover| hover.definition.is_some())
+    {
+        return typed;
+    }
+    // A field a library function returns is documented on that function.
+    if let Some(position) = position_in_item(db, file, offset)
+        && let Some(producers) =
+            fields::field_producers(db, files, position.item, position.relative)
+    {
+        let mut field_hover = typed?;
+        field_hover.definition = producers.iter().find_map(|producer| {
+            hover(db, files, producer.file, producer.range.start())?.definition
+        });
+        return Some(field_hover);
+    }
+    let package = match target_at(db, files, file, offset) {
+        Some(Target::Package(target)) => target,
+        Some(Target::StubGlobal(name)) if stub_target(db, &name).is_none() => {
+            library_target(db, name)
+        }
+        _ => return typed,
+    };
+    let mut hover = typed.unwrap_or_else(|| {
+        let range = name_range_at(file.text(db), offset);
+        Hover {
+            range,
+            lines: vec![package.name.clone()],
+            definition: None,
+        }
+    });
+    // The help page says more than an `Unknown` type does.
+    let unknown = format!("{}: Unknown", package.name);
+    if hover
+        .lines
+        .iter()
+        .all(|line| line == "Unknown" || *line == unknown)
+    {
+        hover.lines = vec![package.name.clone()];
+    }
+    hover.definition = Some(HoverDefinition::Package(package));
+    Some(hover)
+}
+
+/// The R name around `offset`, backticks excluded.
+fn name_range_at(text: &str, offset: TextSize) -> TextRange {
+    let is_name_character =
+        |character: char| character.is_alphanumeric() || character == '.' || character == '_';
+    let at = usize::from(offset).min(text.len());
+    let start = text[..at]
+        .rfind(|character| !is_name_character(character))
+        .map_or(0, |found| found + 1);
+    let end = text[at..]
+        .find(|character| !is_name_character(character))
+        .map_or(text.len(), |found| at + found);
+    TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32))
+}
+
+fn typed_hover(
     db: &dyn Db,
     files: ProjectFiles,
     file: SourceFile,
@@ -133,6 +218,86 @@ pub fn hover(
             range: member.range + position.item_offset,
             lines: vec![line],
             definition: None,
+        });
+    }
+    // An argument name is no expression; it shows the parameter it fills, as signature help
+    // renders it, rather than widening to the whole call. A callee with no known signature,
+    // such as `list` or a function taking `...`, leaves the value the name labels.
+    if let Some(argument) = named_argument_at(hir, position.relative) {
+        let line = filled_parameter(db, file, offset, argument.name).unwrap_or_else(|| {
+            match argument
+                .value
+                .and_then(|value| check.expression_types.get(&value))
+            {
+                Some(ty) => format!(
+                    "{}: {}",
+                    argument.name,
+                    TypeRenderer::default().render(db, without_impossible_vectors(db, *ty))
+                ),
+                None => argument.name.to_string(),
+            }
+        });
+        return Some(Hover {
+            range: argument.range + position.item_offset,
+            lines: vec![line],
+            definition: None,
+        });
+    }
+    // A callee the checker types through a special rule (`c`, `lapply`) or an overload it could
+    // not settle records no type of its own; its declared signature still says what it takes,
+    // which beats widening to the call's result.
+    if let Some(innermost) = position.expression_at()
+        && check.expression_types.get(&innermost).is_none()
+        && let ExpressionKind::NameRef(name) = &hir.kind(innermost)
+        && item_naming(db, position.item)
+            .as_ref()
+            .is_some_and(|naming| naming.non_locals.contains_key(&innermost))
+    {
+        // With neither a project nor a stub declaration, the caller attaches the installed
+        // package's documentation instead.
+        let (lines, definition) = match referenced_scheme(db, files, name, &check, innermost) {
+            Some(mut scheme) => {
+                scheme.body = without_impossible_vectors(db, scheme.body);
+                (
+                    hover_lines(db, name, &scheme),
+                    hover_definition(db, files, position.item, innermost, name),
+                )
+            }
+            None => (vec![name.to_string()], None),
+        };
+        return Some(Hover {
+            range: trim_trailing_trivia(file.text(db), hir.range(innermost) + position.item_offset),
+            lines,
+            definition,
+        });
+    }
+    // `pkg::name` as a call head likewise: its stub signature when that package's stub declares
+    // it, else the bare name, which the caller documents from the installed package.
+    if let Some(innermost) = position.expression_at()
+        && check.expression_types.get(&innermost).is_none()
+        && let ExpressionKind::Namespace {
+            package: Some(package),
+            name: Some(name),
+            ..
+        } = &hir.kind(innermost)
+    {
+        let stubbed = declaring_namespace(db, name)
+            .filter(|namespace| *namespace == package.as_str())
+            .and_then(|_| stubs(db)?.schemes.get(name.as_str())?.last().cloned());
+        let (lines, definition) = match stubbed {
+            Some(mut scheme) => {
+                scheme.body = without_impossible_vectors(db, scheme.body);
+                (
+                    hover_lines(db, name, &scheme),
+                    stub_hover_definition(db, name),
+                )
+            }
+            None => (vec![name.to_string()], None),
+        };
+        return Some(Hover {
+            range: trim_trailing_trivia(file.text(db), hir.range(innermost) + position.item_offset),
+            lines,
+            definition,
         });
     }
     // Write targets and operators record no type, so the hover widens to the enclosing typed
@@ -170,6 +335,9 @@ pub fn hover(
                 hover_definition(db, files, position.item, expression, name),
             )
         }
+        ExpressionKind::Namespace {
+            name: Some(name), ..
+        } => (hover_lines(db, name, &TypeScheme::monomorphic(ty)), None),
         _ => (vec![TypeRenderer::default().render(db, ty)], None),
     };
 
@@ -291,12 +459,23 @@ fn member_at<'db>(
                     range: name_range,
                 } = hir[name];
                 // An assignment target records no type of its own, but its record still says
-                // what the field holds.
+                // what the field holds, and failing that, the assigned value does.
+                let field = ExprId::new(index);
+                let assigned = || {
+                    hir.expressions()
+                        .find_map(|expression| match expression.kind {
+                            ExpressionKind::Assign { target, value, .. } if *target == field => {
+                                check.expression_types.get(value).copied()
+                            }
+                            _ => None,
+                        })
+                };
                 let ty = check
                     .expression_types
-                    .get(&ExprId::new(index))
+                    .get(&field)
                     .copied()
-                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))?;
+                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))
+                    .or_else(assigned)?;
                 return Some(Member {
                     range: name_range,
                     label: Some(name.to_string()),
@@ -508,6 +687,59 @@ fn item_target(db: &dyn Db, item: Item<'_>) -> Option<NavigationTarget> {
     })
 }
 
+/// A stub-declared name with no stub source to show, like a base primitive whose signature the
+/// stubs synthesize, navigates to its package like a name without stubs.
+fn library_target(db: &dyn Db, name: String) -> PackageTarget {
+    let mut packages = candidate_packages(db, &name);
+    if let Some(namespace) = declaring_namespace(db, &name) {
+        packages.retain(|package| package != namespace);
+        packages.insert(0, namespace.to_owned());
+    }
+    PackageTarget { packages, name }
+}
+
+/// The packages R would search for a bare `name` from the project, in order.
+fn candidate_packages(db: &dyn Db, name: &str) -> Vec<String> {
+    let mut packages: Vec<String> = Vec::new();
+    let mut push = |package: &str| {
+        if !packages.iter().any(|seen| seen == package) && !is_own_package(db, package) {
+            packages.push(package.to_owned());
+        }
+    };
+    if let Some(metadata) = PackageMetadata::try_get(db) {
+        let imports = metadata.imports(db);
+        for (package, imported) in imports {
+            if imported.as_deref() == Some(name) {
+                push(package);
+            }
+        }
+        for (package, imported) in imports {
+            if imported.is_none() {
+                push(package);
+            }
+        }
+        for package in metadata.attached(db) {
+            push(package);
+        }
+    }
+    for package in DEFAULT_SEARCH_PATH {
+        push(package);
+    }
+    packages
+}
+
+/// The packages R attaches at startup, last searched first-to-last after the project's own
+/// imports.
+const DEFAULT_SEARCH_PATH: [&str; 7] = [
+    "base",
+    "stats",
+    "utils",
+    "methods",
+    "graphics",
+    "grDevices",
+    "datasets",
+];
+
 fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
     stub_declaration(db, name).map(|declaration| StubTarget {
         source_index: declaration.source_index,
@@ -519,14 +751,23 @@ fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Opti
     package_definitions(db, files)
         .get(&Symbol::new(name))
         .copied()
-        .or_else(|| {
-            files.files(db).iter().find_map(|&file| {
-                item_tree(db, file).iter().copied().find(|item| {
-                    matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                        && item.name(db).as_deref() == Some(name)
-                })
-            })
-        })
+        .or_else(|| project_declarations(db, files).get(name).copied())
+}
+
+/// The first function or value item of each name across every project file, scripts and tests
+/// included. Field resolution asks for every library call head it follows, and a miss would
+/// otherwise scan every file's items.
+#[salsa::tracked(returns(ref))]
+fn project_declarations<'db>(db: &'db dyn Db, files: ProjectFiles) -> HashMap<String, Item<'db>> {
+    let mut declarations = HashMap::new();
+    for &file in files.files(db) {
+        for name in global_names(db, file) {
+            if let Some(item) = name.item {
+                declarations.entry(name.name.clone()).or_insert(item);
+            }
+        }
+    }
+    declarations
 }
 
 /// Without a committed overload, the last stub candidate: by corpus convention the most general.
@@ -607,23 +848,54 @@ fn trim_trailing_trivia(text: &str, range: TextRange) -> TextRange {
     TextRange::new(range.start(), TextSize::from((start + trimmed) as u32))
 }
 
+/// Usually one target. A `$` field read whose receiver can come from several constructions
+/// (the branches of an `if`, or a fallback by name) has one per declaring site.
 pub fn definition(
     db: &dyn Db,
     files: ProjectFiles,
     file: SourceFile,
     offset: TextSize,
+) -> Vec<DefinitionTarget> {
+    let Some(target) = target_at(db, files, file, offset) else {
+        return Vec::new();
+    };
+    if let Target::Field(field) = &target {
+        let producers = field.producers.iter().filter_map(|producer| {
+            let callee = target_at(db, files, producer.file, producer.range.start())?;
+            single_definition(db, files, callee)
+        });
+        return field
+            .sites
+            .iter()
+            .map(|site| DefinitionTarget::Project(*site))
+            .chain(producers)
+            .collect();
+    }
+    single_definition(db, files, target).into_iter().collect()
+}
+
+fn single_definition(
+    db: &dyn Db,
+    files: ProjectFiles,
+    target: Target<'_>,
 ) -> Option<DefinitionTarget> {
-    match target_at(db, files, file, offset)? {
+    match target {
+        Target::Field(_) => None,
+        Target::Package(target) => Some(DefinitionTarget::Package(target)),
         Target::Slot { item, binding } => {
             let info = item_naming(db, item).as_ref()?.bindings.get(&binding)?;
             let item_offset = item_node(db, item)?.text_range().start();
+            // A named argument reaches the parameter of a function in another file.
             Some(DefinitionTarget::Project(NavigationTarget {
-                file,
+                file: *item.file(db),
                 range: info.range + item_offset,
             }))
         }
         Target::TypeName(name) => type_name_definition(db, files, &name),
-        Target::StubGlobal(name) => stub_target(db, &name).map(DefinitionTarget::Stub),
+        Target::StubGlobal(name) => Some(match stub_target(db, &name) {
+            Some(target) => DefinitionTarget::Stub(target),
+            None => DefinitionTarget::Package(library_target(db, name)),
+        }),
         Target::TypeParameter(occurrences) => occurrences
             .into_iter()
             .find(|occurrence| occurrence.is_declaration)
@@ -690,6 +962,14 @@ pub fn rename(
     // type would leave them pointing at nothing.
     match &target {
         Target::Tag(name) if stub_mentions_tag(db, name) => return None,
+        Target::Field(field) if !fields::field_occurrences(db, files, field).renamable => {
+            return None;
+        }
+        Target::Slot { item, binding }
+            if !named_argument_occurrences(db, files, *item, *binding, &mut Vec::new()) =>
+        {
+            return None;
+        }
         _ => {}
     }
     let occurrences = occurrences(db, files, &target);
@@ -971,9 +1251,10 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             {
                 continue;
             }
-            let Some(label) = assignment_label(db, &check, id, *value, is_root) else {
+            let Some(scheme) = inferred_scheme(db, &check, id, *value, is_root) else {
                 continue;
             };
+            let label = TypeRenderer::default().render_scheme(db, &scheme);
             hints.push(InlayHint {
                 offset: hir.range(*target).end() + node.text_range().start(),
                 label: format!(": {label}"),
@@ -1018,8 +1299,10 @@ fn positional_parameters<'db>(
         .iter()
         .position(|shape| shape.forwards_dots)
         .unwrap_or(shapes.len());
-    argument_targets(db, function, &shapes)
-        .into_iter()
+    let arena = Bump::new();
+    argument_targets(db, &arena, function, &shapes)
+        .iter()
+        .copied()
         .zip(arguments)
         .take(known)
         .filter(|(_, argument)| argument.name.is_none())
@@ -1788,7 +2071,6 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         }
     }
 
-    let mut all_annotation_edits = Vec::new();
     for &item in item_tree(db, file) {
         let Some(node) = item_node(db, item) else {
             continue;
@@ -1832,61 +2114,23 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
                 }],
             });
         }
-
-        let Some(check) = item_check(db, item) else {
-            continue;
-        };
-        // A statement typed inline, or by a `#:` block that survived, needs no second annotation.
-        let annotated = item_annotation_syntax(db, item)
-            .is_some_and(|annotation| block_refusal(&annotation.syntax_node()).is_none())
-            || statement_inline_site(&node).is_some();
-        let annotated_expressions: BTreeSet<ExprId> = item_annotations(db, item)
-            .expressions
-            .iter()
-            .map(|(id, _)| *id)
-            .collect();
-        for (index, expression) in hir.expressions().enumerate() {
-            let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
-                continue;
-            };
-            let ExpressionKind::NameRef(name) = &hir.kind(*target) else {
-                continue;
-            };
-            let id = ExprId::new(index);
-            let is_root = hir.root == Some(id);
-            if (is_root && annotated)
-                || annotated_expressions.contains(&id)
-                || spells_its_type(hir, &node, *value)
-            {
-                continue;
-            }
-            let start = usize::from(expression.range.start() + item_offset);
-            let line_start = text[..start.min(text.len())]
-                .rfind('\n')
-                .map_or(0, |at| at + 1);
-            let Some(indentation) = text
-                .get(line_start..start)
-                .filter(|indentation| indentation.trim().is_empty())
-            else {
-                continue;
-            };
-            let Some(label) = assignment_label(db, &check, id, *value, is_root) else {
-                continue;
-            };
-            let edit = TextEdit {
-                range: TextRange::empty(TextSize::from(line_start as u32)),
-                replacement: format!("{indentation}#: {label}\n"),
-            };
-            all_annotation_edits.push(edit.clone());
-            if ranges_overlap(expression.range + item_offset, viewport) {
-                actions.push(CodeAction {
-                    title: format!("Add inferred type annotation for `{name}`"),
-                    kind: CodeActionKind::InsertInferredAnnotation,
-                    edits: vec![edit],
-                });
-            }
-        }
     }
+    let annotations = inferred_annotations(db, file);
+    for annotation in annotations
+        .iter()
+        .filter(|annotation| ranges_overlap(annotation.range, viewport))
+    {
+        actions.push(CodeAction {
+            title: format!("Add inferred type annotation for `{}`", annotation.name),
+            kind: CodeActionKind::InsertInferredAnnotation,
+            edits: annotation.edits.clone(),
+        });
+    }
+    let all_annotation_edits: Vec<TextEdit> = annotations
+        .into_iter()
+        .filter(|annotation| annotation.top_level)
+        .flat_map(|annotation| annotation.edits)
+        .collect();
     if !all_annotation_edits.is_empty() {
         actions.push(CodeAction {
             title: "Add inferred type annotations for the whole file".to_owned(),
@@ -1936,6 +2180,198 @@ pub fn fix_all(diagnostics: &[Diagnostic]) -> Option<CodeAction> {
             })
             .collect(),
     })
+}
+
+/// A binding with no annotation whose inferred type can be written down, and the edits that
+/// write it: one `#:` line, or with inline annotations on, the types at their inline places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferredAnnotation {
+    pub name: String,
+    /// The binding's whole statement.
+    pub range: TextRange,
+    /// A top-level binding, as opposed to a local inside a function body.
+    pub top_level: bool,
+    pub edits: Vec<TextEdit>,
+}
+
+/// Every binding in `file` that an inferred annotation would type. A statement typed inline, or
+/// by a `#:` block that survived, needs no second annotation, and neither does a value that
+/// already spells its type.
+pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnotation> {
+    let text = file.text(db);
+    let inline = inline_annotations_enabled(db);
+    let mut annotations = Vec::new();
+    for &item in item_tree(db, file) {
+        let (Some(node), Some(hir), Some(check)) = (
+            item_node(db, item),
+            item_hir(db, item),
+            item_check(db, item),
+        ) else {
+            continue;
+        };
+        let item_offset = node.text_range().start();
+        let annotated = item_annotation_syntax(db, item)
+            .is_some_and(|annotation| block_refusal(&annotation.syntax_node()).is_none())
+            || statement_inline_site(&node).is_some();
+        let annotated_expressions: BTreeSet<ExprId> = item_annotations(db, item)
+            .expressions
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        // An annotation, inline or `#:`, belongs to a statement: inside a call's arguments
+        // `x: T <- 1` does not parse, and a `#:` line there annotates nothing.
+        let statements: BTreeSet<ExprId> = hir
+            .root
+            .into_iter()
+            .chain(
+                hir.expressions()
+                    .flat_map(|expression| match &expression.kind {
+                        ExpressionKind::Block { statements } => hir[statements].to_vec(),
+                        _ => Vec::new(),
+                    }),
+            )
+            .collect();
+        for (index, expression) in hir.expressions().enumerate() {
+            // `<<-` writes a binding outside this scope, which an annotation here cannot type.
+            let ExpressionKind::Assign {
+                spelling: AssignSpelling::Local | AssignSpelling::Equals,
+                target,
+                value,
+            } = &expression.kind
+            else {
+                continue;
+            };
+            let ExpressionKind::NameRef(name) = &hir.kind(*target) else {
+                continue;
+            };
+            let id = ExprId::new(index);
+            if !statements.contains(&id) {
+                continue;
+            }
+            let is_root = hir.root == Some(id);
+            if (is_root && annotated)
+                || annotated_expressions.contains(&id)
+                || spells_its_type(hir, &node, *value)
+            {
+                continue;
+            }
+            let range = expression.range + item_offset;
+            let start = usize::from(range.start());
+            let line_start = text[..start.min(text.len())]
+                .rfind('\n')
+                .map_or(0, |at| at + 1);
+            let Some(indentation) = text
+                .get(line_start..start)
+                .filter(|indentation| indentation.trim().is_empty())
+            else {
+                continue;
+            };
+            let Some(scheme) = inferred_scheme(db, &check, id, *value, is_root) else {
+                continue;
+            };
+            let target_range = hir.range(*target) + item_offset;
+            let value_range = hir.range(*value) + item_offset;
+            let inline_edits = inline
+                .then(|| inline_annotation_edits(db, &node, &scheme, target_range, value_range))
+                .flatten();
+            let edits = inline_edits.unwrap_or_else(|| {
+                let label = TypeRenderer::default().render_scheme(db, &scheme);
+                vec![TextEdit {
+                    range: TextRange::empty(TextSize::from(line_start as u32)),
+                    replacement: format!("{indentation}#: {label}\n"),
+                }]
+            });
+            annotations.push(InferredAnnotation {
+                name: name.as_str().to_owned(),
+                range,
+                top_level: is_root,
+                edits,
+            });
+        }
+    }
+    annotations
+}
+
+/// The inline spelling of `scheme` for the binding `target <- value`: the types go into a
+/// function literal's own header when the value is one, and after the name otherwise. `None`
+/// when the binding has no inline place for them, such as a right assignment, a quoted name, or
+/// a generic type on a value that is not a function literal, or a formal that is optional with
+/// no default; the caller then writes a `#:` line.
+fn inline_annotation_edits<'db>(
+    db: &'db dyn Db,
+    item_node: &SyntaxNode,
+    scheme: &TypeScheme<'db>,
+    target_range: TextRange,
+    value_range: TextRange,
+) -> Option<Vec<TextEdit>> {
+    if target_range.start() > value_range.start() {
+        return None;
+    }
+    let mut renderer = TypeRenderer::default();
+    let function_def = item_node
+        .descendants()
+        .find(|node| node.kind() == FUNCTION_DEF && node.text_range() == value_range);
+    let (Some(function_def), TyKind::Function(function)) = (function_def, scheme.body.kind(db))
+    else {
+        let target = item_node
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| token.kind() == IDENT && token.text_range() == target_range)?;
+        if !scheme.binders.is_empty() || target.text().starts_with('`') {
+            return None;
+        }
+        return Some(vec![TextEdit {
+            range: TextRange::empty(target.text_range().end()),
+            replacement: format!(": {}", renderer.render(db, scheme.body)),
+        }]);
+    };
+    let keyword = function_def
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| matches!(token.kind(), FUNCTION_KW | BACKSLASH))?;
+    let parameter_list = function_def
+        .children()
+        .find(|node| node.kind() == PARAMETER_LIST)?;
+    let mut edits = Vec::new();
+    if let Some(binders) = renderer.render_binder_prefix(&scheme.binders) {
+        edits.push(TextEdit {
+            range: TextRange::empty(keyword.text_range().end()),
+            replacement: binders,
+        });
+    }
+    for parameter in parameter_list
+        .children()
+        .filter(|node| node.kind() == PARAMETER)
+    {
+        let name = parameter.first_token()?;
+        let ty = match name.kind() {
+            DOTS => function.variadic.as_ref()?.element,
+            _ => {
+                let named = function
+                    .named
+                    .iter()
+                    .find(|named| named.name.text(db) == name.text())?;
+                // Inline syntax spells an optional formal only through its default, so one that
+                // is optional because the body may never read it needs the `#:` form's `[name]`.
+                let has_default = parameter
+                    .children_with_tokens()
+                    .any(|element| element.kind() == EQ);
+                if named.optional && !has_default {
+                    return None;
+                }
+                named.ty
+            }
+        };
+        edits.push(TextEdit {
+            range: TextRange::empty(name.text_range().end()),
+            replacement: format!(": {}", renderer.render(db, ty)),
+        });
+    }
+    edits.push(TextEdit {
+        range: TextRange::empty(parameter_list.text_range().end()),
+        replacement: format!(" -> {}", renderer.render(db, function.ret)),
+    });
+    Some(edits)
 }
 
 fn ranges_overlap(left: TextRange, right: TextRange) -> bool {
@@ -3927,7 +4363,7 @@ fn representation<'db>(db: &'db dyn Db, file: SourceFile, ty: Ty<'db>) -> Ty<'db
         let TyKind::Named(name, arguments) = current.kind(db) else {
             break;
         };
-        let Some(definition) = TypeDefinitions::of(file).get(db, *name) else {
+        let Some(definition) = TypeDefinitions::of(db, file).get(db, *name) else {
             break;
         };
         if definition.parameters.len() != arguments.len() {
@@ -5010,13 +5446,13 @@ fn active_parameter(
 
 /// Variables are presentable only under a top-level function type, whose label generalizes them
 /// into binders; anywhere else they would render as unanchored type parameters.
-fn assignment_label(
-    db: &dyn Db,
-    check: &ItemCheck<'_>,
+fn inferred_scheme<'db>(
+    db: &'db dyn Db,
+    check: &ItemCheck<'db>,
     id: ExprId,
     value: ExprId,
     is_root: bool,
-) -> Option<String> {
+) -> Option<TypeScheme<'db>> {
     let mut scheme = if is_root {
         check.scheme.clone()?
     } else {
@@ -5032,7 +5468,7 @@ fn assignment_label(
         scheme.body,
         matches!(scheme.body.kind(db), TyKind::Function(_)),
     )
-    .then(|| TypeRenderer::default().render_scheme(db, &scheme))
+    .then_some(scheme)
 }
 
 /// Drops the union members that name an atomic vector of non-atomic elements, such as the
@@ -5159,6 +5595,10 @@ enum Target<'db> {
     Global(String),
     TypeName(String),
     StubGlobal(String),
+    /// Declared by neither the project nor the stubs: navigable through the host's library,
+    /// with no references or rename.
+    Package(PackageTarget),
+    Field(fields::FieldTarget),
     S4 {
         name: String,
         kind: S4Kind,
@@ -5191,51 +5631,18 @@ fn target_at<'db>(
     let position = position_in_item(db, file, offset)?;
     let naming = item_naming(db, position.item).as_ref()?;
 
-    if let Some(expression) = position.expression_at() {
-        // A call head skips bindings that hold no function, so it navigates where the call goes.
-        let callee_target = item_check(db, position.item)
-            .and_then(|check| check.callee_targets.get(&expression).copied());
-        let binding = match callee_target {
-            Some(CalleeTarget::Slot(binding)) => Some(binding),
-            Some(CalleeTarget::Project | CalleeTarget::Library) => {
-                let ExpressionKind::NameRef(name) =
-                    &item_hir(db, position.item).as_ref()?.kind(expression)
-                else {
-                    return None;
-                };
-                return Some(match callee_target {
-                    Some(CalleeTarget::Project) => Target::Global(name.to_string()),
-                    _ => Target::StubGlobal(name.to_string()),
-                });
-            }
-            None => naming.resolutions.get(&expression).copied(),
-        };
-        if let Some(binding) = &binding {
-            let info = naming.bindings.get(binding)?;
-            // Cross-item reads resolve to the name, so the item's own top-level binding is the
-            // global.
-            if info.kind == BindingKind::TopLevel {
-                return Some(Target::Global(info.name.to_string()));
-            }
-            return Some(Target::Slot {
-                item: position.item,
-                binding: *binding,
-            });
-        }
-        // A quiet read (data masking, an opaque operator) navigates like any cross-item read;
-        // only its diagnostic is withheld.
-        if let Some(name) = naming
-            .non_locals
-            .get(&expression)
-            .or_else(|| naming.quiet_reads.get(&expression))
-        {
-            if global_declaration_exists(db, files, name) {
-                return Some(Target::Global(name.to_string()));
-            }
-            if stub_declaration(db, name).is_some() {
-                return Some(Target::StubGlobal(name.to_string()));
-            }
-        }
+    if let Some(field) = fields::field_at(db, files, position.item, position.relative) {
+        return Some(Target::Field(field));
+    }
+    if let Some(hir) = item_hir(db, position.item)
+        && let Some(argument) = named_argument_at(hir, position.relative)
+    {
+        return parameter_target(db, files, position.item, &argument);
+    }
+    if let Some(expression) = position.expression_at()
+        && let Some(target) = expression_target(db, files, position.item, naming, expression)
+    {
+        return Some(target);
     }
 
     // A generic the project defines is also an ordinary global function (`setGeneric` binds its
@@ -5272,6 +5679,372 @@ fn target_at<'db>(
     })
 }
 
+/// The signature-help label of the parameter a named argument at `offset` fills.
+fn filled_parameter(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    name: Symbol,
+) -> Option<String> {
+    let help = signature_help(db, file, offset)?;
+    let signature = help.signatures.get(help.active_signature)?;
+    let span = signature.parameters.get(signature.active_parameter?)?;
+    let label = signature.label.get(std::ops::Range::<usize>::from(*span))?;
+    let spelled = label.trim_start_matches('[').split([']', ':']).next()?;
+    (spelled == name.as_str()).then(|| label.to_owned())
+}
+
+/// Where a name read navigates, or `None` when it reaches nothing the project or a stub declares.
+fn expression_target<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    naming: &ItemNaming,
+    expression: ExprId,
+) -> Option<Target<'db>> {
+    if let ExpressionKind::Namespace {
+        package: Some(package),
+        name: Some(name),
+        ..
+    } = item_hir(db, item).as_ref()?.kind(expression)
+    {
+        if is_own_package(db, package.as_str()) {
+            return global_declaration_exists(db, files, name.as_str())
+                .then(|| Target::Global(name.to_string()));
+        }
+        // A stub declares names by their bare spelling, so the qualifier must name the package
+        // that declaration belongs to. Any other qualified name is the package's to define.
+        if declaring_namespace(db, name.as_str()) == Some(package.as_str())
+            && stub_declaration(db, name.as_str()).is_some()
+        {
+            return Some(Target::StubGlobal(name.to_string()));
+        }
+        return Some(Target::Package(PackageTarget {
+            packages: vec![package.to_string()],
+            name: name.to_string(),
+        }));
+    }
+    // A call head skips bindings that hold no function, so it navigates where the call goes.
+    let callee_target =
+        item_check(db, item).and_then(|check| check.callee_targets.get(&expression).copied());
+    let binding = match callee_target {
+        Some(CalleeTarget::Slot(binding)) => Some(binding),
+        Some(CalleeTarget::Project | CalleeTarget::Library) => {
+            let ExpressionKind::NameRef(name) = &item_hir(db, item).as_ref()?.kind(expression)
+            else {
+                return None;
+            };
+            return Some(match callee_target {
+                Some(CalleeTarget::Project) => Target::Global(name.to_string()),
+                _ => Target::StubGlobal(name.to_string()),
+            });
+        }
+        None => naming.resolutions.get(&expression).copied(),
+    };
+    if let Some(binding) = &binding {
+        let info = naming.bindings.get(binding)?;
+        // Cross-item reads resolve to the name, so the item's own top-level binding is the
+        // global.
+        if info.kind == BindingKind::TopLevel {
+            return Some(Target::Global(info.name.to_string()));
+        }
+        return Some(Target::Slot {
+            item,
+            binding: *binding,
+        });
+    }
+    // A quiet read (data masking, an opaque operator) navigates like any cross-item read;
+    // only its diagnostic is withheld.
+    if let Some(name) = naming
+        .non_locals
+        .get(&expression)
+        .or_else(|| naming.quiet_reads.get(&expression))
+    {
+        if global_declaration_exists(db, files, name) {
+            return Some(Target::Global(name.to_string()));
+        }
+        if stub_declaration(db, name).is_some() {
+            return Some(Target::StubGlobal(name.to_string()));
+        }
+        return Some(Target::Package(PackageTarget {
+            packages: candidate_packages(db, name),
+            name: name.to_string(),
+        }));
+    }
+    None
+}
+
+/// A named argument in a call, `name` in `f(name = value)`.
+struct NamedArgument {
+    callee: ExprId,
+    name: Symbol,
+    value: Option<ExprId>,
+    /// Relative to the item.
+    range: TextRange,
+}
+
+fn named_argument_at(hir: &Module, relative: TextSize) -> Option<NamedArgument> {
+    hir.expressions().find_map(|expression| {
+        let ExpressionKind::Call { callee, arguments } = expression.kind else {
+            return None;
+        };
+        if !expression.range.contains_inclusive(relative) {
+            return None;
+        }
+        hir[arguments].iter().find_map(|argument| {
+            let range = hir.argument_name_range(argument)?;
+            range.contains_inclusive(relative).then_some(())?;
+            Some(NamedArgument {
+                callee: *callee,
+                name: hir.argument_name(argument)?,
+                value: argument.value,
+                range,
+            })
+        })
+    })
+}
+
+/// The parameter a named argument fills: a project function's parameter slot, or the library
+/// function itself when a stub or an installed package declares the callee, since a library
+/// parameter has no site of its own.
+/// R's partial matching (`f(fac = 1)` for `factor`) is not followed.
+fn parameter_target<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    argument: &NamedArgument,
+) -> Option<Target<'db>> {
+    let naming = item_naming(db, item).as_ref()?;
+    let hir = item_hir(db, item).as_ref()?;
+    let callee = match hir.kind(argument.callee) {
+        ExpressionKind::Field { .. } => {
+            Target::Field(fields::resolve_field(db, files, item, argument.callee))
+        }
+        _ => expression_target(db, files, item, naming, argument.callee)?,
+    };
+    match callee {
+        Target::Global(name) => {
+            // A function a top-level block assigns, as in `local({ helper <- function(...) })`,
+            // is no item of its own, so its item is found from the declaration, as definition
+            // finds it.
+            let definition = declaring_item(db, files, &name).or_else(|| {
+                let target = Target::Global(name.clone());
+                let declaration = occurrences(db, files, &target)
+                    .into_iter()
+                    .find(|occurrence| occurrence.is_declaration)?;
+                Some(position_in_item(db, declaration.file, declaration.range.start())?.item)
+            })?;
+            let binding = item_naming(db, definition)
+                .as_ref()?
+                .bindings
+                .iter()
+                .find(|(_, info)| info.kind == BindingKind::TopLevel && info.name == name)
+                .map(|(binding, _)| *binding)?;
+            parameter_binding(db, definition, binding, argument.name)
+        }
+        Target::Slot { item, binding } => parameter_binding(db, item, binding, argument.name),
+        library @ (Target::StubGlobal(_) | Target::Package(_)) => Some(library),
+        // `object$method(deep = TRUE)`: the parameter of the function the field was given.
+        Target::Field(field) if field.precise => field.sites.iter().find_map(|site| {
+            let position = position_in_item(db, site.file, site.range.start())?;
+            let hir = item_hir(db, position.item).as_ref()?;
+            let declared = site.range - position.item_offset;
+            let function = hir
+                .expressions()
+                .find_map(|expression| match &expression.kind {
+                    ExpressionKind::Call { arguments, .. } => {
+                        hir[arguments].iter().find_map(|named| {
+                            (hir.argument_name_range(named)? == declared).then_some(named.value?)
+                        })
+                    }
+                    ExpressionKind::Record(fields) => hir[fields]
+                        .iter()
+                        .find(|record_field| record_field.name_range == declared)
+                        .map(|record_field| record_field.value),
+                    ExpressionKind::Assign { target, value, .. } => {
+                        matches!(hir.kind(*target), ExpressionKind::Field { name: Some(name), .. }
+                        if hir.name_range(*name) == declared)
+                        .then_some(*value)
+                    }
+                    _ => None,
+                })?;
+            function_parameter(db, position.item, function, argument.name)
+        }),
+        _ => None,
+    }
+}
+
+/// The parameter named `name` of the function expression `function`.
+fn function_parameter<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    function: ExprId,
+    name: Symbol,
+) -> Option<Target<'db>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let naming = item_naming(db, item).as_ref()?;
+    let ExpressionKind::Function { parameters, .. } = hir.kind(function) else {
+        return None;
+    };
+    let parameter = hir[parameters]
+        .iter()
+        .find(|parameter| parameter.name == name)?;
+    let (binding, _) = naming
+        .bindings
+        .iter()
+        .find(|(_, info)| info.kind == BindingKind::Parameter && info.range == parameter.range)?;
+    Some(Target::Slot {
+        item,
+        binding: *binding,
+    })
+}
+
+/// The parameter named `name` of the function last assigned to `function`.
+fn parameter_binding<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    function: BindingId,
+    name: Symbol,
+) -> Option<Target<'db>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let naming = item_naming(db, item).as_ref()?;
+    let value = hir
+        .expressions()
+        .filter_map(|expression| match expression.kind {
+            ExpressionKind::Assign { target, value, .. }
+                if naming.resolutions.get(target) == Some(&function)
+                    && matches!(hir.kind(*value), ExpressionKind::Function { .. }) =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        })
+        .last()?;
+    function_parameter(db, item, value, name)
+}
+
+/// The named arguments that fill a parameter at the calls of its function, so a rename of the
+/// parameter keeps those calls matching it.
+fn named_argument_occurrences(
+    db: &dyn Db,
+    files: ProjectFiles,
+    item: Item<'_>,
+    binding: BindingId,
+    result: &mut Vec<Occurrence>,
+) -> bool {
+    let (Some(hir), Some(naming)) = (item_hir(db, item), item_naming(db, item)) else {
+        return true;
+    };
+    let Some(info) = naming.bindings.get(&binding) else {
+        return true;
+    };
+    if info.kind != BindingKind::Parameter {
+        return true;
+    }
+    let Some(function) = hir
+        .expressions()
+        .enumerate()
+        .find_map(|(index, expression)| {
+            let ExpressionKind::Function { parameters, .. } = expression.kind else {
+                return None;
+            };
+            hir[parameters]
+                .iter()
+                .any(|parameter| parameter.range == info.range)
+                .then(|| ExprId::new(index))
+        })
+    else {
+        return true;
+    };
+    let function_binding = hir
+        .expressions()
+        .find_map(|expression| match expression.kind {
+            ExpressionKind::Assign { target, value, .. } if *value == function => {
+                naming.resolutions.get(target).copied()
+            }
+            _ => None,
+        });
+    let mut callers = Vec::new();
+    let mut renamable = true;
+    match function_binding.and_then(|binding| Some((binding, naming.bindings.get(&binding)?))) {
+        Some((_, function_info)) if function_info.kind == BindingKind::TopLevel => {
+            callers = occurrences(db, files, &Target::Global(function_info.name.to_string()));
+        }
+        Some((function_binding, _)) => {
+            slot_occurrences(db, item, function_binding, &mut callers);
+        }
+        // A method, `list(copy = function(deep) ...)`: its calls are the reads of the field.
+        // A rename must reach every one of them, so a guessed field or an untraced
+        // same-named read refuses it.
+        None => {
+            if let Some(declared) = field_holding(hir, function) {
+                match fields::field_at(db, files, item, declared.start()) {
+                    Some(field) if field.precise => {
+                        let found = fields::field_occurrences(db, files, &field);
+                        renamable = found.renamable;
+                        callers = found.occurrences;
+                    }
+                    _ => renamable = false,
+                }
+            }
+        }
+    }
+    for caller in callers.iter().filter(|caller| !caller.is_declaration) {
+        let Some(position) = position_in_item(db, caller.file, caller.range.start()) else {
+            continue;
+        };
+        let Some(caller_hir) = item_hir(db, position.item) else {
+            continue;
+        };
+        let head = caller.range - position.item_offset;
+        for expression in caller_hir.expressions() {
+            let ExpressionKind::Call { callee, arguments } = expression.kind else {
+                continue;
+            };
+            let callee_range = caller_hir.range(*callee);
+            if callee_range.end() != head.end() || !callee_range.contains_range(head) {
+                continue;
+            }
+            result.extend(caller_hir[arguments].iter().filter_map(|argument| {
+                (caller_hir.argument_name(argument)? == info.name).then_some(())?;
+                Some(Occurrence {
+                    file: caller.file,
+                    range: caller_hir.argument_name_range(argument)? + position.item_offset,
+                    is_declaration: false,
+                })
+            }));
+        }
+    }
+    renamable
+}
+
+/// The item-relative name range of the field that `value` is put into: a named argument of a
+/// call, a record field, or a `receiver$name <- value` write.
+fn field_holding(hir: &Module, value: ExprId) -> Option<TextRange> {
+    hir.expressions()
+        .find_map(|expression| match &expression.kind {
+            ExpressionKind::Call { arguments, .. } => hir[arguments]
+                .iter()
+                .find(|argument| argument.value == Some(value))
+                .and_then(|argument| hir.argument_name_range(argument)),
+            ExpressionKind::Record(fields) => hir[fields]
+                .iter()
+                .find(|field| field.value == value)
+                .map(|field| field.name_range),
+            ExpressionKind::Assign {
+                target,
+                value: assigned,
+                ..
+            } if *assigned == value => match hir.kind(*target) {
+                ExpressionKind::Field {
+                    name: Some(name), ..
+                } => Some(hir.name_range(*name)),
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a
 /// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
@@ -5281,10 +6054,14 @@ fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bo
 fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occurrence> {
     let mut result = Vec::new();
     match target {
-        Target::StubGlobal(_) => {}
+        Target::StubGlobal(_) | Target::Package(_) => {}
+        Target::Field(field) => result = fields::field_occurrences(db, files, field).occurrences,
         Target::TypeParameter(occurrences) => result = occurrences.clone(),
         Target::Tag(name) => result = tag_occurrences(db, files, name),
-        Target::Slot { item, binding } => slot_occurrences(db, *item, *binding, &mut result),
+        Target::Slot { item, binding } => {
+            slot_occurrences(db, *item, *binding, &mut result);
+            named_argument_occurrences(db, files, *item, *binding, &mut result);
+        }
         Target::TypeName(name) => result = type_name_occurrences(db, files, name),
         Target::S4 { name, kind } => {
             for &file in files.files(db) {
@@ -5460,7 +6237,7 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let callee_targets = (!naming.callee_fallbacks.is_empty())
         .then(|| item_check(db, item))
         .flatten()
-        .map(|check| check.callee_targets);
+        .map(|check| &check.callee_targets);
     let reaches = |expression: &ExprId, resolved: BindingId| match callee_targets
         .as_ref()
         .and_then(|targets| targets.get(expression))

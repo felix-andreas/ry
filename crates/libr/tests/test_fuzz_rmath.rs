@@ -5,9 +5,14 @@
 //! panics on NaN, infinite, huge or tiny arguments. `FUZZ_ITERS` scales the run.
 
 use {
-    R::{arith::Rng, rmath::*},
     heap::Heap,
-    interp::rmath::*,
+    interp::{
+        distributions::{
+            Deviates, SessionDeviates, rbeta, rbinom, rchisq, rexp, rgamma, rgeom, rhyper, rnbinom,
+            rpois, rsignrank, runif, rweibull,
+        },
+        rmath::*,
+    },
     syntax::testing::{SplitMix64, fuzz_iterations},
 };
 
@@ -364,6 +369,12 @@ fn nothing_panics_and_na_stays_na() {
     }
 }
 
+/// The generators return `Err` only for an R-level error, which the valid arguments here never
+/// raise, so one is a failure of the property.
+fn draw<E: std::fmt::Debug>(result: Result<f64, E>) -> f64 {
+    result.expect("a random generator raised an error on valid arguments")
+}
+
 #[test]
 fn random_variates_stay_in_their_support() {
     let mut seeds = SplitMix64(0x5eed_0006);
@@ -375,37 +386,37 @@ fn random_variates_stay_in_their_support() {
         interp::install(heap, interp::default_hooks());
         interp::random::set_seed(20251031).expect("seeding the default generator");
     }
-    let mut rng = Rng;
+    let mut rng = SessionDeviates;
     for _ in 0..fuzz_iterations(2000) {
         let a = positive(&mut seeds, 1e-3, 1e4);
         let b = positive(&mut seeds, 1e-3, 1e4);
         let p = uniform(&mut seeds).clamp(1e-6, 1.0);
         let n = seeds.below(100000) as f64;
         let checks = [
-            ("rgamma", rgamma(&mut rng, a, b), 0.0, f64::INFINITY),
-            ("rbeta", rbeta(&mut rng, a, b), 0.0, 1.0),
-            ("rchisq", rchisq(&mut rng, a), 0.0, f64::INFINITY),
-            ("rbinom", rbinom(&mut rng, n, p), 0.0, n),
-            ("rpois", rpois(&mut rng, a), 0.0, f64::INFINITY),
-            ("rgeom", rgeom(&mut rng, p), 0.0, f64::INFINITY),
-            ("rnbinom", rnbinom(&mut rng, a, p), 0.0, f64::INFINITY),
+            ("rgamma", draw(rgamma(&mut rng, a, b)), 0.0, f64::INFINITY),
+            ("rbeta", draw(rbeta(&mut rng, a, b)), 0.0, 1.0),
+            ("rchisq", draw(rchisq(&mut rng, a)), 0.0, f64::INFINITY),
+            ("rbinom", draw(rbinom(&mut rng, n, p)), 0.0, n),
+            ("rpois", draw(rpois(&mut rng, a)), 0.0, f64::INFINITY),
+            ("rgeom", draw(rgeom(&mut rng, p)), 0.0, f64::INFINITY),
+            ("rnbinom", draw(rnbinom(&mut rng, a, p)), 0.0, f64::INFINITY),
             (
                 "rhyper",
-                rhyper(&mut rng, n, b.floor(), (n / 2.0).floor()),
+                draw(rhyper(&mut rng, n, b.floor(), (n / 2.0).floor())),
                 0.0,
                 n,
             ),
-            ("rexp", rexp(&mut rng, a), 0.0, f64::INFINITY),
-            ("runif", runif(&mut rng, -a, b), -a, b),
+            ("rexp", draw(rexp(&mut rng, a)), 0.0, f64::INFINITY),
+            ("runif", draw(runif(&mut rng, -a, b)), -a, b),
             (
                 "rweibull",
-                rweibull(&mut rng, a.min(50.0), b),
+                draw(rweibull(&mut rng, a.min(50.0), b)),
                 0.0,
                 f64::INFINITY,
             ),
             (
                 "rsignrank",
-                rsignrank(&mut rng, (n / 1000.0).floor()),
+                draw(rsignrank(&mut rng, (n / 1000.0).floor())),
                 0.0,
                 f64::INFINITY,
             ),
@@ -416,9 +427,9 @@ fn random_variates_stay_in_their_support() {
                 "{name} drew {value} outside [{low}, {high}] (a={a}, b={b}, p={p}, n={n})"
             );
         }
-        let normal = rng.norm_rand();
+        let normal = draw(rng.normal());
         assert!(normal.is_finite(), "norm_rand drew {normal}");
-        let exponential = rng.exp_rand();
+        let exponential = draw(rng.exponential());
         assert!(exponential >= 0.0 && exponential.is_finite());
     }
 }

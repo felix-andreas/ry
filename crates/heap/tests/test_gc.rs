@@ -507,6 +507,68 @@ fn strings_are_interned_per_encoding_and_ascii_is_unmarked() {
     }
 }
 
+/// The scan that hashes a string also finds its NUL and non-ASCII bytes, reading words that end at
+/// the last byte and may overlap. Every length up to several words and every byte position must
+/// still be seen, and equal bytes must still meet in the table.
+#[test]
+fn every_byte_position_is_scanned_at_every_length() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.inhibit_collection();
+        for length in 1..=48usize {
+            let text: Vec<u8> = (0..length).map(|index| b'a' + (index % 26) as u8).collect();
+            let first = heap.mk_char(&text, Encoding::Utf8).expect("mk_char");
+            assert!(first.has_gp(gp::ASCII), "length {length} is ASCII");
+            assert_eq!(first.bytes(), &text[..]);
+            let copy = text.clone();
+            let again = heap.mk_char(&copy, Encoding::Latin1).expect("mk_char");
+            assert_eq!(first, again, "length {length} interns once");
+            for position in 0..length {
+                let mut with_nul = text.clone();
+                with_nul[position] = 0;
+                assert!(
+                    matches!(
+                        heap.mk_char(&with_nul, Encoding::Native),
+                        Err(HeapError::EmbeddedNul { .. })
+                    ),
+                    "a NUL at {position} of {length} is found"
+                );
+                let mut high = text.clone();
+                high[position] = 0xE9;
+                let latin1 = heap.mk_char(&high, Encoding::Latin1).expect("mk_char");
+                assert_eq!(
+                    Encoding::of(latin1),
+                    Encoding::Latin1,
+                    "a high byte at {position} of {length} is not ASCII"
+                );
+                assert_ne!(latin1, first, "one changed byte at {position} of {length}");
+                let bytes = heap.mk_char(&high, Encoding::Bytes).expect("mk_char");
+                assert_ne!(latin1, bytes, "the encoding is part of the key");
+            }
+        }
+        heap.allow_collection();
+    }
+}
+
+/// The allocator reserves address space lazily, so without a bound a petabyte vector would be
+/// handed out and fail only when touched. GNU R reports it as an allocation failure up front.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_vector_larger_than_the_machine_is_refused() {
+    if std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1") {
+        return;
+    }
+    let mut heap = Heap::new();
+    unsafe {
+        let length = 1isize << 47;
+        assert!(matches!(
+            heap.alloc_vector(SexpType::Real, length),
+            Err(HeapError::CannotAllocate { .. })
+        ));
+        assert!(heap.alloc_vector(SexpType::Real, 1 << 20).is_ok());
+    }
+}
+
 #[test]
 fn weak_references_follow_ephemeron_rules() {
     let mut heap = Heap::new();
@@ -582,6 +644,34 @@ fn environments_bind_look_up_and_remove() {
         assert!(heap.frame_cell(global, v3).is_none());
         let v4 = heap.install(b"v4").expect("install");
         assert_eq!(heap.frame_cell(global, v4).expect("bound").cdr(), values[4]);
+
+        // Removing most bindings compacts the frame; the survivors keep their insertion order
+        // and stay reachable through a collection.
+        let symbol = |heap: &mut Heap, index: usize| {
+            heap.install(format!("v{index}").as_bytes())
+                .expect("install")
+        };
+        for index in (5..20).filter(|index| index % 4 != 0) {
+            let removed = symbol(&mut heap, index);
+            assert_eq!(heap.remove_binding(global, removed), Ok(true));
+            assert_eq!(heap.remove_binding(global, removed), Ok(false));
+        }
+        heap.collect(Collection::Major);
+        let survivors = [0, 1, 2, 4, 8, 12, 16];
+        let expected: Vec<Sexp> = survivors
+            .iter()
+            .map(|&index| symbol(&mut heap, index))
+            .collect();
+        assert_eq!(heap.bound_symbols(global), expected);
+        for &index in &survivors {
+            let bound = symbol(&mut heap, index);
+            assert_eq!(
+                heap.frame_cell(global, bound).expect("bound").cdr(),
+                values[index]
+            );
+        }
+        heap.define(global, v3, values[3]).expect("define");
+        assert_eq!(heap.bound_symbols(global).last(), Some(&v3));
 
         let base = heap.known().base_env;
         let pi = heap.install(b"pi").expect("install");

@@ -248,6 +248,7 @@ fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
         let behavior = match item_top_level(db, span.item) {
             TopLevel::Definition => "definition",
             TopLevel::Constant => "constant",
+            TopLevel::Generator => "generator",
             TopLevel::Effect { .. } => "effect",
         };
         let pure = if *item_declared_pure(db, span.item) {

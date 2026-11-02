@@ -47,6 +47,7 @@ pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_engine;
 pub mod graphics_render;
+pub mod help_server;
 pub mod http;
 pub mod latex;
 pub mod linalg;
@@ -133,6 +134,8 @@ pub struct Hooks {
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
+    /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
+    pub run_exit_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
     /// succeeded, and whether the value was visible.
     pub run_task_callbacks: unsafe fn(Sexp, Sexp, bool, bool) -> R<()>,
@@ -153,7 +156,13 @@ pub struct Hooks {
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
+    /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
+    /// finds `user_unif_rand`.
+    pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
 }
+
+/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
+pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -176,6 +185,9 @@ pub struct Interp {
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
+    /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
+    /// the collector still sees them.
+    pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
@@ -316,6 +328,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         handlers: None,
         restarts: None,
         global_handlers: None,
+        suspended_handlers: Vec::new(),
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
@@ -369,6 +382,7 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
+        run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
             Err(unwind::error("top-level task callbacks need the libR host"))
@@ -385,6 +399,7 @@ pub fn default_hooks() -> Hooks {
             Ok(())
         },
         connection_vfprintf: None,
+        find_native_symbol: |_| None,
     }
 }
 
@@ -466,6 +481,10 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.handlers, marker);
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
+            for (handlers, restarts) in &interp.suspended_handlers {
+                conditions::trace_handlers(handlers, marker);
+                conditions::trace_restarts(restarts, marker);
+            }
             marker.mark(interp.srcref);
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
@@ -482,12 +501,6 @@ impl RootSource for InterpRoots {
                 marker.mark(call);
             }
             interp.globals.trace(marker);
-            interp.symbols.trace(marker);
-            for definition in &interp.builtins {
-                if let Some(object) = definition.object {
-                    marker.mark(object);
-                }
-            }
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);

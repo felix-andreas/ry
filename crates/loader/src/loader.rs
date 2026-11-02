@@ -17,13 +17,14 @@ use {
         file_conditional_writers, file_definitions, file_typing_mode,
         load_index::{
             IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-            S4Definition, classify_constants, file_binds, file_items, file_load_index, fnv1a,
+            S4Definition, classify_top_level, file_binds, file_items, file_load_index, fnv1a,
             package_index,
         },
         metadata::{
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
-            PackageMetadata, S3MethodDirective, normalized_imports, parse_description_collate,
-            parse_description_dependencies, parse_description_package, parse_namespace,
+            PackageMetadata, S3MethodDirective, description_field, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::install_shipped_stubs,
     },
@@ -47,8 +48,9 @@ use {
 pub struct Loader {
     db: RootDatabase,
     packages: Vec<LoadedPackage>,
-    /// Size and modification time of each file as last read, per package root.
-    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>)>>,
+    /// Size, modification time and declared encoding of each file as last read, per package
+    /// root.
+    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>, SourceEncoding)>>,
     /// Whether the shipped stubs are in the database. A strict package needs them to tell
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
@@ -57,6 +59,10 @@ pub struct Loader {
     /// with [`Loader::set_strict`]: the loader reads package sources, not ry's configuration.
     /// Off, a file is strict only when its `# typing: strict` directive says so.
     strict: bool,
+    /// The packages a plan was asked for that have nothing committed, because the plan or its
+    /// application failed, with the [`source_fingerprint`] taken at that plan, so a console
+    /// retries the load once the sources change.
+    unloaded: FxHashMap<PathBuf, Option<u64>>,
 }
 
 /// A package's sources as the loader reads them.
@@ -185,6 +191,8 @@ pub struct Plan {
     /// keeps the same names and a backend need not rescan them to resync its exports.
     pub keeps_names: bool,
     pub run_on_load: bool,
+    /// Strict mode covers the package, so the host checks it before the plan runs anything.
+    pub strict: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
 }
@@ -298,6 +306,9 @@ pub struct Code {
     pub source_end: u32,
     /// Whether the code registers S4 classes or methods, after which R refreshes its S4 caches.
     pub registers_s4: bool,
+    /// Whether running it only binds names and registers classes, so it may run before the
+    /// strict check of the package has finished (see `EagerItem::effect_free`).
+    pub effect_free: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,17 +393,26 @@ impl Loader {
         let root = find_package_root(path)?;
         // Taken before reading, so an edit made while the plan is read shows as a change later.
         let fingerprint = source_fingerprint(&root);
-        let inputs = self.read(&root)?;
-        let plan = self.plan_inputs(&root, inputs, full)?;
-
-        if let Some(package) = self
+        let planned = self
+            .read(&root)
+            .and_then(|inputs| self.plan_inputs(&root, inputs, full));
+        let package = self
             .packages
             .iter_mut()
-            .find(|package| package.root == root)
-        {
-            package.pending_fingerprint = fingerprint;
+            .find(|package| package.root == root);
+        let committed = match package {
+            Some(package) => {
+                if planned.is_ok() {
+                    package.pending_fingerprint = fingerprint;
+                }
+                package.committed.is_some()
+            }
+            None => false,
+        };
+        if !committed {
+            self.unloaded.insert(root, fingerprint);
         }
-        Ok(plan)
+        planned
     }
 
     /// Derives the analysis a plan of the package at or above `path` reads, without planning,
@@ -546,7 +566,7 @@ impl Loader {
                 file_conditional_writers(db, file);
             });
             let sources = self.packages[position].sources;
-            self.warm(files, |db, file| classify_constants(db, sources, file));
+            self.warm(files, |db, file| classify_top_level(db, sources, file));
         }
         let sources = self.packages[position].sources;
         self.warm(files, |db, file| {
@@ -567,6 +587,7 @@ impl Loader {
             Some(state) => {
                 package.committed = Some(state);
                 package.committed_fingerprint = package.pending_fingerprint.take();
+                self.unloaded.remove(root);
                 true
             }
             None => false,
@@ -574,8 +595,9 @@ impl Loader {
     }
 
     /// The roots of the loaded packages whose sources changed on disk since they were loaded,
-    /// judged from file names, sizes and modification times without reading a file. A root is
-    /// reported once per change: a reload that fails is not retried until the next change.
+    /// and of the packages whose load failed whose sources changed since that attempt, judged
+    /// from file names, sizes and modification times without reading a file. A root is reported
+    /// once per change: a reload that fails is not retried until the next change.
     pub fn changed_roots(&mut self) -> Vec<PathBuf> {
         let mut changed = Vec::new();
         for package in &mut self.packages {
@@ -588,7 +610,51 @@ impl Loader {
                 changed.push(package.root.clone());
             }
         }
+        for (root, fingerprint) in &mut self.unloaded {
+            let current = source_fingerprint(root);
+            if current != *fingerprint {
+                *fingerprint = current;
+                changed.push(root.clone());
+            }
+        }
+        changed.sort();
         changed
+    }
+
+    /// Every top-level name of the package loaded from `root` whose definition reaches one of
+    /// `changed`, through the names the definitions mention, `changed` included. A test that
+    /// mentions none of them runs exactly the code it ran before a reload that changed only
+    /// `changed`, so `ry test` reruns the tests that mention one first.
+    pub fn callers(&self, root: &Path, changed: &[String]) -> Vec<String> {
+        let Some(index) = self
+            .packages
+            .iter()
+            .find(|package| package.root == root)
+            .and_then(|package| package.committed.as_ref())
+            .map(|state| &state.index)
+        else {
+            return changed.to_vec();
+        };
+        let mut mentioned_by: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+        for (_, item) in index.items() {
+            for name in &item.binds {
+                for mention in item.mentions.iter().chain(&item.reads) {
+                    mentioned_by.entry(mention).or_default().push(name);
+                }
+            }
+        }
+        let mut reached: FxHashSet<&str> = changed.iter().map(String::as_str).collect();
+        let mut queue: Vec<&str> = reached.iter().copied().collect();
+        while let Some(name) = queue.pop() {
+            for &caller in mentioned_by.get(name).map_or(&[][..], Vec::as_slice) {
+                if reached.insert(caller) {
+                    queue.push(caller);
+                }
+            }
+        }
+        let mut names: Vec<String> = reached.into_iter().map(str::to_owned).collect();
+        names.sort_unstable();
+        names
     }
 
     /// The pending state for `root`, which a backend that persists state saves.
@@ -727,10 +793,11 @@ impl Loader {
         });
     }
 
-    /// Reads the package's sources. A file whose size and modification time are unchanged
-    /// since the last read is not read again.
+    /// Reads the package's sources. A file whose size, modification time and declared encoding
+    /// are unchanged since the last read is not read again.
     fn read(&mut self, root: &Path) -> Result<PackageInputs, LoadError> {
-        let description = read(&root.join("DESCRIPTION"))?;
+        let description = read_description(&root.join("DESCRIPTION"))?;
+        let encoding = SourceEncoding::of(&description);
         let namespace = match fs::read_to_string(root.join("NAMESPACE")) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -742,14 +809,15 @@ impl Loader {
         let mut stamps = FxHashMap::default();
         for path in paths {
             let absolute = root.join(&path);
+            // The encoding is part of the stamp, so declaring another one decodes every file again.
             let stamp = fs::metadata(&absolute)
-                .map(|metadata| (metadata.len(), metadata.modified().ok()))
+                .map(|metadata| (metadata.len(), metadata.modified().ok(), encoding))
                 .map_err(|error| LoadError::Io(absolute.clone(), error))?;
             let unchanged = stamp.1.is_some() && known.get(&path) == Some(&stamp);
             let text = if unchanged {
                 None
             } else {
-                Some(read(&absolute)?.replace("\r\n", "\n").replace('\r', "\n"))
+                Some(read_source(&absolute, encoding)?)
             };
             stamps.insert(path.clone(), stamp);
             files.push((path, text));
@@ -828,9 +896,7 @@ impl Loader {
                 (None, text) => {
                     let text = match text {
                         Some(text) => text,
-                        None => read(&root.join(&path))?
-                            .replace("\r\n", "\n")
-                            .replace('\r', "\n"),
+                        None => read_source(&root.join(&path), SourceEncoding::of(&description))?,
                     };
                     let file = SourceFile::builder(text, DocumentKind::Package)
                         .durability(Durability::HIGH)
@@ -1104,9 +1170,10 @@ pub fn diff<'text>(
             source_start: span.source_start,
             source_end: span.source_end,
             registers_s4: false,
+            effect_free: true,
         }
     };
-    let eager_code = |path: &str, item: &IndexedItem| Code {
+    let eager_code = |path: &str, item: &IndexedItem, effect_free: bool| Code {
         name: None,
         path: path.to_owned(),
         line: item.span.line,
@@ -1116,6 +1183,7 @@ pub fn diff<'text>(
         source_start: item.span.source_start,
         source_end: item.span.source_end,
         registers_s4: registers_s4(item),
+        effect_free,
     };
 
     // Lazy definitions are keyed by name, which only one item writes.
@@ -1251,22 +1319,27 @@ pub fn diff<'text>(
     // A rerun statement must also see what it saw at load: when it reads a name that it or a
     // later statement rewrites, as `f <- memoise(f)` does, the earlier writers of that name
     // rerun first. Otherwise it would read the final value and, here, memoise twice.
-    let eager: Vec<(&str, &IndexedItem, bool)> = index
+    let eager: Vec<(&str, &IndexedItem, bool, bool)> = index
         .bindings
         .eager
         .iter()
-        .filter_map(|&at| {
+        .filter_map(|eager| {
+            let at = eager.at;
             let (path, item) = index.item_at(at)?;
-            Some((path, item, fresh.contains(&(at.0 as usize, at.1 as usize))))
+            let fresh = fresh.contains(&(at.0 as usize, at.1 as usize));
+            Some((path, item, fresh, eager.effect_free))
         })
         .collect();
     let mut writers: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
-    for (position, (_, item, _)) in eager.iter().enumerate() {
+    for (position, (_, item, _, _)) in eager.iter().enumerate() {
         for name in &item.binds {
             writers.entry(name).or_default().push(position);
         }
     }
-    let mut rerun: Vec<bool> = eager.iter().map(|(_, _, fresh)| full || *fresh).collect();
+    let mut rerun: Vec<bool> = eager
+        .iter()
+        .map(|(_, _, fresh, _)| full || *fresh)
+        .collect();
     // A lazy constant holds the value its initializer computed when it was forced, so like an
     // eager statement it is bound afresh when anything its initializer reaches changed.
     let constants: Vec<(&str, &str, &IndexedItem)> = if full {
@@ -1287,7 +1360,7 @@ pub fn diff<'text>(
         if !full && !changed.is_empty() {
             let roots: Vec<&str> = eager
                 .iter()
-                .flat_map(|(_, item, _)| item.reads.iter().map(String::as_str))
+                .flat_map(|(_, item, _, _)| item.reads.iter().map(String::as_str))
                 .collect();
             let reaching: Vec<String> = reaching_changed(&roots, functions, &changed)
                 .into_iter()
@@ -1312,7 +1385,7 @@ pub fn diff<'text>(
                 grew = true;
             }
         }
-        for (position, (_, item, _)) in eager.iter().enumerate() {
+        for (position, (_, item, _, _)) in eager.iter().enumerate() {
             if !rerun[position]
                 && !changed.is_empty()
                 && item
@@ -1349,14 +1422,14 @@ pub fn diff<'text>(
         .iter()
         .zip(&rerun)
         .filter(|(_, rerun)| **rerun)
-        .map(|((path, item, _), _)| eager_code(path, item))
+        .map(|((path, item, _, effect_free), _)| eager_code(path, item, *effect_free))
         .collect();
     // A fresh load runs every eager statement, so positions in `eager` are positions in `run`.
     let deferred_s4 = if full { deferred_s4(index) } else { None };
     // Another statement may make the same registration, which then stays.
     let registered: BTreeSet<&Registration> = eager
         .iter()
-        .flat_map(|(_, item, _)| &item.registrations)
+        .flat_map(|(_, item, _, _)| &item.registrations)
         .collect();
 
     let mut remove = BTreeSet::new();
@@ -1485,6 +1558,7 @@ pub fn diff<'text>(
             .filter(|libraries| !libraries.is_empty() || !full),
         exports_changed,
         keeps_names,
+        strict: index.strict,
         namespace: index.namespace.clone(),
         warnings,
     }
@@ -1512,7 +1586,8 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         }
     }
     let mut definitions = Vec::new();
-    for (eager_position, &at) in index.bindings.eager.iter().enumerate() {
+    for (eager_position, eager) in index.bindings.eager.iter().enumerate() {
+        let at = eager.at;
         let Some((_, item)) = index.item_at(at) else {
             continue;
         };
@@ -1753,6 +1828,7 @@ impl Plan {
             exports_changed: false,
             keeps_names: true,
             run_on_load: false,
+            strict: state.index.strict,
             warnings: Vec::new(),
         }
     }
@@ -1976,8 +2052,63 @@ fn stamp(metadata: &fs::Metadata) -> String {
     format!("{}\0{modified}", metadata.len())
 }
 
-fn read(path: &Path) -> Result<String, LoadError> {
-    fs::read_to_string(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))
+/// How a package's code files are encoded, which `DESCRIPTION`'s `Encoding` field declares. R
+/// reads code in the declared encoding, so a latin1 package's files are decoded byte by byte;
+/// any other declaration is read as UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEncoding {
+    Utf8,
+    Latin1,
+}
+
+impl SourceEncoding {
+    pub fn of(description: &str) -> SourceEncoding {
+        match description_field(description, "Encoding") {
+            Some(name)
+                if ["latin1", "ISO-8859-1", "ISO8859-1"]
+                    .iter()
+                    .any(|latin1| name.eq_ignore_ascii_case(latin1)) =>
+            {
+                SourceEncoding::Latin1
+            }
+            _ => SourceEncoding::Utf8,
+        }
+    }
+
+    /// The text of a code file's `bytes`, or `None` when they are not valid UTF-8 in a UTF-8
+    /// package.
+    pub fn decode(self, bytes: Vec<u8>) -> Option<String> {
+        match self {
+            SourceEncoding::Latin1 => Some(bytes.iter().map(|&byte| char::from(byte)).collect()),
+            SourceEncoding::Utf8 => String::from_utf8(bytes).ok(),
+        }
+    }
+}
+
+/// A code file's text, decoded as `encoding` and with its line endings normalized to `\n`.
+fn read_source(path: &Path, encoding: SourceEncoding) -> Result<String, LoadError> {
+    let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
+    let text = encoding.decode(bytes).ok_or_else(|| {
+        let message = "the file is not valid UTF-8; a package whose code is latin1 declares \
+                       `Encoding: latin1` in DESCRIPTION";
+        LoadError::Io(
+            path.to_path_buf(),
+            io::Error::new(io::ErrorKind::InvalidData, message),
+        )
+    })?;
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+/// `DESCRIPTION`, which R reads as latin1 when it is not valid UTF-8.
+fn read_description(path: &Path) -> Result<String, LoadError> {
+    let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
+    Ok(String::from_utf8(bytes).unwrap_or_else(|error| {
+        error
+            .into_bytes()
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect()
+    }))
 }
 
 fn file_hash(path: &Path) -> Result<Option<u64>, LoadError> {

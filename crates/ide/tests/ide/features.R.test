@@ -8,9 +8,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `x`
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 completion (128+): x, break, else, FALSE, for, function, if, in
 hint @1: integer
 
@@ -27,10 +27,9 @@ references: 20..25*, 33..38
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: double\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @1: fn() -> double
 hint @25: double
@@ -47,9 +46,13 @@ references: 14..19*, 25..30
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
+  edit 13..13 -> "<T: numeric>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
+  edit 13..13 -> "<T: numeric>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> double"
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @1: <T: numeric> fn(count: T) -> double
 
@@ -66,11 +69,13 @@ calls double: in g [44..50] | out
 signature: fn(x: double) -> double
 parameters: [x: double]
 action: Add inferred type annotation for `g`
-  edit 28..28 -> "#: fn() -> double\n"
+  edit 43..43 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
-  edit 28..28 -> "#: fn() -> double\n"
-completion (27): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Num.to_double
+  edit 18..18 -> "<T: numeric>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 43..43 -> " -> double"
+completion (29): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Num.to_double
 hint @6: <T: numeric> fn(x: T) -> T
 hint @29: fn() -> double
 
@@ -88,10 +93,9 @@ references: 20..25*, 33..38
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: double\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
 hint @1: fn() -> double
 hint @25: double
@@ -109,10 +113,12 @@ calls helper: in caller [45..51] | out
 signature: fn(x: double) -> double
 parameters: [x: double]
 action: Add inferred type annotation for `caller`
-  edit 24..24 -> "#: fn() -> double\n"
+  edit 44..44 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-  edit 24..24 -> "#: fn() -> double\n"
+  edit 18..18 -> "<T>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 44..44 -> " -> double"
 completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @6: <T> fn(x: T) -> T
 hint @30: fn() -> double
@@ -132,11 +138,11 @@ references: 216..221*, 229..234
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `use`
-  edit 222..222 -> "#: double\n"
+  edit 225..225 -> ": double"
 action: Add inferred type annotations for the whole file
-  edit 179..179 -> "#: fn() -> double\n"
+  edit 200..200 -> " -> double"
   edit 203..203 -> "#: double\n"
-  edit 222..222 -> "#: double\n"
+  edit 225..225 -> ": double"
 completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
 hint @186: fn() -> double
 hint @221: double
@@ -157,13 +163,11 @@ references: 20..21*, 29..30*, 34..35, 42..43
 rename: 4 edit(s)
 signature: none
 action: Add inferred type annotation for `n`
-  edit 27..27 -> "  #: double\n"
+  edit 30..30 -> ": double"
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: double\n"
-  edit 27..27 -> "  #: double\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (128+): n, NA, NA_character_, NA_complex_, NA_integer_, NA_real_, NaN, next
 hint @1: fn() -> double
 hint @21: double
@@ -181,9 +185,13 @@ references: 14..19*, 25..30
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
+  edit 13..13 -> "<T: numeric>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
+  edit 13..13 -> "<T: numeric>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> double"
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @1: <T: numeric> fn(count: T) -> double
 
@@ -201,11 +209,13 @@ calls helper: in caller [45..51], also [74..80] | out
 signature: fn(x: double) -> double
 parameters: [x: double]
 action: Add inferred type annotation for `caller`
-  edit 24..24 -> "#: fn() -> double\n"
+  edit 44..44 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-  edit 24..24 -> "#: fn() -> double\n"
-  edit 55..55 -> "#: fn() -> double\n"
+  edit 18..18 -> "<T>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 44..44 -> " -> double"
+  edit 73..73 -> " -> double"
 completion (2): helper, help.search
 hint @6: <T> fn(x: T) -> T
 hint @30: fn() -> double
@@ -223,10 +233,14 @@ rename: 2 edit(s)
 calls helper: in caller [45..51] | out
 signature: none
 action: Add inferred type annotation for `helper`
-  edit 0..0 -> "#: <T> fn(x: T) -> T\n"
+  edit 18..18 -> "<T>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-  edit 24..24 -> "#: fn() -> double\n"
+  edit 18..18 -> "<T>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 44..44 -> " -> double"
 completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @6: <T> fn(x: T) -> T
 hint @30: fn() -> double
@@ -253,9 +267,9 @@ rename: none
 signature: fn(x: double, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double
 parameters: [x: double] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (128+): princomp, print, print.AsIs, print.by, print.condition, print.connection, print.data.frame, print.Date
 hint @1: fn() -> double
 
@@ -273,11 +287,12 @@ references: 44..50*, 58..64
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `g`
-  edit 24..24 -> "#: fn() -> double\n"
+  edit 39..39 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-  edit 42..42 -> "  #: double\n"
-  edit 24..24 -> "#: fn() -> double\n"
+  edit 18..18 -> "<T>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 39..39 -> " -> double"
 completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @6: <T> fn(x: T) -> T
 hint @25: fn() -> double
@@ -297,10 +312,9 @@ references: 20..25*, 33..38, 41..46
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: double\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @1: fn() -> double
 hint @25: double
@@ -316,9 +330,9 @@ references: 25..29*, 44..48
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> NULL\n"
+  edit 15..15 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> NULL\n"
+  edit 15..15 -> " -> NULL"
 completion (128+): I, item, if, in, Inf, iconv, iconvlist, icuGetCollate
 hint @1: fn() -> NULL
 hint @29: integer
@@ -339,7 +353,10 @@ rename: none
 signature: fn(x: double, y: double = 2) -> double
 parameters: [x: double] | y: double = 2
 action: Add inferred type annotations for the whole file
-  edit 263..263 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"
+  edit 276..276 -> "<T: numeric>"
+  edit 278..278 -> ": T"
+  edit 281..281 -> ": T"
+  edit 286..286 -> " -> T"
 completion (128+): x = , y = , f, g, break, else, FALSE, for
 hint @264: <T: numeric> fn(x: T, [y]: T) -> T
 
@@ -354,10 +371,13 @@ rename: none
 signature: fn(x: double, y: double = 2) -> double
 parameters: x: double | [y: double = 2]
 action: Add inferred type annotation for `g`
-  edit 30..30 -> "#: fn() -> double\n"
+  edit 45..45 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"
-  edit 30..30 -> "#: fn() -> double\n"
+  edit 13..13 -> "<T: numeric>"
+  edit 15..15 -> ": T"
+  edit 18..18 -> ": T"
+  edit 23..23 -> " -> T"
+  edit 45..45 -> " -> double"
 completion (128+): y = , f, g, break, else, FALSE, for, function
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 hint @31: fn() -> double
@@ -373,7 +393,10 @@ rename: none
 signature: <T: numeric> fn(x: T, y: T = 2) -> T
 parameters: x: T | [y: T = 2]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"
+  edit 13..13 -> "<T: numeric>"
+  edit 15..15 -> ": T"
+  edit 18..18 -> ": T"
+  edit 23..23 -> " -> T"
 completion (128+): f, g, break, else, FALSE, for, function, if
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 
@@ -387,25 +410,25 @@ rename: none
 signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
 parameters: [...: Any] | [sep]: character | [collapse]: character | NULL | [recycle0]: logical
 action: Add inferred type annotation for `h`
-  edit 0..0 -> "#: fn() -> character\n"
+  edit 15..15 -> " -> character"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> character\n"
+  edit 15..15 -> " -> character"
 completion (128+): h, break, else, FALSE, for, function, if, in
 hint @1: fn() -> character
 
 #---- unknown_name_hits_dots
 h <- function() paste(collapse$0 = "")
 #++++
-hover 16..36: character
-definition: none
+hover 22..30: [collapse]: character | NULL
+definition: stub source base at `paste`
 references: none
 rename: none
 signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
 parameters: ...: Any | [sep]: character | [[collapse]: character | NULL] | [recycle0]: logical
 action: Add inferred type annotation for `h`
-  edit 0..0 -> "#: fn() -> character\n"
+  edit 15..15 -> " -> character"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> character\n"
+  edit 15..15 -> " -> character"
 completion: none
 hint @1: fn() -> character
 
@@ -418,8 +441,8 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
-parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[] | matrix, [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[] | matrix] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
 signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
@@ -427,9 +450,9 @@ parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
 signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `h`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 15..15 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 15..15 -> " -> integer"
 completion (128+): h, break, else, FALSE, for, function, if, in
 hint @1: fn() -> integer
 
@@ -442,8 +465,8 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double (active)
-parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[] | matrix, [na.rm]: logical) -> double (active)
+parameters: [...: double[] | integer[] | logical[] | matrix] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
 signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
@@ -451,9 +474,9 @@ parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
 signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `h`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (128+): h, break, else, FALSE, for, function, if, in
 hint @1: fn() -> double
 
@@ -489,8 +512,9 @@ f <- function(total_count) {
   tot$0
 }
 #++++
-hover 31..34: tot: Unknown
-definition: none
+hover 31..34: tot
+hover-definition: installed tot from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed tot from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -500,13 +524,16 @@ completion (128+): total_count, prototype, NLSstAsymptotic, NLSstLfAsymptote, NL
 print <- function(x) x
 g <- function() pri$0
 #++++
-hover 39..42: pri: Unknown
-definition: none
+hover 39..42: pri
+hover-definition: installed pri from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed pri from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(x: T) -> T\n"
+  edit 17..17 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 completion (128+): print, princomp, print.AsIs, print.by, print.condition, print.connection, print.data.frame, print.Date
 hint @5: <T> fn(x: T) -> T
 
@@ -520,10 +547,10 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `use`
-  edit 38..38 -> "#: fn() -> double\n"
+  edit 55..55 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{alpha: double, beta: character}\n"
-  edit 38..38 -> "#: fn() -> double\n"
+  edit 6..6 -> ": list{alpha: double, beta: character}"
+  edit 55..55 -> " -> double"
 completion (1): alpha
 hint @6: list{alpha: double, beta: character}
 hint @41: fn() -> double
@@ -531,8 +558,9 @@ hint @41: fn() -> double
 #---- namespace_exports
 h <- function() stats::med$0
 #++++
-hover 16..26: Unknown
-definition: none
+hover 16..26: med
+hover-definition: installed med from stats
+definition: installed med from stats
 references: none
 rename: none
 signature: none
@@ -541,8 +569,9 @@ completion (11): median, median.default, medpolish, runmed, makepredictcall, mod
 #---- keyword_prefix
 g <- function() fun$0
 #++++
-hover 16..19: fun: Unknown
-definition: none
+hover 16..19: fun
+hover-definition: installed fun from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed fun from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -567,9 +596,11 @@ rename: 4 edit(s)
 type-definition 9..15
 signature: none
 action: Add inferred type annotation for `g`
-  edit 73..73 -> "#: fn(id: UserId) -> UserId\n"
+  edit 89..89 -> ": UserId"
+  edit 90..90 -> " -> UserId"
 action: Add inferred type annotations for the whole file
-  edit 73..73 -> "#: fn(id: UserId) -> UserId\n"
+  edit 89..89 -> ": UserId"
+  edit 90..90 -> " -> UserId"
 completion (1): UserId
 hint @74: fn(id: UserId) -> UserId
 
@@ -667,9 +698,9 @@ rename: 3 edit(s)
 signature: fn(Class: character, ...: Any) -> Any
 parameters: [Class: character] | ...: Any
 action: Add inferred type annotation for `p`
-  edit 55..55 -> "#: Any\n"
+  edit 56..56 -> ": Any"
 action: Add inferred type annotations for the whole file
-  edit 55..55 -> "#: Any\n"
+  edit 56..56 -> ": Any"
 completion: none
 hint @9Class =
 hint @56: Any
@@ -738,9 +769,9 @@ rename: 3 edit(s)
 signature: fn(Class: character, ...: Any) -> Any
 parameters: [Class: character] | ...: Any
 action: Add inferred type annotation for `q`
-  edit 81..81 -> "#: Any\n"
+  edit 82..82 -> ": Any"
 action: Add inferred type annotations for the whole file
-  edit 81..81 -> "#: Any\n"
+  edit 82..82 -> ": Any"
 completion: none
 hint @9Class =
 hint @53signature =
@@ -763,9 +794,9 @@ rename: 2 edit(s)
 type-definition 9..15
 signature: none
 action: Add inferred type annotation for `touch`
-  edit 52..52 -> "#: fn() -> UserId\n"
+  edit 71..71 -> " -> UserId"
 action: Add inferred type annotations for the whole file
-  edit 52..52 -> "#: fn() -> UserId\n"
+  edit 71..71 -> " -> UserId"
 completion (54): uid, UCBAdmissions, UKDriverDeaths, UKgas, unCfillPOSIXlt, unclass, undebug, undebugcall
 hint @57: fn() -> UserId
 
@@ -800,12 +831,11 @@ action: Remove unused assignment of `dead`
 action: Prefix `dead` with `.` to keep it
   edit 20..20 -> "."
 action: Add inferred type annotation for `dead`
-  edit 18..18 -> "  #: double\n"
+  edit 24..24 -> ": double"
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: double\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (17): dead, DataFrame.head, DataFrame.read_csv, DataFrame.read_parquet, defaultDumpName, delayedAssign, Dict.keep_shared, .Deprecated
 hint @1: fn() -> double
 hint @24: double
@@ -820,9 +850,9 @@ references: 0..5*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `count`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @5: integer
 
@@ -836,10 +866,10 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `pick`
-  edit 38..38 -> "#: fn() -> double\n"
+  edit 56..56 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{alpha: double, beta: character}\n"
-  edit 38..38 -> "#: fn() -> double\n"
+  edit 6..6 -> ": list{alpha: double, beta: character}"
+  edit 56..56 -> " -> double"
 completion (1): alpha
 hint @6: list{alpha: double, beta: character}
 hint @42: fn() -> double
@@ -853,9 +883,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `msg`
-  edit 0..0 -> "#: character\n"
+  edit 3..3 -> ": character"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: character\n"
+  edit 3..3 -> ": character"
 completion: none
 hint @3: character
 
@@ -873,7 +903,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (49): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -886,7 +916,7 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (49): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_frame_update_types_later_reads
 sales <- DataFrame(a = 1)
@@ -900,7 +930,7 @@ references: 0..5*, 26..31, 42..47
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{a: double[]}\n"
+  edit 5..5 -> ": DataFrame{a: double[]}"
 completion (128+): sales, BJsales, BJsales.lead, sample, sample.int, sapply, savePlot, scale
 hint @5: DataFrame{a: double[]}
 
@@ -917,9 +947,13 @@ references: 14..19*, 25..30, 43..48
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T> fn(sales: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(sales: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 completion (128+): sales, BJsales, BJsales.lead, sample, sample.int, sapply, savePlot, scale
 hint @1: <T> fn(sales: T) -> T
 
@@ -935,8 +969,6 @@ definition 25..32
 references: 25..32*, 49..56
 rename: 2 edit(s)
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 23..23 -> "  #: character\n"
 completion: none
 hint @32: character
 

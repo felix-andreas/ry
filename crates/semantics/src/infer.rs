@@ -55,7 +55,7 @@ pub struct InferenceTable<'db> {
     undo: Vec<(InferenceVar, Entry<'db>)>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
-    pub definitions: Option<TypeDefinitions>,
+    pub definitions: Option<TypeDefinitions<'db>>,
     /// Includes project classes: operator dispatch resolves methods through the
     /// global scope, so the numeric constraint must consult the same set.
     pub arithmetic_classes: Option<&'db FxHashSet<String>>,
@@ -176,7 +176,10 @@ impl<'db> InferenceTable<'db> {
         match self.definition(db, *name) {
             // Includes the bare use of a generic (`Box` for `Box<T>`).
             Some(definition) => definition.parameters.len() != arguments.len(),
-            None => !stubs(db).is_some_and(|library| library.nominals.contains(name.text(db))),
+            None => !self
+                .definitions
+                .map_or_else(|| stubs(db), TypeDefinitions::library)
+                .is_some_and(|library| library.nominals.contains(name.text(db))),
         }
     }
 
@@ -255,8 +258,7 @@ impl<'db> InferenceTable<'db> {
         // through the same interned application, so the visiting stack bounds it.
         let alias = match resolved.kind(db) {
             TyKind::Named(name, arguments) => self
-                .definitions
-                .and_then(|table| table.get(db, *name))
+                .definition(db, *name)
                 .filter(|definition| definition.alias)
                 .map(|definition| (definition, arguments)),
             _ => None,
@@ -866,8 +868,7 @@ impl<'db> InferenceTable<'db> {
                 && actual_arguments.len() == expected_arguments.len() =>
             {
                 let variances = self
-                    .definitions
-                    .and_then(|table| table.get(db, *actual_name))
+                    .definition(db, *actual_name)
                     .map(|definition| parameter_variances(db, definition))
                     .unwrap_or_default();
                 actual_arguments
@@ -1816,6 +1817,11 @@ mod tests {
                 variadic: None,
                 ret: int,
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
         let positional_interface = Ty::new(
@@ -1826,6 +1832,11 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
