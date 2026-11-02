@@ -255,6 +255,11 @@ pub fn cold_refusals(state: i32) -> i32 {
 /// so calls no longer compile it and only a hot loop in it does.
 pub const LOOPS_ONLY: i32 = 1 << 16;
 
+/// The entry count of a body that calls must not compile. Counting up from here never reaches
+/// the entry threshold, so tier 0 stops asking the tier about the body's calls and stops
+/// recording type feedback for them; only its back edges can still make it warm.
+pub const NEVER_HOT: i32 = i32::MIN;
+
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it
 /// keep running, so the objects it embeds stay rooted for the rest of the session.
 pub unsafe fn invalidate(code: Sexp) {

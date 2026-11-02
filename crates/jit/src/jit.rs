@@ -154,6 +154,7 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                 }
                 if reason == analysis::MOSTLY_TIER0 {
                     counters[profile::TIER_STATE] |= runtime::LOOPS_ONLY;
+                    counters[profile::ENTRIES] = runtime::NEVER_HOT;
                 } else if reason != analysis::COLD && reason != analysis::NOTHING_NATIVE {
                     counters[profile::TIER_STATE] = -1;
                 }
@@ -227,7 +228,7 @@ unsafe fn compiled_for<'a>(
             return None;
         }
         if state & runtime::LOOPS_ONLY != 0 && !in_loop {
-            counters[profile::ENTRIES] = 0;
+            counters[profile::ENTRIES] = runtime::NEVER_HOT;
             return None;
         }
         if runtime::compiles(state) >= MAX_COMPILES {
@@ -249,7 +250,7 @@ unsafe fn compiled_for<'a>(
                 }
                 if reason == analysis::MOSTLY_TIER0 {
                     counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
-                    counters[profile::ENTRIES] = 0;
+                    counters[profile::ENTRIES] = runtime::NEVER_HOT;
                 } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.

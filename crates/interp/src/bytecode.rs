@@ -2790,7 +2790,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
-    let decoded = Decoded::of(machine);
+    let mut decoded = Decoded::of(machine);
     loop {
         let at = pc;
         match step(machine, &decoded, &mut pc) {
@@ -2809,6 +2809,11 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                 {
                     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
                     profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
+                    if decoded.feedback.is_null()
+                        && profile[profile::BACK_EDGES] >= tier.back_edge_threshold / 2
+                    {
+                        decoded = Decoded::of(machine);
+                    }
                     if profile[profile::BACK_EDGES] >= tier.back_edge_threshold {
                         profile[profile::BACK_EDGES] = 0;
                         match (tier.back_edge)(machine, pc) {
@@ -2900,8 +2905,8 @@ struct Decoded<'a> {
     constants: Sexp,
     cache: LookupCache,
     registers: *mut Sexp,
-    /// The type feedback bytes, one per code word, or null when no optimizing tier is installed
-    /// to read them.
+    /// The type feedback bytes, one per code word, or null while nothing will read them: no
+    /// optimizing tier is installed, or the code is not yet warm (see [`warm`]).
     feedback: *mut i32,
 }
 
@@ -2909,8 +2914,10 @@ impl Decoded<'_> {
     unsafe fn of(machine: &Machine<'_>) -> Self {
         let constants = machine.code.cdr();
         let feedback = match interp().bytecode.tier {
-            Some(_) => values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr(),
-            None => std::ptr::null_mut(),
+            Some(tier) if warm(constants, &tier) => {
+                values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+            }
+            _ => std::ptr::null_mut(),
         };
         Decoded {
             code: values::ints(machine.code.car()),
@@ -2927,6 +2934,21 @@ impl Decoded<'_> {
             *self.feedback.add(pc) |= i32::from(value_kind(value));
         }
     }
+}
+
+/// Whether tier 0 records type feedback for this code: once it has optimized code, or once it is
+/// halfway to either compile threshold. Recording costs a type test and a store per value, and
+/// most bodies never get near a threshold, so recording from the first entry made every call
+/// of cold package code slower with the optimizing tier installed than without it. Half a
+/// threshold of activations still sees every type a compile would specialize on.
+unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
+    if constants.element(TIER1) != nil() {
+        return true;
+    }
+    let profile = values::ints(constants.element(PROFILE));
+    profile[profile::TIER_STATE] >= 0
+        && (profile[profile::ENTRIES] >= tier.entry_threshold / 2
+            || profile[profile::BACK_EDGES] >= tier.back_edge_threshold / 2)
 }
 
 /// Runs one instruction. `Some(value)` means the body returned.

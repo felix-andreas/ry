@@ -6468,3 +6468,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** The `vapply` case runs at tier 0's speed under `RY_JIT=force` (about 15 µs per
   call of ten elements), and base R's `pmin`, whose body makes such a closure, is no slower with
   the JIT on than off.
+
+## Bodies that would mostly hand back to tier 0 compile only for loops
+
+- **Previous shape.** A hot body compiled whenever its plan had at least one native action. In
+  package code (`[.data.frame`, `[.zoo`, S4 `is`, ggplot2 internals) most instructions are calls
+  tier 1 cannot specialise, so the compiled body was a chain of `jit_step` calls back into tier 0.
+  Each such step costs more than tier 0 running the instruction itself, and Cranelift spent about
+  0.6 s compiling these bodies on a 12-file finbench slice, which made the suite about 8% slower
+  with the JIT on than off.
+- **Target shape.** `compile_in` refuses with `MOSTLY_TIER0` (`crates/jit/src/analysis.rs`) when
+  the plan has fewer native actions than tier-0 steps, unless the compile was triggered by a hot
+  back edge or `RY_JIT=force` is on. The refusal sets `runtime::LOOPS_ONLY` in the body's tier
+  state, so later hot entries return at once and only a hot loop can still compile it, because a
+  loop's native header pays for its steps on every iteration. A fully typed closure's first-call
+  compile goes through the same gate.
+- **Impact.** On the finbench slice the gate refuses about four in five compiles and most of the
+  compile time, and the JIT-on wall gap against `RY_JIT=off` drops from about 8% to about 4.5%.
+  The why-ry programs are unaffected: their bodies are loops or mostly native.
