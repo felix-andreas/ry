@@ -38,11 +38,25 @@ pub fn check_ide_invariants(source: &str) {
 
         let cursor_name = name_at(source, offset);
 
-        let definition = crate::definition(&db, files, file, offset);
-        check_target(&db, definition.as_ref(), &at("definition"));
+        let definitions = crate::definition(&db, files, file, offset);
+        for definition in &definitions {
+            check_target(&db, Some(definition), &at("definition"));
+        }
+        // A by-name guess at a field's declaration is not reciprocal: the declaration's references
+        // keep only the reads that provably reach it.
+        let guessed_field = matches!(
+            crate::target_at(&db, files, file, offset),
+            Some(crate::Target::Field(field)) if !field.precise
+        );
+        let definition = match definitions.as_slice() {
+            [single] if !guessed_field => Some(single.clone()),
+            _ => None,
+        };
         check_names(
             &db,
-            definition_range(definition.as_ref()),
+            definitions
+                .iter()
+                .filter_map(|target| definition_range(Some(target))),
             cursor_name,
             &at("definition"),
         );

@@ -49,6 +49,8 @@ pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
 
 pub struct Heap {
     space: Space,
+    /// The largest single allocation the heap attempts (`memory_ceiling`).
+    allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
@@ -358,6 +360,7 @@ impl Heap {
 
     pub fn with_policy(policy: GcPolicy) -> Heap {
         let mut heap = Heap {
+            allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
             young_large: Vec::new(),
@@ -663,6 +666,22 @@ impl Heap {
         self.alloc_triple_keeping(kind, first, second, third, None)
     }
 
+    /// A promise over `expression` in `env` whose attribute slot holds the compiled `code`.
+    /// Setting the slot on the fresh object needs no write barrier, which `set_attrib` would run.
+    pub unsafe fn alloc_compiled_promise(
+        &mut self,
+        unforced: Sexp,
+        expression: Sexp,
+        env: Sexp,
+        code: Sexp,
+    ) -> HeapResult<Sexp> {
+        let promise =
+            self.alloc_triple_keeping(SexpType::Promise, unforced, expression, env, Some(code))?;
+        promise.set_attrib_unbarriered(code);
+        code.increment_refcount();
+        Ok(promise)
+    }
+
     /// `alloc_triple` that also keeps `extra` alive across the allocation.
     unsafe fn alloc_triple_keeping(
         &mut self,
@@ -860,16 +879,28 @@ impl Heap {
         if bytes.len() > i32::MAX as usize {
             return Err(HeapError::StringTooLong);
         }
-        let (any_nul, ascii) = scan_nul_and_ascii(bytes);
-        if any_nul {
+        let scan = strings::scan(bytes);
+        if scan.any_nul {
             let text = String::from_utf8_lossy(bytes).replace('\0', "\\0");
             return Err(HeapError::EmbeddedNul { text });
         }
-        let bits = if ascii { gp::ASCII } else { encoding.gp_bits() };
-        let hash = strings::hash(bytes, bits & gp::ENCODING);
-        if let Some(found) = self.strings.find(hash, bytes, bits & gp::ENCODING) {
-            return Ok(found);
+        let bits = if scan.ascii {
+            gp::ASCII
+        } else {
+            encoding.gp_bits()
+        };
+        let hash = strings::hash(&scan, bits & gp::ENCODING);
+        match self.strings.find(hash, bytes, bits & gp::ENCODING) {
+            Some(found) => Ok(found),
+            None => self.intern_new(bytes, bits, hash),
         }
+    }
+
+    /// Allocates and interns a string the table does not hold. It is kept out of line so that
+    /// re-interning an existing string, the common case, runs without its register pressure.
+    #[cold]
+    #[inline(never)]
+    unsafe fn intern_new(&mut self, bytes: &[u8], bits: u16, hash: u32) -> HeapResult<Sexp> {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
@@ -1337,10 +1368,12 @@ impl Heap {
         self.roots.handles.push(object);
     }
 
+    #[inline]
     pub fn handle_mark(&self) -> usize {
         self.roots.handles.len()
     }
 
+    #[inline]
     pub fn release_handles(&mut self, mark: usize) {
         self.roots.handles.truncate(mark);
     }
@@ -1471,6 +1504,9 @@ impl Heap {
                 (memory, class as u8)
             }
             None => {
+                if size > self.allocation_ceiling {
+                    return Err(HeapError::CannotAllocate { bytes: size });
+                }
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
                 let memory = if zeroed >= size {
@@ -2240,7 +2276,11 @@ impl RootStack {
         self.entries.push(object);
     }
 
+    #[inline]
     fn truncate(&mut self, length: usize) {
+        if length >= self.entries.len() {
+            return;
+        }
         self.entries.truncate(length);
         self.scanned = self.scanned.min(self.entries.len());
     }
@@ -2283,30 +2323,36 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 
+/// Physical memory plus swap on Linux, where the allocator reserves address space without
+/// committing it, so a vector far larger than the machine would be handed out and fail only when
+/// touched. GNU R gets its "cannot allocate vector" error from the kernel's overcommit heuristic
+/// refusing such a request, and this bound gives the same answer before asking. With
+/// `vm.overcommit_memory` set to 1 the kernel grants any request, and so does GNU R, so there is
+/// no bound; macOS and Windows also grant oversized requests to GNU R, so they have none either.
+#[cfg(target_os = "linux")]
+fn memory_ceiling() -> usize {
+    let always_overcommit =
+        std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1");
+    if always_overcommit {
+        return usize::MAX;
+    }
+    // SAFETY: `sysinfo` only writes the struct it is given.
+    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sysinfo(&mut info) } != 0 {
+        return usize::MAX;
+    }
+    let unit = (info.mem_unit as usize).max(1);
+    (info.totalram as usize)
+        .saturating_add(info.totalswap as usize)
+        .saturating_mul(unit)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn memory_ceiling() -> usize {
+    usize::MAX
+}
+
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
-}
-
-/// Whether `bytes` holds a NUL byte, and whether it is all ASCII, in one pass of eight bytes at a
-/// time. Most strings are a few bytes long, where `memchr`'s setup costs more than the scan.
-fn scan_nul_and_ascii(bytes: &[u8]) -> (bool, bool) {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGHS: u64 = 0x8080_8080_8080_8080;
-    let (mut zero_bits, mut high_bits) = (0u64, 0u64);
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(chunk);
-        let word = u64::from_le_bytes(word);
-        // The classic zero-byte test, which is nonzero exactly when some byte of the word is.
-        zero_bits |= word.wrapping_sub(ONES) & !word & HIGHS;
-        high_bits |= word;
-    }
-    let mut tail_nul = false;
-    for &byte in chunks.remainder() {
-        tail_nul |= byte == 0;
-        high_bits |= u64::from(byte);
-    }
-    (tail_nul || zero_bits != 0, high_bits & HIGHS == 0)
 }

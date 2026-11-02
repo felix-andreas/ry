@@ -616,6 +616,14 @@ k: Record{x: double}
 sum: <T> fn([v]: T) -> double
 s: double
 
+#---- return_passes_them_through
+f <- function(flag: logical) {
+  if (flag) return((value = 1, failures = 0L))
+  (value = 0, failures = 1L)
+}
+#++++
+f: fn(flag: logical) -> Record{failures: integer, value: double}
+
 #---- a_value_that_may_be_r_data_is_not_reported
 f <- function(flag: logical) {
   v <- if (flag) (x = 1,) else NULL
