@@ -516,7 +516,7 @@ unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
 /// to the console. Only the rows an editor scrolls to are ever formatted.
 unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
     let title = values::as_string_scalar(call.arg(1))?.unwrap_or_default();
-    crate::console_server::show(call.arg(0), &title).map_err(|message| error(message))?;
+    crate::console_server::show(call.arg(0), &title).map_err(error)?;
     Ok(call.arg(0))
 }
 

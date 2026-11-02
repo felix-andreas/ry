@@ -2996,7 +2996,7 @@ unsafe fn step(
                 let mut compiled = constants.element(operand(2) + 1);
                 if compiled == unbound() {
                     compiled = compile_promise_arguments(machine.function, call.cdr())?;
-                    crate::heap().set_element(constants, operand(2) as usize + 1, compiled);
+                    crate::heap().set_element(constants, operand(2) + 1, compiled);
                 }
                 let arguments = if compiled == nil() {
                     call.cdr()
@@ -3313,12 +3313,9 @@ unsafe fn step(
             if body.kind() != SexpType::Bytecode && worth_compiling(body) {
                 // A body the compiler rejects (an error is its way of saying so, such as for a
                 // `break` outside a loop) stays source, which the AST evaluator runs.
-                match compile(body, closure) {
-                    Ok(Some(code)) => {
-                        crate::heap().set_element(constants, operand(2), code);
-                        crate::heap().set_cdr(closure, code);
-                    }
-                    Ok(None) | Err(_) => {}
+                if let Ok(Some(code)) = compile(body, closure) {
+                    crate::heap().set_element(constants, operand(2), code);
+                    crate::heap().set_cdr(closure, code);
                 }
             }
             set(operand(0), closure);

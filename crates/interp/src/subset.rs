@@ -4119,7 +4119,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         .map_or(call.call, |position| frames[position].call);
                     crate::conditions::warning_call(
                         closure_call,
-                        &format!(
+                        format!(
                             "number of {direction} of result is not a multiple of vector length (arg {})",
                             position + 1
                         ),

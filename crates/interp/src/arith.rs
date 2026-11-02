@@ -877,9 +877,9 @@ unsafe fn strict(
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
-    if arrays::check_operands(call.call, &name, class, &operands)? {
+    if arrays::check_operands(call.call, name, class, &operands)? {
         let result = compute(call)?;
-        return arrays::finish_result(call.call, &name, result);
+        return arrays::finish_result(call.call, name, result);
     }
     let result = compute(call)?;
     // R's operator may hand back an operand, which is an Array here and may still be bound to a
