@@ -1,0 +1,49 @@
+[stdout]
+| [1]  TRUE FALSE
+| [1] "2020"
+| [1] "example at USER"
+| [1] 4
+| attr(,"match.length")
+| [1] 7
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| attr(,"capture.start")
+|      year month
+| [1,]    4     9
+| attr(,"capture.length")
+|      year month
+| [1,]    4     2
+| attr(,"capture.names")
+| [1] "year"  "month"
+| [[1]]
+| [1] "a" "b" "c"
+| 
+| [1]  TRUE FALSE
+| [1] "bye bye"
+| [1] 1 2 4 5
+| attr(,"match.length")
+| [1] 1 1 1 1
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "dog concat dog"
+| [1] 0
+| [1] "aXaX cb"
+| [1] 1
+| attr(,"match.length")
+| [1] 4
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "PCRE pattern compilation error\n\t'missing closing parenthesis'\n\tat ''"
+| [1] "invalid regular expression 'a)'"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid regular expression 'a)'"

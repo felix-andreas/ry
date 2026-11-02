@@ -55,6 +55,7 @@ const LEAVES: &[&str] = &[
     "List.is_empty",
     "List.get",
     "List.contains",
+    "List.range",
     "Dict.len",
     "Dict.is_empty",
     "Dict.get",
@@ -96,6 +97,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.concat", list_concat).reusing_first_argument(),
     library("List.single", list_single),
     library("List.repeat", list_repeat),
+    library("List.range", list_range),
     library("List.reverse", list_reverse),
     library("List.join", list_join),
     library("List.map", list_map),
@@ -105,6 +107,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.map4", list_map4),
     library("List.join_map", list_join_map),
     library("List.keep_if", list_keep_if),
+    library("List.keep_if_try", list_keep_if_try),
     library("List.drop_if", list_drop_if),
     library("List.keep_oks", list_keep_oks),
     library("List.keep_errs", list_keep_errs),
@@ -159,6 +162,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.concat_utf8", list_concat_utf8).reusing_first_argument(),
     library("List.with_capacity", list_with_capacity),
     library("List.reserve", list_reserve).reusing_first_argument(),
+    library("List.release_excess_capacity", list_release_excess_capacity),
     library("Str.is_empty", str_is_empty),
     library("Str.concat", str_concat),
     library("Str.join_with", str_join_with),
@@ -237,6 +241,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.div_ceil_checked", num_div_ceil_checked),
     library("Num.to_double", num_to_double),
     library("Num.to_integer_checked", num_to_integer_checked),
+    library("Num.to_integer", num_to_integer),
     library("Num.add", num_add),
     library("Num.sub", num_sub),
     library("Num.mul", num_mul),
@@ -288,6 +293,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.walk_until", dict_walk_until),
     library("Dict.join_map", dict_join_map),
     library("Dict.reserve", dict_reserve).reusing_first_argument(),
+    library("Dict.capacity", dict_capacity),
+    library("Dict.release_excess_capacity", dict_release_excess_capacity),
     library("Dict.clear", dict_clear),
     library("Set.empty", set_empty),
     library("Set.single", set_single),
@@ -308,6 +315,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.walk_until", set_walk_until),
     library("Set.join_map", set_join_map),
     library("Set.reserve", set_reserve).reusing_first_argument(),
+    library("Set.capacity", set_capacity),
+    library("Set.release_excess_capacity", set_release_excess_capacity),
 ];
 
 /// The library's values that are not functions, which `attach` binds beside the builtins.
@@ -317,11 +326,18 @@ pub const CONSTANTS: &[(&str, Constant)] = &[
     ("Num.pi", Constant::Double(std::f64::consts::PI)),
     ("Num.tau", Constant::Double(std::f64::consts::TAU)),
     ("Num.e", Constant::Double(std::f64::consts::E)),
+    // `i32::MIN` is `NA`, so the smallest integer R holds is one above it.
+    ("Num.max_integer", Constant::Integer(i32::MAX)),
+    ("Num.min_integer", Constant::Integer(-i32::MAX)),
+    ("Num.max_double", Constant::Double(f64::MAX)),
+    ("Num.min_double", Constant::Double(f64::MIN)),
+    ("Num.infinity", Constant::Double(f64::INFINITY)),
 ];
 
 #[derive(Clone, Copy)]
 pub enum Constant {
     Logical(bool),
+    Integer(i32),
     Double(f64),
 }
 
@@ -360,6 +376,7 @@ pub(crate) unsafe fn attach() -> Sexp {
             let symbol = values::install(name)?;
             let value = match constant {
                 Constant::Logical(flag) => scalar_bool(flag)?,
+                Constant::Integer(number) => scalar_integer(number)?,
                 Constant::Double(number) => scalar_real(number)?,
             };
             eval::define(symbol, value, env)?;
@@ -966,6 +983,23 @@ unsafe fn list_repeat(call: &Call<'_>) -> R<Sexp> {
     list_vector(&items)
 }
 
+/// The integers from `start` up to and including `end`, or an empty list when `end` is smaller.
+unsafe fn list_range(call: &Call<'_>) -> R<Sexp> {
+    let [start, end] = arguments(call, ["start", "end"])?;
+    let start = whole(call, "start", start)?;
+    let end = whole(call, "end", end)?;
+    let size = usize::try_from(end - start + 1).unwrap_or(0);
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(size)
+        .map_err(|_| error(format!("cannot allocate a list of {size} elements")))?;
+    // `whole` admits only integers R can hold, so every step fits an `i32`.
+    for number in start..=end {
+        items.push(scalar_integer(number as i32)?);
+    }
+    list_vector(&items)
+}
+
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
     let mut items = list_elements(call, "list", list)?;
@@ -1089,6 +1123,26 @@ unsafe fn list_keep_if(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_drop_if(call: &Call<'_>) -> R<Sexp> {
     filter(call, false)
+}
+
+/// The elements for which `predicate` returns `:Ok(TRUE)`, stopping at the first `:Err`.
+unsafe fn list_keep_if_try(call: &Call<'_>) -> R<Sexp> {
+    let [list, predicate] = arguments(call, ["list", "predicate"])?;
+    let items = list_elements(call, "list", list)?;
+    let predicate = function(call, "predicate", predicate)?;
+    let mut kept = Vec::new();
+    for item in items {
+        let result = scope(|| invoke(call, predicate, &[item]))?;
+        match returned_result(call, "predicate", result)? {
+            (true, answer) => {
+                if verdict(call, "predicate", answer)? {
+                    kept.push(item);
+                }
+            }
+            (false, _) => return Ok(result),
+        }
+    }
+    ok(sequence(call, list, &kept)?)
 }
 
 /// The payloads of the results `f` returns that are `:Ok` (when `oks`) or `:Err`.
@@ -1660,7 +1714,7 @@ unsafe fn fold_numbers(
     // numbers for a million-item Array.
     let [list] = arguments(call, ["list"])?;
     if list.is_array() && list.kind() == SexpType::Real {
-        return scalar_real(double(f64::from(start), values::reals(list)));
+        return defined(call, double(f64::from(start), values::reals(list)));
     }
     let numbers = list_numbers(call)?;
     if numbers
@@ -1668,7 +1722,7 @@ unsafe fn fold_numbers(
         .any(|number| matches!(number, Number::Double(_)))
     {
         let doubles: Vec<f64> = numbers.iter().map(|number| number.as_double()).collect();
-        return scalar_real(double(f64::from(start), &doubles));
+        return defined(call, double(f64::from(start), &doubles));
     }
     let mut total = start;
     for number in numbers {
@@ -1948,6 +2002,23 @@ unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
         crate::heap().set_element(grown, at, item);
     }
     Ok(grown)
+}
+
+/// The list with no room beyond its elements: the list itself when it has none to give back.
+unsafe fn list_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [list] = arguments(call, ["list"])?;
+    let items = list_elements(call, "list", list)?;
+    if list.is_array()
+        || !crate::heap().is_resizable(list)
+        || list.capacity() as usize <= items.len()
+    {
+        return Ok(list);
+    }
+    let exact = resizable(SexpType::List, items.len(), items.len())?;
+    for (at, &item) in items.iter().enumerate() {
+        crate::heap().set_element(exact, at, item);
+    }
+    Ok(exact)
 }
 
 // Str.
@@ -2397,8 +2468,9 @@ unsafe fn num_is_odd(call: &Call<'_>) -> R<Sexp> {
     parity(call, 1.0)
 }
 
-/// `:Ok(result)` of an arithmetic operation, or `:Err(:Overflow)` when an integer result does
-/// not fit or a double result of finite operands is infinite.
+/// `:Ok(result)` of an arithmetic operation, `:Err(:Overflow)` when an integer result does
+/// not fit or a double result of finite operands is infinite, and `:Err(:Undefined)` for a
+/// `NaN` result (`Inf - Inf`).
 unsafe fn checked(
     call: &Call<'_>,
     integer: fn(i32, i32) -> Option<i32>,
@@ -2417,7 +2489,7 @@ unsafe fn checked(
             if value.is_infinite() && first.is_finite() && second.is_finite() {
                 err("Overflow")
             } else {
-                ok(scalar_real(value)?)
+                defined_ok(value)
             }
         }
     }
@@ -2440,7 +2512,16 @@ unsafe fn num_div_checked(call: &Call<'_>) -> R<Sexp> {
     if second.as_double() == 0.0 {
         return err("DivByZero");
     }
-    ok(scalar_real(first.as_double() / second.as_double())?)
+    defined_ok(first.as_double() / second.as_double())
+}
+
+/// A checked operation's double result as `:Ok(value)`, or `:Err(:Undefined)` when it is `NaN`
+/// (`Inf / Inf`), since no library function returns `NaN`.
+unsafe fn defined_ok(value: f64) -> R<Sexp> {
+    if value.is_nan() {
+        return err("Undefined");
+    }
+    ok(scalar_real(value)?)
 }
 
 /// A division by a nonzero divisor, which keeps the operands' number type, or `None` for a zero
@@ -2463,13 +2544,15 @@ unsafe fn divide(
     }))
 }
 
-/// [`divide`] with a zero divisor as `:Err(:DivByZero)`.
+/// [`divide`] with a zero divisor as `:Err(:DivByZero)` and a `NaN` quotient as
+/// `:Err(:Undefined)`.
 unsafe fn checked_division(
     call: &Call<'_>,
     integer: fn(i32, i32) -> i32,
     double: fn(f64, f64) -> f64,
 ) -> R<Sexp> {
     match divide(call, integer, double)? {
+        Some(Number::Double(quotient)) => defined_ok(quotient),
         Some(quotient) => ok(number_value(quotient)?),
         None => err("DivByZero"),
     }
@@ -2633,20 +2716,21 @@ unsafe fn num_abs_diff(call: &Call<'_>) -> R<Sexp> {
                     .error("the integer result overflows; convert the numbers to doubles first")),
             }
         }
-        (first, second) => scalar_real((first.as_double() - second.as_double()).abs()),
+        (first, second) => defined(call, (first.as_double() - second.as_double()).abs()),
     }
 }
 
-/// A function of one number whose result is a double.
+/// A function of one number whose result is a double; a `NaN` result (`Num.sin(Inf)`) is an
+/// error.
 unsafe fn real_function(call: &Call<'_>, function: fn(f64) -> f64) -> R<Sexp> {
-    scalar_real(function(one_number(call)?.as_double()))
+    defined(call, function(one_number(call)?.as_double()))
 }
 
 unsafe fn num_pow(call: &Call<'_>) -> R<Sexp> {
     let [base, exponent] = arguments(call, ["base", "exponent"])?;
     let base = number(call, "base", base)?.as_double();
     let exponent = number(call, "exponent", exponent)?.as_double();
-    scalar_real(base.powf(exponent))
+    defined(call, base.powf(exponent))
 }
 
 unsafe fn num_sin(call: &Call<'_>) -> R<Sexp> {
@@ -2666,7 +2750,7 @@ unsafe fn num_atan(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// An operation whose integer result is clamped to the integers R can hold, `-2147483647` to
-/// `2147483647`, and whose double result is the plain one.
+/// `2147483647`, and whose double result is the plain one, with `NaN` (`Inf - Inf`) an error.
 unsafe fn saturated(
     call: &Call<'_>,
     integer: fn(i64, i64) -> i64,
@@ -2678,7 +2762,7 @@ unsafe fn saturated(
             let limit = i64::from(i32::MAX);
             scalar_integer(value.clamp(-limit, limit) as i32)
         }
-        (first, second) => scalar_real(double(first.as_double(), second.as_double())),
+        (first, second) => defined(call, double(first.as_double(), second.as_double())),
     }
 }
 
@@ -2700,6 +2784,23 @@ unsafe fn num_div_ceil_checked(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn num_to_double(call: &Call<'_>) -> R<Sexp> {
     scalar_real(one_number(call)?.as_double())
+}
+
+unsafe fn num_to_integer(call: &Call<'_>) -> R<Sexp> {
+    match one_number(call)? {
+        Number::Integer(value) => scalar_integer(value),
+        Number::Double(value) => {
+            let truncated = value.trunc();
+            if truncated.is_finite() && truncated.abs() <= f64::from(i32::MAX) {
+                scalar_integer(truncated as i32)
+            } else {
+                Err(call.error(format!(
+                    "`number` must fit an integer, not {}; `Num.to_integer_checked()` returns `:Err(:OutOfBounds)` instead",
+                    crate::format::format_real_alone(value, 15)
+                )))
+            }
+        }
+    }
 }
 
 unsafe fn num_to_integer_checked(call: &Call<'_>) -> R<Sexp> {
@@ -2737,7 +2838,8 @@ unsafe fn unchecked(
     }
 }
 
-/// An unchecked operation's double result, where `NaN` (as from `Inf - Inf`) is an error.
+/// An unchecked operation's double result, where `NaN` (as from `Inf - Inf`) is an error: no
+/// library function returns `NaN`, and a checked twin returns `:Err(:Undefined)` instead.
 unsafe fn defined(call: &Call<'_>, value: f64) -> R<Sexp> {
     if value.is_nan() {
         return Err(call.error("the result is undefined (`NaN`)"));
@@ -4104,7 +4206,53 @@ unsafe fn dict_clear(call: &Call<'_>) -> R<Sexp> {
     Collection::new(NativeKind::Dict).write()
 }
 
+/// How many entries the collection holds before it must grow its storage.
+unsafe fn collection_capacity(object: Sexp) -> R<Sexp> {
+    let capacity = match object.record_handle(0) {
+        Some(keys) if crate::heap().is_resizable(keys) => keys.capacity() as usize,
+        Some(keys) => length(keys),
+        None => 0,
+    };
+    scalar_integer(i32::try_from(capacity).unwrap_or(i32::MAX))
+}
+
+/// The collection with no room beyond its entries: the collection itself when it has none.
+unsafe fn release_collection(object: Sexp) -> R<Sexp> {
+    let count = entry_count(object);
+    let index = records::slot_value(object, index_slot(records::native_kind(object)))?;
+    let excess = object
+        .record_handle(0)
+        .is_some_and(|keys| crate::heap().is_resizable(keys) && keys.capacity() as usize > count)
+        || length(index) > (count * 2).next_power_of_two().max(8);
+    if !excess {
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
+    collection.rebuild_index()?;
+    collection.write()
+}
+
+unsafe fn dict_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    collection_capacity(dict(call, object)?)
+}
+
+unsafe fn dict_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    release_collection(dict(call, object)?)
+}
+
 // Set.
+
+unsafe fn set_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["set"])?;
+    collection_capacity(set(call, object)?)
+}
+
+unsafe fn set_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["set"])?;
+    release_collection(set(call, object)?)
+}
 
 unsafe fn set(call: &Call<'_>, value: Sexp) -> R<Sexp> {
     collection(call, "set", value, NativeKind::Set)

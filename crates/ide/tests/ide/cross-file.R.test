@@ -14,9 +14,9 @@ calls helper: in result [R/use.R:10..16] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): helper, result, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -37,9 +37,9 @@ calls helper: in wrapper [R/use.R:26..32] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 completion (128+): helper, wrapper, break, else, FALSE, for, function, if
 hint @7: fn() -> integer
 
@@ -59,9 +59,9 @@ references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -80,9 +80,9 @@ references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @5: integer
 
@@ -100,9 +100,9 @@ references: R/def.R:0..5*, R/use.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -120,9 +120,9 @@ references: R/def.R:12..17*, R/use.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): other, result, value, break, else, FALSE, for, function
 hint @6: integer
 
@@ -139,9 +139,9 @@ references: R/def.R:0..5*, R/use.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -158,10 +158,10 @@ hover 19..27: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
-parameters: f: character | [[signature]: character[]] | [definition]: Any | ...: Any
+signature: fn(f: character | (fn(...: Any) -> Any), [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: f: character | (fn(...: Any) -> Any) | [[signature]: character[]] | [definition]: Any | ...: Any
 action: Add inferred type annotations for the whole file
-  edit 44..44 -> "#: fn() -> Any\n"
+  edit 62..62 -> " -> Any"
 completion: none
 hint @19signature =
 hint @29definition =
@@ -180,10 +180,10 @@ definition R/classes.R:67..72
 references: R/classes.R:67..72*, R/classes.R:104..109, R/methods.R:11..16
 rename: 3 edit(s)
 calls speak: in  | out
-signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
-parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
+signature: fn(f: character | (fn(...: Any) -> Any), [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: [f: character | (fn(...: Any) -> Any)] | [signature]: character[] | [definition]: Any | ...: Any
 action: Add inferred type annotations for the whole file
-  edit 44..44 -> "#: fn() -> Any\n"
+  edit 62..62 -> " -> Any"
 completion: none
 hint @19signature =
 hint @29definition =
@@ -204,9 +204,9 @@ rename: 3 edit(s)
 signature: fn(Class: character, ...: Any) -> Any
 parameters: [Class: character] | ...: Any
 action: Add inferred type annotation for `make`
-  edit 44..44 -> "#: fn() -> Any\n"
+  edit 62..62 -> " -> Any"
 action: Add inferred type annotations for the whole file
-  edit 44..44 -> "#: fn() -> Any\n"
+  edit 62..62 -> " -> Any"
 completion: none
 hint @19signature =
 hint @29definition =
@@ -241,9 +241,9 @@ references: R/a.R:0..5*, R/b.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -260,9 +260,9 @@ references: R/b.R:10..15, R/c.R:0..5*
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -281,9 +281,9 @@ references: R/def.R:0..5*, R/use.R:10..15, R/use.R:25..30
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (128+): other, result, value, break, else, FALSE, for, function
 hint @5: integer
 
@@ -301,10 +301,10 @@ references: R/def.R:0..5*, R/use.R:10..15, R/use.R:25..30
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
-  edit 16..16 -> "#: integer\n"
+  edit 6..6 -> ": integer"
+  edit 21..21 -> ": integer"
 completion (128+): other, result, value, break, else, FALSE, for, function
 hint @6: integer
 hint @21: integer
@@ -327,10 +327,10 @@ calls helper: in wrapper [R/use.R:26..32], result [R/use.R:49..55] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> integer\n"
-  edit 39..39 -> "#: integer\n"
+  edit 21..21 -> " -> integer"
+  edit 45..45 -> ": integer"
 completion (128+): helper, result, wrapper, break, else, FALSE, for, function
 hint @7: fn() -> integer
 hint @45: integer
@@ -351,9 +351,9 @@ references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -372,9 +372,9 @@ references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @5: integer
 
@@ -392,9 +392,9 @@ references: R/a.R:0..5*, R/b.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -411,9 +411,9 @@ references: R/b.R:10..15, R/c.R:0..5*
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -435,9 +435,9 @@ references: R/def.R:0..5*, R/use.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (128+): helper, result, value, break, else, FALSE, for, function
 hint @5: integer
 
@@ -458,13 +458,12 @@ references: R/use.R:41..46*, R/use.R:56..61
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 39..39 -> "  #: integer\n"
+  edit 46..46 -> ": integer"
 action: Add inferred type annotation for `helper`
-  edit 16..16 -> "#: fn() -> integer\n"
+  edit 36..36 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
-  edit 39..39 -> "  #: integer\n"
-  edit 16..16 -> "#: fn() -> integer\n"
+  edit 6..6 -> ": integer"
+  edit 36..36 -> " -> integer"
 completion (128+): value, helper, result, break, else, FALSE, for, function
 hint @6: integer
 hint @22: fn() -> integer
@@ -520,7 +519,9 @@ references: R/a.R:10..15*, R/a.R:34..39, R/a.R:44..49, R/b.R:13..18, R/b.R:23..2
 rename: 5 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 50..50 -> "#: <T> fn(x: T) -> T\n"
+  edit 66..66 -> "<T>"
+  edit 68..68 -> ": T"
+  edit 69..69 -> " -> T"
 completion (1): Set
 hint @54: <T> fn(x: T) -> T
 
@@ -538,9 +539,9 @@ references: R/a.R:0..5*, R/b.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @5: integer
 
@@ -558,9 +559,9 @@ references: R/a.R:0..5*, R/b.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -579,9 +580,9 @@ calls helper: in result [R/use.R:10..16] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `result`
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 6..6 -> ": integer"
 completion (128+): helper, result, break, else, FALSE, for, function, if
 hint @6: integer
 
@@ -603,9 +604,9 @@ references: R/def.R:0..5*, R/use.R:10..15
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion (128+): helper, result, value, break, else, FALSE, for, function
 hint @5: integer
 
@@ -652,11 +653,16 @@ calls square: in sum_of_squares [R/math.R:119..125], report [R/report.R:47..53],
 signature: <T: numeric> fn(x: T) -> T
 parameters: [x: T]
 action: Add inferred type annotation for `sum_of_squares`
-  edit 28..28 -> "#: <T> fn(values: T) -> double\n"
+  edit 54..54 -> "<T>"
+  edit 61..61 -> ": T"
+  edit 62..62 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
-  edit 65..65 -> "  #: double\n"
-  edit 28..28 -> "#: <T> fn(values: T) -> double\n"
+  edit 18..18 -> "<T: numeric>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 54..54 -> "<T>"
+  edit 61..61 -> ": T"
+  edit 62..62 -> " -> double"
 completion (13): square, squares, sQuote, sum_of_squares, seq.default, sequence, sequence.default, setequal
 hint @6: <T: numeric> fn(x: T) -> T
 hint @42: <T> fn(values: T) -> double
@@ -682,11 +688,16 @@ rename: 1 edit(s)
 calls sum_of_squares: in  | out square [R/math.R:119..125, R/math.R:142..148], report [R/math.R:135..141]
 signature: none
 action: Add inferred type annotation for `sum_of_squares`
-  edit 28..28 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 54..54 -> "<T>"
+  edit 61..61 -> ": T"
+  edit 62..62 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
-  edit 65..65 -> "  #: double\n"
-  edit 28..28 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 18..18 -> "<T: numeric>"
+  edit 20..20 -> ": T"
+  edit 21..21 -> " -> T"
+  edit 54..54 -> "<T>"
+  edit 61..61 -> ": T"
+  edit 62..62 -> " -> NULL"
 completion (1): sum_of_squares
 hint @6: <T: numeric> fn(x: T) -> T
 hint @42: <T> fn(values: T) -> NULL

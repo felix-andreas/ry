@@ -50,6 +50,21 @@ report <- summarise(
 )
 ```
 
+## Formatting part of a file
+
+`ry fmt --range` formats only the lines you name and leaves the rest of the file as it was. It takes
+a line (`3`), a span of lines (`2-3`), or a span with columns (`2:1-3:10`):
+
+```text
+$ ry fmt --range 2-3 R/report.R
+1 file reformatted, 0 files left unchanged
+```
+
+Lines 2 and 3 are laid out as `ry fmt` would lay them out, and `x<-c(1,2,3)` on line 1 stays untouched.
+A statement is the smallest unit, so a range that reaches into a multi-line call reformats the whole
+call. A range that starts past the end of the file is an error. Editors use the same operation for
+"Format Selection" and, if you turn on format-on-type, for each line break and closing `}`.
+
 ## In CI
 
 `ry fmt --check` changes nothing. It lists the files it would change and exits with status 1 if

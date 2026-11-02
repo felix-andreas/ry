@@ -1,0 +1,23 @@
+# A helper that ends in a library update of its first parameter updates the caller's value in
+# place, and still copies whenever the old value stays visible: a closure that escapes, or a call
+# object a generated body shares between a tail and a non-tail position.
+
+requires ry-runtime
+
+file updates.R
+| h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }
+| f <- function() { d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(keep), Dict.len(d)) }
+| print(f())
+| g <- function(d) { s <- function() length(d); List.append(d, s) }
+| f2 <- function() { d <- list(1, 2); for (i in 1:4) d <- g(d); c(length(d), d[[6L]](), d[[3L]]()) }
+| print(f2())
+| e <- quote(List.append(d, k))
+| shared <- eval(bquote(function(d, k) if (length(.(e)) > 100L) d else .(e)))
+| f3 <- function() { d <- list(); for (i in 1:6) d <- shared(d, i); List.to_vector(d) }
+| print(f3())
+
+run ry run --runtime ry updates.R
+expect exit 0
+expect stdout "[1] 5 6"
+expect stdout "[1] 6 5 2"
+expect stdout "[1] 1 2 3 4 5 6"

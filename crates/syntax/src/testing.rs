@@ -643,7 +643,7 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
     );
     let descendants: Vec<crate::SyntaxNode> = root.descendants().collect();
     let mut visited = Vec::new();
-    let mut green_text = String::new();
+    let mut tokens = Vec::new();
     let mut open = 0usize;
     crate::walk_green(root, |event| match event {
         crate::GreenEvent::Enter {
@@ -655,15 +655,20 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
             visited.push((node.kind(), parent.map(crate::GreenRef::kind), range));
         }
         crate::GreenEvent::Leave(_) => open -= 1,
-        crate::GreenEvent::Token { text, range, .. } => {
-            assert_eq!(usize::from(range.start()), green_text.len());
-            green_text.push_str(text);
+        crate::GreenEvent::Token { kind, text, range } => {
+            tokens.push((kind, text.to_owned(), range));
         }
     });
     assert_eq!(open, 0, "green walk left nodes open for input {input:?}");
+    let expected_tokens: Vec<_> = root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| crate::is_walked_token(token.kind()))
+        .map(|token| (token.kind(), token.text().to_owned(), token.text_range()))
+        .collect();
     assert_eq!(
-        green_text, input,
-        "green walk lost text for input {input:?}"
+        tokens, expected_tokens,
+        "green walk tokens diverged for input {input:?}"
     );
     let expected: Vec<_> = descendants
         .iter()

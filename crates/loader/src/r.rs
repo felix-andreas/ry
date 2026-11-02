@@ -168,6 +168,17 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                     ),
                     ("classes".into(), strings(&deferred.classes)),
                     ("generics".into(), strings(&deferred.generics)),
+                    (
+                        "foreign_generics".into(),
+                        strings(&deferred.foreign_generics),
+                    ),
+                    (
+                        "cache_key".into(),
+                        deferred
+                            .cache_key
+                            .as_ref()
+                            .map_or(RValue::Null, |key| RValue::Character(vec![key.clone()])),
+                    ),
                     ("names".into(), strings(&deferred.names)),
                 ])
             }),
@@ -182,6 +193,10 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                 }
                 .to_owned(),
             ]),
+        ),
+        (
+            "data".into(),
+            plan.data.as_deref().map_or(RValue::Null, strings),
         ),
         ("s3_register".into(), s3(&plan.s3_register)),
         ("s3_unregister".into(), s3(&plan.s3_unregister)),

@@ -27,6 +27,7 @@ ry check --output json         # one JSON object per finding, on stdout
 ry check --min-severity error  # ignore warnings, also for the exit code
 ry check --fix                 # apply the safe fixes, then report what remains
 ry check --fix --unsafe-fixes  # also apply fixes that guess, such as a spelling suggestion
+ry check --annotate            # write inferred types as annotations, then report what remains
 ```
 
 Naming a file limits what is reported, not what is analyzed: ry always reads the whole
@@ -55,6 +56,12 @@ guesses what you meant, such as changing a misspelled `totl` to `total`, is unsa
 error is left unchanged, because its fixes were worked out on a guess at what the broken code means.
 The editor offers the same fixes as quick fixes.
 
+`--annotate` writes the inferred type of each unannotated top-level function and binding in the
+named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
+says, prints how many it added, and then reports what is left.
+[Strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode) shows it at work. A binding
+whose type inference cannot write down, such as one involving `Unknown`, is skipped.
+
 ### The check cache
 
 `ry check` records its findings in `.ry_cache/check.json` at the project root, and the next run
@@ -72,6 +79,12 @@ The output is the same with or without the cache. `--no-cache` checks every file
 writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
 directory, so the record stays out of version control.
 
+The language server reads the same record when it starts. If the record still holds for a file
+under `R/`, opening that file shows its recorded findings at once, before the server has analysed
+the project, and the server's own analysis replaces them when it settles. A file that changed since
+the check, or whose findings depend on one that did, starts without them. Any edit drops the
+recorded findings of every file, and a record written by a different ry binary is never read.
+
 ## fmt
 
 ```sh
@@ -87,8 +100,9 @@ already uses, and leaves every other line alone. A statement is laid out as one 
 just outside the range changes when it belongs to a statement the range reaches into. A range that
 starts past the file's last line is an error, and an end past it stops at the last line.
 
-`ry fmt` skips `.Rmd`, `.qmd`, and `.Rnw` files, because it rewrites a whole file's layout and must not
-touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
+In `.Rmd`, `.qmd`, and `.Rnw` files, `ry fmt` formats each R chunk on its own and leaves the prose,
+the fences, inline `` `r expr` `` code, and indented chunks (such as one inside a list item) exactly
+as written. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
 ## run and R
@@ -150,7 +164,7 @@ No feature is experimental right now, so `--experimental-features` ignores every
 `ry debug-adapter` serves one debug session over the
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
 output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
-script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments.
+script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments. On Unix, the `ry run` console serves the same protocol on a socket, so an editor can attach to it while you work.
 
 ## debug
 
