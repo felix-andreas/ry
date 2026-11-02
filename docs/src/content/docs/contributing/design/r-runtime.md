@@ -846,24 +846,26 @@ without R.
 
 At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
 group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
-machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At 1e8
-rows the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
+machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At both
+sizes the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
+The R script reads only the answer's numeric columns back into R for its checksum (`DataFrame.schema`
+picks them), because reading q10's six key columns as R vectors would add about 1 GB at 5e7 rows.
 
 <!-- bench-table:5e7-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.779 | 0.136 | 0.150 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.892 | 0.170 | 0.159 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.210 | 0.697 | 0.707 |
-| groupby q4: three means by `id4` | 1.600 | 0.597 | 0.608 |
-| groupby q5: three sums by `id6` | 1.272 | 0.643 | 0.726 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.128 | 0.679 | 0.799 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 5.136 | 0.458 | 0.409 |
-| groupby q8: the two largest `v3` by `id6` | 3.389 | 1.395 | 1.491 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.197 | 0.349 | 0.295 |
-| groupby q10: `sum(v3)`, count by all six ids | 10.210 | 4.093 | 4.119 |
-| total | 30.81 | 9.22 | 9.46 |
-| peak memory (GB) | 6.6 | 7.1 | 5.9 |
+| groupby q1: `sum(v1)` by `id1` | 0.762 | 0.152 | 0.132 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.919 | 0.167 | 0.164 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.284 | 0.618 | 0.608 |
+| groupby q4: three means by `id4` | 1.683 | 0.609 | 0.577 |
+| groupby q5: three sums by `id6` | 1.356 | 0.636 | 0.680 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.222 | 0.673 | 0.863 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 5.120 | 0.470 | 0.480 |
+| groupby q8: the two largest `v3` by `id6` | 3.233 | 1.659 | 1.576 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.072 | 0.311 | 0.309 |
+| groupby q10: `sum(v3)`, count by all six ids | 10.177 | 4.036 | 4.100 |
+| total | 30.83 | 9.33 | 9.49 |
+| peak memory (GB) | 6.6 | 6.1 | 5.9 |
 <!-- /bench-table:5e7-groupby -->
 
 <!-- bench-table:1e8-groupby -->
