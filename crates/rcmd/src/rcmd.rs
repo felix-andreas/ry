@@ -112,6 +112,7 @@ impl Platform {
         let variables = make_assignments(
             &fs::read_to_string(&path).map_err(io_error(&path))?,
             &home.display().to_string(),
+            &mut |path| fs::read_to_string(path).ok(),
         );
         let get = |name: &str| {
             expand_make(variables.get(name).map_or("", String::as_str), &variables)
@@ -251,7 +252,9 @@ impl Toolchain {
     /// `LAPACK_LIBS` beside a set `BLAS_LIBS` is kept: GNU R then takes LAPACK from the BLAS,
     /// which packages link after `$(LAPACK_LIBS)` anyway.
     pub fn with_makeconf_libraries(self, text: &str, gnu_r_home: &Path) -> Toolchain {
-        let variables = make_assignments(text, &gnu_r_home.display().to_string());
+        let variables = make_assignments(text, &gnu_r_home.display().to_string(), &mut |path| {
+            fs::read_to_string(path).ok()
+        });
         let get = |name: &str| {
             expand_make(variables.get(name).map_or("", String::as_str), &variables)
                 .trim()
@@ -272,7 +275,9 @@ impl Toolchain {
     /// against the file's own assignments and `R_HOME` against `gnu_r_home`, since ry's home
     /// does not hold GNU R's BLAS or LAPACK.
     pub fn from_makeconf(text: &str, gnu_r_home: &Path) -> Toolchain {
-        let variables = make_assignments(text, &gnu_r_home.display().to_string());
+        let variables = make_assignments(text, &gnu_r_home.display().to_string(), &mut |path| {
+            fs::read_to_string(path).ok()
+        });
         let get = |name: &str| {
             expand_make(variables.get(name).map_or("", String::as_str), &variables)
                 .trim()
@@ -2139,6 +2144,7 @@ SHLIB_OPENMP_CFLAGS =
         let variables = make_assignments(
             "A = x\nA += y\nB ?= $(A) ${C}\nB ?= no\nLOOP = $(LOOP)\n",
             "/r",
+            &mut |_| None,
         );
         assert_eq!(expand_make("$(B)", &variables), "x y ");
         assert_eq!(expand_make("$(LOOP) $$ $(R_HOME)", &variables), " $ /r");
@@ -2149,6 +2155,7 @@ SHLIB_OPENMP_CFLAGS =
         let variables = make_assignments(
             "STD = 17\nCXX17 = clang++\nPADDED = 17 # the blank before # stays\n",
             "/My R",
+            &mut |_| None,
         );
         assert_eq!(expand_make("$(CXX$(STD))", &variables), "clang++");
         assert_eq!(expand_make("$(CXX$(PADDED))", &variables), "");
@@ -2167,6 +2174,7 @@ SHLIB_OPENMP_CFLAGS =
             "A = x # c\nB = $(A)y\nS := $(B) $$Q\nB = changed\nT := $(S)\nT += $(B)\n\
              U += u\nU := $(U)v\nR_HOME = ignored\n",
             "/r",
+            &mut |_| None,
         );
         assert_eq!(
             expand_make("[$(S)] [$(T)] [$(U)]", &variables),
@@ -2182,6 +2190,7 @@ SHLIB_OPENMP_CFLAGS =
         let variables = make_assignments(
             "A := x\nA += $(NONE)\nB = $$ \\\n    \\\n   \nB := $B17\nC := x$$$\n",
             "/r",
+            &mut |_| None,
         );
         assert_eq!(
             expand_make("[$(A)] [$(B)] [$(C)]", &variables),
@@ -2193,7 +2202,10 @@ SHLIB_OPENMP_CFLAGS =
     /// its length rather than exponential.
     #[test]
     fn make_expansion_of_a_repeated_self_reference_ends() {
-        let variables = make_assignments("A = $(A)$(A)$(A)$(A)$(A)$(A)$(A)$(A)\n", "/r");
+        let variables =
+            make_assignments("A = $(A)$(A)$(A)$(A)$(A)$(A)$(A)$(A)\n", "/r", &mut |_| {
+                None
+            });
         assert_eq!(expand_make("$(A)", &variables), "");
     }
 
@@ -2201,10 +2213,10 @@ SHLIB_OPENMP_CFLAGS =
     /// variables, and `X` is one letter, so `$X` refers to it.
     const MAKE_NAMES: [&str; 5] = ["RA", "RB", "RC", "RAB", "X"];
 
-    /// Generates makefiles from a seed, runs each through GNU make with `$(info ...)` lines
-    /// that print every variable, and requires `make_assignments` and `expand_make` to
-    /// print the same. A makefile make rejects (a recursive variable) is skipped, but ry
-    /// must still expand it without hanging.
+    /// Generates makefiles from a seed, each with up to two included files, runs each through
+    /// GNU make with `$(info ...)` lines that print every variable, and requires
+    /// `make_assignments` and `expand_make` to print the same. A makefile make rejects (a
+    /// recursive variable) is skipped, but ry must still expand it without hanging.
     #[test]
     fn make_expansion_agrees_with_gnu_make() {
         if Command::new("make").arg("--version").output().is_err() {
@@ -2216,8 +2228,24 @@ SHLIB_OPENMP_CFLAGS =
         let mut total = 0usize;
         syntax::testing::for_each_seed(300, |seed| {
             let mut random = SplitMix64(seed);
-            let makefile = random_makefile(&mut random);
-            let variables = make_assignments(&makefile, home);
+            // `b.mk` includes nothing, so the includes never form a cycle.
+            let parts = [
+                ("a.mk", random_makefile(&mut random, &["b.mk"])),
+                ("b.mk", random_makefile(&mut random, &[])),
+            ];
+            let makefile = random_makefile(&mut random, &["a.mk", "b.mk"]);
+            let directory =
+                std::env::temp_dir().join(format!("ry-rcmd-make-{}-{seed}", std::process::id()));
+            fs::create_dir_all(&directory).expect("create the makefile directory");
+            for (name, text) in &parts {
+                fs::write(directory.join(name), text).expect("write an included makefile");
+            }
+            let variables = make_assignments(&makefile, home, &mut |path| {
+                parts
+                    .iter()
+                    .find(|(name, _)| *name == path)
+                    .map(|(_, text)| text.clone())
+            });
             let ours: String = MAKE_NAMES
                 .iter()
                 .chain(&["R_HOME", "UNSET"])
@@ -2228,11 +2256,17 @@ SHLIB_OPENMP_CFLAGS =
                 .collect();
             total += 1;
             let names = MAKE_NAMES.iter().chain(&["R_HOME", "UNSET"]).copied();
-            let Some(theirs) = gnu_make_info(&makefile, home, names) else {
+            let theirs = gnu_make_info(&makefile, &directory, home, names);
+            fs::remove_dir_all(&directory).expect("remove the makefile directory");
+            let Some(theirs) = theirs else {
                 return;
             };
             compared += 1;
-            assert_eq!(ours, theirs, "makefile:\n{makefile}");
+            let shown: String = parts
+                .iter()
+                .map(|(name, text)| format!("{name}:\n{text}"))
+                .collect();
+            assert_eq!(ours, theirs, "makefile:\n{makefile}{shown}");
         });
         assert!(
             compared * 2 >= total,
@@ -2255,23 +2289,58 @@ SHLIB_OPENMP_CFLAGS =
             eprintln!("skipping: GNU R is not installed");
             return;
         };
-        // R names the included `vars.mk` by `R_SHARE_DIR`, which only R CMD sets, and ry
-        // does not follow includes.
-        let text: String = fs::read_to_string(&path)
-            .expect("Makeconf is readable")
-            .lines()
-            .filter(|line| !line.starts_with("include "))
-            .map(|line| format!("{line}\n"))
-            .collect();
+        // R CMD sets `R_SHARE_DIR`, by which `Makeconf` names the `vars.mk` it includes.
+        let Some(share) = Command::new("Rscript")
+            .args(["-e", "cat(R.home('share'))"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        else {
+            eprintln!("skipping: Rscript is not installed or failed");
+            return;
+        };
+        let text = format!(
+            "R_SHARE_DIR = {share}\n{}",
+            fs::read_to_string(&path).expect("Makeconf is readable")
+        );
         let home = "/r h";
-        let variables = make_assignments(&text, home);
+        let variables = make_assignments(&text, home, &mut |path| fs::read_to_string(path).ok());
+        assert!(
+            variables.contains_key("R_PKGS_BASE"),
+            "the included vars.mk was not read"
+        );
         let ours: String = variables
             .iter()
             .map(|(name, value)| format!("{name}=[{}]\n", expand_make(value, &variables)))
             .collect();
-        let theirs = gnu_make_info(&text, home, variables.keys().map(String::as_str))
-            .expect("make reads GNU R's Makeconf");
+        let theirs = gnu_make_info(
+            &text,
+            &std::env::temp_dir(),
+            home,
+            variables.keys().map(String::as_str),
+        )
+        .expect("make reads GNU R's Makeconf");
         assert_eq!(ours, theirs);
+    }
+
+    /// An `=` in the comment after an `include` does not turn the line into an assignment.
+    #[test]
+    fn an_include_with_an_assignment_in_its_comment_still_includes() {
+        let text = "include a.mk # sets A=1\n";
+        let variables = make_assignments(text, "/r", &mut |name| {
+            (name == "a.mk").then(|| "A = 1\n".to_owned())
+        });
+        assert_eq!(expand_make("$(A)", &variables), "1");
+    }
+
+    /// A file that includes itself ends at the depth bound instead of recursing forever.
+    #[test]
+    fn a_makefile_that_includes_itself_ends() {
+        let text = "A += x\ninclude self.mk\n";
+        let variables = make_assignments(text, "/r", &mut |_| Some(text.to_owned()));
+        let expanded = expand_make("$(A)", &variables);
+        assert_eq!(expanded.split_whitespace().count(), 33);
     }
 
     /// Arbitrary text never panics the parser or the expander, and expansion ends.
@@ -2286,7 +2355,7 @@ SHLIB_OPENMP_CFLAGS =
             let text: String = (0..random.below(80))
                 .map(|_| alphabet[random.below(alphabet.len())])
                 .collect();
-            let variables = make_assignments(&text, "/r");
+            let variables = make_assignments(&text, "/r", &mut |_| None);
             for value in variables.values().chain([&text]) {
                 expand_make(value, &variables);
             }
@@ -2295,13 +2364,28 @@ SHLIB_OPENMP_CFLAGS =
 
     use syntax::testing::SplitMix64;
 
-    fn random_makefile(random: &mut SplitMix64) -> String {
+    /// A makefile of assignments, comments and blank lines, and lines including the files
+    /// named in `includes` (which must exist, except through `-include` and `sinclude`).
+    fn random_makefile(random: &mut SplitMix64, includes: &[&str]) -> String {
         let operators = ["=", ":=", "::=", "+=", "?="];
         let mut makefile = String::new();
         for _ in 0..1 + random.below(8) {
-            match random.below(12) {
+            match random.below(14) {
                 0 => makefile.push_str("# a comment \\\n  continued\n"),
                 1 => makefile.push('\n'),
+                2 | 3 if !includes.is_empty() => {
+                    let name = includes[random.below(includes.len())];
+                    let line = match random.below(5) {
+                        0 => format!("include {name}"),
+                        1 => format!("-include {name} missing.mk"),
+                        2 => format!("sinclude $(UNSET){name} # a comment"),
+                        // A reference to a variable whose text may name the file.
+                        3 => format!("  include $(UNSET) {name}"),
+                        _ => format!("include {name}\\\n  {name}"),
+                    };
+                    makefile.push_str(&line);
+                    makefile.push('\n');
+                }
                 _ => {
                     let name = MAKE_NAMES[random.below(MAKE_NAMES.len())];
                     let operator = operators[random.below(operators.len())];
@@ -2356,6 +2440,7 @@ SHLIB_OPENMP_CFLAGS =
     /// the makefile.
     fn gnu_make_info<'a>(
         makefile: &str,
+        directory: &Path,
         home: &str,
         names: impl Iterator<Item = &'a str>,
     ) -> Option<String> {
@@ -2365,6 +2450,7 @@ SHLIB_OPENMP_CFLAGS =
             .collect();
         let mut child = Command::new("make")
             .args(["-s", "--no-print-directory", "-f", "-"])
+            .current_dir(directory)
             .arg(format!("R_HOME={home}"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())

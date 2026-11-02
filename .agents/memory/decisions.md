@@ -6161,6 +6161,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Shape.** `make_assignments` and `expand_make` (`crates/rcmd/src/makeconf.rs`) follow GNU make 4.3: recursive (`=`) values expand at use, simple (`:=`) values expand at assignment, `?=` assigns once, `+=` keeps the flavor of the original and adds no space to an empty value, a backslash-newline run collapses to one space, `$$` is a literal dollar, a lone trailing `$` stays, and a variable that references itself expands to nothing at the inner reference instead of recursing (GNU make stops there with an error). There is no depth bound, so a non-cyclic doubling chain expands exponentially, exactly as it does under GNU make. `R_HOME` is ry's home whatever the makefile assigns, because R passes it on make's command line.
 - **Why.** A package's `Makevars` is written against GNU make, and any difference in expansion changes compiler flags silently. `make_expansion_agrees_with_gnu_make` checks generated makefiles against the real `make`, so the rule is GNU make's behavior, not a reading of its manual.
+- **Includes.** An `include`, `-include` or `sinclude` line expands its file list and reads each file through a caller-supplied `read`, applying its assignments at that point, as make does; a file `read` cannot supply is skipped, and nesting stops at 32 levels so a self-include ends. GNU R's `Makeconf` includes `vars.mk`, and the differential generates includes too, so the rule is checked against make.
 
 ## The JIT leaves a lossy double modulus to tier 0
 
@@ -6348,6 +6349,36 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
+
+## `ry test --watch` selects callers through S3 dispatch
+
+- **Shape.** `Loader::callers` (`crates/loader/src/loader.rs`) walks the reverse mention graph from the changed names, and every name it reaches also reaches the generics its `S3method()` registrations name and every dotted prefix of the name (`format.shape` reaches `format`). The plan's `changed` list (`Plan::changed_names`) is the touched names plus the function and generic of each registration the reload made or removed.
+- **Why.** A test calls the generic, never the method, so following mentions alone ran the test that dispatches to an edited method last. The dotted prefix covers a method registered by naming convention or by `registerS3method`, and the registration edge covers `S3method(gen, cls, fun)` with any function name. `check_reload` (`crates/loader/src/testing.rs`) models both, and the `test-watch` scenario edits a helper that only a three-argument registration ties to `format`.
+
+## Any save refreshes every open document's diagnostics
+
+- **Shape.** `Worker::did_save` (`crates/ry/src/server.rs`) refreshes every open document, whether or not the saved path is open.
+- **Why.** A save of `NAMESPACE`, a stub, or a file no buffer shows changes what other documents see, and the server had skipped the refresh for a path it did not hold open, so open documents kept stale diagnostics until their next edit. The simulator found it; `any_save_republishes_documents_that_an_edit_elsewhere_changed` pins it.
+
+## A call-hierarchy item answers only in its own document
+
+- **Shape.** Incoming and outgoing calls resolve the item and answer nothing if the name resolves to a function in another file (`server.rs`, the hierarchy item lookup).
+- **Why.** An item's call ranges are relative to its own document; an edit can move the definition its name resolves to, and answering from the other file returned ranges in the wrong text.
+
+## The console test waits on a count of handled closes
+
+- **Shape.** `console_server::closed_connections` and `wait_for_closed_connections` (`crates/interp/src/console_server.rs`) count the debugger connections the console has finished closing, behind a mutex and condition variable. `test_console_server` waits for its own count instead of polling with a sleep.
+- **Why.** Polling bounded by a wall-clock budget fails on a loaded machine and breaks the rule that no harness reads the clock.
+
+## A splice reparse refuses a prefix with an unclosed delimiter
+
+- **Shape.** `reparse::try_splice` (`crates/syntax/src/reparse.rs`) falls back to a full parse when the old tree reports an unclosed delimiter or unterminated string before the edit, or a missing closer (an error whose message says "to close", as for a `[[` closed by a single `]`, which never says "unclosed"). The closer phrase also matches other recoveries, such as a type argument list's `>`; that only costs a full parse.
+- **Why.** Recovery ends such a group early, so a closer the edit adds anywhere after it closes the group in a full parse and reshapes the tree up to it. Files with such an error are already broken, so the fallback costs little.
+
+## Every seeded harness rotates through `FUZZ_SEED`
+
+- **Shape.** Each case of a harness is one seed of `for_each_seed`, and a harness that shares one generator across cases builds it as `SplitMix64(CONST ^ seed)`. `tools/fuzz-deep.py` finds harnesses by reading the sources, resolves each against its binary's `--list`, and runs it with `FUZZ_SEED` at a fresh start and `FUZZ_DEPTH`, which scales each loop's own default count. A scaled depth, rather than one `FUZZ_ITERS` count, keeps the proportions of a test with several loops of different sizes and needs no budget read out of the source.
+- **Why.** A single stream drawn across iterations neither replays one case nor moves to new inputs, so a deep campaign over it repeats the default run. Discovery from the sources means a new harness joins the campaign without being registered.
 
 ## CI runs `just gate` against GNU R 4.3.3, and nothing ignored
 

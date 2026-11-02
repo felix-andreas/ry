@@ -1056,6 +1056,8 @@ which needs workflow scope, any scheduled fuzz job and its corpus cache, and an 
 
 ## Open: robustness harnesses
 
+- **Three `fuzz_iterations` harnesses ignore `FUZZ_SEED`.** `refactor_seed_mutations_keep_code_valid` (`crates/ide/tests/test_fuzz.rs`), `fuzz_the_intern_table_keeps_exactly_the_surviving_strings` (`crates/heap/tests/test_gc.rs`) and the reload fuzz (`crates/loader/tests/test_reload_fuzz.rs`) draw from one fixed generator, so `just fuzz-deep` reruns their same inputs each round. Convert each to `for_each_seed` with `SplitMix64(CONST ^ seed)`.
+
 Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
 
 - **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.
@@ -1068,11 +1070,10 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 - **Allocation failure is not injectable** in the heap or the analysis.
 - **The simulator does not open `.Rtypes` stub buffers**, does not send `workspace/didChangeConfiguration`,
   and never restarts the server mid-session. Each is a cheap action to add to `Session::act`.
-- **`ry test --watch` has no end-to-end scenario.** `check_reload` (`crates/loader/src/testing.rs`) checks that every name whose call graph reaches changed code is among `Loader::callers`, but its reachability follows identifier tokens only, so a caller that reaches an edited S3 method through dispatch is not checked. Add a scenario that edits a file under a running watcher, and model dispatch in `reachable`.
-- **The make differential strips `include` lines** (`gnu_make_info` in `crates/rcmd/src/rcmd.rs`), because GNU R's `Makeconf` includes `$(R_SHARE_DIR)/make/vars.mk` from a home the test does not build. Point the include at a real file, or generate includes, so `include` handling is compared too.
-- **`fuzz/fuzz_targets/csv.rs` is not compiled by the default suite**; build the `fuzz/` crate in `just gate` (it needs nightly) or keep the target a one-line call into `io::check_csv_input`.
-- **`test_console_server` waits on the wall clock** (its `initialize` helper polls `sleep(10ms)` up to 200 times for the console to notice a closed debugger), so a heavily loaded machine can fail it. Signal the console's notice through a condition instead.
-- **The REPL is not driven by a seed.** `crates/repl` has no seeded harness; the console protocol is covered from the server side (`interp` `test_console_server`), not the REPL's line editing and evaluation loop.
+- **The console's completeness check disagrees with GNU R** (`syntax::input_is_unfinished`, used by `repl::input_is_complete`). A string left open across lines reads as finished to the parser's check (the console catches it through `open_quote_start`), and `pkg::`, a trailing `\`, a leading `;`, `f(1\n2` and a bare `[` or `[[` read as unfinished where GNU R reports an error. `the_console_holds_back_what_gnu_r_finds_unfinished` (`crates/repl/tests/test_console_input.rs`) skips the `::` and `\` endings; drop the skip once the rule matches R's lexer.
+- **Run `just fuzz-deep` on a schedule.** It needs about 30 GB of build space (it builds every test binary, with line tables only) and GNU R with testthat at `R_LIBS_USER` for the scenario-backed suites; a scheduled run passes a fresh base (`just fuzz-deep 480 $(date +%s)`). One partial round from base 2000000 has run: the libr GC-stress suites, format, and heap passed, and the format and ide fuzzers found the two bugs now pinned in their regression lists. The language-server simulation, the C API sequences and the oracle torture have not had a deep window yet.
+- **GC torture over the package test suites.** `RY_GC_STRESS=1 oracle packages --runtime ry` against a corpus (`--corpus DIR` with `sources/`, `library/` and `closure.txt`) runs each package's own tests under collection stress. Over the 24 testthat-closure packages, R6, brio and callr passed under stress; the run stopped in cli, and the full 67-package closure has not run. Collector, barrier and rooting bugs it finds go to the heap work with the package, the stress mode and the first bad frame.
+- **rprojroot's tests fail on ry and pass on GNU R** (testthat closure, `oracle packages`); not yet triaged.
 - **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
   query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
   protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.

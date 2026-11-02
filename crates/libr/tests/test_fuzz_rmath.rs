@@ -13,7 +13,7 @@ use {
         },
         rmath::*,
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 const NA: f64 = f64::from_bits(0x7ff0_0000_0000_07a2);
@@ -119,9 +119,9 @@ fn continuous() -> Vec<Pq> {
 
 #[test]
 fn quantiles_invert_distribution_functions() {
-    let mut rng = SplitMix64(0x5eed_0001);
-    let mut failures = Vec::new();
-    for _ in 0..fuzz_iterations(300) {
+    for_each_seed(300, |seed| {
+        let mut rng = SplitMix64(0x5eed_0001 ^ seed);
+        let mut failures = Vec::new();
         for (name, p, q, parameters) in continuous() {
             let (a, b) = parameters(&mut rng);
             let lower = rng.below(2) == 0;
@@ -150,14 +150,14 @@ fn quantiles_invert_distribution_functions() {
                 ));
             }
         }
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
 }
 
 #[test]
 fn distribution_functions_are_monotone_with_complementary_tails() {
-    let mut rng = SplitMix64(0x5eed_0002);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(0x5eed_0002 ^ seed);
         for (name, p, q, parameters) in continuous() {
             let (a, b) = parameters(&mut rng);
             let low = q(1e-6, a, b, true, false);
@@ -187,12 +187,11 @@ fn distribution_functions_are_monotone_with_complementary_tails() {
                 previous = lower;
             }
         }
-    }
+    });
 }
 
 #[test]
 fn densities_are_nonnegative_and_match_their_logs() {
-    let mut rng = SplitMix64(0x5eed_0003);
     type Density = (&'static str, fn(f64, f64, f64, bool) -> f64);
     let densities: [Density; 10] = [
         ("norm", dnorm),
@@ -208,7 +207,8 @@ fn densities_are_nonnegative_and_match_their_logs() {
             dbinom(x, n.round(), p.fract().abs(), log)
         }),
     ];
-    for _ in 0..fuzz_iterations(2000) {
+    for_each_seed(2000, |seed| {
+        let mut rng = SplitMix64(0x5eed_0003 ^ seed);
         for (name, density) in densities {
             let x = if rng.below(2) == 0 {
                 rng.below(60) as f64
@@ -231,13 +231,13 @@ fn densities_are_nonnegative_and_match_their_logs() {
                 );
             }
         }
-    }
+    });
 }
 
 #[test]
 fn discrete_quantiles_are_the_smallest_with_enough_probability() {
-    let mut rng = SplitMix64(0x5eed_0004);
-    for _ in 0..fuzz_iterations(500) {
+    for_each_seed(500, |seed| {
+        let mut rng = SplitMix64(0x5eed_0004 ^ seed);
         let p = positive(&mut rng, 1e-8, 1.0 - 1e-8).min(1.0 - 1e-8);
         let n = (rng.below(5000) + 1) as f64;
         let probability = uniform(&mut rng).clamp(0.001, 0.999);
@@ -293,12 +293,11 @@ fn discrete_quantiles_are_the_smallest_with_enough_probability() {
                 "{name}: q({p}) = {quantile} with P = {at} and {below} below it"
             );
         }
-    }
+    });
 }
 
 #[test]
 fn nothing_panics_and_na_stays_na() {
-    let mut rng = SplitMix64(0x5eed_0005);
     type Three = fn(f64, f64, f64) -> f64;
     let functions: [(&str, Three); 32] = [
         ("dnorm", |x, a, b| dnorm(x, a, b, false)),
@@ -350,7 +349,8 @@ fn nothing_panics_and_na_stays_na() {
         }),
         ("fround", |x, a, _| fround(x, a)),
     ];
-    for _ in 0..fuzz_iterations(800) {
+    for_each_seed(800, |seed| {
+        let mut rng = SplitMix64(0x5eed_0005 ^ seed);
         for (name, function) in functions {
             let (x, a, b) = (wild(&mut rng), wild(&mut rng), wild(&mut rng));
             let result = function(x, a, b);
@@ -366,7 +366,7 @@ fn nothing_panics_and_na_stays_na() {
                 assert!(is_na(result), "{name}(NA, {a}, {b}) = {result}, not NA");
             }
         }
-    }
+    });
 }
 
 /// The generators return `Err` only for an R-level error, which the valid arguments here never
@@ -377,17 +377,19 @@ fn draw<E: std::fmt::Debug>(result: Result<f64, E>) -> f64 {
 
 #[test]
 fn random_variates_stay_in_their_support() {
-    let mut seeds = SplitMix64(0x5eed_0006);
     // The deviates draw from the interpreter's generator, so the interpreter must exist.
     let heap: &'static mut Heap = Box::leak(Box::new(Heap::new()));
     // SAFETY: this is the only test in the file that touches the interpreter, and the heap
     // lives for the rest of the process.
-    unsafe {
-        interp::install(heap, interp::default_hooks());
-        interp::random::set_seed(20251031).expect("seeding the default generator");
-    }
+    unsafe { interp::install(heap, interp::default_hooks()) };
     let mut rng = SessionDeviates;
-    for _ in 0..fuzz_iterations(2000) {
+    for_each_seed(2000, |seed| {
+        // Reseeding per case makes the seed the case's whole input, so a replay draws the same
+        // deviates.
+        // SAFETY: the interpreter is installed above.
+        unsafe { interp::random::set_seed(20251031_i32.wrapping_add(seed as i32)) }
+            .expect("seeding the default generator");
+        let mut seeds = SplitMix64(0x5eed_0006 ^ seed);
         let a = positive(&mut seeds, 1e-3, 1e4);
         let b = positive(&mut seeds, 1e-3, 1e4);
         let p = uniform(&mut seeds).clamp(1e-6, 1.0);
@@ -431,5 +433,5 @@ fn random_variates_stay_in_their_support() {
         assert!(normal.is_finite(), "norm_rand drew {normal}");
         let exponential = draw(rng.exponential());
         assert!(exponential >= 0.0 && exponential.is_finite());
-    }
+    });
 }

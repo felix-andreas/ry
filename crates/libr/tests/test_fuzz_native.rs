@@ -10,7 +10,7 @@ mod harness;
 use {
     harness::*,
     std::ffi::c_int,
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 #[derive(Clone, Debug)]
@@ -149,10 +149,10 @@ fn fuzz_nested_non_local_exits() {
     rytest(&r);
     let contexts = unsafe { (r.api().ry_context_depth)() };
     let arena = unsafe { (r.api().ry_arena_bytes)() };
-    let mut rng = SplitMix64(0x5eed);
-    for iteration in 0..fuzz_iterations(150) {
+    for_each_seed(150, |seed| {
+        let mut rng = SplitMix64(0x5eed ^ seed);
         let mark = r.protected.get();
-        r.stress(iteration % 10 == 9);
+        r.stress(seed % 10 == 9);
         let expression = generate(&mut rng, 5);
         let mut expected_effects = Effects::default();
         let expected = model(&expression, &mut expected_effects);
@@ -184,7 +184,7 @@ fn fuzz_nested_non_local_exits() {
             "{expression:?} kept R_alloc memory"
         );
         r.release_to(mark);
-    }
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -198,7 +198,7 @@ fn fuzz_api_sequences_keep_objects_intact() {
     let r = r();
     rytest(&r);
     let names = r.data::<Sexp>("R_NamesSymbol");
-    for seed in 0..fuzz_iterations(12) as u64 {
+    for_each_seed(12, |seed| {
         let mut rng = SplitMix64(seed);
         let mark = r.protected.get();
         r.stress(seed % 3 == 2);
@@ -275,7 +275,7 @@ fn fuzz_api_sequences_keep_objects_intact() {
         }
         r.stress(false);
         r.release_to(mark);
-    }
+    });
 }
 
 /// A random object for the accessor comparison: every vector kind, ALTREP sequences, nested
@@ -379,8 +379,8 @@ fn random_object(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
 fn fuzz_inline_accessors_agree_with_libr() {
     let r = r();
     rytest(&r);
-    let mut rng = SplitMix64(0xacce55);
-    for iteration in 0..fuzz_iterations(400) {
+    for_each_seed(400, |seed| {
+        let mut rng = SplitMix64(0xacce55 ^ seed);
         let mark = r.protected.get();
         let object = random_object(&r, &mut rng, 3);
         let disagreement = r
@@ -389,8 +389,8 @@ fn fuzz_inline_accessors_agree_with_libr() {
         assert_eq!(
             r.strings(disagreement),
             vec![Some(String::new())],
-            "iteration {iteration}: the inline accessor disagrees with libR"
+            "seed {seed}: the inline accessor disagrees with libR"
         );
         r.release_to(mark);
-    }
+    });
 }

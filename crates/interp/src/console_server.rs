@@ -30,6 +30,7 @@ use {
             Mutex, MutexGuard, PoisonError,
             atomic::{AtomicBool, Ordering},
         },
+        time::Duration,
     },
 };
 
@@ -108,6 +109,19 @@ pub unsafe fn read_line(prompt: &str) -> Option<String> {
 pub enum BrowseInput {
     Line(Option<String>),
     Attach(Box<dyn Transport>, Value),
+}
+
+/// Blocks until the console has handled the close of `count` connections in all, so a client
+/// that dropped one knows when the console has let go of it, the debugger included. `false`
+/// when `limit` passed first, which only bounds a hang: the wait wakes on each close, never on
+/// a clock.
+pub fn wait_for_closed_connections(count: u64, limit: Duration) -> bool {
+    platform::wait_for_closed_connections(count, limit)
+}
+
+/// The number of connections whose close the console has handled.
+pub fn closed_connections() -> u64 {
+    platform::closed_connections()
 }
 
 /// Wakes the console's wait for input, so it answers the help server's queued requests.
@@ -416,6 +430,19 @@ mod platform {
     static STASHED_INPUT: Mutex<Option<Option<String>>> = Mutex::new(None);
     /// The connection that owns the debugger, while one is attached.
     static DEBUG_CONNECTION: Mutex<Option<u64>> = Mutex::new(None);
+    static CLOSED: Mutex<u64> = Mutex::new(0);
+    static CLOSED_CHANGED: Condvar = Condvar::new();
+
+    pub fn wait_for_closed_connections(count: u64, limit: Duration) -> bool {
+        let (closed, _) = CLOSED_CHANGED
+            .wait_timeout_while(lock(&CLOSED), limit, |closed| *closed < count)
+            .unwrap_or_else(PoisonError::into_inner);
+        *closed >= count
+    }
+
+    pub fn closed_connections() -> u64 {
+        *lock(&CLOSED)
+    }
 
     /// What the console asked the input thread for: `prompt` is the line it should read next,
     /// and `outstanding` stays set from the request until the interpreter takes the line, so a
@@ -518,7 +545,7 @@ mod platform {
                     push(Event::Closed(id));
                 });
             if spawned.is_err() {
-                lock(&CONNECTIONS).remove(&id);
+                forget(id);
             }
         }
     }
@@ -1033,11 +1060,19 @@ mod platform {
     }
 
     unsafe fn closed(connection: u64) {
-        lock(&CONNECTIONS).remove(&connection);
         if *lock(&DEBUG_CONNECTION) == Some(connection) {
             interp().debugger = None;
             *lock(&DEBUG_CONNECTION) = None;
         }
+        forget(connection);
+    }
+
+    /// Drops a connection the console is done with. Every path that ends one comes through here,
+    /// so `closed_connections` counts each connection exactly once.
+    fn forget(connection: u64) {
+        lock(&CONNECTIONS).remove(&connection);
+        *lock(&CLOSED) += 1;
+        CLOSED_CHANGED.notify_all();
     }
 
     /// The attached debugger's side of its connection.
@@ -1062,12 +1097,10 @@ mod platform {
                         }
                     },
                     Some(Event::Closed(connection)) if connection == self.connection => {
-                        lock(&CONNECTIONS).remove(&connection);
+                        forget(connection);
                         return None;
                     }
-                    Some(Event::Closed(connection)) => {
-                        lock(&CONNECTIONS).remove(&connection);
-                    }
+                    Some(Event::Closed(connection)) => forget(connection),
                     // A stopped program waits like a prompt, so it answers the help server too.
                     Some(Event::Help) if wait => serve_help(),
                     Some(Event::Help) => {}
@@ -1096,13 +1129,21 @@ mod platform {
 
 #[cfg(not(unix))]
 mod platform {
-    use heap::object::Sexp;
+    use {heap::object::Sexp, std::time::Duration};
 
     pub fn start() -> Option<String> {
         None
     }
 
     pub fn finish() {}
+
+    pub fn wait_for_closed_connections(_count: u64, _limit: Duration) -> bool {
+        true
+    }
+
+    pub fn closed_connections() -> u64 {
+        0
+    }
 
     pub fn wake() {}
 
