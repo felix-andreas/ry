@@ -5924,6 +5924,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
 - A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.
 - `FunctionType.missing_tested` (inferred only) lists the formals a body tests with `missing()`. `optional_argument_targets` treats such a parameter as one the callee may leave unread even when it has a default, so a missing formal forwarded there (knitr's `kable_format(format)`) stays optional in the caller.
+- **Previous shape (facts).** A refinement only narrowed a slot's type, so nothing outside a type could be remembered on an edge: a call like `is_loaded(package)` proved nothing, and two `is.null()` tests on different slots stayed independent. pkgload's `parent.env(ns_env(package))` after `if (!is_loaded(package)) stop()` and pracma's `if (!is.null(A)) b <- -b` after an "A and b both or neither" check were reported.
+- **Shape (facts).** `check::Environment` carries `facts: Vec<Fact>` beside its slot entries, with `Fact::Holds(slot, predicate)` (a project predicate tested true) and `Fact::NullTogether(a, b)`. They live in the same undo log as entries (`Undo::Established`, `Undo::Dropped`), so forks and joins treat them like any refinement, and a write to a slot drops every fact that mentions it. `join_writes` drops them for every slot a branch or loop body wrote even when the joined entry is unchanged (a rollback restores the fact, and a same-typed write is still a different value), and a loop counts that as a change so its body is rechecked. An open, `Any` or `Unknown` member of another return counts as possibly `NULL` for `null_unless`. A `NULL` guard on one slot also refines its null partners. `FunctionType.null_unless` (inferred only) records a callee whose only `NULL` return is an opening `if (!pred(formal)) return(NULL)` on a formal it never writes; `null_excluded_return` strips `NULL` at a call whose argument holds `pred`. Facts are not on the type because they are about variables, not values.
+- **`FunctionType.reduces`** (inferred only) records a body ending in `Reduce(f, x, init =)` over its formals, possibly through a local `function(a, b) formal(a, b, ...)`, with no early return. `forwarded_reduce` folds the caller's callback through `fold_reduce`, the loop `infer_reduce_fold` uses, so purrr-style wrappers get the fold that a direct `Reduce` gets without the shared-variable hazard above: the callback is the caller's, not a closure over the wrapper's variables.
+- **`FunctionType.from_calls`** marks a callback type synthesized from the calls in a body. Its later calls may omit an argument an earlier call passed (fewer arguments, a missing one), because the real callee supplies a default. Making the synthesized named parameters optional was rejected: the type-system contract says an optional parameter in an expected callback type requires the actual callback to have a default, which would report the callers.
+- **Bare `NA` returns** (`Checker::bare_na_returns`) take the type of the other returns when all of them, the trailing value included, share one atomic kind; otherwise `NA` joins as `logical`. Only the inferred return is lenient: a declared `-> character` still reports `return(NA)`, so the round-trip test lists the case.
+- **Branch joins keep a bounded variable open** when the closed side is not a plain scalar or vector (mgcv's `rho + rho0` against `L %*% rho`), extending the rule that an unconstrained variable is never pinned by the other branch. A bound such as `numeric` does not make a matrix the parameter's type.
+- **An `exists("name")` probe** for a function an attached package ships and the project does not define makes the `else` diverge (codetools' `if (exists("emptyenv")) emptyenv() else NULL`). The fallback serves older R versions that ry never presents.
 
 ## `ry test` is `ry load` plus testthat, with affected tests first
 
@@ -6222,6 +6229,72 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
+
+## Alias cycles are reported at the declaration, and short names get narrow suggestions
+
+- **Previous shape.** An alias cycle was found only when an annotation used the alias, and reported on that use with a whole-statement range; an unused cyclic alias was never reported. `nearest_name` returned nothing for a name under four characters, so `person$nam` got no suggestion.
+- **Shape.** `alias_cycle_diagnostics` (`crates/semantics/src/diagnostics.rs`) walks each alias the file declares with `check::alias_cycle_walk`, seeded with the alias itself, and reports every alias on a cycle at its declaration. A use of a cyclic alias drops the annotation silently, so one mistake is reported once, where the fix goes. A name of two or three characters is suggested a candidate only when exactly one candidate is that name with one character inserted (`nam` and `nme` find `name`; `df` never finds `dt`), because a substitution budget on a short name matches unrelated names.
+- **Impact.** The fix site is the declaration, and the check runs per file over that file's declarations, so it adds no project-wide read.
+
+## Refactorings refuse rather than guess, and a seeded property check holds them to it
+
+- `ide::refactors` (`crates/ide/src/refactor.rs`) offers extract variable, extract function,
+  inline variable and annotation conversion. Each one is offered only where the rewrite keeps
+  evaluation: extract variable refuses a statement that would evaluate the expression repeatedly,
+  conditionally or never (loop or function bodies, `if` branches, the right of `&&`/`||`), and
+  `is_quoted` refuses code under a formula or a quoting call. Extract function refuses `return()`,
+  `<<-`, `...` and frame-inspecting calls. Inline refuses when a read name is reassigned before the
+  last use or a call would run more than once.
+- Calls that do not evaluate their arguments once, in order, in the caller are classified by
+  `argument_evaluation`: *captured* (quoting, data masking such as `with()` and `dplyr` verbs,
+  and the index of a `[`, for data.table) blocks every refactoring; *guarded* (condition
+  handlers, `switch`, `withr::with_*`) blocks hoisting a variable out but allows extracting a
+  function that is called in place. `evaluated_first` is the one rule for hoisting and for
+  inlining a value with a call: every node between the expression and its statement evaluates it
+  exactly once, and nothing before it in the statement calls or assigns. A value that assigns is
+  never inlined (`x <- y <- 0`). Extract function treats a read anywhere in the enclosing loop as
+  later code, because the next pass runs it. These came from review, and the property check
+  cannot see them (the result parses and resolves), so each is pinned in
+  `crates/ide/tests/refactor`.
+- Text that only parses as one expression inside its old context is parenthesized
+  (`needs_grouping`: a `?`, or a reparse that is not exactly one node), because `value <- d?f`
+  and a multi-line operand chain change meaning when moved out.
+- Two edits at one offset are merged into one: LSP clients disagree on the order of same-offset
+  inserts, so a definition inserted at the statement start plus a replacement there must be one
+  edit.
+- `ide::testing::check_refactor_invariants` (driven by `crates/ide/tests/test_fuzz.rs`) applies
+  every action at every node range and asserts determinism, non-overlapping edits, a clean reparse
+  and no new unresolved names. It runs without stubs: with them one seed took 17 s instead of
+  1.3 s, and unresolved-name reporting does not need them. The parse and resolution invariants run
+  only on input that parsed cleanly, because mutated input already has errors the rewrite cannot
+  be blamed for.
+
+## Call-head completion ranks by call counts, without test files
+
+- **Before.** Completion ranked equally good matches by how often the name is spelled in the
+  project, so at two characters on a call head testthat's `expect_*` (spelled in every test)
+  beat the package's own functions, and S3 methods (`print.purrr_rate`) crowded out functions.
+- **Shape.** The per-file name-use fold (`SpelledNames`) also counts names in call-head position
+  (directly or as `pkg::name`). A call-head completion ranks project S3 methods (a `generic.class`
+  beside a `generic` candidate) last, then by calls, then spellings. Call counts leave out test
+  files unless the cursor is in one (`chunk_uses` takes `with_tests`); spelling counts keep them,
+  since tests show which `pkg::` members a project uses (dropping them cost httr2's `pkg::name`
+  role 9 points). Two characters on call heads went from 68% to 72% on httr2 and 74% to 76% on
+  purrr.
+- **Rejected:** ranking by words shared with the enclosing function (`check_rate` in code that
+  has a `rate`). It gained a point or two at half the name and lost six to eight at two
+  characters, where long names share some word with almost any function.
+
+## Call hierarchy and workspace symbols are measured against the reference oracle
+
+- `ry debug analysis-stats` checks incoming and outgoing calls of a sample of project top-level
+  functions (defined exactly once) against the independent lexical resolver that already checks
+  references: every oracle global site that is a call head is an expected call, grouped by the
+  enclosing top-level definition. Workspace symbols are checked by querying each sampled
+  definition's exact name and a half-length prefix (at least 3 characters); a prefix that
+  matches more names than a search lists is left out of the share, since a user types on.
+- Workspace search reads a memoized per-file list (`searchable_symbols`), because rebuilding
+  every file's outline per query took about half a second on finbench.
 
 # Decision record: the syntax tree is ry's own flat preorder arena
 

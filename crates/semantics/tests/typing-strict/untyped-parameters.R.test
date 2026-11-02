@@ -67,3 +67,12 @@ NULL
 #++++
 .onLoad: fn(libname: character, pkgname: character) -> Any
 .onUnload: fn(libpath: character) -> Any
+
+#---- a_hook_that_tests_missing_takes_its_arguments_as_optional
+# data.table's `.onLoad` checks `missing(pkgname)` so a developer can run it by hand.
+.onLoad <- function(libname, pkgname) {
+  prefix <- if (!missing(pkgname)) "data.table::" else ""
+  invisible(prefix)
+}
+#++++
+.onLoad: fn(libname: character, [pkgname]: character) -> Any

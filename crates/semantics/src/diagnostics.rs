@@ -8,7 +8,7 @@ use {
         },
         check::{
             ExpressionNeeds, ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind,
-            TypeError, TypeErrorKind, column_element,
+            TypeError, TypeErrorKind, alias_cycle_walk, column_element,
         },
         comment_annotation,
         exhaustiveness::{MatchFinding, MatchFindingKind},
@@ -675,6 +675,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics.extend(duplicate_binding_diagnostics(db, file));
     diagnostics.extend(duplicate_type_diagnostics(db, file));
     diagnostics.extend(unknown_type_diagnostics(db, file));
+    diagnostics.extend(alias_cycle_diagnostics(db, file));
     diagnostics.extend(annotation_rule_diagnostics(db, file));
     diagnostics.extend(annotation_agreement_diagnostics(db, file));
 
@@ -826,6 +827,38 @@ fn classify_non_local_read(
         suggestion: project_typo
             .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
+}
+
+/// An alias whose expansion reaches itself never becomes a type. It is reported at each
+/// declaration on the cycle, including one no annotation uses; a use only compares like
+/// `Unknown`, so the one mistake is reported once, where the fix goes.
+fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    let table = TypeDefinitions::of(db, file);
+    let mut diagnostics = Vec::new();
+    for (name, range) in type_declaration_sites(db, file) {
+        let interned = Name::new(db, name.as_str());
+        let Some(definition) = table.get(db, interned) else {
+            continue;
+        };
+        if !definition.alias {
+            continue;
+        }
+        let mut expanding = FxHashSet::default();
+        expanding.insert(interned);
+        if alias_cycle_walk(db, table, definition.body, &mut expanding).as_deref()
+            == Some(name.as_str())
+        {
+            diagnostics.push(Diagnostic::new(
+                *range,
+                Severity::Error,
+                "annotation",
+                format!(
+                    "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                ),
+            ));
+        }
+    }
+    diagnostics
 }
 
 /// Without this, a misspelled type name would silently become an opaque nominal.
@@ -2212,7 +2245,7 @@ pub(crate) fn nearest_name<'a>(
     candidates: impl Iterator<Item = &'a str>,
 ) -> Option<String> {
     let name_characters: Vec<char> = name.chars().collect();
-    if name_characters.len() < 4 {
+    if name_characters.len() < 2 {
         return None;
     }
     // A standard-library name such as `Str.split` is usually the start of a longer one
@@ -2229,6 +2262,20 @@ pub(crate) fn nearest_name<'a>(
         if let Some(candidate) = completion {
             return Some((*candidate).to_owned());
         }
+    }
+    // A short name is one substitution away from many unrelated names (`df` and `dt`), so it
+    // gets a suggestion only when exactly one candidate is the name with one character
+    // inserted, as `name` is for `nam` and `nme`.
+    if name_characters.len() < 4 {
+        let mut extensions = candidates.iter().filter(|candidate| {
+            let mut characters = candidate.chars();
+            candidate.chars().count() == name_characters.len() + 1
+                && name_characters
+                    .iter()
+                    .all(|wanted| characters.any(|character| character == *wanted))
+        });
+        let first = extensions.next()?;
+        return extensions.next().is_none().then(|| (*first).to_owned());
     }
     let candidates = candidates.into_iter();
     let budget = if name_characters.len() >= 8 { 2 } else { 1 };
@@ -2504,7 +2551,17 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 assignment_targets.insert(*value, *name);
             }
         }
+        let naming = item_naming(db, item);
         for origin in &check.strict_origins {
+            // An unresolved `pkg::name` is already reported as unresolved, and that finding
+            // names the fix; a second one saying its type is unknown adds nothing.
+            if naming
+                .as_ref()
+                .and_then(|naming| naming.namespace_reads.get(&origin.expression))
+                .is_some_and(|read| namespace_read_message(db, read).is_some())
+            {
+                continue;
+            }
             // Loop-widened and recursive origins are about the named binding.
             let assignment_target = match &origin.kind {
                 StrictOriginKind::LoopWidened(_)
@@ -2687,8 +2744,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         }
         TypeErrorKind::ArityMismatch { expected, found } => {
             if found < expected {
+                // Only a function type without parameter names reaches here, so the missing
+                // arguments are named by position.
+                let missing = if expected - found == 1 {
+                    format!("argument {expected} is missing")
+                } else {
+                    format!("arguments {} to {expected} are missing", found + 1)
+                };
                 format!(
-                    "this call supplies {found} positional {}, but the function requires {expected}, so a required argument is missing",
+                    "this call supplies {found} positional {}, but the function requires {expected}: {missing}",
                     plural(*found, "argument", "arguments"),
                 )
             } else {
@@ -2698,7 +2762,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 )
             }
         }
-        TypeErrorKind::MissingArguments { names } => {
+        TypeErrorKind::MissingArguments { names, misspelled } => {
             let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
             let listed = match quoted.split_last() {
                 Some((last, [])) => last.clone(),
@@ -2707,7 +2771,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             // A declared required parameter need not be read, so the reason is the
             // signature's, not the body's.
-            format!("this call leaves out {listed}, which the function requires")
+            let hint = misspelled
+                .as_ref()
+                .map(|(argument, nearest)| {
+                    format!(
+                        ". `{argument}` names no parameter, so it goes to `...`. Did you mean `{nearest}`?"
+                    )
+                })
+                .unwrap_or_default();
+            format!("this call leaves out {listed}, which the function requires{hint}")
         }
         TypeErrorKind::NamedArgumentMismatch {
             argument,
@@ -2759,9 +2831,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             format!(
                 "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
             )
-        }
-        TypeErrorKind::AliasCycle { name } => {
-            format!("Type alias `{name}` expands in a cycle.")
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
             "expected {}, found `{}`",

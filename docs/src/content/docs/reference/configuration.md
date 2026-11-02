@@ -73,7 +73,7 @@ line-ending = "auto"     # keep the file's own; or "lf", "cr-lf"
 
 The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `strict` turns on type errors
 too and raises unresolved names to errors. A `# typing: off`, `on`, or `strict` comment in a file
-overrides both keys for that file.
+overrides both keys for that file, and may end in a note such as `# typing: off  # generated code`.
 
 ## Which file applies
 
