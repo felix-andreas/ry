@@ -1810,8 +1810,13 @@ opcode with a jump table would be faster to dispatch, but every op in the JIT's 
 graph has at most one jump target, and the arm chain keeps that invariant, so the JIT needed only
 a read and a liveness arm for the new op. A `switch` whose selector is tagged, dots or missing,
 whose alternatives contain `...`, or which has two defaults stays an AST call, which keeps those
-rare shapes on one implementation (`switch_compiles`). Errors match GNU R's AST `switch`, not
-its byte compiler, which reports two defaults as "numeric EXPR required". The ledger fold
+rare shapes on one implementation (`switch_compiles`). Both paths read the selector through
+`eval::switch_selector`, so they share its checks and warnings. Errors match GNU R's AST
+`switch`, not its byte compiler: two defaults raise "duplicate 'switch' defaults", and an empty
+default that runs raises "argument is missing, with no default". GNU R's byte compiler instead
+says "numeric EXPR required" for the first and returns an invisible `NULL` for the second, but
+GNU R runs a closure's first call through the AST, so code that depends on either behaviour
+already fails there. The ledger fold
 template's per-fill cost dropped from about 19.1k to 17.8k instructions.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
