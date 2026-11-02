@@ -754,13 +754,110 @@ fn ry_test_runs_testthat_against_the_loaded_package_on_both_runtimes() {
         assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
         assert!(printed.contains("broken: 1"), "{runtime}: {printed}");
         assert!(printed.contains("step: ."), "{runtime}: {printed}");
+        // The wording of a failed expectation changes between testthat versions.
         assert!(
-            printed.contains("Expected `scale` to equal 11."),
+            printed.contains("`scale`") && printed.contains("11"),
             "{runtime}: {printed}"
         );
         let output = run(Some("step"));
         let printed = text(&output);
         assert!(output.status.success(), "{runtime}: {printed}");
         assert!(!printed.contains("broken"), "{runtime}: {printed}");
+    }
+}
+
+const ROXYGEN: &[(&str, &str)] = &[
+    (
+        "DESCRIPTION",
+        "Package: roxy\nTitle: Roxygen Test\nVersion: 0.1.0\nDescription: A test.\n\
+         License: MIT\nEncoding: UTF-8\nRoxygen: list(markdown = TRUE)\n",
+    ),
+    (
+        "R/add.R",
+        "#' Add two numbers\n#'\n#' Adds `x` and `y`.\n#' @param x A number.\n\
+         #' @param y A number.\n#' @return The sum.\n#' @export\n#' @examples\n#' add(1, 2)\n\
+         add <- function(x, y = 1) x + y\n\n#' @rdname add\n#' @export\n\
+         sub2 <- function(x, y) x - y\n\n#' Print a thing\n#' @param x Thing.\n\
+         #' @param ... Unused.\n#' @export\nprint.thing <- function(x, ...) cat(\"thing\\n\")\n",
+    ),
+    (
+        "R/scale.R",
+        "#' Scale\n#' @inheritParams add\n#' @param factor How much.\n#' @importFrom stats median\n\
+         #' @export\nscale_by <- function(x, factor) x * factor\n",
+    ),
+];
+
+/// Every file under `root` except `.git`, by relative path, with its bytes.
+fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(root).expect("under root");
+                files.push((
+                    relative.display().to_string(),
+                    fs::read(&path).expect("read"),
+                ));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// `ry document` writes what `devtools::document()` writes, byte for byte, on a cold run and on
+/// a run after an edit, which reuses the blocks of the unchanged file.
+#[test]
+fn ry_document_matches_devtools_on_both_runtimes() {
+    if !r_available() || !installed("roxygen2") || !installed("devtools") {
+        return;
+    }
+    let edit = |root: &Path| {
+        let path = root.join("R/scale.R");
+        let text = fs::read_to_string(&path).expect("read");
+        fs::write(&path, text.replace("How much.", "How much to scale by.")).expect("write");
+    };
+    let reference = package(ROXYGEN);
+    let devtools = || {
+        let output = Command::new("Rscript")
+            .args(["-e", "devtools::document()"])
+            .current_dir(reference.path())
+            .output()
+            .expect("run devtools");
+        assert!(output.status.success(), "{}", text(&output));
+    };
+    devtools();
+    let cold = tree(reference.path());
+    edit(reference.path());
+    devtools();
+    let edited = tree(reference.path());
+    assert!(
+        cold.iter().any(|(path, _)| path == "man/add.Rd"),
+        "{cold:?}"
+    );
+    for runtime in RUNTIMES {
+        let root = package(ROXYGEN);
+        let cache = tempfile::tempdir().expect("temp dir");
+        let document = || {
+            let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .args(["document", "--runtime", runtime])
+                .arg(root.path())
+                .env("XDG_CACHE_HOME", cache.path())
+                .output()
+                .expect("run ry document");
+            assert!(output.status.success(), "{runtime}: {}", text(&output));
+        };
+        document();
+        assert!(tree(root.path()) == cold, "{runtime}: the cold run differs");
+        edit(root.path());
+        document();
+        assert!(
+            tree(root.path()) == edited,
+            "{runtime}: the run after an edit differs"
+        );
     }
 }

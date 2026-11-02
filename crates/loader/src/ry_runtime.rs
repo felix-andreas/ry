@@ -11,9 +11,8 @@
 
 use {
     crate::{
-        Code, Loader, Source, find_package_root,
+        Code, Loader, Source, find_package_root, package_cache_path,
         r::{RUNTIME_RY, RValue, error_value, plan_value},
-        s4_cache_path,
     },
     heap::object::{Sexp, SexpType},
     interp::{
@@ -429,7 +428,7 @@ unsafe fn do_deferred(call: &Call<'_>) -> R<Sexp> {
         ),
         (
             "cache".into(),
-            s4_cache_path(Path::new(&root)).map_or(RValue::Null, |path| {
+            package_cache_path(Path::new(&root), "s4").map_or(RValue::Null, |path| {
                 RValue::Character(vec![path.to_string_lossy().into_owned()])
             }),
         ),

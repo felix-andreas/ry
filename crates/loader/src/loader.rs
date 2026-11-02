@@ -2008,11 +2008,12 @@ fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
     })
 }
 
-/// Where a backend keeps the S4 metadata of the package at `root` ([`DeferredS4::cache_key`]),
-/// one file per package that each save replaces.
-pub fn s4_cache_path(root: &Path) -> Option<PathBuf> {
+/// Where one kind of per-package cache lives for the package at `root`, one `.rds` file per
+/// package that each save replaces: `s4` for the S4 metadata a backend holds back
+/// ([`DeferredS4::cache_key`]), `roxygen` for the blocks `ry document` parsed.
+pub fn package_cache_path(root: &Path, kind: &str) -> Option<PathBuf> {
     let name = format!("{:016x}.rds", xxh3_64(root.as_os_str().as_encoded_bytes()));
-    Some(cache_directory()?.join("ry").join("s4").join(name))
+    Some(cache_directory()?.join("ry").join(kind).join(name))
 }
 
 fn cache_directory() -> Option<PathBuf> {

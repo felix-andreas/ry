@@ -1,5 +1,6 @@
 use {
     clap::Parser,
+    loader::package_cache_path,
     ry::{
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime},
@@ -391,11 +392,18 @@ fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> Ex
     let roclets = if roclets.is_empty() {
         "NULL".to_owned()
     } else {
-        let quoted: Vec<String> = roclets.iter().map(|roclet| load::r_string(roclet)).collect();
+        let quoted: Vec<String> = roclets
+            .iter()
+            .map(|roclet| load::r_string(roclet))
+            .collect();
         format!("c({})", quoted.join(", "))
     };
+    let cache = package_cache_path(&root, "roxygen").map_or_else(
+        || "NULL".to_owned(),
+        |path| load::r_string(&path.to_string_lossy()),
+    );
     let run = format!(
-        "({driver})({root}, {roclets})",
+        "({driver})({root}, {roclets}, {cache})",
         driver = include_str!("document.R").trim_end(),
         root = load::r_string(&root.to_string_lossy()),
     );
