@@ -13,7 +13,7 @@ action: Add inferred type annotation for `xs`
   edit 2..2 -> ": Array<double>"
 action: Add inferred type annotations for the whole file
   edit 2..2 -> ": Array<double>"
-completion (29): xs, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
+completion (29): xs, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
 hint @2: Array<double>
 
 #---- hover_on_an_item_read
@@ -32,7 +32,7 @@ action: Add inferred type annotation for `first`
 action: Add inferred type annotations for the whole file
   edit 2..2 -> ": Array<integer>"
   edit 20..20 -> ": integer"
-completion (29): xs, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
+completion (29): xs, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
 hint @2: Array<integer>
 hint @20: integer
 
@@ -76,7 +76,7 @@ signature: fn(list: Array<double>, f: fn(double) -> T) -> Array<T> (active)
 parameters: list: Array<double> | [f: fn(double) -> T]
 signature: <T, U> fn(list: list[T], f: fn(T) -> U) -> list[U]
 parameters: list: list[T] | [f: fn(T) -> U]
-completion (103): F, f = , FALSE, for, function, factanal, factor, factor.scope
+completion (103): f = , for, function, factanal, factor, factor.scope, factorial, faithful
 hint @20list =
 
 #---- hover_on_the_for_variable

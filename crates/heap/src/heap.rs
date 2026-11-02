@@ -30,8 +30,8 @@ use {
     crate::{
         env::Frame,
         object::{
-            NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
-            VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
+            EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
+            TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
         },
         records::Layouts,
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
@@ -46,18 +46,21 @@ use {
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
 /// GNU R's default `PROTECT` stack size, `R_PPSSIZE`.
 pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
+/// The bytes one pairlist cell, promise, closure or binding cell takes, for sizing a
+/// [`Heap::reserve`].
+pub const TRIPLE_BYTES: usize = size_of::<TripleObject>();
+/// The bytes one environment takes, for sizing a [`Heap::reserve`]. Its frame's table is
+/// allocated outside the heap and not counted.
+pub const ENVIRONMENT_BYTES: usize = size_of::<EnvironmentObject>();
 
 pub struct Heap {
     space: Space,
+    /// The largest single allocation the heap attempts (`memory_ceiling`).
+    allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
-    /// The last store target the barrier found unmarked. Marks are set only during a collection,
-    /// which clears this, so until then a store into it needs no barrier work. Native code fills
-    /// a fresh vector one `SET_STRING_ELT` at a time, and this makes each of those stores one
-    /// compare instead of a mark-bitmap lookup.
-    young_parent: Option<Sexp>,
     escaped: Vec<Sexp>,
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
@@ -79,6 +82,12 @@ pub struct Heap {
     policy: GcPolicy,
     /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
+    /// The `young_bytes` past which a small allocation takes the slow path, which runs a minor
+    /// collection when one is due. It is derived from the policy and `old_bytes`, and stored
+    /// because the allocation fast path then needs one compare against it; it is zero under
+    /// collection stress, so every allocation takes the slow path. It changes only where its
+    /// inputs do: a collection and [`Heap::update_policy`].
+    small_trigger: usize,
     /// Bytes of large vectors allocated since the last collection, kept apart from
     /// `young_bytes` because they have their own budget.
     young_large_bytes: usize,
@@ -358,11 +367,11 @@ impl Heap {
 
     pub fn with_policy(policy: GcPolicy) -> Heap {
         let mut heap = Heap {
+            allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
             young_large: Vec::new(),
             remembered: Vec::new(),
-            young_parent: None,
             escaped: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
@@ -391,6 +400,7 @@ impl Heap {
             next_source_id: 0,
             policy,
             young_bytes: 0,
+            small_trigger: 0,
             young_large_bytes: 0,
             old_bytes: 0,
             stats: GcStats::default(),
@@ -403,6 +413,7 @@ impl Heap {
         // is a registered root.
         unsafe { heap.create_well_known() };
         heap.inhibit = 0;
+        heap.refresh_small_trigger();
         heap
     }
 
@@ -418,8 +429,25 @@ impl Heap {
         self.stats
     }
 
-    pub fn policy_mut(&mut self) -> &mut GcPolicy {
-        &mut self.policy
+    pub fn policy(&self) -> &GcPolicy {
+        &self.policy
+    }
+
+    /// Changes the collection policy. The allocation fast path reads a budget derived from it,
+    /// which this recomputes, so the policy has no other mutable access.
+    pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
+        change(&mut self.policy);
+        self.refresh_small_trigger();
+    }
+
+    /// Recomputes [`Heap::small_trigger`] from the policy and the old generation's size.
+    fn refresh_small_trigger(&mut self) {
+        // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
+        // every large vector a big session allocates, rescanning the young ones each time.
+        self.small_trigger = match self.policy.stress {
+            GcStress::EveryAllocation => 0,
+            GcStress::Off => self.policy.young_limit.max(self.old_bytes / 2),
+        };
     }
 
     /// Suspends collection until the matching [`Heap::allow_collection`], for code that builds
@@ -653,6 +681,7 @@ impl Heap {
 
     /// A triple-shaped object: a pairlist cell, call, closure, promise or similar. The three
     /// handles stay rooted across the allocation.
+    #[inline]
     pub unsafe fn alloc_triple(
         &mut self,
         kind: SexpType,
@@ -680,6 +709,7 @@ impl Heap {
     }
 
     /// `alloc_triple` that also keeps `extra` alive across the allocation.
+    #[inline(always)]
     unsafe fn alloc_triple_keeping(
         &mut self,
         kind: SexpType,
@@ -691,21 +721,64 @@ impl Heap {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
         let keep = [first, second, third, extra.unwrap_or(first)];
         let object = self.allocate_with(kind, size, &keep, 0)?;
-        object.set_car_unbarriered(first);
-        object.set_cdr_unbarriered(second);
-        object.set_tag_unbarriered(third);
-        first.increment_refcount();
-        second.increment_refcount();
-        third.increment_refcount();
-        if kind == SexpType::Symbol {
-            let symbol = object.as_ptr().cast::<SymbolObject>();
-            std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
-            std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
-            std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
-        }
+        fill_triple(object, kind, first, second, third);
         Ok(object)
     }
 
+    /// Runs the collection check for `bytes` of small objects at once, keeping `keep` alive
+    /// across the collection it may run. The `_uncollected` allocators never collect, so a
+    /// caller that builds a known batch of objects, such as a closure call's environment,
+    /// binding cells and promises, pays for one check instead of one per object, and the
+    /// objects it builds need no root until its next allocation that can collect.
+    ///
+    /// The reservation is a budget, not memory set aside: allocating past it is allowed and
+    /// only moves the next collection earlier. Size it with [`TRIPLE_BYTES`] and
+    /// [`ENVIRONMENT_BYTES`].
+    #[inline]
+    pub unsafe fn reserve(&mut self, bytes: usize, keep: &[Sexp]) {
+        if self.young_bytes + bytes > self.small_trigger {
+            self.reserve_slow(bytes, keep);
+        }
+    }
+
+    /// [`Heap::alloc_triple`] without the collection check, after a [`Heap::reserve`].
+    #[inline]
+    pub unsafe fn alloc_triple_uncollected(
+        &mut self,
+        kind: SexpType,
+        first: Sexp,
+        second: Sexp,
+        third: Sexp,
+    ) -> HeapResult<Sexp> {
+        let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
+        let object = self.allocate_uncollected(kind, size, 0)?;
+        fill_triple(object, kind, first, second, third);
+        Ok(object)
+    }
+
+    /// [`Heap::cons`] without the collection check, after a [`Heap::reserve`].
+    #[inline]
+    pub unsafe fn cons_uncollected(&mut self, car: Sexp, cdr: Sexp) -> HeapResult<Sexp> {
+        self.alloc_triple_uncollected(SexpType::Pairlist, car, cdr, self.known.nil)
+    }
+
+    /// [`Heap::alloc_compiled_promise`] without the collection check, after a
+    /// [`Heap::reserve`].
+    pub unsafe fn alloc_compiled_promise_uncollected(
+        &mut self,
+        unforced: Sexp,
+        expression: Sexp,
+        env: Sexp,
+        code: Sexp,
+    ) -> HeapResult<Sexp> {
+        let promise =
+            self.alloc_triple_uncollected(SexpType::Promise, unforced, expression, env)?;
+        promise.set_attrib_unbarriered(code);
+        code.increment_refcount();
+        Ok(promise)
+    }
+
+    #[inline]
     pub unsafe fn cons(&mut self, car: Sexp, cdr: Sexp) -> HeapResult<Sexp> {
         self.alloc_triple(SexpType::Pairlist, car, cdr, self.known.nil)
     }
@@ -740,9 +813,19 @@ impl Heap {
         enclosure: Sexp,
         bindings: usize,
     ) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
+        self.reserve(ENVIRONMENT_BYTES, &[enclosure]);
+        self.alloc_environment_uncollected(enclosure, bindings)
+    }
+
+    /// [`Heap::alloc_environment_with_capacity`] without the collection check, after a
+    /// [`Heap::reserve`].
+    pub unsafe fn alloc_environment_uncollected(
+        &mut self,
+        enclosure: Sexp,
+        bindings: usize,
+    ) -> HeapResult<Sexp> {
         // Every field is written below, so zeroing the slot first would store it twice.
-        let object = self.allocate_with(SexpType::Environment, size, &[enclosure], 0)?;
+        let object = self.allocate_uncollected(SexpType::Environment, ENVIRONMENT_BYTES, 0)?;
         std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
         self.space.set_finalizable(object);
         object.set_enclosure_unbarriered(enclosure);
@@ -876,16 +959,28 @@ impl Heap {
         if bytes.len() > i32::MAX as usize {
             return Err(HeapError::StringTooLong);
         }
-        let (any_nul, ascii) = scan_nul_and_ascii(bytes);
-        if any_nul {
+        let scan = strings::scan(bytes);
+        if scan.any_nul {
             let text = String::from_utf8_lossy(bytes).replace('\0', "\\0");
             return Err(HeapError::EmbeddedNul { text });
         }
-        let bits = if ascii { gp::ASCII } else { encoding.gp_bits() };
-        let hash = strings::hash(bytes, bits & gp::ENCODING);
-        if let Some(found) = self.strings.find(hash, bytes, bits & gp::ENCODING) {
-            return Ok(found);
+        let bits = if scan.ascii {
+            gp::ASCII
+        } else {
+            encoding.gp_bits()
+        };
+        let hash = strings::hash(&scan, bits & gp::ENCODING);
+        match self.strings.find(hash, bytes, bits & gp::ENCODING) {
+            Some(found) => Ok(found),
+            None => self.intern_new(bytes, bits, hash),
         }
+    }
+
+    /// Allocates and interns a string the table does not hold. It is kept out of line so that
+    /// re-interning an existing string, the common case, runs without its register pressure.
+    #[cold]
+    #[inline(never)]
+    unsafe fn intern_new(&mut self, bytes: &[u8], bits: u16, hash: u32) -> HeapResult<Sexp> {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
@@ -937,9 +1032,12 @@ impl Heap {
 
     // Stores, each through the write barrier and the reference counts.
 
+    /// Records a store of `child` into `parent`. Only an old parent that is not yet remembered
+    /// can come to point at a young child, and the parent's header, which the store is about to
+    /// write near, says whether it is one.
     #[inline(always)]
     pub unsafe fn write_barrier(&mut self, parent: Sexp, child: Sexp) {
-        if self.young_parent == Some(parent) || parent.gc_bits() & gc_bits::REMEMBERED != 0 {
+        if parent.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) != gc_bits::OLD {
             return;
         }
         self.write_barrier_slow(parent, child);
@@ -947,9 +1045,8 @@ impl Heap {
 
     #[inline(never)]
     unsafe fn write_barrier_slow(&mut self, parent: Sexp, child: Sexp) {
-        if !self.space.is_marked(parent) {
-            self.young_parent = Some(parent);
-        } else if !self.space.is_marked(child) {
+        debug_assert!(self.space.is_marked(parent), "an old object lost its mark");
+        if child.gc_bits() & gc_bits::OLD == 0 {
             parent.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(parent);
         }
@@ -1015,14 +1112,12 @@ impl Heap {
             }
             to.set_element_unbarriered(to_start + offset, value);
         }
-        if count == 0 || self.young_parent == Some(to) || to.gc_bits() & gc_bits::REMEMBERED != 0 {
+        if count == 0 || to.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) != gc_bits::OLD {
             return;
         }
-        if !self.space.is_marked(to) {
-            self.young_parent = Some(to);
-            return;
-        }
-        if (0..count).any(|offset| !self.space.is_marked(to.stored_element(to_start + offset))) {
+        if (0..count)
+            .any(|offset| to.stored_element(to_start + offset).gc_bits() & gc_bits::OLD == 0)
+        {
             to.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(to);
         }
@@ -1086,7 +1181,7 @@ impl Heap {
         let mut escaped = std::mem::take(&mut self.escaped);
         for vector in escaped.drain(..) {
             vector.set_gc_bit(gc_bits::ESCAPED, false);
-            if vector.gc_bits() & gc_bits::REMEMBERED == 0 && self.space.is_marked(vector) {
+            if vector.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) == gc_bits::OLD {
                 vector.set_gc_bit(gc_bits::REMEMBERED, true);
                 self.remembered.push(vector);
             }
@@ -1155,22 +1250,31 @@ impl Heap {
     /// matched formals. The cells are allocated as one batch, with a single collection check
     /// that keeps every value alive, so the values need no other root.
     pub unsafe fn define_formals(&mut self, env: Sexp, bindings: &[Formal]) -> HeapResult<()> {
-        debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
-        let size = object_size(SexpType::Binding, 0).ok_or(HeapError::TooLong)?;
-        let request = size * bindings.len();
-        if self.collection_due(request, false) {
+        let request = TRIPLE_BYTES * bindings.len();
+        if self.young_bytes + request > self.small_trigger {
             let keep: SmallVec<[Sexp; 16]> = bindings
                 .iter()
                 .map(|binding| binding.value)
                 .chain([env])
                 .collect();
-            self.maybe_collect(request, false, &keep);
+            self.reserve_slow(request, &keep);
         }
+        self.define_formals_uncollected(env, bindings)
+    }
+
+    /// [`Heap::define_formals`] without the collection check, after a [`Heap::reserve`] that
+    /// counted one [`TRIPLE_BYTES`] per binding.
+    pub unsafe fn define_formals_uncollected(
+        &mut self,
+        env: Sexp,
+        bindings: &[Formal],
+    ) -> HeapResult<()> {
+        debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let nil = self.known.nil;
         let frame = &mut *env.frame_ptr();
         let mut first = true;
         for binding in bindings {
-            let cell = self.allocate_uncollected(SexpType::Binding, size, 0)?;
+            let cell = self.allocate_uncollected(SexpType::Binding, TRIPLE_BYTES, 0)?;
             cell.set_car_unbarriered(binding.symbol);
             cell.set_cdr_unbarriered(binding.value);
             cell.set_tag_unbarriered(nil);
@@ -1181,9 +1285,9 @@ impl Heap {
                 cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
             frame.insert(binding.symbol, cell);
-            // A collection above may have made `env` old, and the cells are all young, so the
-            // first cell's barrier check covers every one, including when a later allocation
-            // fails and leaves the cells before it in the frame.
+            // A collection may have made `env` old since it was allocated, and the cells are
+            // all young, so the first cell's barrier check covers every one, including when a
+            // later allocation fails and leaves the cells before it in the frame.
             if first {
                 self.write_barrier(env, cell);
                 first = false;
@@ -1338,6 +1442,7 @@ impl Heap {
     // Roots.
 
     /// Keeps `object` alive until the current handle scope ends.
+    #[inline]
     pub fn root(&mut self, object: Sexp) {
         self.roots.handles.push(object);
     }
@@ -1381,7 +1486,7 @@ impl Heap {
         *self.roots.precious.entry(object).or_insert(0) += 1;
         // An old object keeps its mark, so a minor collection would skip it anyway. The caller
         // is preserving the object, so it is live.
-        if !unsafe { self.space.is_marked(object) } {
+        if unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
             self.new_roots.push(object);
         }
     }
@@ -1435,12 +1540,16 @@ impl Heap {
 
     // Collection.
 
+    #[inline(always)]
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {
         self.allocate_with(kind, size, keep, size)
     }
 
     /// Allocates an object and zeroes its first `zeroed` bytes. The rest is left as it was,
-    /// which only a vector of plain numbers that its caller fills in may rely on.
+    /// which only a vector of plain numbers that its caller fills in may rely on. `keep` stays
+    /// alive across a collection the allocation runs, which only the cold path does, so a
+    /// caller's `keep` array costs nothing on the common path once this is inlined.
+    #[inline(always)]
     unsafe fn allocate_with(
         &mut self,
         kind: SexpType,
@@ -1448,64 +1557,138 @@ impl Heap {
         keep: &[Sexp],
         zeroed: usize,
     ) -> HeapResult<Sexp> {
-        let large = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).is_none();
-        self.maybe_collect(size, large, keep);
+        match SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)) {
+            Some(&class) => self.allocate_small(kind, class as usize, size, zeroed, keep),
+            None => self.allocate_large(kind, size, zeroed, keep),
+        }
+    }
+
+    /// The young generation's fast path: a budget check and a pointer bump in the size class's
+    /// pool. Everything else, the collection included, is on the cold path.
+    #[inline(always)]
+    unsafe fn allocate_small(
+        &mut self,
+        kind: SexpType,
+        class: usize,
+        size: usize,
+        zeroed: usize,
+        keep: &[Sexp],
+    ) -> HeapResult<Sexp> {
+        let young = self.young_bytes + size;
+        if young > self.small_trigger {
+            return self.allocate_small_slow(kind, class, size, zeroed, keep);
+        }
+        let memory = self
+            .space
+            .allocate(class)
+            .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        self.young_bytes = young;
+        Ok(self.init_small(memory, kind, class, zeroed))
+    }
+
+    #[cold]
+    #[inline(never)]
+    unsafe fn allocate_small_slow(
+        &mut self,
+        kind: SexpType,
+        class: usize,
+        size: usize,
+        zeroed: usize,
+        keep: &[Sexp],
+    ) -> HeapResult<Sexp> {
+        self.maybe_collect(size, false, keep);
+        let memory = self
+            .space
+            .allocate(class)
+            .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        self.young_bytes += size;
+        Ok(self.init_small(memory, kind, class, zeroed))
+    }
+
+    #[cold]
+    #[inline(never)]
+    unsafe fn reserve_slow(&mut self, bytes: usize, keep: &[Sexp]) {
+        self.maybe_collect(bytes, false, keep);
+    }
+
+    #[inline(never)]
+    unsafe fn allocate_large(
+        &mut self,
+        kind: SexpType,
+        size: usize,
+        zeroed: usize,
+        keep: &[Sexp],
+    ) -> HeapResult<Sexp> {
+        self.maybe_collect(size, true, keep);
         self.allocate_uncollected(kind, size, zeroed)
     }
 
     /// [`Heap::allocate_with`] without the collection check, for a caller that ran it once for
     /// a batch of objects.
+    #[inline(always)]
     unsafe fn allocate_uncollected(
         &mut self,
         kind: SexpType,
         size: usize,
         zeroed: usize,
     ) -> HeapResult<Sexp> {
-        let class = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).copied();
-        let (memory, size_class) = match class {
-            Some(class) => {
-                let class = class as usize;
-                let memory = self
-                    .space
-                    .allocate(class)
-                    .ok_or(HeapError::CannotAllocate { bytes: size })?;
-                // Every slot size is a multiple of 8 bytes, and zeroing word by word keeps the
-                // common small object clear of a call into `memset`.
-                let words = memory.as_ptr().cast::<u64>();
-                for word in 0..SLOT_SIZES[class].min(zeroed.next_multiple_of(8)) / 8 {
-                    words.add(word).write(0);
-                }
-                (memory, class as u8)
-            }
-            None => {
-                let layout = Layout::from_size_align(size, 16)
-                    .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
-                let memory = if zeroed >= size {
-                    NonNull::new(std::alloc::alloc_zeroed(layout))
-                } else {
-                    NonNull::new(std::alloc::alloc(layout)).inspect(|memory| {
-                        std::ptr::write_bytes(memory.as_ptr(), 0, zeroed);
-                    })
-                }
-                .ok_or(HeapError::CannotAllocate { bytes: size })?;
-                (memory, LARGE_CLASS)
-            }
+        let Some(&class) = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)) else {
+            return self.allocate_large_uncollected(kind, size, zeroed);
         };
-        let object = Sexp::from_non_null(memory.cast());
-        // The nil object is created first, pointing at itself.
-        let nil = if self.inhibit > 0 && kind == SexpType::Nil {
-            object
-        } else {
-            self.known.nil
-        };
-        object.init_header(kind, size_class, 0, nil);
-        if size_class == LARGE_CLASS {
-            self.large.insert(object);
-            self.young_large.push(object);
-            self.young_large_bytes += size;
-        } else {
-            self.young_bytes += size;
+        let class = class as usize;
+        let memory = self
+            .space
+            .allocate(class)
+            .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        self.young_bytes += size;
+        Ok(self.init_small(memory, kind, class, zeroed))
+    }
+
+    /// Zeroes a fresh small slot's first `zeroed` bytes and writes its header. Every slot size
+    /// is a multiple of 8 bytes, and zeroing word by word keeps the common small object clear
+    /// of a call into `memset`.
+    #[inline(always)]
+    unsafe fn init_small(
+        &self,
+        memory: NonNull<u8>,
+        kind: SexpType,
+        class: usize,
+        zeroed: usize,
+    ) -> Sexp {
+        let words = memory.as_ptr().cast::<u64>();
+        for word in 0..SLOT_SIZES[class].min(zeroed.next_multiple_of(8)) / 8 {
+            words.add(word).write(0);
         }
+        let object = Sexp::from_non_null(memory.cast());
+        object.init_header(kind, class as u8, 0, self.known.nil);
+        object
+    }
+
+    #[inline(never)]
+    unsafe fn allocate_large_uncollected(
+        &mut self,
+        kind: SexpType,
+        size: usize,
+        zeroed: usize,
+    ) -> HeapResult<Sexp> {
+        if size > self.allocation_ceiling {
+            return Err(HeapError::CannotAllocate { bytes: size });
+        }
+        let layout = Layout::from_size_align(size, 16)
+            .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
+        let memory = if zeroed >= size {
+            NonNull::new(std::alloc::alloc_zeroed(layout))
+        } else {
+            NonNull::new(std::alloc::alloc(layout)).inspect(|memory| {
+                std::ptr::write_bytes(memory.as_ptr(), 0, zeroed);
+            })
+        }
+        .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        let object = Sexp::from_non_null(memory.cast());
+        object.init_header(kind, LARGE_CLASS, 0, self.known.nil);
+        self.large.insert(object);
+        self.young_large.push(object);
+        self.young_large_bytes += size;
         Ok(object)
     }
 
@@ -1550,17 +1733,14 @@ impl Heap {
         if self.policy.stress == GcStress::EveryAllocation {
             return true;
         }
-        // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
-        // every large vector a big session allocates, rescanning the young ones each time.
         // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
         // a reader such as `fread` allocates every column before filling any, so charging
         // them to the nursery would buy a collection per column that rescans the columns
         // already allocated.
-        let grown = self.old_bytes / 2;
         if large {
-            self.young_large_bytes + request > self.policy.young_large_limit.max(grown)
+            self.young_large_bytes + request > self.policy.young_large_limit.max(self.old_bytes / 2)
         } else {
-            self.young_bytes + request > self.policy.young_limit.max(grown)
+            self.young_bytes + request > self.small_trigger
         }
     }
 
@@ -1574,7 +1754,6 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
-        self.young_parent = None;
         if kind == Collection::Major {
             self.clear_marks();
         } else if self.policy.verify {
@@ -1646,6 +1825,7 @@ impl Heap {
         }
         self.young_bytes = 0;
         self.young_large_bytes = 0;
+        self.refresh_small_trigger();
         self.inhibit -= 1;
     }
 
@@ -1856,6 +2036,17 @@ impl Heap {
     /// next minor collection would free a live child.
     unsafe fn verify_barrier(&self) {
         let check = |parent: Sexp| {
+            if self.space.is_marked(parent) != (parent.gc_bits() & gc_bits::OLD != 0) {
+                panic!(
+                    "the header of a {:?} says it is {}, but its mark disagrees",
+                    parent.kind(),
+                    if parent.gc_bits() & gc_bits::OLD != 0 {
+                        "old"
+                    } else {
+                        "young"
+                    },
+                );
+            }
             if !self.space.is_marked(parent)
                 || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
             {
@@ -2006,6 +2197,8 @@ impl Heap {
         nil.set_car_unbarriered(nil);
         nil.set_cdr_unbarriered(nil);
         nil.set_tag_unbarriered(nil);
+        // The nil object is created first, so its attributes pointed at a placeholder.
+        nil.set_attrib_unbarriered(nil);
         nil.mark_not_mutable();
         self.known.nil = nil;
         let result = (|| -> HeapResult<()> {
@@ -2243,6 +2436,7 @@ impl RootStack {
         self.entries.len()
     }
 
+    #[inline]
     fn push(&mut self, object: Sexp) {
         self.entries.push(object);
     }
@@ -2294,30 +2488,54 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 
+/// Physical memory plus swap on Linux, where the allocator reserves address space without
+/// committing it, so a vector far larger than the machine would be handed out and fail only when
+/// touched. GNU R gets its "cannot allocate vector" error from the kernel's overcommit heuristic
+/// refusing such a request, and this bound gives the same answer before asking. With
+/// `vm.overcommit_memory` set to 1 the kernel grants any request, and so does GNU R, so there is
+/// no bound; macOS and Windows also grant oversized requests to GNU R, so they have none either.
+#[cfg(target_os = "linux")]
+fn memory_ceiling() -> usize {
+    let always_overcommit =
+        std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1");
+    if always_overcommit {
+        return usize::MAX;
+    }
+    // SAFETY: `sysinfo` only writes the struct it is given.
+    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sysinfo(&mut info) } != 0 {
+        return usize::MAX;
+    }
+    let unit = (info.mem_unit as usize).max(1);
+    (info.totalram as usize)
+        .saturating_add(info.totalswap as usize)
+        .saturating_mul(unit)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn memory_ceiling() -> usize {
+    usize::MAX
+}
+
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
 }
 
-/// Whether `bytes` holds a NUL byte, and whether it is all ASCII, in one pass of eight bytes at a
-/// time. Most strings are a few bytes long, where `memchr`'s setup costs more than the scan.
-fn scan_nul_and_ascii(bytes: &[u8]) -> (bool, bool) {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGHS: u64 = 0x8080_8080_8080_8080;
-    let (mut zero_bits, mut high_bits) = (0u64, 0u64);
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(chunk);
-        let word = u64::from_le_bytes(word);
-        // The classic zero-byte test, which is nonzero exactly when some byte of the word is.
-        zero_bits |= word.wrapping_sub(ONES) & !word & HIGHS;
-        high_bits |= word;
+/// Writes a fresh triple-shaped object's three fields, which a fresh object needs no write
+/// barrier for, and a symbol's extra fields.
+#[inline(always)]
+unsafe fn fill_triple(object: Sexp, kind: SexpType, first: Sexp, second: Sexp, third: Sexp) {
+    object.set_car_unbarriered(first);
+    object.set_cdr_unbarriered(second);
+    object.set_tag_unbarriered(third);
+    first.increment_refcount();
+    second.increment_refcount();
+    third.increment_refcount();
+    if kind == SexpType::Symbol {
+        let symbol = object.as_ptr().cast::<SymbolObject>();
+        std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
+        std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
+        std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
     }
-    let mut tail_nul = false;
-    for &byte in chunks.remainder() {
-        tail_nul |= byte == 0;
-        high_bits |= u64::from(byte);
-    }
-    (tail_nul || zero_bits != 0, high_bits & HIGHS == 0)
 }

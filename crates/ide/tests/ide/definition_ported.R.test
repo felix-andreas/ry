@@ -16,7 +16,9 @@ action: Add inferred type annotations for the whole file
   edit 23..23 -> ": T"
   edit 24..24 -> " -> T"
 completion (30): parameter, packageStartupMessage, pairs.default, pairwise.table, parent.frame, parseNamespaceFile, print.data.frame, print.summary.table
-hint @1: <T> fn(parameter: T) -> T
+hint @13<T>
+hint @23: T
+hint @24 -> T
 
 #---- for_variable_use
 wrapper <- function(items) {
@@ -40,7 +42,9 @@ action: Add inferred type annotations for the whole file
   edit 25..25 -> ": T"
   edit 26..26 -> " -> NULL"
 completion (2): item, items
-hint @7: <T> fn(items: T) -> NULL
+hint @19<T>
+hint @25: T
+hint @26 -> NULL
 
 #---- nested_shadow_inner_use
 wrapper <- function() {
@@ -65,9 +69,9 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: fn() -> integer
+hint @21 -> integer
 hint @31: integer
-hint @45: fn() -> integer
+hint @59 -> integer
 hint @71: integer
 
 #---- nested_shadow_outer_use
@@ -91,9 +95,9 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: fn() -> integer
+hint @21 -> integer
 hint @31: integer
-hint @45: fn() -> integer
+hint @59 -> integer
 hint @71: integer
 
 #---- top_level_redefinition_between_uses
@@ -144,7 +148,7 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: fn() -> integer
+hint @21 -> integer
 hint @31: integer
 
 #---- call_head_skips_a_value_binding
@@ -171,9 +175,10 @@ action: Add inferred type annotation for `outer`
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> double"
 completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
-hint @5: fn() -> double
-hint @30: fn(y: T) -> double
-hint @59: fn() -> double
+hint @19 -> double
+hint @44: T
+hint @45 -> double
+hint @73 -> double
 hint @86: character
 
 #---- call_head_falls_through_to_the_package_function
@@ -202,7 +207,11 @@ action: Add inferred type annotations for the whole file
   edit 60..60 -> ": double"
   edit 61..61 -> " -> double"
 completion (38): scale_by, scale, scale.default, cmdscale, apply_scale, sequence.default, setGraphicsEventHandlers, srcfilealias
-hint @8: <T: numeric> fn(x: T, by: T) -> T
-hint @46: fn(x: double) -> double
+hint @20<T: numeric>
+hint @22: T
+hint @26: T
+hint @27 -> T
+hint @60: double
+hint @61 -> double
 hint @74: double
 hint @94by =

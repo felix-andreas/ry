@@ -67,7 +67,7 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 action: Rewrite `:=` with `DataFrame.with_columns`
   edit 57..85 -> "sales <- sales |> DataFrame.with_columns(tax = col(\"amount\") * 0.2)"
-completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
+completion (82): t, team, t.data.frame, t.default, t.test, table, tabulate, tail
 hint @5: DataFrame{team: character[], amount: double[]}
 
 #---- hover_on_a_column_named_by_a_string

@@ -9,6 +9,11 @@
 //! fingerprint (see [`surface`]), and the files its check reached. When every changed file
 //! keeps its surface, only the changed files and the files that reached them are checked again;
 //! any other change checks everything.
+//!
+//! A run checks only the files it was asked about, so the record may hold files with no
+//! findings recorded: the run analysed them only as far as the requested files' checks reached
+//! them. A later run treats such a file as stale. `ry load` relies on this to share the record
+//! with `ry check` while checking only `R/`.
 
 use {
     crate::config::{self, Config},
@@ -33,7 +38,7 @@ use {
 pub const DIRECTORY: &str = ".ry_cache";
 const RECORD: &str = "check.json";
 /// Bumped whenever the record's layout or its reuse rule changes.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 /// Whether a run may read and write the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +77,8 @@ struct RecordedFile {
     dependencies: Vec<u32>,
     /// The NAMESPACE imports the file's code uses, which the NAMESPACE findings depend on.
     tokens: Vec<String>,
-    diagnostics: Vec<RecordedDiagnostic>,
+    /// `None` when the run that wrote the record did not check the file.
+    diagnostics: Option<Vec<RecordedDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,9 +113,10 @@ struct RecordedFix {
 pub enum Plan {
     /// No usable record: check every file.
     Fresh,
-    /// Nothing changed: every file's findings come from the record.
+    /// Nothing changed and every file was checked: every file's findings come from the record.
     Replay(Record),
-    /// Only the files marked stale are checked; the others' findings come from the record.
+    /// Only the files marked stale are checked; the others' findings come from the record. A
+    /// file the recorded run did not check is stale.
     Partial { previous: Record, stale: Vec<bool> },
 }
 
@@ -120,7 +127,8 @@ pub struct FileOutcome<'a> {
     pub surface: Fingerprint,
     pub dependencies: Vec<u32>,
     pub tokens: Vec<String>,
-    pub diagnostics: &'a [Diagnostic],
+    /// `None` for a file this run did not check.
+    pub diagnostics: Option<&'a [Diagnostic]>,
 }
 
 impl Fingerprinter {
@@ -146,6 +154,12 @@ impl Fingerprinter {
 
     pub fn finish(&self) -> Fingerprint {
         Fingerprint(self.fast.finish(), self.sip.finish())
+    }
+}
+
+impl Default for Fingerprinter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -269,7 +283,13 @@ pub fn plan(
         .zip(contents)
         .map(|(recorded, content)| recorded.content != *content)
         .collect();
-    if !changed.contains(&true) {
+    let unchecked = |index: usize| {
+        previous
+            .files
+            .get(index)
+            .is_none_or(|recorded| recorded.diagnostics.is_none())
+    };
+    if !changed.contains(&true) && !(0..previous.files.len()).any(unchecked) {
         return Plan::Replay(previous);
     }
     for (index, recorded) in previous.files.iter().enumerate() {
@@ -283,6 +303,7 @@ pub fn plan(
         .enumerate()
         .map(|(index, recorded)| {
             changed[index]
+                || unchecked(index)
                 || recorded
                     .dependencies
                     .iter()
@@ -293,7 +314,8 @@ pub fn plan(
 }
 
 impl Record {
-    /// The recorded findings of the file at `index`, against this run's files.
+    /// The recorded findings of the file at `index`, against this run's files. `None` for a
+    /// file the recorded run did not check, or whose findings cannot be read back.
     pub fn diagnostics(
         &self,
         index: usize,
@@ -302,6 +324,7 @@ impl Record {
         let recorded = self.files.get(index)?;
         recorded
             .diagnostics
+            .as_ref()?
             .iter()
             .map(|diagnostic| restore(diagnostic, &file_at))
             .collect()
@@ -365,16 +388,21 @@ pub fn record(
     let recorded_files = outcomes
         .into_iter()
         .map(|outcome| {
-            let diagnostics = outcome
-                .diagnostics
-                .iter()
-                .map(|diagnostic| recorded(diagnostic, &positions))
-                .collect::<Option<Vec<_>>>()?;
+            let diagnostics = match outcome.diagnostics {
+                None => None,
+                Some(diagnostics) => Some(
+                    diagnostics
+                        .iter()
+                        .map(|diagnostic| recorded(diagnostic, &positions))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+            };
             // A finding that points into another file shows that file's text.
             let mut dependencies = outcome.dependencies;
             dependencies.extend(
                 diagnostics
                     .iter()
+                    .flatten()
                     .flat_map(|diagnostic| diagnostic.related.iter())
                     .map(|related| related.file),
             );

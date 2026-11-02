@@ -2,32 +2,27 @@
 #@ param LENGTH int 20 200
 #@ param KMER int 2 5
 # Nucleotide sequence utilities.
-#: fn([length]: integer, [seed]: integer) -> character
-random_sequence_@ID@ <- function(length = @LENGTH@L, seed = 15L) {
+random_sequence_@ID@ <- function(length: integer = @LENGTH@L, seed: integer = 15L) -> character {
   set.seed(seed)
   paste(sample(c("A", "C", "G", "T"), length, replace = TRUE), collapse = "")
 }
 
-#: fn(sequence: character) -> character
-reverse_complement_@ID@ <- function(sequence) {
+reverse_complement_@ID@ <- function(sequence: character) -> character {
   complement <- chartr("ACGT", "TGCA", sequence)
   paste(rev(strsplit(complement, "")[[1]]), collapse = "")
 }
 
-#: fn(sequence: character) -> double[]
-gc_content_@ID@ <- function(sequence) {
+gc_content_@ID@ <- function(sequence: character) -> double[] {
   stringr::str_count(sequence, "[GC]") / stringr::str_length(sequence)
 }
 
-#: fn(sequence: character, [k]: integer) -> integer[]
-kmer_counts_@ID@ <- function(sequence, k = @KMER@L) {
+kmer_counts_@ID@ <- function(sequence: character, k: integer = @KMER@L) -> integer[] {
   starts <- seq_len(nchar(sequence) - k + 1L)
   kmers <- stringr::str_sub(sequence, starts, starts + k - 1L)
   sort(table(kmers), decreasing = TRUE)
 }
 
-#: fn(sequence: character, motif: character) -> integer[]
-find_motif_@ID@ <- function(sequence, motif) {
+find_motif_@ID@ <- function(sequence: character, motif: character) -> integer[] {
   matches <- gregexpr(paste0("(?=", motif, ")"), sequence, perl = TRUE)[[1]]
   if (identical(as.integer(matches), -1L)) integer(0) else as.integer(matches)
 }

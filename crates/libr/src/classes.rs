@@ -104,7 +104,7 @@ unsafe fn slot_symbol(name: Sexp) -> ApiResult<Sexp> {
         SexpType::String if crate::vectors::xlength(name)? == 1 => Ok(runtime()
             .heap
             .install_char(crate::vectors::sexp_elt(name, 0)?)?),
-        _ => Err(error(format!("invalid type or length for slot name"))),
+        _ => Err(error("invalid type or length for slot name")),
     }
 }
 

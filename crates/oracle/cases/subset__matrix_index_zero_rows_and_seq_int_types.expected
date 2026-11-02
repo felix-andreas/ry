@@ -12,9 +12,16 @@
 | [1] 4
 | [1] "max 3"
 | [1] "min 1"
+| [1] "(subscript) logical subscript too long"
+| [1] "(subscript) logical subscript too long"
+|      [,1] [,2] [,3] [,4] [,5] [,6]
+| [1,]    1    7   13   19   25   31
+| [2,]    3    9   15   21   27   33
+| [3,]    5   11   17   23   29   35
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| "min 1"
+integer
+| structure(c(1L, 3L, 5L, 7L, 9L, 11L, 13L, 15L, 17L, 19L, 21L, 
+| 23L, 25L, 27L, 29L, 31L, 33L, 35L), dim = c(3L, 6L))

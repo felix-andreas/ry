@@ -10,7 +10,7 @@ default:
 ry *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! output=$(cargo build --color always -q --manifest-path "{{ justfile_directory() }}/Cargo.toml" -p ry-lang -p libr 2>&1); then
+    if ! output=$(cargo build --color always -q --manifest-path "{{ justfile_directory() }}/Cargo.toml" -p ry-lang -p libr -p rcmd 2>&1); then
     	printf '%s\n' "$output" >&2
     	exit 1
     fi
@@ -105,19 +105,19 @@ bench *args:
 
 # Regenerates the benchmark table in why-ry.mdx: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
 bench-why *args:
-    cargo build --release -p ry-lang -p libr
+    cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/why/run.py {{ args }}
 
 # Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
 bench-base *args:
-    cargo build --release -p ry-lang -p libr
+    cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/base/run.py {{ args }}
 
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
 # (`--joins-only` runs the join questions alone).
 bench-table dir *args:
-    cargo build --release -p ry-lang -p libr
+    cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/table/report.py {{ dir }} --write {{ args }}
 
 # Drives `ry repl` through a pty against the system R; skips without R.
@@ -189,7 +189,7 @@ package version target="":
     stage="$dir/ry-$target"
     rm -rf "$stage"
     mkdir -p "$stage"
-    cargo build --release --locked --target "$target" -p ry-lang -p libr
+    cargo build --release --locked --target "$target" -p ry-lang -p libr -p rcmd
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and
@@ -200,13 +200,13 @@ package version target="":
     			echo "error: ry.exe or R.dll imports a toolchain runtime the archive lacks: $runtimes" >&2
     			exit 1
     		fi
-    		cp "$build/ry.exe" "$build/R.dll" LICENSE "$stage/"
-    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe R.dll LICENSE >/dev/null)
+    		cp "$build/ry.exe" "$build/R.dll" "$build/ry-rcmd.exe" LICENSE "$stage/"
+    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe R.dll ry-rcmd.exe LICENSE >/dev/null)
     		;;
     	*)
     		library=libR.so
     		case "$target" in *apple*) library=libR.dylib ;; esac
-    		cp "$build/ry" "$build/$library" LICENSE "$stage/"
+    		cp "$build/ry" "$build/$library" "$build/ry-rcmd" LICENSE "$stage/"
     		tar -czf "$dir/ry-$target.tar.gz" -C "$stage" .
     		;;
     esac
@@ -276,7 +276,7 @@ corpus-sources:
 
 # Run corpus packages' own tests under GNU R and ry's runtime: `just package-tests [--runtime ry] [PKG...]`.
 package-tests *args:
-    cargo build -q --release -p ry-lang -p libr
+    cargo build -q --release -p ry-lang -p libr -p rcmd
     ORACLE_RY=target/release/ry cargo run -q --release -p oracle -- packages {{ args }}
 
 # Assemble ry's R home in .corpus/ry-home: bin/R, bin/Rscript and R CMD run on ry's runtime.
@@ -298,7 +298,7 @@ bench-gen *args:
 
 # Compare generated packages' tests under GNU R and ry's runtime test by test, e.g. `just bench-compare .bench/finbench`.
 bench-compare *args:
-    cargo build -q --release -p ry-lang -p libr -p oracle
+    cargo build -q --release -p ry-lang -p libr -p rcmd -p oracle
     R_LIBS=$PWD/.corpus/library ./target/release/oracle bench --ry target/release/ry {{ args }}
 
 # Run a generated package's tests under GNU R, e.g. `just bench-test .bench/finbench`.
@@ -308,13 +308,13 @@ bench-test package reporter="summary":
 # Differential fuzzing of the runtime: random programs under GNU R, ry's tier 0 and the forced JIT.
 # `just fuzz-differential 0 500` runs seeds 0 to 499; add `ry-gctorture` to the engines for stress.
 fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
-    cargo build -q -p ry-lang -p libr -p oracle
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares them with GNU R instead.
 gc-torture:
-    cargo build -q -p ry-lang -p libr
+    cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases cases_survive_gc_torture -- --nocapture
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with

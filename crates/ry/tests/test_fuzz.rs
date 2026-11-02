@@ -99,7 +99,7 @@ fn position_seeds_hold_invariants() {
 
 #[test]
 fn fuzz_positions() {
-    let mut rng = SplitMix64(0x0ff5_e7);
+    let mut rng = SplitMix64(0x000f_f5e7);
     for _ in 0..fuzz_iterations(2000) {
         let input = match rng.below(2) {
             0 => random_bytes(&mut rng),

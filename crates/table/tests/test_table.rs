@@ -2182,8 +2182,8 @@ fn a_double_sum_over_many_groups_adds_in_row_order() {
             }
         })
         .collect();
-    let mut expected = vec![0.0; groups as usize];
-    let mut seen = vec![false; groups as usize];
+    let mut expected = vec![0.0; groups];
+    let mut seen = vec![false; groups];
     for (key, value) in keys.iter().zip(&values) {
         expected[*key as usize] += value;
         seen[*key as usize] = true;

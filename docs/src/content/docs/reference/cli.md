@@ -76,6 +76,10 @@ what the rest of the project sees also checks every file, for example one that a
 `<<-`, `assign`, `library`, `setClass` or a `#: @type` declaration. A directory with no `ry.toml`
 or `DESCRIPTION`, such as one holding a single downloaded script, gets no cache.
 
+A run checks only the files it was asked about, so `ry check R` records no findings for the files
+in `tests/`, and a later `ry check` checks those files. The strict check of `ry load` asks about
+`R/` alone in the same way and shares the record.
+
 The output is the same with or without the cache. `--no-cache` checks every file without reading or
 writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
 directory, so the record stays out of version control.
@@ -199,8 +203,10 @@ script's status. [Editors](/guides/editors#running-and-debugging) lists the laun
 
 ## debug
 
-`ry debug ast FILE` prints the syntax tree of a file, and `ry debug analysis-stats [PATH]` analyzes
-a workspace and reports where time and memory go. Both are developer aids for working on ry itself.
+`ry debug ast FILE` prints the syntax tree of a file, `ry debug analysis-stats [PATH]` analyzes
+a workspace and reports where time and memory go, and `ry debug erase FILE...` rewrites files in
+place as the plain R that `ry R` runs, with every inline annotation removed. All three are developer
+aids for working on ry itself.
 
 ## Exit codes
 

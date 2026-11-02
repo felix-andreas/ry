@@ -347,6 +347,12 @@ pub(crate) mod gc_bits {
     pub const MARK: u8 = 1 << 0;
     /// In the remembered set: an old object that may point at young objects.
     pub const REMEMBERED: u8 = 1 << 1;
+    /// Survived a collection: the object's mark, which is sticky, was set at least once. Outside
+    /// a collection this agrees with the mark, which lives in a side bitmap for small objects;
+    /// the copy in the header is what lets the write barrier decide from the parent's header
+    /// alone, which a store has in cache, instead of locating its slot in the bitmaps. It is
+    /// never cleared, because a freed slot's next object starts with fresh header bits.
+    pub const OLD: u8 = 1 << 2;
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;

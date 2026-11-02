@@ -33,7 +33,11 @@ illegal dependency unrepresentable.
 - **`ide`** implements the editor features (hover, navigation, rename, call hierarchy, completion,
   inlay hints, signature help, code actions and fixes, symbols and the outline, folding, selection
   ranges, and semantic tokens) as pure reads of `semantics` queries at byte offsets.
-  Anything to do with the editor protocol lives in the server, never here.
+  Anything to do with the editor protocol lives in the server, never here. Reading an installed
+  package's R code is I/O, so the server passes it in as a callback (`completion_with`,
+  `signature_help_with`) rather than the analysis reading the R library itself. Completion ranks
+  names by how often the project uses them, summed over tracked counts per chunk of 32 files, so a
+  keystroke recounts one chunk instead of the whole project.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the

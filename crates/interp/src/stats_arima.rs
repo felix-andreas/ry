@@ -504,9 +504,7 @@ pub unsafe fn arima_like(call: &NativeCall<'_>) -> R<Sexp> {
             anew[i] = value;
         }
         if d > 0 {
-            for i in r + 1..rd {
-                anew[i] = a[i - 1];
-            }
+            anew[r + 1..rd].copy_from_slice(&a[r..rd - 1]);
             let mut value = a[0];
             for i in 0..d {
                 value += delta[i] * a[r + i];

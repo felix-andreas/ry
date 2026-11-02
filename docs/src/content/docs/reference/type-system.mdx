@@ -344,8 +344,12 @@ these rules:
   `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
   `character`, `raw`, and `NULL` admit values of that type, and each numeric type also admits the
-  types below it in the promotion order, as the checker does. A list type admits any list, a
-  function type any function, and a union any of its members. Vector shape, element types, and
+  types below it in the promotion order, as the checker does. A parameter whose type admits
+  `integer` also admits a `double` scalar holding a whole number, because the checker accepts a
+  whole-number literal there (`f(10)` for `n: integer`) and storage cannot tell a literal from a
+  computed value; a return value gets no such allowance. A list type admits any R list, a
+  `Record{...}` or `Tuple{...}` type any ry record or tuple, a function type any function, and a
+  union any of its members. Vector shape, element types, and
   attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
   parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
   have the annotated type.
@@ -778,7 +782,10 @@ way. Every union, written or inferred, is normalized:
 - Member order does not affect meaning. Rendering keeps first-occurrence order, except that `NULL`
   always renders last.
 - A union whose members collapse to one type is that type, so `integer | integer` is `integer`.
-- A union with an `Any` member is `Any`, because every value already satisfies `Any`.
+- A union with an `Any` member is `Any`, because every value already satisfies `Any`. So an `if`
+  whose branch is `Any` is `Any` (`if (is.null(f)) order else f` with `f <- attr(x, "f")`), and
+  not the other branch's type. A variable that two paths write is different: it keeps the typed
+  path's type, so a later use of it is still checked.
 - Otherwise, a union with an `Unknown` member is `Unknown`.
 
 A call's result drops a union member that is a type parameter of the called function when the
@@ -1798,6 +1805,15 @@ A `logical` argument satisfies the numeric requirement, because R promotes it, s
 `cost <- function(price, rate) price * rate` accepts `cost(TRUE, 0.5)` and `cost(1L, 0.5)`. Mixed
 arguments widen in R's order, `logical` to `integer` to `double`, so both calls are `double`. A
 union of numbers widens to its widest member, so `cost(1L, if (fine) 0.5 else 1L)` is `double` too.
+A `matrix` absorbs any number, logical or numeric vector the same way, because R's arithmetic gives a
+matrix: with `weigh <- function(a, H) a * H`, both `weigh(2, m)` and `weigh(m, 2)` are `matrix`. A
+matrix's element type is not tracked, so a character matrix is absorbed too.
+
+An argument that is itself still generic, such as the parameter `H` in
+`outer <- function(H) weigh(2, H)`, is constrained to be numeric rather than pinned to the literal's
+`double`, so `outer` is `<T: numeric> fn(H: T) -> double` and accepts a vector or a matrix. The result
+keeps the literal's `double`, which is exact for a scalar argument and approximate for a vector or
+matrix one. A declared numeric type parameter is accepted the same way.
 
 ### Operator methods on a class
 
@@ -2358,6 +2374,11 @@ a local variable or parameter, the recognized guards are:
   matches. The true branch keeps every member, because the field itself may hold `NULL`. So
   `url <- list()`, a loop that fills `url`, and then `if (is.null(url$scheme)) stop(...)` leave
   `url` as the filled record.
+- `length(x)` as a condition, or `length(x)` compared with a numeric literal, removes `NULL` from `x`'s union
+  in whichever branch a length of zero cannot reach. So after
+  `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
+  `if (0 < length(range))` drops it in the true branch. `length(range) < 3` admits zero and refines
+  nothing.
 - `!cond` swaps the two branches.
 
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists
@@ -2765,9 +2786,11 @@ scoping.
   any shipped export manifest outside R's own packages, stays inactive until the project uses the
   package, and a `pkg::name` read does not count as use. The read is still accepted, because
   `pkg::name` loads a package without attaching it, so a script may use a package that way alone.
-  Until the package is used, the name is not validated and types as `Unknown`, so in a script with
-  no `library(dplyr)` and no `DESCRIPTION`, both `dplyr::mutate` and a misspelled `dplyr::mutat`
-  pass.
+  Until the package is used, the read types as `Unknown`, but its name is still checked against
+  the package's shipped export manifest and stubs, so in a script with no `library(dplyr)` and no
+  `DESCRIPTION`, `dplyr::mutate` passes and a misspelled `dplyr::mutat` warns "not exported". A
+  shipped package with typed stubs but no export manifest is not checked this way, because its
+  stubs may describe only part of it.
 - A project stub that overrides a shipped name's type does not remove the name from its shipped
   namespace, so `stats::sd` stays valid under an `sd` override.
 - A qualified read that could not be validated types as `Unknown`, and is a strict-mode origin.
@@ -2978,12 +3001,47 @@ with_transaction <- function(con, body) {
 }
 ```
 
+A string template reads too. glue and cli evaluate each `{...}` segment of a string in the calling
+frame, and so does any wrapper that forwards `parent.frame()`, so a name inside the braces of any
+string literal keeps the binding it would resolve to alive. Such a name is never reported as
+unresolved, because the string may be plain text. `{{` is glue's escaped brace, a segment that opens
+with `.` is cli markup whose style name is not a read (`{.path {file}}` reads only `file`), a segment
+that opens with `?` is cli pluralization text, and a name after `$`, `@` or `::` is a member:
+
+```r
+report <- function(files) {
+  n <- length(files)          # read by the template, not a dead store
+  cli::cli_inform("Found {n} file{?s}: {.path {files}}")
+}
+```
+
 #### Names bound at run time
 
 In a file that calls `R6Class`, the names `self`, `private`, and `super` resolve and type as
-`Unknown`, because R6 creates those bindings when an object is constructed. The recognition is
-syntactic, so a local binding that shadows `R6Class` is not honored, and it is scoped to the file, so
-a file that defines no R6 class still warns about `self`.
+`Unknown`, because R6 creates those bindings when an object is constructed. So do they inside a
+method added with `Gen$set("public", "name", function(...) ...)` in any file. Elsewhere, a file
+that defines no R6 class still warns about `self`. The recognition is syntactic, so a local binding
+that shadows `R6Class` is not honored.
+
+A Reference Class method runs in its object's frame, which sits between the method body and the
+package namespace. Inside a method that `setRefClass(methods = list(...))` or
+`Gen$methods(...)` defines, a field or method of the class therefore resolves and types as
+`Unknown`, and it shadows a top-level function of the same name:
+
+```r
+getBaseFont <- function(wb) wb$font
+Workbook <- setRefClass("Workbook", fields = c(font = "character"))
+Workbook$methods(getBaseFont = function() font)
+Workbook$methods(widths = function() nchar(getBaseFont()))  # the method, so no `wb` is needed
+```
+
+The members are the names in `fields` and `methods`, the names that `Gen$fields(...)` and
+`Gen$methods(...)` add anywhere in the project, those of every superclass in `contains` that the
+project defines, `.self`, and the methods every object inherits (`callSuper`, `initFields`, `copy`,
+`field`, `show` and the rest of `envRefClass`). A misspelled member is still an unresolved name. A
+class with a superclass the project does not define, or a `Gen$methods(...)` call on a generator
+the project does not bind to `setRefClass`, has members ry cannot see, so its methods resolve every
+name.
 
 Inside any function body, the S3 dispatch variables `.Generic`, `.Method`, `.Class`, `.Group`,
 `.GenericCallEnv`, and `.GenericDefEnv` resolve and type as `Unknown`, because `UseMethod`,
@@ -3086,7 +3144,11 @@ strict-mode origin. The recognized masks are:
   formal first (`data` for the `with` pair, `x` for `subset`, `_data` for `transform`), and the
   remaining positional arguments fill what is left, so `with(speed > 20, data = frame)` masks the
   condition. The `base::` spelling masks exactly like the bare one, while another package's export of
-  the same name masks nothing.
+  the same name masks nothing. Each masked argument is its own scope, because R evaluates it in an
+  environment made from the data: `within(d, total <- a + b)` binds `total` there, never in the
+  caller, and such a write is never reported as unused. The results are typed: `subset` keeps a data
+  frame, a matrix, or a vector's element type, `transform` and `within` give a `data.frame`, and
+  `with` gives `Any`, since its value is whatever its expression computes.
 - A call to a [`@masked`](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat) stub
   declaration.
 
@@ -3279,7 +3341,14 @@ unresolved
 ```
 
 This is an `unresolved` warning rather than a type error, because R looks a non-column up in the
-enclosing scope, so only a name nothing defines is certainly wrong. `.N`, `.GRP`, and `.NGRP` are
+enclosing scope, so only a name nothing defines is certainly wrong.
+
+When the columns are not known, a local whose value is `NULL` reads as a column of unknown type.
+Packages write `time <- nTest <- NULL` before `dt[nTest > 0][order(-time)]` only to silence
+R CMD check's "no visible binding" note, so the `NULL` is never the value the query reads. The same
+holds inside `[` on a value of no known shape (an unannotated parameter, an `Unknown` result), which
+may be a data.table, and it covers everything inside the brackets, nested calls and functions
+included. On a vector, `values[order(-time)]` still reports the `NULL`. `.N`, `.GRP`, and `.NGRP` are
 `integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns, or the
 columns `.SDcols` selects (see [Every column at once](#every-column-at-once)). A called
 name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A
@@ -3580,6 +3649,12 @@ Four packages have shipped stubs that do not join name resolution by default:
 - `ggplot2`, with the `ggplot` and `gg` nominals, `+.ggplot`, the geoms and scales, and the `@masked`
   `aes`;
 - `testthat`, with the expectations and `test_that`.
+
+`tidyr` and `tibble` are conditional the same way. Their shipped stubs declare only the `@masked`
+verbs (`pivot_longer`, `drop_na`, `unnest`, `tibble`, `add_column` and the rest), and every other
+export comes from the package's export manifest. A column selection such as
+`pivot_longer(d, cols = c(a, b))` and a later column read such as `tibble(x = 1:3, y = x * 2)` are
+therefore not unresolved names.
 
 R does not attach these packages by default either, and their names must not suppress typo warnings
 in projects that never use them. So a conditional namespace activates only when:

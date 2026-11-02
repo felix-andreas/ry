@@ -97,6 +97,12 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 		printf 'cat(sum(matrix(1:6, 2) %%*%% matrix(1:6, 3)), solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)), "\\n")\n' >linalg.R
 		output=$("$ry" run linalg.R 2>&1 | tr -d '\r') || true
 		if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi
+		# `ry load` compiles a package's src/ with the ry-rcmd it finds beside the runtime.
+		if [ -x "$scratch/install/ry-rcmd" ] || [ -x "$scratch/install/ry-rcmd.exe" ]; then
+			pass "the archive carries ry-rcmd beside the runtime"
+		else
+			fail "the archive carries no ry-rcmd beside the runtime"
+		fi
 	else
 		echo "skip  ry run (this archive carries no runtime)"
 	fi
