@@ -2585,7 +2585,19 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   the site's feedback, and hands off to tier 0 otherwise. `$` had to join `base_primitive`'s list,
   or every site compiled as a general call. 5,000,000 iterations of `s <- s + p$x * p$y + p$z`
   take 0.074 s on a record against 1.83 s on a list (0.055 s with locals), profiling build.
-  Tuple `[[i]]` and tag payloads read through `match` still take the generic path.
+- **Item, constructor and `match` sites.** `x[[k]]` with a constant `k` compiles to `Op::Item`
+  with the same `[layout, slot]` shape cache (`records::cached_item`); a list or vector subject
+  falls through to `[[`'s path. Constructor calls (`.ry_record`, `.ry_tuple`, `.ry_tag`) whose
+  names are distinct intern their layout at compile time and compile to `Op::Construct`; a
+  payload-free tag is one shared constant. A guard-free `match` compiles to `MatchShape`,
+  `MatchTag`, `MatchLiteral` and `Slot` tests, sets the arm's bindings only after the whole
+  pattern matched (as the special does), and ends in `MatchFail` with the special's error; a
+  `match` with a guard stays with the special. The JIT branches on kind, layout and tag natively
+  and reads slots through `Intrinsic::Field`; `Construct` is an opaque pure step. Profiling
+  build, against the build before these sites: 5,000,000 `t[[2L]]` reads 2.27 s to 0.026 s
+  (`r$b` 0.026 s, list `l[[2L]]` 0.83 s); 2,000,000 three-arm tag `match`es 1.29 s to 0.57 s
+  (`switch` on a list's `$kind` 1.10 s); 2,000,000 `:Ok(i)` constructions 0.69 s to 0.13-0.23 s
+  (`list(kind =, v =)` 0.35 s).
 - **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
   the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
   keeps its slot count in header padding, so the collector never reads the layout table.
