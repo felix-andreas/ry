@@ -2289,10 +2289,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
       `format`/`strptime` do not recycle the format.
     - The fancy-regex backtrack limit is unbounded, so a catastrophic POSIX pattern can hang.
     - `iconv(sub = , "ASCII//TRANSLIT")`.
-  - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
-    `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
-    0.036 between `besselI` results), an F value in nlme's `anova`, gmp's `factorialZ` and
-    `asNumeric` precision, the C symbols of commonmark, and openssl's bignum "not valid integer".
+  - Smaller classes: Bessel's `IJKY.R` (a relative difference of 0.036 between `besselI`
+    results), an F value in nlme's `anova`, 12 of data.table's `test.data.table()` tests
+    (901.2, 1138.2, 2125.03, 2125.05, 2211.119, 2211.24, 2211.349, 2252.1, 2258.4, 2258.5,
+    2291.1, 2300.4), and four tinytest failures in RcppSimdJson.
+  - A process the oracle kills at its deadline leaves an empty `.Rout`, because ry buffers
+    stdout; reproduce a hang with `ry run` in the background and `gdb -p` to see where it is.
   - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
@@ -2373,9 +2375,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
-- **Indexing a compact sequence materializes it.** `1:n`, `seq_len` and `seq_along` of at least
-  2^20 elements are compact ALTREP objects, but `x[i]` and `x[[i]]` on one expand the whole
-  vector, because subsetting does not call `Elt` or `Extract_subset` (the item above).
+- **Indexing a compact sequence materializes it.** `1:n`, `n:1`, `seq_len` and `seq_along` of at
+  least 2^20 elements are compact ALTREP objects (`sequence` in `crates/interp/src/arith.rs`;
+  doubles past `INT_MAX`), but `x[i]` and `x[[i]]` on one expand the whole vector once, keeping
+  the expansion in data2, because subsetting does not call `Elt` or `Extract_subset` (the item
+  above). Subsetting `seq_len(2^31)` therefore allocates 16 GB where GNU R reads elements.
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function

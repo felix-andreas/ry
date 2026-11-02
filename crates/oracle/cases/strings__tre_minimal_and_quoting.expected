@@ -1,0 +1,24 @@
+[stdout]
+| [1] "aXb"
+| [1] "aXb"
+| [1] "aXb"
+| [1] "aXbXb"
+| [1] "aXbXb"
+| [1] "aXbbb"
+| [1] "xaaa"
+| [1] "-----BEGIN C-----\nAAA\n-----END C-----"
+| [2] "-----BEGIN C-----\nB\n-----END C-----"  
+| [1]  TRUE FALSE
+| [1] FALSE  TRUE
+| [1] TRUE
+| [1] "<>b"   "(41 b" "x41)" 
+| [1] "X"  "ab"
+| [1] 1
+| [1] 20 20
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 1L

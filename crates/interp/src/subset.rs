@@ -3055,7 +3055,7 @@ pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
 }
 
 /// `na_tags` marks the arguments whose tag stands for an NA name; it may be shorter than `args`.
-unsafe fn combine_args(
+pub unsafe fn combine_args(
     args: &[Arg],
     na_tags: &[bool],
     recursive: bool,
@@ -3679,8 +3679,24 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     if symbol == symbols.class {
         return crate::dispatch::set_class_attribute(object, value);
     }
-    if symbol == symbols.row_names && value.kind() == SexpType::Integer {
-        // Row names 1:n are stored compactly, as GNU R does.
+    if symbol == symbols.row_names {
+        return set_row_names(object, value);
+    }
+    values::set_attr(object, symbol, value)
+}
+
+/// GNU R's `row_names_gets`: row names `1:n`, and the double `c(NA, n)` that `dput()` writes
+/// and C code builds, are stored in the compact integer form `c(NA, -n)` (or `c(NA, n)`).
+pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
+    let symbol = symbols().row_names;
+    let value =
+        if value.kind() == SexpType::Real && length(value) == 2 && values::reals(value)[0].is_nan()
+        {
+            coerce_vector(value, SexpType::Integer)?
+        } else {
+            value
+        };
+    if value.kind() == SexpType::Integer {
         let data = values::ints(value);
         let compact = !data.is_empty()
             && data
@@ -3775,6 +3791,12 @@ unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     for pass in 0..2 {
         for index in 0..length(attributes) {
             let name = names.element(index);
+            if name != values::na_string() && name.bytes().is_empty() {
+                return Err(call.error(format!(
+                    "all attributes must have names [{} does not]",
+                    index + 1
+                )));
+            }
             let is_dim = name.bytes() == b"dim";
             if (pass == 0) != is_dim {
                 continue;
@@ -4284,10 +4306,12 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             }
         }
     }
-    let (items, expressions): (Vec<Arg>, Vec<Sexp>) = items
+    // Errors and warnings name an argument by its position in the call, NULLs included.
+    let (items, positions): (Vec<Arg>, Vec<usize>) = items
         .into_iter()
-        .zip(expressions)
-        .filter(|(arg, _)| arg.value != nil())
+        .enumerate()
+        .filter(|(_, arg)| arg.value != nil())
+        .map(|(position, arg)| (arg, position + 1))
         .unzip();
     if items.is_empty() {
         return Ok(nil());
@@ -4301,22 +4325,37 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         kind = SexpType::Logical;
     }
     // The extent along the bound dimension.
-    let mut extent = 0usize;
-    for arg in &items {
-        if let Some(dims) = values::dims(arg.value).filter(|dims| dims.len() == 2) {
-            extent = if by_row { dims[1] } else { dims[0] };
-            break;
-        }
-    }
-    if extent == 0 {
-        extent = items.iter().map(|arg| length(arg.value)).max().unwrap_or(0);
-    }
+    // The first matrix fixes it, even at zero; without one, the longest vector does.
+    let has_matrix = items
+        .iter()
+        .any(|arg| values::dims(arg.value).is_some_and(|dims| dims.len() == 2));
+    let extent = items
+        .iter()
+        .find_map(|arg| {
+            values::dims(arg.value)
+                .filter(|dims| dims.len() == 2)
+                .map(|dims| if by_row { dims[1] } else { dims[0] })
+        })
+        .unwrap_or_else(|| items.iter().map(|arg| length(arg.value)).max().unwrap_or(0));
     let mut pieces: Vec<(Sexp, usize, bool)> = Vec::new();
     let mut total = 0usize;
     let mut warned = false;
-    for (position, arg) in items.iter().enumerate() {
+    // The warning names the `rbind` or `cbind` closure call, not the internal.
+    let frames = &crate::interp().frames;
+    let closure_call = frames
+        .iter()
+        .rposition(|frame| frame.env == call.env)
+        .map_or(call.call, |position| frames[position].call);
+    for (arg, &position) in items.iter().zip(&positions) {
         match values::dims(arg.value).filter(|dims| dims.len() == 2) {
             Some(dims) => {
+                if (if by_row { dims[1] } else { dims[0] }) != extent {
+                    let direction = if by_row { "columns" } else { "rows" };
+                    // Reported against the `rbind` or `cbind` closure call, as GNU R does.
+                    return Err(crate::unwind::error(format!(
+                        "number of {direction} of matrices must match (see arg {position})"
+                    )));
+                }
                 let count = if by_row { dims[0] } else { dims[1] };
                 pieces.push((arg.value, count, true));
                 total += count;
@@ -4329,27 +4368,21 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     pieces.push((arg.value, 0, false));
                     continue;
                 }
+                // A vector longer than a matrix's extent is truncated, which GNU R warns about
+                // even when the extent is zero.
                 let uneven = source_length > 0
-                    && extent > 0
                     && (if source_length > extent {
-                        source_length % extent
+                        has_matrix || source_length % extent != 0
                     } else {
-                        extent % source_length
-                    }) != 0;
+                        extent % source_length != 0
+                    });
                 if uneven && !warned {
                     warned = true;
                     let direction = if by_row { "columns" } else { "rows" };
-                    // The warning names the `rbind` or `cbind` closure call, not the internal.
-                    let frames = &crate::interp().frames;
-                    let closure_call = frames
-                        .iter()
-                        .rposition(|frame| frame.env == call.env)
-                        .map_or(call.call, |position| frames[position].call);
                     crate::conditions::warning_call(
                         closure_call,
-                        format!(
-                            "number of {direction} of result is not a multiple of vector length (arg {})",
-                            position + 1
+                        &format!(
+                            "number of {direction} of result is not a multiple of vector length (arg {position})"
                         ),
                     )?;
                 }
@@ -4411,7 +4444,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     other_names = dimnames.element(if by_row { 1 } else { 0 });
                 }
             } else {
-                let expression = expressions[position];
+                // Positions count from 1 over the call's arguments, which `expressions` mirrors.
+                let expression = expressions[positions[position] - 1];
                 let name = if arg.tag != nil() {
                     symbol_name(arg.tag).into_owned()
                 } else if deparse_level >= 1 && expression.kind() == SexpType::Symbol {
