@@ -6105,16 +6105,9 @@ unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
                 if [x0, x1, y0, y1].iter().any(|value| !value.is_finite()) {
                     continue;
                 }
-                push_shape(
-                    device,
-                    clip,
-                    Shape::Path {
-                        points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                        closed: true,
-                        fill,
-                        stroke: None,
-                    },
-                )?;
+                // Each cell is a device rectangle, as in GNU R, so a device that snaps
+                // borderless rectangles to its pixel grid (ragg) leaves no seams.
+                push_rect(device, clip, [x0, y0, x1, y1], fill, None)?;
             }
         }
         Ok(())
