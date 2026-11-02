@@ -341,13 +341,6 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   state$s4_deferred <- NULL
   .ry_restore_s4_tables(state)
   ns <- state$ns
-  rm(list = deferred$names[deferred$names %in% names(ns)], envir = ns)
-  # The attached package environment shares the placeholder bindings, and the methods package
-  # searches it too, so a copy left there would make the definitions read their own placeholder.
-  if (!is.null(state$package_env)) {
-    environment <- state$package_env
-    rm(list = deferred$names[deferred$names %in% names(environment)], envir = environment)
-  }
   held <- .Internal(ryLoaderDeferred(state$root))
   loading <- !is.null(state$s4_cursor)
   previous <- options(topLevelEnvironment = ns)
@@ -360,7 +353,16 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   cache <- if (!loading && !is.null(deferred$cache_key)) {
     .ry_s4_cache(ns, deferred$cache_key, held$cache)
   }
-  if (!.ry_restore_s4(ns, cache)) {
+  # Restoring overwrites the placeholders, and one left in the attached package environment
+  # now finds the restored value, so only a run, or a name the restored file lacks, needs them
+  # gone. Removing a binding from a large frame is slow, which is why a restore skips it.
+  restored <- .ry_restore_s4(ns, cache)
+  .ry_remove_s4_placeholders(state, if (isTRUE(restored)) {
+    setdiff(deferred$names, attr(restored, "names_bound"))
+  } else {
+    deferred$names
+  })
+  if (!isTRUE(restored)) {
     before <- names(ns)
     signalled <- FALSE
     withCallingHandlers(
@@ -421,7 +423,17 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     return(FALSE)
   }
   list2env(saved$values, envir = ns)
-  TRUE
+  structure(TRUE, names_bound = names(saved$values))
+}
+
+# The attached package environment shares the placeholder bindings, and the methods package
+# searches it too, so a copy left there would make the definitions read their own placeholder.
+.ry_remove_s4_placeholders <- function(state, names) {
+  for (environment in list(state$ns, state$package_env)) {
+    if (length(names) && !is.null(environment)) {
+      rm(list = names[names %in% names(environment)], envir = environment)
+    }
+  }
 }
 
 # Saves the bindings the held-back definitions made, replacing the file atomically so that a
