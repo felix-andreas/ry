@@ -3574,6 +3574,8 @@ pub unsafe fn platform() -> R<Sexp> {
 }
 
 unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
+    // GNU R reports the file its BLAS routines came from.
+    let blas = crate::linalg::blas_library_path().unwrap_or_default();
     let entries = [
         ("zlib", "1.3"),
         ("bzlib", ""),
@@ -3583,7 +3585,7 @@ unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
         ("TRE", ""),
         ("iconv", "glibc"),
         ("readline", ""),
-        ("BLAS", ""),
+        ("BLAS", blas.as_str()),
     ];
     let result = string_vector(
         &entries

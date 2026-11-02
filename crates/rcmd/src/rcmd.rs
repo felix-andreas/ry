@@ -35,6 +35,10 @@ mod headers {
     include!(concat!(env!("OUT_DIR"), "/headers.rs"));
 }
 
+mod makeconf;
+
+use makeconf::{expand_make, make_assignments};
+
 #[derive(Debug)]
 pub enum Error {
     Io(PathBuf, io::Error),
@@ -217,17 +221,50 @@ impl Toolchain {
     }
 
     /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
-    /// On Linux that is [`Toolchain::default`]. On macOS it is the one GNU R's own
-    /// `etc/Makeconf` names, because the compilers and libraries vary by installer: CRAN's R
-    /// uses Apple's clang, the gfortran in `/opt/gfortran` and its own `libRblas`, Homebrew's
-    /// uses Homebrew's gcc and OpenBLAS, and neither has a usable default.
+    /// On macOS it is the one GNU R's own `etc/Makeconf` names, because the compilers and
+    /// libraries vary by installer: CRAN's R uses Apple's clang, the gfortran in `/opt/gfortran`
+    /// and its own `libRblas`, Homebrew's uses Homebrew's gcc and OpenBLAS, and neither has a
+    /// usable default. On Linux it is [`Toolchain::default`] linking the BLAS and LAPACK that
+    /// `Makeconf` names (see [`Toolchain::with_makeconf_libraries`]). On Windows it is Rtools.
     pub fn for_gnu_r_home(gnu_r_home: &Path) -> Result<Toolchain> {
-        if !cfg!(target_os = "macos") {
+        if cfg!(windows) {
             return Ok(Toolchain::default());
         }
         let path = gnu_r_home.join("etc").join("Makeconf");
         let text = fs::read_to_string(&path).map_err(io_error(&path))?;
-        Ok(Toolchain::from_makeconf(&text, gnu_r_home))
+        Ok(if cfg!(target_os = "macos") {
+            Toolchain::from_makeconf(&text, gnu_r_home)
+        } else {
+            Toolchain::default().with_makeconf_libraries(&text, gnu_r_home)
+        })
+    }
+
+    /// This toolchain linking the BLAS and LAPACK that GNU R's `Makeconf` names, where it names
+    /// one. A distribution's R names the bare `-lblas` and `-llapack` the default has, but an R
+    /// on a system without a global library path records where they are (nixpkgs writes
+    /// `-L/nix/store/...-blas-3/lib -lblas`), and the linker finds them nowhere else. An empty
+    /// `LAPACK_LIBS` beside a set `BLAS_LIBS` is kept: GNU R then takes LAPACK from the BLAS,
+    /// which packages link after `$(LAPACK_LIBS)` anyway.
+    pub fn with_makeconf_libraries(self, text: &str, gnu_r_home: &Path) -> Toolchain {
+        let variables = make_assignments(text);
+        let home = gnu_r_home.display().to_string();
+        let get = |name: &str| {
+            expand_make(
+                variables.get(name).map_or("", String::as_str),
+                &variables,
+                &home,
+                0,
+            )
+        };
+        let blas_libs = get("BLAS_LIBS");
+        if blas_libs.is_empty() {
+            return self;
+        }
+        Toolchain {
+            blas_libs,
+            lapack_libs: get("LAPACK_LIBS"),
+            ..self
+        }
     }
 
     /// Reads a toolchain from the text of GNU R's `Makeconf`, expanding `$(VAR)` references
@@ -266,120 +303,6 @@ impl Toolchain {
             openmp: get("SHLIB_OPENMP_CFLAGS"),
         }
     }
-}
-
-/// The `NAME = value` assignments of a makefile, with backslash continuations joined. `+=`
-/// appends and `?=` assigns only once, as make does.
-fn make_assignments(text: &str) -> BTreeMap<String, String> {
-    let mut variables = BTreeMap::new();
-    let mut logical = String::new();
-    for line in text.lines() {
-        // make joins a continuation and the whitespace around it into one space.
-        let line = if logical.is_empty() {
-            line
-        } else {
-            line.trim_start()
-        };
-        if let Some(stripped) = line.strip_suffix('\\') {
-            logical.push_str(stripped.trim_end());
-            logical.push(' ');
-            continue;
-        }
-        logical.push_str(line);
-        let statement = std::mem::take(&mut logical);
-        if statement.starts_with(['\t', '#']) {
-            continue;
-        }
-        let Some((name, value)) = statement.split_once('=') else {
-            continue;
-        };
-        // A `#` starts a comment anywhere on an assignment line, as in make.
-        let value = value.split('#').next().unwrap_or("").trim().to_owned();
-        let (name, operator) = match name.trim_end().strip_suffix(['+', '?', ':']) {
-            Some(stripped) => (stripped.trim(), name.trim_end().chars().last()),
-            None => (name.trim(), None),
-        };
-        if name.is_empty() || name.contains(char::is_whitespace) {
-            continue;
-        }
-        match operator {
-            Some('+') => {
-                let entry: &mut String = variables.entry(name.to_owned()).or_default();
-                if !entry.is_empty() {
-                    entry.push(' ');
-                }
-                entry.push_str(&value);
-            }
-            Some('?') => {
-                variables.entry(name.to_owned()).or_insert(value);
-            }
-            _ => {
-                variables.insert(name.to_owned(), value);
-            }
-        }
-    }
-    variables
-}
-
-/// Expands `$(NAME)` and `${NAME}` in `value`, including a name built by a nested reference
-/// (`$(CXX$(STD))`), and `$$` to `$`. An unknown name expands to nothing, as in make, and the
-/// depth bound stops a self-referencing assignment. Whitespace inside the value is kept, so a
-/// quoted path with a space survives.
-fn expand_make(
-    value: &str,
-    variables: &BTreeMap<String, String>,
-    home: &str,
-    depth: usize,
-) -> String {
-    let mut expanded = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(start) = rest.find('$') {
-        expanded.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let (open, close) = match after.chars().next() {
-            Some('(') => ('(', ')'),
-            Some('{') => ('{', '}'),
-            Some('$') => {
-                expanded.push('$');
-                rest = &after[1..];
-                continue;
-            }
-            _ => {
-                expanded.push('$');
-                rest = after;
-                continue;
-            }
-        };
-        let mut level = 0usize;
-        let end = after.char_indices().find_map(|(index, character)| {
-            if character == open {
-                level += 1;
-            } else if character == close {
-                level -= 1;
-                if level == 0 {
-                    return Some(index);
-                }
-            }
-            None
-        });
-        let Some(end) = end else {
-            expanded.push_str(&rest[start..]);
-            rest = "";
-            break;
-        };
-        let name = expand_make(&after[1..end], variables, home, depth + 1);
-        let name = name.as_str();
-        if name == "R_HOME" {
-            expanded.push_str(home);
-        } else if depth < 16
-            && let Some(inner) = variables.get(name)
-        {
-            expanded.push_str(&expand_make(inner, variables, home, depth + 1));
-        }
-        rest = &after[end + 1..];
-    }
-    expanded.push_str(rest);
-    expanded.trim().to_owned()
 }
 
 /// Where the pieces of an R home come from.
@@ -2188,6 +2111,30 @@ SHLIB_OPENMP_CFLAGS =
         assert_eq!(toolchain.cppflags, "-I/opt/R/arm64/include");
         assert_eq!(toolchain.ldflags, "-L/opt/R/arm64/lib");
         assert_eq!(toolchain.openmp, "", "Apple's clang has no OpenMP");
+    }
+
+    #[test]
+    fn a_linux_toolchain_links_the_blas_and_lapack_gnu_r_makeconf_names() {
+        let home = Path::new("/nix/store/abc-R-4.5.2/lib/R");
+        let nix = "BLAS_LIBS = -L/nix/store/def-blas-3/lib -lblas\n\
+                   LAPACK_LIBS = -L/nix/store/ghi-lapack-3/lib -llapack\n";
+        let toolchain = Toolchain::default().with_makeconf_libraries(nix, home);
+        assert_eq!(toolchain.blas_libs, "-L/nix/store/def-blas-3/lib -lblas");
+        assert_eq!(
+            toolchain.lapack_libs,
+            "-L/nix/store/ghi-lapack-3/lib -llapack"
+        );
+        assert_eq!(toolchain.cc, Toolchain::default().cc);
+        let internal = "BLAS_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRblas\nLAPACK_LIBS =\n";
+        let toolchain = Toolchain::default().with_makeconf_libraries(internal, home);
+        assert_eq!(
+            toolchain.blas_libs,
+            "-L\"/nix/store/abc-R-4.5.2/lib/R/lib\" -lRblas"
+        );
+        assert_eq!(toolchain.lapack_libs, "");
+        let toolchain = Toolchain::default().with_makeconf_libraries("CC = gcc\n", home);
+        assert_eq!(toolchain.blas_libs, "-lblas");
+        assert_eq!(toolchain.lapack_libs, "-llapack");
     }
 
     #[test]
