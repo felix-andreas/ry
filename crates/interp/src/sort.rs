@@ -1210,23 +1210,29 @@ impl SortKey<'_> {
 
 /// The stable order of `count` rows by `keys`, the first key most significant: a least
 /// significant digit radix sort, one key at a time from the last, each over only the digits
-/// its range spans. Each pass gathers its key's values in the current order, so the values and
-/// the order move together through the digit passes as two parallel arrays.
+/// its range spans.
+///
+/// A dense key sorts in one counting pass that reads the key twice rather than buffering it.
+/// A wider key gathers its values in the current order, shifted to start at zero, so the values
+/// and the order move together through the digit passes as two parallel arrays. The values take
+/// 32 bits when the key's range fits, which covers integers, factor codes and string ranks, so
+/// at a million rows the scratch is 16 MB instead of 24 MB; only doubles need 64.
 fn radix_order(keys: &[SortKey<'_>], count: usize) -> Vec<u32> {
-    const BITS: u32 = 11;
-    const BUCKETS: usize = 1 << BITS;
     let mut order: Vec<u32> = (0..count as u32).collect();
     let mut spare_order: Vec<u32> = Vec::new();
-    let mut values: Vec<u64> = Vec::with_capacity(count);
-    let mut spare_values: Vec<u64> = Vec::new();
-    let mut histogram = vec![0usize; BUCKETS];
+    let mut narrow = (Vec::new(), Vec::new());
+    let mut wide = (Vec::new(), Vec::new());
+    let mut histogram = Vec::new();
     for key in keys.iter().rev() {
-        values.clear();
-        values.extend(order.iter().map(|&index| key.get(index as usize)));
-        let Some(&low) = values.iter().min() else {
+        let Some((low, high)) = order.iter().map(|&index| key.get(index as usize)).fold(
+            None,
+            |range: Option<(u64, u64)>, value| match range {
+                Some((low, high)) => Some((low.min(value), high.max(value))),
+                None => Some((value, value)),
+            },
+        ) else {
             continue;
         };
-        let high = values.iter().copied().max().unwrap_or(low);
         let span = high - low;
         if span == 0 {
             continue;
@@ -1237,53 +1243,86 @@ fn radix_order(keys: &[SortKey<'_>], count: usize) -> Vec<u32> {
         if span < count.max(1 << 16) as u64 {
             histogram.clear();
             histogram.resize(span as usize + 2, 0);
-            for &value in &values {
-                histogram[(value - low) as usize + 1] += 1;
+            for &index in &order {
+                histogram[(key.get(index as usize) - low) as usize + 1] += 1;
             }
             for bucket in 1..histogram.len() {
                 histogram[bucket] += histogram[bucket - 1];
             }
-            for (&value, &index) in values.iter().zip(&order) {
-                let bucket = &mut histogram[(value - low) as usize];
+            for &index in &order {
+                let bucket = &mut histogram[(key.get(index as usize) - low) as usize];
                 spare_order[*bucket] = index;
                 *bucket += 1;
             }
             std::mem::swap(&mut order, &mut spare_order);
-            histogram.clear();
-            histogram.resize(BUCKETS, 0);
-            continue;
-        }
-        for value in &mut values {
-            *value -= low;
-        }
-        spare_values.resize(count, 0);
-        let digits = (u64::BITS - span.leading_zeros()).div_ceil(BITS);
-        for digit in 0..digits {
-            let shift = digit * BITS;
-            histogram.fill(0);
-            for &value in &values {
-                histogram[((value >> shift) as usize) & (BUCKETS - 1)] += 1;
-            }
-            if histogram.iter().any(|&bucket| bucket == count) {
-                continue;
-            }
-            let mut start = 0;
-            for bucket in histogram.iter_mut() {
-                let size = *bucket;
-                *bucket = start;
-                start += size;
-            }
-            for (&value, &index) in values.iter().zip(&order) {
-                let bucket = &mut histogram[((value >> shift) as usize) & (BUCKETS - 1)];
-                spare_values[*bucket] = value;
-                spare_order[*bucket] = index;
-                *bucket += 1;
-            }
-            std::mem::swap(&mut values, &mut spare_values);
-            std::mem::swap(&mut order, &mut spare_order);
+        } else if let Ok(span) = u32::try_from(span) {
+            narrow.0.clear();
+            narrow.0.extend(
+                order
+                    .iter()
+                    .map(|&index| (key.get(index as usize) - low) as u32),
+            );
+            digit_passes(
+                span,
+                (&mut narrow.0, &mut narrow.1),
+                (&mut order, &mut spare_order),
+                &mut histogram,
+            );
+        } else {
+            wide.0.clear();
+            wide.0
+                .extend(order.iter().map(|&index| key.get(index as usize) - low));
+            digit_passes(
+                span,
+                (&mut wide.0, &mut wide.1),
+                (&mut order, &mut spare_order),
+                &mut histogram,
+            );
         }
     }
     order
+}
+
+/// Sorts `order` stably by `values`, its parallel array of keys from zero to `span`, with one
+/// counting pass per 11-bit digit the span covers. A digit every value shares is skipped.
+fn digit_passes<Value: Copy + Default + Into<u64>>(
+    span: Value,
+    (values, spare_values): (&mut Vec<Value>, &mut Vec<Value>),
+    (order, spare_order): (&mut Vec<u32>, &mut Vec<u32>),
+    histogram: &mut Vec<usize>,
+) {
+    const BITS: u32 = 11;
+    const BUCKETS: usize = 1 << BITS;
+    let count = order.len();
+    spare_values.resize(count, Value::default());
+    histogram.clear();
+    histogram.resize(BUCKETS, 0);
+    let digits = (u64::BITS - span.into().leading_zeros()).div_ceil(BITS);
+    for digit in 0..digits {
+        let shift = digit * BITS;
+        let bucket_of = |value: Value| ((value.into() >> shift) as usize) & (BUCKETS - 1);
+        histogram.fill(0);
+        for &value in values.iter() {
+            histogram[bucket_of(value)] += 1;
+        }
+        if histogram.iter().any(|&bucket| bucket == count) {
+            continue;
+        }
+        let mut start = 0;
+        for bucket in histogram.iter_mut() {
+            let size = *bucket;
+            *bucket = start;
+            start += size;
+        }
+        for (&value, &index) in values.iter().zip(order.iter()) {
+            let bucket = &mut histogram[bucket_of(value)];
+            spare_values[*bucket] = value;
+            spare_order[*bucket] = index;
+            *bucket += 1;
+        }
+        std::mem::swap(values, spare_values);
+        std::mem::swap(order, spare_order);
+    }
 }
 
 /// Compares two rows key by key. A key of a type that cannot be ordered is recorded in
