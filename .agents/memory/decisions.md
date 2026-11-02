@@ -5446,7 +5446,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   one query, which is exactly what the data-oriented rule says should come from an arena.
 - **Target shape.**
   - The checker's maps are `hashbrown` maps allocated in a `bumpalo::Bump` (`ArenaMap`,
-    `ArenaSet` in `crates/semantics/src/check.rs`). The arenas live in a per-thread pool; it is a
+    `ArenaSet` in `crates/semantics/src/check.rs`), through an `Arena` adapter that implements
+    std's `Allocator`. Bumpalo's `allocator-api2` impl does not work here, because the JIT turns
+    on hashbrown's `nightly` feature and that switches every hashbrown map in a workspace build
+    to std's trait; bumpalo's own `allocator_api` feature is no way out either, since it breaks
+    Cranelift's register allocator. The arenas live in a per-thread pool; it is a
     stack, not one arena, because an item check can start a nested check (a callee's interface)
     while its own arena is live. An arena is reset, not freed, when its check returns, so a
     thread reuses the same chunks for every item.

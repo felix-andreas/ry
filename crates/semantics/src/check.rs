@@ -38,10 +38,12 @@ use {
     hashbrown::{HashMap, HashSet},
     rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet},
     std::{
+        alloc::{AllocError, Allocator, Layout},
         borrow::Cow,
         cell::RefCell,
         mem,
         ops::Range,
+        ptr::NonNull,
         rc::Rc,
         sync::atomic::{AtomicUsize, Ordering},
     },
@@ -651,24 +653,24 @@ fn check_item_in<'db>(
         table,
         frame_level: 0,
         discarded_if: None,
-        parameter_hints: HashMap::with_hasher_in(FxBuildHasher, arena),
-        hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, arena),
+        parameter_hints: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         expression_annotations: {
-            let mut annotations = HashMap::with_hasher_in(FxBuildHasher, arena);
+            let mut annotations = HashMap::with_hasher_in(FxBuildHasher, Arena(arena));
             annotations.extend(expression_annotations.iter().cloned());
             annotations
         },
         environment: Environment::default(),
         scheme_arena: Vec::new(),
         recorded: RecordedTypes(vec![None; module.expression_count()]),
-        recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, arena),
-        recorded_expectations: HashMap::with_hasher_in(FxBuildHasher, arena),
-        recorded_loop_variables: HashMap::with_hasher_in(FxBuildHasher, arena),
-        selected_overloads: HashMap::with_hasher_in(FxBuildHasher, arena),
-        callee_targets: HashMap::with_hasher_in(FxBuildHasher, arena),
-        masked_reads: HashSet::with_hasher_in(FxBuildHasher, arena),
+        recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        recorded_expectations: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        recorded_loop_variables: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        selected_overloads: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        callee_targets: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        masked_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         column_scopes: Vec::new(),
-        column_misses: HashMap::with_hasher_in(FxBuildHasher, arena),
+        column_misses: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         query_depth: 0,
         errors: Vec::new(),
         record_strict_origins,
@@ -678,19 +680,19 @@ fn check_item_in<'db>(
         call_first_var: 0,
         return_frames: Vec::new(),
         pending_enclosing_writes: Vec::new(),
-        forward_captured: HashSet::with_hasher_in(FxBuildHasher, arena),
-        capture_joins: HashMap::with_hasher_in(FxBuildHasher, arena),
+        forward_captured: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        capture_joins: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         capture_repass_needed: false,
-        superassign_seeds: HashMap::with_hasher_in(FxBuildHasher, arena),
-        pre_materialized: HashMap::with_hasher_in(FxBuildHasher, arena),
-        no_default_formals: HashSet::with_hasher_in(FxBuildHasher, arena),
-        defaulted_formals: HashSet::with_hasher_in(FxBuildHasher, arena),
-        non_local_slots: HashMap::with_hasher_in(FxBuildHasher, arena),
-        string_values: HashMap::with_hasher_in(FxBuildHasher, arena),
+        superassign_seeds: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        pre_materialized: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        no_default_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        defaulted_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        string_values: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         value_read_slots: None,
-        computed_slots: HashSet::with_hasher_in(FxBuildHasher, arena),
-        lookup_slots: HashSet::with_hasher_in(FxBuildHasher, arena),
-        valued_slots: HashSet::with_hasher_in(FxBuildHasher, arena),
+        computed_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        lookup_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        valued_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         super_assigned: super_assigned_names(module),
         next_non_local_slot: naming
             .bindings
@@ -1075,8 +1077,24 @@ impl<'db> Environment<'db> {
 
 /// A map whose table lives in the check's arena: the working maps grow and rehash many times
 /// per item, and the arena frees every superseded table in one step when the check ends.
-type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, &'a Bump>;
-type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, &'a Bump>;
+type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, Arena<'a>>;
+type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, Arena<'a>>;
+
+/// The check's bump arena as a std allocator, whose frees are no-ops because the arena is reset
+/// when the check ends. It implements std's trait rather than relying on bumpalo's
+/// `allocator-api2` one, because the workspace's JIT turns on hashbrown's `nightly` feature,
+/// which switches every hashbrown map in the build to std's trait.
+#[derive(Clone, Copy)]
+struct Arena<'a>(&'a Bump);
+
+unsafe impl Allocator for Arena<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let pointer = self.0.try_alloc_layout(layout).map_err(|_| AllocError)?;
+        Ok(NonNull::slice_from_raw_parts(pointer, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, _pointer: NonNull<u8>, _layout: Layout) {}
+}
 
 struct Checker<'db, 'a> {
     db: &'db dyn Db,
@@ -7605,7 +7623,7 @@ impl<'db> Checker<'db, '_> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
         let saved_seeds = mem::replace(
             &mut self.superassign_seeds,
-            HashMap::with_hasher_in(FxBuildHasher, self.arena),
+            HashMap::with_hasher_in(FxBuildHasher, Arena(self.arena)),
         );
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
@@ -8232,7 +8250,7 @@ impl<'db> Checker<'db, '_> {
         let arena = self.arena;
         self.value_read_slots
             .get_or_insert_with(|| {
-                let mut slots = HashSet::with_hasher_in(FxBuildHasher, arena);
+                let mut slots = HashSet::with_hasher_in(FxBuildHasher, Arena(arena));
                 slots.extend(
                     naming
                         .resolutions
