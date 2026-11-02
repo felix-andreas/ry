@@ -6101,3 +6101,43 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
+
+## Refactorings refuse rather than guess, and a seeded property check holds them to it
+
+- `ide::refactors` (`crates/ide/src/refactor.rs`) offers extract variable, extract function,
+  inline variable and annotation conversion. Each one is offered only where the rewrite keeps
+  evaluation: extract variable refuses a statement that would evaluate the expression repeatedly,
+  conditionally or never (loop or function bodies, `if` branches, the right of `&&`/`||`), and
+  `is_quoted` refuses code under a formula or a quoting call. Extract function refuses `return()`,
+  `<<-`, `...` and frame-inspecting calls. Inline refuses when a read name is reassigned before the
+  last use or a call would run more than once.
+- Text that only parses as one expression inside its old context is parenthesized
+  (`needs_grouping`: a `?`, or a reparse that is not exactly one node), because `value <- d?f`
+  and a multi-line operand chain change meaning when moved out.
+- Two edits at one offset are merged into one: LSP clients disagree on the order of same-offset
+  inserts, so a definition inserted at the statement start plus a replacement there must be one
+  edit.
+- `ide::testing::check_refactor_invariants` (driven by `crates/ide/tests/test_fuzz.rs`) applies
+  every action at every node range and asserts determinism, non-overlapping edits, a clean reparse
+  and no new unresolved names. It runs without stubs: with them one seed took 17 s instead of
+  1.3 s, and unresolved-name reporting does not need them. The parse and resolution invariants run
+  only on input that parsed cleanly, because mutated input already has errors the rewrite cannot
+  be blamed for.
+
+## Call-head completion ranks by call counts, not spelling counts
+
+- **Before.** Completion ranked equally good matches by how often the name is spelled in the
+  project, so at two characters on a call head testthat's `expect_*` (spelled in every test)
+  beat the package's own functions.
+- **Shape.** The per-file name-use fold (`SpelledNames`) also counts names in call-head position
+  (directly or as `pkg::name`), and `finish_completions` ranks a call-head completion by
+  `(calls, spellings)`, the file's own counts weighted as before. No new project-wide state: the
+  counts ride the existing per-file fold.
+
+## Call hierarchy and workspace symbols are measured against the reference oracle
+
+- `ry debug analysis-stats` checks incoming and outgoing calls of a sample of project top-level
+  functions (defined exactly once) against the independent lexical resolver that already checks
+  references: every oracle global site that is a call head is an expected call, grouped by the
+  enclosing top-level definition. Workspace symbols are checked by querying each sampled
+  definition's exact name and a half-length prefix (at least 3 characters).
