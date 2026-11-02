@@ -2849,6 +2849,7 @@ impl Matcher {
                 first,
                 longest,
                 shortest,
+                ..
             } => {
                 let Some(found) = first.search(&Input::new(text).range(from..)) else {
                     return Ok(None);
