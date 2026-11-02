@@ -82,13 +82,6 @@ False reports on correct R, worst first:
   `is_loaded(package)`, and `imports_env()` tests `is_loaded()` itself before
   `parent.env(ns_env(package))`: 1 corpus report). Correct under the `T | NULL` rule, but R code
   relies on it.
-- **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
-  above `amount <- df$amount` still reports the origin and tells the user to "add a type
-  annotation"; only `# ry: allow(strict)` clears it.
-- **Strict mode reports `if (x < 0) stop("negative")`.** The `stop()` call in an `if` without `else`
-  is reported as an undetermined type, which puts a strict finding on the most common guard in R.
-- **Strict mode misses two `Unknown` sources.** R6 objects (`Acc$new()`) and values from packages
-  known only by an export list (`library(purrr); map(...)`) are `Unknown` and never reported.
 
 Smaller gaps:
 
@@ -96,8 +89,6 @@ Smaller gaps:
   unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
   message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
   "did you mean".
-- After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
-  finding.
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
@@ -617,7 +608,7 @@ effectively a two-core number.
 
 ### A first strict `ry load` costs the strict check's wall time
 
-- On typed finbench (4 cores), a load with no usable check record takes 2.0 to 2.2 s at full size, against 0.6 to 1.2 s untyped and 0.6 to 0.7 s after `ry check`; at 60,000 lines it is 0.45 to 0.55 s against 0.25 to 0.35 s untyped (`decisions.md`, "The strict load check analyses only the package"). The check skips tests and scripts and frees its memos off the verdict path, so what is left is checker CPU: at 60,000 lines the check alone is about 0.85 CPU-s (parse about 100 ms, `item_annotations` 63 ms, `file_annotation_references` 48 ms, folds 43 ms, parse-stage diagnostics 40 ms, HIR 39 ms, lints 37 ms). Lowering the thread's priority and changing the worker count were measured without gain, so the lever left is the analysis core's own speed.
+- On typed finbench (4 cores), a load with no usable check record takes 1.6 to 1.9 s at full size, against 0.4 to 0.9 s untyped and 0.6 to 0.7 s after `ry check`; at 60,000 lines it is 0.45 to 0.55 s against 0.25 to 0.35 s untyped (`decisions.md`, "The strict load check analyses only the package"). The check skips tests and scripts and frees its memos off the verdict path, so what is left is checker CPU: at 60,000 lines the check alone is about 0.85 CPU-s (parse about 100 ms, `item_annotations` 63 ms, `file_annotation_references` 48 ms, folds 43 ms, parse-stage diagnostics 40 ms, HIR 39 ms, lints 37 ms). Lowering the thread's priority and changing the worker count were measured without gain, so the lever left is the analysis core's own speed. At full size the loader reports about 1.26 s, most of it waiting for the verdict, and the check of the 502 package files alone costs about 3.0 CPU-s (`ry check R --no-cache` takes 0.9 to 1.0 s; an `R/`-only copy of the project costs the same, so tests are already out of it). A `perf` profile of that check is flat: salsa bookkeeping (`QueryEdge` inserts, `SyncTable::try_claim`, `add_read`, interning) is about 21% of self time, mimalloc and page faults about 12%, the lexer and tree building about 6%, and no checker function exceeds 2%. So the next cut is structural: fewer tracked queries per item (each of the 50,000 items mints about a dozen memos, plus per-name `frame_binder`, `package_name` and `global_scheme` memos), not a hot loop.
 
 ### Corpus reports that more precise types now reach
 

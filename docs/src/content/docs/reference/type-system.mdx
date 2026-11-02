@@ -2613,9 +2613,14 @@ That selection cannot be modelled statically, but the call is still checked in f
 
 The source is evaluated once, before the first iteration, and the loop does not change its type. The
 loop variable is re-initialized from the source on every iteration, so an assignment to it in the
-body does not carry over into the next iteration. After the loop, R keeps the variable's last value.
-A read of it there is `Unknown` and is not reported, inside a function or at the top level of a
-file, and not even in strict mode. Typing it as the element type is a known gap.
+body does not carry over into the next iteration.
+
+After the loop, R keeps the variable's last value, or sets it to `NULL` when the source was empty.
+A read there is therefore the element type joined with `NULL`, and with whatever the body assigns
+to the variable. A `from:to` range always has at least one element, so after
+`for (i in 1:n) {}` the variable `i` is `integer`, while after `for (value in x) {}` with
+`x: double[]` it is `double | NULL`. A loop at the top level of a file leaves its variable bound
+like a top-level assignment, so a later statement or item reads the same type.
 
 ### `while`
 
@@ -2855,9 +2860,11 @@ Manifests follow the way R exposes each namespace:
 - A conditional namespace's manifest activates together with its stubs (see
   [conditional stub namespaces](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat)).
   While the namespace is inactive, its names stay unknown, bare and qualified alike.
-- A read satisfied only by an import still counts as a use for the unused check. A bare read of such
-  a name is not a strict-mode origin, which is a known gap; a qualified `pkg::name` read with no
-  known type is.
+- A read satisfied only by an import still counts as a use for the unused check. A read with no
+  known type, bare or qualified, is a strict-mode origin, whether it is a call or a value read such
+  as `template <- glue`.
+- A base operator read as a value, such as `` `+` `` in ``Reduce(`+`, xs)``, is
+  `fn(e1: Any, [e2]: Any) -> Any`, because its result depends on the operands' classes.
 
 ### Replacement-form assignment
 
@@ -3704,7 +3711,8 @@ out of the parts decided at run time from a value's class attribute:
   [replacement-form assignment](#replacement-form-assignment) of its base variable.
 - `R6Class(...)`, `$new(...)`, and R6 fields and methods are not modeled and are `Unknown`; `self`,
   `private`, and `super` are covered under [names bound at run time](#names-bound-at-run-time).
-  Strict mode does not report R6 values yet, because `R6Class` is known only from an export list.
+  In strict mode, an R6 value is an origin where it is first bound, as in
+  `account <- Account$new()`.
 
 ### Declaring a checked type for your own classes
 
