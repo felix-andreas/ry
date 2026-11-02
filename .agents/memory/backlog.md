@@ -350,6 +350,9 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
+- Qualified library calls are not fast-pathed: `library_function`/`library_call` in
+  `crates/interp/src/bytecode.rs` recognize only a bare symbol, so `std::List.map` (the only spelling
+  with `[check] prelude = false`) misses the compile-time leaf resolution and the JIT loops.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
@@ -436,7 +439,7 @@ protects construction but nothing after it.
 
 - The runtime checks that atomic items share one type but not that ry-value items do, so
   `[(x = 1), [1]]` builds at run time; only the checker rejects it.
-- `List` functions added to `standard_library.rs` need an Array overload in `types/ry.Rtypes`, and
+- `List` functions added to `standard_library.rs` need an Array overload in `types/std.Rtypes`, and
   any that reuse their first argument's storage must not reuse an Array's.
 - `class(xs)` is R's implicit class (`numeric`), and serialization (`saveRDS`) drops the flag, so
   a reloaded Array is a plain vector.

@@ -221,9 +221,9 @@ so `Dict.to_list` and `Dict.walk` are deterministic.
 
 ## Typing
 
-The signatures live in a shipped stub file, `types/ry.Rtypes`, read as the stubs of a namespace
-named `ry`. That namespace is always active, like `base`, so the names resolve in every file and
-hover names `ry` as their home. Every signature is a rank-1 generic in the existing type grammar:
+The signatures live in a shipped stub file, `types/std.Rtypes`, read as the stubs of a namespace
+named `std`. That namespace is always active, like `base`, and the prelude puts its names in scope
+in every file unless `[check] prelude = false`; hover names `std` as their home. Every signature is a rank-1 generic in the existing type grammar:
 
 ```
 @alias Result<T, E> {:Ok(T) | :Err(E)}

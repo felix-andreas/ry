@@ -3229,8 +3229,8 @@ first lines R had already read, leaving R mid-command.
   `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so
   plain R cannot change meaning. Module names are Roc's; a Roc name that already means something
   else in R is renamed (`Result.try` is `Result.and_then`).
-- **One source of truth per side:** the types live once in `types/ry.Rtypes` (namespace `ry`,
-  always active), and the runtime functions live once in `crates/interp/src/standard_library.rs`,
+- **One source of truth per side:** the types live once in `types/std.Rtypes` (namespace `std`,
+  always active, in scope by bare name through the prelude), and the runtime functions live once in `crates/interp/src/standard_library.rs`,
   registered with `BuiltinDef::accepting_native`. A test asserts the two name sets are equal and
   that every declared parameter name is accepted at run time.
 - **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
@@ -3979,7 +3979,7 @@ contract.
 - **Runtime representation.** An Array is an ordinary R vector carrying the heap flag `flag_bits::ARRAY` (`crates/heap/src/object.rs`): atomic storage for scalar items, a VECSXP for ry-value items. A separate object type was rejected because every C API accessor, `sum()`, and the JIT already read the unboxed storage, so converting to R is free (drop the flag) and nothing has to learn a new layout. Setting any attribute clears the flag, which keeps "no attributes" true without checks at every attribute write. `values::duplicate` and `shallow_duplicate` drop the flag on the copy (nested Arrays keep theirs), because a copier is about to write and a builtin or C code may write an `NA`; only `arrays::writable` re-flags a copy, after checking the write.
 - **One place enforces the rules.** `crates/interp/src/arrays.rs` validates construction, operators (`arith.rs` wraps each builtin in `strict`), indexing and replacement, then flags the result. The bytecode fast paths and the JIT's type guard refuse a flagged operand, so they can never skip a check; a dedicated Array feedback kind is backlog work.
 - **R code keeps working on Arrays.** Reads follow R's positions wherever R gives no `NA` (negative positions, zeros), and everything that would produce `NA` is an error. A replacement that is not an item of the item type (an `NA`, an R vector, another type) does not error: the result is the plain R vector R would build, so base functions such as `ifelse()` that assign into an argument keep working. An operator works the same way: an operand that is not an Array and not a single item of the item type makes R's operator run and return a plain vector (`arrays::check_operands`), because base `str()` computes `ob - signif(ob, digits)` and `signif()` returns a plain vector. Typed code cannot reach that path because the checker rejects the value; the rules the checker cannot see (bounds, no recycling) stay runtime errors, so a typed `Array<T>` never holds a plain vector.
-- **`List` results.** A `List` function returns an Array only when its collection argument (`list`, `first`, `lists`) is one, never because an item argument is. A callback's result type is bound by the `item` constraint (`types/ry.Rtypes`), so the checker rejects `List.map` to a non-item instead of failing at run time.
+- **`List` results.** A `List` function returns an Array only when its collection argument (`list`, `first`, `lists`) is one, never because an item argument is. A callback's result type is bound by the `item` constraint (`types/std.Rtypes`), so the checker rejects `List.map` to a non-item instead of failing at run time.
 - **Checker.** `Array<T>` fits `T[]` (atomic items) or `list[T]` (ry-value items), never the reverse, so Arrays pass to R code and R vectors need `as.Array()`. A DataFrame stores an Array column as its plain vector, so `column_type` maps `Array<T>` to `T[]`.
 - **Impact.** No duplicated state: the flag is the single source of truth for strictness, and the checker's type and the runtime flag agree by construction. Pinned by `crates/semantics/tests/typing/arrays.R.test`, `crates/interp/tests/test_arrays.rs` (including a generated round trip) and Array seeds in both fuzzers.
 
@@ -6687,3 +6687,28 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Incremental.** The server path keeps every memo and firewall; only the tracked names changed
   (`parse_memo`, `item_syntax_memo`, `item_annotation_syntax_memo`), and `test_incremental.rs`
   pins the first two under those names.
+
+## The standard library is the `std` namespace, with an optional prelude
+
+- **Previous shape:** the library's signatures lived in `types/ry.Rtypes` beside the DataFrame API, in
+  the always-active namespace `ry`, so every name was always in scope and `ry::List.map` was the only
+  qualified spelling. Its per-function reference was a hand-written copy of the stub docs in
+  `reference/standard-library.mdx`, which drifted from the declarations.
+- **Prior art:** Roc auto-imports its builtin modules with no opt-out; Rust has `std::prelude` and
+  `#![no_implicit_prelude]`; Gleam has no prelude and imports explicitly. R already reads `pkg::name`
+  as namespace access, so the Rust shape fits without new syntax.
+- **Chosen shape:** the library is its own namespace, `std` (`types/std.Rtypes`, `types/std.exports`;
+  `ry` keeps the DataFrame API and Arrays). `std::Name` always resolves. `[check] prelude`, default
+  `true`, additionally puts the bare names in scope; `false` makes a bare name unbound (with a fix to
+  `std::Name`) unless the project defines it. Types (`Result`, `Dict`, `Set`, `Array`) stay in scope,
+  because they are type syntax, not namespace members. The checker gates bare lookups through
+  `stubs::outside_prelude`, which reads the setting only for library names, so flipping it rechecks
+  only items that use the library (`test_incremental.rs`). The runtime binds both namespaces and
+  attaches `package:std` only with the prelude on; the host passes the setting as the negative flag
+  `RUN_FLAG_NO_PRELUDE`, so `R CMD` and older hosts keep the prelude.
+- **Docs:** `crates/semantics/tests/test_std_docs.rs` renders `docs/.../reference/std/` from
+  `types/std.Rtypes` and fails when the committed pages are stale (`just docs-std` rewrites them), so the
+  declarations are the single source of truth for the checker, hover and the docs.
+- **Impact:** one source of truth for the API docs; no new syntax; incremental cost bounded to items
+  that use the library. Gap: compiled code fast-paths only bare library calls, so `std::List.map`
+  is not fast-pathed or JIT-looped (`backlog.md`).

@@ -89,7 +89,7 @@ nominal gives `Unknown` rather than an error, so value-dependent access stays us
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
-An opaque type may take type parameters, as `@type Dict<K, V>` does in `types/ry.Rtypes`. Its
+An opaque type may take type parameters, as `@type Dict<K, V>` does in `types/std.Rtypes`. Its
 parameters are invariant, so a `Dict<character, double>` is neither a `Dict<character, Any>` nor
 the other way around, and `Dict<K, V>` in a signature binds both parameters at a call.
 
