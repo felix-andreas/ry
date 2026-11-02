@@ -1402,23 +1402,12 @@ fn fuzz_stdlib_traversals_agree_with_model() {
     // library in Rust. Tier 0 and compiled code must both give the model's value, so a hand-off
     // from the loop (an `NA` answer, an overflow, an element of another type, a collection that
     // is not one, an Array, which fails the loop's type guard as an ALTREP list does) must still
-    // end where the model says. `STDLIB_FUZZ_SEED` replays one case.
-    let base = std::env::var("STDLIB_FUZZ_SEED")
-        .ok()
-        .and_then(|seed| seed.parse::<u64>().ok());
-    let iterations = if base.is_some() {
-        1
-    } else {
-        fuzz_iterations(300)
-    };
-    let replaying = base.is_some();
-    let base = base.unwrap_or(0x5eed_0000);
+    // end where the model says.
     with_interpreter(|| {
-        let mut errors = 0;
-        for case in 0..iterations {
-            let seed = base.wrapping_add(case as u64);
+        let (mut runs, mut errors) = (0, 0);
+        for_each_seed(300, |seed| {
             let mut rng = SplitMix64(seed);
-            let (call, model) = stdlib_case(&mut rng);
+            let (body, model) = stdlib_case(&mut rng);
             // The model's value is rendered as R source, and what that evaluates to is the
             // value both tiers must give.
             let wanted = match &model {
@@ -1426,28 +1415,34 @@ fn fuzz_stdlib_traversals_agree_with_model() {
                 // SAFETY: the interpreter is installed.
                 value => unsafe { run(&render(value)) },
             };
-            let body = call;
+            runs += 1;
             errors += usize::from(model == Model::Error);
             // SAFETY: the interpreter is installed.
-            let (reference, compiled) = unsafe { outcomes(4_000_000 + case, &body, "()") };
-            let replay = format!(
-                "replay with STDLIB_FUZZ_SEED={seed} cargo test -p jit --test test_tiers fuzz_stdlib"
-            );
-            assert_eq!(reference, wanted, "tier 0 on {body}\n{replay}");
+            let (reference, compiled) = unsafe { outcomes(4_000_000 + seed as usize, &body, "()") };
+            // The model knows values only, so tier 0's warnings are left out of that
+            // comparison; compiled code must match tier 0 warnings included.
+            let value: Vec<&str> = reference
+                .lines()
+                .filter(|line| !line.starts_with("warning: "))
+                .collect();
+            let value = value.join("\n");
+            // The model says that a call fails, not with which message.
+            let value = if value.starts_with("error") {
+                "error".to_owned()
+            } else {
+                value
+            };
+            assert_eq!(value, wanted, "tier 0 on {body}");
             for (run, outcome) in compiled.iter().enumerate() {
-                assert_eq!(
-                    outcome,
-                    &wanted,
-                    "compiled call {} on {body}\n{replay}",
-                    run + 1
-                );
+                assert_eq!(outcome, &reference, "compiled call {} on {body}", run + 1);
             }
-        }
-        eprintln!("{errors} of {iterations} stdlib cases expected an error");
-        // A replayed case may be one that expects an error, so only a whole run is checked.
+        });
+        // Cases that expect an error compare less, so most must give a value. A replay of one
+        // seed says nothing about the share.
+        eprintln!("{errors} of {runs} stdlib cases expected an error");
         assert!(
-            replaying || errors * 2 < iterations.max(2),
-            "too many failing cases"
+            runs < 50 || errors * 2 < runs,
+            "{errors} of {runs} stdlib cases expected an error"
         );
     });
 }
