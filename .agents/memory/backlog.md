@@ -3069,5 +3069,14 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check is about 1.45 s on 4 cores and already uses about 3.4 of them, so the 1 s cold target
-  needs about a third less CPU work. The levers are in "Benchmark code bases (measured)".
+- A cold check is about 1.45-1.6 s on 4 cores and already uses about 3.4 of them, so the 1 s cold
+  target needs about a third less CPU work. Under callgrind the finance bench went from 27.6 to
+  24.6 G instructions with: direct descent in `node_at`, green walks for `write_tokens`, a node-only
+  `walk_green` (syntax lints 2.1 to 1.06 G, syntax sites 0.82 to 0.66 G), a per-check memo of type
+  definitions, and a formal-use walk that tracks only the formals. Wall time did not move outside the
+  machine's noise. What is left is flat: item checking 11.05 G (45%, `infer_ordinary_call` 5.7 G,
+  argument matching 1.75 G, `InferenceTable::resolve` 1.8 G), parse inside `file_attached_namespaces`
+  4.2 G (rowan's node cache, `flush_deferred_trivia`, the lexer), HIR lowering 3.7 G, naming
+  `resolve` 0.88 G, mimalloc about 4.5 G spread over all of them, and salsa's dependency edges about
+  0.7 G. A real third needs the checker's per-call allocations gone (argument targets, scheme clones,
+  `match_arguments` vectors) and a cheaper tree build, not more local cuts.
