@@ -75,10 +75,13 @@ macro_rules! distributions {
         math($args, $interface, $vectors, $function)
     };
     (@call random integer $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, true, $function)
+        random_vector($args, $interface, true, $function, None)
     };
     (@call random real $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, false, $function)
+        random_vector($args, $interface, false, $function, None)
+    };
+    (@call random normal $function:expr, $args:expr, $interface:expr) => {
+        random_vector($args, $interface, false, $function, Some(fill_rnorm))
     };
 }
 
@@ -173,7 +176,7 @@ distributions! {
     "rnbinom" 3 random integer |s, v| rnbinom(s, v[0], v[1]);
     "rnbinom_mu" 3 random real |s, v| rnbinom_mu(s, v[0], v[1]);
     "rnchisq" 3 random real |s, v| rnchisq(s, v[0], v[1]);
-    "rnorm" 3 random real |s, v| rnorm(s, v[0], v[1]);
+    "rnorm" 3 random normal |s, v| rnorm(s, v[0], v[1]);
     "runif" 3 random real |s, v| runif(s, v[0], v[1]);
     "rweibull" 3 random real |s, v| rweibull(s, v[0], v[1]);
     "rwilcox" 3 random integer |s, v| rwilcox(s, v[0], v[1]);
@@ -328,6 +331,10 @@ unsafe fn flag(value: Sexp) -> R<i32> {
     Ok(ints(integer)[0])
 }
 
+/// Fills a whole result with draws at the first parameter set, or declines with `false` so the
+/// caller draws one at a time.
+type BatchFill = unsafe fn(&mut [f64], &[f64; 3]) -> bool;
+
 /// GNU R's `random1` to `random3`: `n` is a count, or the length of a longer vector, and the
 /// parameters recycle over it. Missing parameters give `NA`s, and every NaN drawn raises "NAs
 /// produced". The stats routines return the discrete generators' counts as integers when they
@@ -336,7 +343,8 @@ unsafe fn random_vector(
     args: &[Arg],
     interface: Interface,
     integer: bool,
-    function: fn(&mut SessionDeviates, &[f64; 3]) -> R<f64>,
+    function: impl Fn(&mut SessionDeviates, &[f64; 3]) -> R<f64>,
+    batch: Option<BatchFill>,
 ) -> R<Sexp> {
     let count = random_count(argument(args, 0))?;
     let parameters = args.len().saturating_sub(1).min(3);
@@ -351,14 +359,14 @@ unsafe fn random_vector(
         lengths[index] = length(original);
     }
     let integer = integer && interface == Interface::Stats;
-    // The draws go straight into the result, so a large `n` costs one vector rather than a
-    // scratch buffer and a copy.
+    // Every element is written below before anything reads the vector, and a failed draw
+    // returns the error, so the vector starts unzeroed.
     let result = alloc_uninit(SexpType::Real, count)?;
     let drawn = reals_mut(result);
     if count > 0 && lengths[..parameters].contains(&0) {
         drawn.fill(NA_REAL);
         warning("NAs produced")?;
-        return integer_if_requested(result, integer);
+        return random_result(result, integer);
     }
     if count > 0 {
         random::get_rng_state()?;
@@ -369,17 +377,20 @@ unsafe fn random_vector(
         for index in 0..parameters {
             arguments[index] = reals(operands[index])[0];
         }
-        for (element, slot) in drawn.iter_mut().enumerate() {
-            if !scalar {
-                for index in 0..parameters {
-                    arguments[index] = reals(operands[index])[element % lengths[index]];
+        let batched = scalar && batch.is_some_and(|batch| batch(drawn, &arguments));
+        if !batched {
+            for (element, slot) in drawn.iter_mut().enumerate() {
+                if !scalar {
+                    for index in 0..parameters {
+                        arguments[index] = reals(operands[index])[element % lengths[index]];
+                    }
                 }
-            }
-            match function(&mut deviates, &arguments) {
-                Ok(value) => *slot = value,
-                Err(failure) => {
-                    outcome = Err(failure);
-                    break;
+                match function(&mut deviates, &arguments) {
+                    Ok(value) => *slot = value,
+                    Err(failure) => {
+                        outcome = Err(failure);
+                        break;
+                    }
                 }
             }
         }
@@ -390,7 +401,7 @@ unsafe fn random_vector(
             warning("NAs produced")?;
         }
     }
-    integer_if_requested(result, integer)
+    random_result(result, integer)
 }
 
 /// The number of draws `n` asks for: the value of a scalar, or the length of a longer vector.
@@ -422,22 +433,37 @@ unsafe fn random_count(value: Sexp) -> R<usize> {
     Ok(count as usize)
 }
 
-/// The draws in `result` as an integer vector when the distribution counts and every draw fits,
-/// which is what GNU R's `rbinom` and friends return.
-unsafe fn integer_if_requested(result: Sexp, integer: bool) -> R<Sexp> {
-    let fits = |value: &f64| value.is_nan() || value.abs() <= f64::from(i32::MAX);
-    if !integer || !reals(result).iter().all(fits) {
-        return Ok(result);
+/// `rnorm`'s draws in bulk for a scalar mean and standard deviation, when [`rnorm`] would
+/// draw a deviate for every element and the generator supports bulk draws.
+unsafe fn fill_rnorm(slots: &mut [f64], arguments: &[f64; 3]) -> bool {
+    let [mu, sigma, _] = *arguments;
+    if mu.is_nan() || !sigma.is_finite() || sigma <= 0.0 || !mu.is_finite() {
+        return false;
     }
-    let counts = alloc_uninit(SexpType::Integer, length(result))?;
-    for (slot, value) in ints_mut(counts).iter_mut().zip(reals(result)) {
+    if !random::fill_standard_normal(slots) {
+        return false;
+    }
+    for slot in slots.iter_mut() {
+        *slot = mu + sigma * *slot;
+    }
+    true
+}
+
+/// The drawn deviates, as integers when the routine counts and every count fits.
+unsafe fn random_result(drawn: Sexp, integer: bool) -> R<Sexp> {
+    let fits = |value: &f64| value.is_nan() || value.abs() <= f64::from(i32::MAX);
+    if !integer || !reals(drawn).iter().all(fits) {
+        return Ok(drawn);
+    }
+    let result = alloc_uninit(SexpType::Integer, length(drawn))?;
+    for (slot, value) in ints_mut(result).iter_mut().zip(reals(drawn)) {
         *slot = if value.is_nan() {
             NA_INTEGER
         } else {
             *value as i32
         };
     }
-    Ok(counts)
+    Ok(result)
 }
 
 /// `rmultinom(n, size, prob)`: `n` draws of the counts of `size` objects put into

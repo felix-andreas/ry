@@ -12,12 +12,15 @@ references: 20..25*, 51..56, 59..64
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `inner`
-  edit 29..29 -> "  #: fn() -> T\n"
+  edit 50..50 -> " -> T"
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 19..19 -> "<T>"
+  edit 25..25 -> ": T"
+  edit 26..26 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 29..29 -> "  #: fn() -> T\n"
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 19..19 -> "<T>"
+  edit 25..25 -> ": T"
+  edit 26..26 -> " -> T"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: <T> fn(value: T) -> T
 hint @36: fn() -> T
@@ -34,10 +37,13 @@ references: 20..25*, 64..69
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 19..19 -> "<T>"
+  edit 25..25 -> ": T"
+  edit 26..26 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 29..29 -> "  #: fn(value: T) -> T\n"
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 19..19 -> "<T>"
+  edit 25..25 -> ": T"
+  edit 26..26 -> " -> T"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: <T> fn(value: T) -> T
 hint @36: fn(value: T) -> T
@@ -56,13 +62,11 @@ references: 26..31*, 60..65, 68..73
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `value`
-  edit 24..24 -> "  #: integer\n"
+  edit 31..31 -> ": integer"
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 24..24 -> "  #: integer\n"
-  edit 38..38 -> "  #: fn() -> integer\n"
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
@@ -83,10 +87,13 @@ references: 37..41*, 92..96
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 55..55 -> "    #: fn(item: T) -> T\n"
-  edit 0..0 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> NULL"
 completion (1): item
 hint @7: <T> fn(values: T) -> NULL
 hint @64: fn(item: T) -> T

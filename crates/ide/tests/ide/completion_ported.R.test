@@ -40,8 +40,6 @@ definition: none
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 24..24 -> "  #: integer\n"
 completion (1): outer_value
 hint @37: integer
 
@@ -62,9 +60,6 @@ definition: none
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 46..46 -> "    #: integer\n"
-  edit 98..98 -> "    #: integer\n"
 completion (11): var_b, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
 hint @55: integer
 hint @107: integer
@@ -77,7 +72,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (18): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.count_leading_zero_bits
+completion (20): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.count_leading_zero_bits
 
 #---- block_body_local
 wrapper <- function(x) {
@@ -92,8 +87,6 @@ definition: none
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 29..29 -> "    #: integer\n"
 completion (1): block_value
 hint @44: integer
 
@@ -113,8 +106,6 @@ definition: none
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 52..52 -> "      #: integer\n"
 completion (1): switch_value
 hint @70: integer
 
@@ -131,9 +122,13 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(values: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> NULL"
 completion (128+): item, inheritedSlotNames, is.finite, is.finite.POSIXlt, is.infinite, is.infinite.POSIXlt, cite, citeNatbib
 hint @7: <T> fn(values: T) -> NULL
 
@@ -150,8 +145,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> NULL\n"
-  edit 49..49 -> "  #: integer\n"
+  edit 19..19 -> " -> NULL"
 completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
 hint @5: fn() -> NULL
 hint @56: integer
@@ -166,7 +160,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{alpha: double, beta: character}\n"
+  edit 6..6 -> ": list{alpha: double, beta: character}"
 completion (2): alpha, beta
 hint @6: list{alpha: double, beta: character}
 
@@ -202,7 +196,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 7..7 -> ": integer"
 completion (1): MyValue
 hint @7: integer
 
@@ -218,7 +212,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 9..9 -> ": integer"
 completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, Formaldehyde, formals
 hint @9: integer
 
@@ -232,6 +226,6 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 5..5 -> ": integer"
 completion: none
 hint @5: integer

@@ -15,7 +15,7 @@ use {
         graphics_engine::{
             self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
         },
-        graphics_render::{self, Format, Paper, Rect, Shape, Stroke},
+        graphics_render::{self, Format, Paper, Rect, Stroke},
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -3623,6 +3623,24 @@ fn along_side(device: &Device, side: i32, at: f64, outer: bool) -> f64 {
     }
 }
 
+/// What base graphics draws, in inches from the device's bottom-left corner, before it goes
+/// through the engine.
+enum Shape {
+    /// A polyline, or a polygon when `closed`. An open path is never filled.
+    Path {
+        points: Vec<[f64; 2]>,
+        closed: bool,
+        fill: Colour,
+        stroke: Option<Stroke>,
+    },
+    Circle {
+        centre: [f64; 2],
+        radius: f64,
+        fill: Colour,
+        stroke: Option<Stroke>,
+    },
+}
+
 /// Draws `shape`, in inches from the device's bottom-left corner, through the engine, clipped
 /// to `clip`.
 fn push_shape(device: &mut Device, clip: Rect, shape: Shape) -> R<()> {
@@ -3663,7 +3681,6 @@ fn push_shape(device: &mut Device, clip: Rect, shape: Shape) -> R<()> {
                 let [x, y] = device.to_device(centre);
                 graphics_engine::circle(x, y, radius / device.unit_inches(), &mut gc, dd)
             }
-            Shape::Text { .. } => Ok(()),
         }
     }
 }
@@ -5765,7 +5782,7 @@ fn colour_name(colour: Colour) -> String {
 }
 
 /// A colour given as hex digits or a name, without palette indices.
-fn parse_colour_spec(text: &str) -> Result<Colour, String> {
+pub(crate) fn parse_colour_spec(text: &str) -> Result<Colour, String> {
     if let Some(digits) = text.strip_prefix('#') {
         // The short forms `#RGB` and `#RGBA` arrived in R 4.4.
         let short = crate::system::r_at_least(4, 4) && matches!(digits.len(), 3 | 4);

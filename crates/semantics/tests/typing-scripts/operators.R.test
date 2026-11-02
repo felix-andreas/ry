@@ -13,3 +13,11 @@ f(c(1.5, 2.5))
 f: <T: scalar numeric> fn(n: T) -> double[]
 double[]
 23..34 error[type-mismatch] expected `T`, found `double[]`
+
+#---- a_mismatch_beside_a_class_names_the_resolved_operand
+d <- as.Date("2024-01-01")
+d + sample(c("a", "b"), 2L, replace = TRUE)
+#++++
+d: Date
+Unknown
+27..70 error[type-mismatch] `+` is not defined between `Date` and `character[]`

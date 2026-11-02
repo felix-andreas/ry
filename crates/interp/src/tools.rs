@@ -1,6 +1,6 @@
 //! The tools package's native routines: checksums, the text scanners behind package checks,
-//! format strings, file permissions and processes. Rd parsing lives in `rd`; LaTeX parsing and
-//! the help server are not available yet and fail with a clear error.
+//! format strings, file permissions, processes, and the help server's start and stop. Rd parsing
+//! lives in `rd`, LaTeX parsing in `latex` and the help server in `help_server`.
 
 use {
     crate::{
@@ -30,21 +30,35 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("ps_sigs", do_ps_sigs),
     ("ps_priority", do_ps_priority),
     ("package_dependencies_scan", do_package_dependencies_scan),
-    // The help server cannot start, so `startDynamicHelp` warns and carries on without it.
-    ("startHTTPD", |call| unsafe {
-        let port = values::as_integer_scalar(call.arg(1));
-        if port != NA_INTEGER && !(0..=65535).contains(&port) {
-            return Err(error(format!(
-                "Invalid port number {port}: should be in 0:65535, typically above 1024"
-            )));
-        }
-        scalar_integer(-1)
+    ("startHTTPD", do_start_httpd),
+    ("stopHTTPD", |_| {
+        crate::help_server::stop();
+        Ok(nil())
     }),
-    ("stopHTTPD", |_| Ok(nil())),
     ("parseRd", crate::rd::parse_rd),
     ("deparseRd", crate::rd::deparse_rd),
     ("parseLatex", crate::latex::parse_latex),
 ];
+
+/// `startHTTPD(ip, port)`: 0 once the help server listens, -2 when the port is taken (so
+/// `startDynamicHelp()` tries the next one), and -1 for any other failure.
+unsafe fn do_start_httpd(call: &NativeCall<'_>) -> R<Sexp> {
+    let ip = call.arg(0);
+    let ip = match ip.kind() {
+        SexpType::Nil => "0.0.0.0".to_owned(),
+        SexpType::String if length(ip) == 1 => values::string_at(ip, 0)
+            .ok_or_else(|| error("invalid bind address specification"))?
+            .into_owned(),
+        _ => return Err(error("invalid bind address specification")),
+    };
+    let port = values::as_integer_scalar(call.arg(1));
+    if port == NA_INTEGER || !(0..=65535).contains(&port) {
+        return Err(error(format!(
+            "Invalid port number {port}: should be in 0:65535, typically above 1024"
+        )));
+    }
+    scalar_integer(crate::help_server::start(&ip, port as u16))
+}
 
 /// `Rmd5(files)` and `Rsha256(files)`: the digest of each file in hexadecimal, `NA` when it
 /// cannot be read. From R 4.5 on the argument may instead be a raw vector, whose own digest is

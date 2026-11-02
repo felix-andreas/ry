@@ -1348,24 +1348,18 @@ impl ConsoleClient {
     }
 }
 
-/// An editor reaches a running `ry run` console through the socket its registry file names: it
-/// attaches the debugger, stops at a breakpoint and at a `debugonce()` function, pages through a
-/// data frame, and receives `View()`. Detaching leaves the console running.
+/// Starts `ry run` as a console in `project`, with its socket under `temporary`, and connects to
+/// the socket its registry file names.
 #[cfg(unix)]
-#[test]
-fn an_editor_attaches_to_a_running_console() {
-    use std::{io::Write, process::Stdio, time::Duration};
-    if !ry_runtime_available() {
-        return;
-    }
-    let project = tempfile::tempdir().expect("temp dir");
-    let temporary = tempfile::tempdir().expect("temp dir");
-    let script = project.path().join("f.R");
-    fs::write(&script, "g <- function(x) {\n  y <- x + 1\n  y * 2\n}\n").expect("write f.R");
+fn start_attachable_console(
+    project: &std::path::Path,
+    temporary: &std::path::Path,
+) -> (std::process::Child, std::process::ChildStdin, ConsoleClient) {
+    use std::{process::Stdio, time::Duration};
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
         .arg("run")
-        .current_dir(project.path())
-        .env("TMPDIR", temporary.path())
+        .current_dir(project)
+        .env("TMPDIR", temporary)
         .env("NO_COLOR", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1375,7 +1369,7 @@ fn an_editor_attaches_to_a_running_console() {
     let mut input = child.stdin.take().expect("stdin");
     let registry = (0..300)
         .find_map(|_| {
-            let found = fs::read_dir(temporary.path())
+            let found = fs::read_dir(temporary)
                 .ok()?
                 .flatten()
                 .filter(|entry| entry.file_name().to_string_lossy().starts_with("ry-"))
@@ -1398,7 +1392,7 @@ fn an_editor_attaches_to_a_running_console() {
     let registry: serde_json::Value = serde_json::from_str(&registry).expect("registry JSON");
     assert_eq!(
         fs::canonicalize(registry["cwd"].as_str().expect("cwd")).expect("cwd exists"),
-        fs::canonicalize(project.path()).expect("project exists"),
+        fs::canonicalize(project).expect("project exists"),
     );
     let socket =
         std::os::unix::net::UnixStream::connect(registry["socket"].as_str().expect("socket"))
@@ -1406,10 +1400,29 @@ fn an_editor_attaches_to_a_running_console() {
     socket
         .set_read_timeout(Some(Duration::from_secs(60)))
         .expect("set a timeout");
-    let mut client = ConsoleClient {
+    let client = ConsoleClient {
         stream: std::io::BufReader::new(socket),
         seq: 0,
     };
+    (child, input, client)
+}
+
+/// An editor reaches a running `ry run` console through the socket its registry file names: it
+/// attaches the debugger, stops at a breakpoint and at a `debugonce()` function, pages through a
+/// data frame, and receives `View()`. Detaching leaves the console running.
+#[cfg(unix)]
+#[test]
+fn an_editor_attaches_to_a_running_console() {
+    use std::{io::Write, time::Duration};
+    if !ry_runtime_available() {
+        return;
+    }
+    let project = tempfile::tempdir().expect("temp dir");
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let script = project.path().join("f.R");
+    fs::write(&script, "g <- function(x) {\n  y <- x + 1\n  y * 2\n}\n").expect("write f.R");
+    let (mut child, mut input, mut client) =
+        start_attachable_console(project.path(), temporary.path());
 
     client.send("initialize", serde_json::json!({ "adapterID": "ry" }));
     client.until(|message| message["event"] == "initialized");
@@ -1497,6 +1510,80 @@ fn an_editor_attaches_to_a_running_console() {
         page["body"]["rows"],
         serde_json::json!([["2", "b"], ["3", "c"]])
     );
+    // Sorting and filtering cover the whole object, and rows keep their original names.
+    let table =
+        |client: &mut ConsoleClient, view: &serde_json::Value, arguments: serde_json::Value| {
+            let mut arguments = arguments;
+            arguments["viewId"] = view["body"]["viewId"].clone();
+            let page = client.request("ryTable", arguments);
+            (
+                page["body"]["total"].clone(),
+                page["body"]["rowNames"].clone(),
+                page["body"]["rows"].clone(),
+            )
+        };
+    assert_eq!(
+        table(
+            &mut client,
+            &view,
+            serde_json::json!({ "sort": { "column": 1, "descending": true }, "count": 2 })
+        ),
+        (
+            serde_json::json!(5),
+            serde_json::json!(["5", "4"]),
+            serde_json::json!([["5", "e"], ["4", "d"]])
+        )
+    );
+    assert_eq!(
+        table(&mut client, &view, serde_json::json!({ "filter": "D" })),
+        (
+            serde_json::json!(1),
+            serde_json::json!(["4"]),
+            serde_json::json!([["4", "d"]])
+        )
+    );
+    input
+        .write_all(b"ry_table <- DataFrame(name = c(\"Bo\", \"ana\", NA, \"dan\"), age = c(30, 25, NA, 25))\n")
+        .expect("type a command");
+    let ry_table = (0..100)
+        .find_map(|_| {
+            let view = client.request("ryView", serde_json::json!({ "expression": "ry_table" }));
+            if view["success"] == true {
+                return Some(view);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            None
+        })
+        .expect("ry_table is viewable once defined");
+    assert_eq!(
+        table(
+            &mut client,
+            &ry_table,
+            serde_json::json!({ "sort": { "column": 1 } })
+        ),
+        (
+            serde_json::json!(4),
+            serde_json::json!(["3", "2", "4", "1"]),
+            serde_json::json!([
+                ["NA", "NA"],
+                ["ana", "25.0"],
+                ["dan", "25.0"],
+                ["Bo", "30.0"]
+            ])
+        )
+    );
+    assert_eq!(
+        table(
+            &mut client,
+            &ry_table,
+            serde_json::json!({ "filter": "A", "sort": { "column": 0, "descending": true } })
+        ),
+        (
+            serde_json::json!(2),
+            serde_json::json!(["4", "2"]),
+            serde_json::json!([["dan", "25.0"], ["ana", "25.0"]])
+        )
+    );
     let globals = client.request("ryGlobals", serde_json::json!({}));
     assert!(
         globals["body"]["globals"]
@@ -1506,6 +1593,35 @@ fn an_editor_attaches_to_a_running_console() {
             .any(|binding| binding["name"] == "df" && binding["columns"][1]["name"] == "b"),
         "{globals}"
     );
+    // A flood far past the queue's bound is slowed down, not dropped: every request is answered.
+    let mut writer = client
+        .stream
+        .get_ref()
+        .try_clone()
+        .expect("clone the socket");
+    let flood = std::thread::spawn(move || {
+        for seq in 10_000..10_500 {
+            let body = serde_json::json!({
+                "type": "request", "seq": seq, "command": "ryGlobals", "arguments": {},
+            })
+            .to_string();
+            writer
+                .write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+                .expect("write to the console");
+        }
+    });
+    let mut answered: Vec<u64> = (0..500)
+        .map(|_| {
+            client
+                .until(|message| message["type"] == "response" && message["command"] == "ryGlobals")
+                ["request_seq"]
+                .as_u64()
+                .expect("a request seq")
+        })
+        .collect();
+    flood.join().expect("the flood is written");
+    answered.sort_unstable();
+    assert_eq!(answered, (10_000..10_500).collect::<Vec<u64>>());
     client.request("rySubscribe", serde_json::json!({}));
     input.write_all(b"View(df)\n").expect("type a command");
     let event = client.until(|message| message["event"] == "ryView");
@@ -1538,6 +1654,94 @@ fn an_editor_attaches_to_a_running_console() {
         left.is_empty(),
         "the console removes its socket and registry: {left:?}"
     );
+}
+
+/// `browser()` in a console with no editor attached stops at a `Browse[1]>` prompt, where typed
+/// lines evaluate in the stopped frame and `n` steps; an editor that attaches during that stop
+/// is told of it and drives the program from there.
+#[cfg(unix)]
+#[test]
+fn browser_stops_at_a_prompt_an_editor_can_take_over() {
+    use std::{
+        io::{Read, Write},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    if !ry_runtime_available() {
+        return;
+    }
+    let project = tempfile::tempdir().expect("temp dir");
+    let temporary = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        project.path().join("b.R"),
+        "f <- function(x) {\n  y <- x + 1\n  browser()\n  z <- y * 10\n  y * 2\n}\n",
+    )
+    .expect("write b.R");
+    let (mut child, mut input, mut client) =
+        start_attachable_console(project.path(), temporary.path());
+    let stdout = Arc::new(Mutex::new(String::new()));
+    let mut pipe = child.stdout.take().expect("stdout");
+    let collected = Arc::clone(&stdout);
+    let collector = std::thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(read @ 1..) = pipe.read(&mut buffer) {
+            let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            collected.lock().expect("stdout lock").push_str(&text);
+        }
+    });
+    let wait_for = |wanted: &str| {
+        let seen = (0..600).any(|_| {
+            if stdout.lock().expect("stdout lock").contains(wanted) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        });
+        assert!(
+            seen,
+            "never printed {wanted:?}: {}",
+            stdout.lock().expect("stdout lock")
+        );
+    };
+
+    input
+        .write_all(b"source(\"b.R\"); f(1)\ny + 100\n")
+        .expect("type a command");
+    wait_for("debug at b.R#3: browser()");
+    wait_for("[1] 102");
+    input.write_all(b"n\n").expect("step");
+    wait_for("debug at b.R#4: z <- y * 10");
+
+    client.send("initialize", serde_json::json!({ "adapterID": "ry" }));
+    client.until(|message| message["event"] == "initialized");
+    assert_eq!(
+        client.request("attach", serde_json::json!({}))["success"],
+        true
+    );
+    client.request("configurationDone", serde_json::json!({}));
+    let stopped = client.until(|message| message["event"] == "stopped");
+    assert_eq!(stopped["body"]["reason"], "step");
+    let trace = client.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    assert_eq!(trace["body"]["stackFrames"][0]["line"], 4);
+    let value = client.request(
+        "evaluate",
+        serde_json::json!({ "expression": "y", "frameId": 1 }),
+    );
+    assert_eq!(value["body"]["result"], "2");
+    client.request("continue", serde_json::json!({}));
+    wait_for("[1] 4");
+    client.request("disconnect", serde_json::json!({}));
+
+    input
+        .write_all(b"cat(\"still running\\n\")\n")
+        .expect("type a command");
+    drop(input);
+    let status = child.wait().expect("the console ends");
+    collector.join().expect("stdout is read");
+    let stdout = stdout.lock().expect("stdout lock");
+    assert!(status.success(), "{stdout}");
+    assert!(stdout.contains("an editor attached"), "{stdout}");
+    assert!(stdout.contains("still running"), "{stdout}");
 }
 
 /// Hovers `df` and completes `df$` in a file of `project` through `ry server`, which finds the

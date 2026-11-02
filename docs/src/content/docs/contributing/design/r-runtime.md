@@ -380,7 +380,9 @@ The GC is a **non-moving, generational mark-sweep collector with size-segregated
 the design GNU R uses, kept because native code holds raw pointers to object data. Reference counts
 drive copy-on-modify exactly as `MAYBE_SHARED` expects. The roots are the `PROTECT` stack, the
 precious list behind `R_PreserveObject`, global variables, the interpreter's frames, and JIT frames
-through Cranelift's stack maps.
+through Cranelift's stack maps. A minor collection marks only the root-stack entries pushed since
+the previous collection, because marks stay set until the next major one, so the cost of a minor
+collection does not grow with the roots that lazy-loading base leaves behind.
 
 The JIT recovers what a moving nursery would buy in other VMs by not allocating in the first place:
 unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (section 5). If
@@ -561,7 +563,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
   code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
-  only a few dozen times, which made the load slower.
+  only a few dozen times, which made the load slower. A fully typed closure, one with an inline
+  type on every formal, compiles on its first entry instead: the declared types seed the type
+  feedback of the instructions that have not run yet, and the guards on them stay. When even the
+  declared types leave an instruction's operand unknown (the result of an untyped builtin such as
+  `sum`, or `v[k]` with a formal `k`), the first-call compile is declined without counting against
+  the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -607,8 +614,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
-  call still enters through tier 0's call path and allocates a frame and forced promises), the use
-  of static types as early profiles, and freeing the machine code of invalidated bodies.
+  call still enters through tier 0's call path and allocates a frame and forced promises), result
+  types for builtins and for subscripts, which the early profiles of the next section need to cover
+  more than arithmetic on formals, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -617,7 +625,8 @@ treats them in two ways, depending on whether a guarantee exists:
 
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
-  call, so tier 1 can compile it on the first hot loop instead of after warmup. The guards stay.
+  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. Only
+  inline annotations reach the runtime; `#:` comments are invisible to it.
 - **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
   imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
   on purpose), so a strict package can still receive an imprecise value from typed code. ry
@@ -1006,9 +1015,8 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 152 of the 153 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
-   (`oracle compare --engine ry`), and so do 152 of 153 under the JIT (`--engine ry-jit`). The
-   remaining interpreter case, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   The interpreter runs. Every oracle case in `crates/oracle/cases` but one matches GNU R 4.3.3
+   (`oracle compare --engine ry`). The exception, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
    different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
    exit status and 26 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
@@ -1052,9 +1060,8 @@ Each step ends with something real running, and each one is a large, whole chang
    Magick++. Two package-test rates are tracked, both counting only the packages whose
    tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
    ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
-   (`.corpus/ry-library`, `oracle packages --installed`), the last measured rate was 90 of 165
-   (54.5%), from an older interpreter. The rest fail on interpreter gaps, and the classes are listed in
-   `.agents/memory/backlog.md`.
+   (`.corpus/ry-library`, `oracle packages --installed`), it passes 126 of 164 (76.8%). The rest
+   fail on interpreter gaps, and the classes are listed in `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
