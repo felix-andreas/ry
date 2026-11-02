@@ -15423,9 +15423,13 @@ impl<'db> Checker<'db, '_> {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(*element)
             }
-            TyKind::Vector(element) | TyKind::List(element) => Ok(*element),
-            // A literal name may be absent at runtime (`T | NULL`).
-            TyKind::NamedVector(element) | TyKind::NamedList(element) => {
+            // R stops with "subscript out of bounds" on an absent name in an atomic vector,
+            // so a read that returns has the element's type.
+            TyKind::Vector(element) | TyKind::NamedVector(element) | TyKind::List(element) => {
+                Ok(*element)
+            }
+            // A literal name may be absent from a list at runtime (`T | NULL`).
+            TyKind::NamedList(element) => {
                 Ok(if literal_name.is_some() {
                     union_of(self.db, [*element, null(self.db)])
                 } else {
@@ -17576,18 +17580,6 @@ mod tests {
             "{:?}",
             dollar_atomic.errors
         );
-    }
-
-    #[test]
-    fn named_vector_extraction_is_nullable_by_name() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "f <- function() {\n  v <- c(a = 1L)\n  v[[\"a\"]]\n}");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let TyKind::Union(members) = scheme_ret(&db, &check).kind(&db) else {
-            panic!("expected integer | NULL");
-        };
-        assert!(members.contains(&scalar(&db, Atomic::Integer)));
-        assert!(members.contains(&null(&db)));
     }
 
     #[test]

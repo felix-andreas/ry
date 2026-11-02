@@ -1660,7 +1660,8 @@ record the same for a named vector, where R instead fails at run time.
 `$name` behaves like `[["name"]]` on lists, on records, and on opaque nominals, and a backtick-quoted
 name follows the same rule. `$` does not work on atomic vectors, because R rejects it on every atomic
 vector, named ones included: `c(foo = 1L)$foo` is a type error, while `c(foo = 1L)[["foo"]]` is
-`integer | NULL`.
+`integer`: R stops with "subscript out of bounds" when the name is absent from an atomic vector,
+where a list would give `NULL`.
 
 On a nominal whose class declares a `$` method, in a stub or in the project (`$.request` for
 `@type request`), `x$name` types as that method's result instead, because R dispatches the read to
@@ -1693,7 +1694,8 @@ fields.
 
 - A scalar-like `T` returns `T`.
 - An array-like `T[]` returns `T`.
-- A map-like `T[named]` returns `T | NULL` for a name index.
+- A map-like `T[named]` returns `T` for a name index too, because R stops with "subscript out of
+  bounds" on an absent name rather than returning `NULL`.
 
 #### `[[` on lists
 

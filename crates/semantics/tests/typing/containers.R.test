@@ -83,13 +83,13 @@ f <- function(i) {
 #++++
 f: <T> fn(i: T) -> integer | character
 
-#---- named_vector_by_name_is_nullable
+#---- named_vector_by_name_is_the_element
 f <- function() {
   v <- c(a = 1L)
   v[["a"]]
 }
 #++++
-f: fn() -> integer | NULL
+f: fn() -> integer
 
 #---- slice_is_a_sub_list
 f <- function() {
