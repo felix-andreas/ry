@@ -434,7 +434,9 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   }
   ```
   Reports `Unknown` twice, on `dt$pnl` and on the `sum(...)` around it.
-- **An annotation cannot attach to a lambda argument.** Every callback whose parameter needs a type, or whose callee types it `Any` (`apply`, `uniroot`), must first become its own binding. Let a `#:` line inside an argument list annotate the argument that follows.
+- **`ry check --annotate` writes top-level functions and bindings only.** A lambda passed as an argument (`vapply(x, function(v) v * 2, numeric(1))`) keeps no annotation, so the last unannotated functions in the benchmark code bases, nearly all callbacks to `vapply`, `lapply`, `tryCatch` and `purrr`, were annotated by hand. Write the lambda's contextual signature when the callee's parameter type fixes it.
+- **The stats distribution functions return `double[]`.** `pchisq`, `pnorm`, `dnorm` and their siblings in `types/stats.Rtypes` claim a vector, unlike base's scalar-claim convention, so `function(q: double) -> double stats::pchisq(q, df = 1)` is a `type-mismatch` (`expected double, found double[]`) and a p-value lambda must return `double[]`. Moving them to the scalar claim needs the corpus false-report count.
+- **An annotation cannot attach to a lambda argument** in `#:` comments (inline syntax can annotate one). Every callback whose parameter needs a type, or whose callee types it `Any` (`apply`, `uniroot`), must first become its own binding. Let a `#:` line inside an argument list annotate the argument that follows.
   ```r
   #: fn(m: matrix) -> Any
   f <- function(m) apply(
@@ -615,7 +617,7 @@ effectively a two-core number.
 
 ### A first strict `ry load` costs the strict check's wall time
 
-- On typed finbench (4 cores), a load with no usable check record takes 2.5 to 2.7 s, against about 0.6 s untyped, and 0.55 to 0.64 s after `ry check` or a previous load (`decisions.md`, "The strict load check shares the check record"). The gap is analysis CPU: about 5.3 CPU-s for 380,000 lines of `R/` (parse 1 s, item HIR 0.9 s, folds 0.5 s, type check 2.2 s), so the lever left is the analysis core's own speed.
+- On typed finbench (4 cores), a load with no usable check record takes 2.0 to 2.2 s at full size, against 0.6 to 1.2 s untyped and 0.6 to 0.7 s after `ry check`; at 60,000 lines it is 0.45 to 0.55 s against 0.25 to 0.35 s untyped (`decisions.md`, "The strict load check analyses only the package"). The check skips tests and scripts and frees its memos off the verdict path, so what is left is checker CPU: at 60,000 lines the check alone is about 0.85 CPU-s (parse about 100 ms, `item_annotations` 63 ms, `file_annotation_references` 48 ms, folds 43 ms, parse-stage diagnostics 40 ms, HIR 39 ms, lints 37 ms). Lowering the thread's priority and changing the worker count were measured without gain, so the lever left is the analysis core's own speed.
 
 ### Corpus reports that more precise types now reach
 
