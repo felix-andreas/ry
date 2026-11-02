@@ -502,3 +502,17 @@ bind f from R/a.R:1:5
 load datasets data/prices.R data/rates.csv
 sync exports
 run .onLoad
+
+#==== callers
+#---- an_edit_reaches_the_functions_that_call_it_transitively
+#~~~~ before R/a.R
+helper <- function() 1
+middle <- function() helper() + 1
+outer <- function() middle() * 2
+unrelated <- function() 3
+#~~~~ after R/a.R
+helper <- function() 10
+middle <- function() helper() + 1
+outer <- function() middle() * 2
+unrelated <- function() 3
+#++++

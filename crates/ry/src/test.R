@@ -37,10 +37,12 @@ local({
     any(summary$failed > 0L) || any(summary$error)
   }
 
+  # Only sources: a run itself creates and deletes files such as `_snaps/`, which would
+  # otherwise retrigger the watch.
   stamps <- function(root) {
     paths <- c(
-      list.files(file.path(root, "R"), recursive = TRUE, full.names = TRUE),
-      list.files(test_directory(root), full.names = TRUE),
+      list.files(file.path(root, "R"), pattern = "\\.[RrSsq]$", recursive = TRUE, full.names = TRUE),
+      list.files(test_directory(root), pattern = "\\.[rR]$", full.names = TRUE),
       file.path(root, c("DESCRIPTION", "NAMESPACE"))
     )
     info <- file.info(paths, extra_cols = FALSE)
