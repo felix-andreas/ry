@@ -219,22 +219,12 @@ fn file_streams_round_trip() {
 /// against each set of headers.
 #[test]
 fn stream_structs_match_gnu_r_layout() {
-    if !gnu_r_available() {
+    let Some(gnu_r) = gnu_r() else {
         return;
-    }
+    };
     let probe =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packages/serialtest/probe/offsets.c");
     let ry_include = Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
-    let gnu_include = Command::new("R")
-        .args(["RHOME"])
-        .output()
-        .map(|output| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("include"))
-        .expect("R RHOME");
-    let gnu_include = if gnu_include.join("Rinternals.h").exists() {
-        gnu_include
-    } else {
-        PathBuf::from("/usr/share/R/include")
-    };
     let layout = |include: &Path, name: &str| {
         let binary = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
         let status = Command::new("cc")
@@ -250,7 +240,7 @@ fn stream_structs_match_gnu_r_layout() {
         String::from_utf8(output.stdout).expect("text")
     };
     let ry = layout(&ry_include, "offsets-ry");
-    let gnu = layout(&gnu_include, "offsets-gnu");
+    let gnu = layout(&gnu_r.include, "offsets-gnu");
     assert!(ry.contains("R_inpstream_st.native_encoding"));
     assert_eq!(ry, gnu);
 }

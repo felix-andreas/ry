@@ -580,7 +580,7 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
                 };
                 let flag = |wanted: &str| {
                     named(wanted)
-                        .is_some_and(|value| matches!(node_text(&value).trim(), "TRUE" | "T"))
+                        .is_some_and(|value| matches!(node_text(value).trim(), "TRUE" | "T"))
                 };
                 let fixes = named(".fixes")
                     .and_then(name_argument)
@@ -956,7 +956,7 @@ fn dcf_fields(source: &str) -> Vec<(&str, String)> {
 /// R accepts a bare name or a string literal for a NAMESPACE directive argument.
 fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
     match value.kind() {
-        SyntaxKind::NAME => Some((unquote(&node_text(&value)), value.text_range())),
+        SyntaxKind::NAME => Some((unquote(&node_text(value)), value.text_range())),
         SyntaxKind::LITERAL => {
             let token = value
                 .children_with_tokens()
@@ -965,7 +965,7 @@ fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
             Some((string_content(token.text()), value.text_range()))
         }
         // `S3method(pkg::generic, class)` names a generic in another namespace.
-        SyntaxKind::NAMESPACE_EXPR => Some((node_text(&value).into_owned(), value.text_range())),
+        SyntaxKind::NAMESPACE_EXPR => Some((node_text(value).into_owned(), value.text_range())),
         _ => None,
     }
 }

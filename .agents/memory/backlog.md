@@ -23,13 +23,9 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
-- **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
-- **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
-- **Oracle cases failing under `ORACLE_ENGINE=ry`**: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
-- **A hashed frame lists in a different order from GNU R after `rm()`.** `Frame::hash_chains` replays GNU R's table growth over the live bindings only, but GNU R grew its table while the removed ones were still there, so `h <- new.env(hash = TRUE)`, 60 assignments, then `rm()` of the first 45 lists `w60` first in GNU R and last in ry. Replaying needs the removed bindings' insertion history, which compaction drops (`crates/heap/src/env.rs`).
-- **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 119.2k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
+- **Byte strings print with GNU R's padding.** In a printed character vector, GNU R pads a `"bytes"` string by the width of its `\xNN` spelling before the backslash is escaped, one column narrower than ry. `formatC` on one pads by its byte count. Both are cosmetic.
+- **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 119.2k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 17.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 14.2k per reading against 4.5k, where `out[[i]] <- list(...)` runs through `complex_assign` and `do_list` instead of compiled code. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 ## Open: base R kernels against GNU R
 
@@ -592,9 +588,10 @@ change that does not pay.
    (`crates/jit/src/analysis.rs`).
 3. **Side mark bitmaps in the collector.** Done (`decisions.md`, "Small objects live in bitmap
    pages").
-4. **The allocation fast path.** Done with the same change: allocation claims a bitmap word of
-   free slots and there is no young list. What is left in `allocate_uncollected` is the store into
-   a cold slot's header, so the next cut is fewer allocations, not a faster allocator.
+4. **The allocation fast path.** Done: a bump cursor per size class, inlined, with the OLD
+   header bit for the barrier and a batch `Heap::reserve` for call frames (`decisions.md`, "The
+   young generation allocates by bumping a cursor"). The interpreter's closure call adopting
+   `reserve` is the next cut.
 5. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
@@ -2257,8 +2254,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - pkgbuild's "warnings can be turned into errors": GNU R's `R CMD build` script on ry does not
     turn a build warning into an error.
   - `eval(quote(next))` inside a loop reports no loop context.
-  - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
-    different order (`heap::env::Frame::listed_cells`).
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
@@ -2306,15 +2301,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
   packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
   oracle cases; what is left:
-  - Built-in devices ignore raster interpolation and draw a raster as one quadrilateral per cell.
-  - The raster devices composite `saturate` as `add`, which tiny-skia lacks.
   - Raster compositing allocates a canvas-sized layer for every mark drawn with an operator other
     than `over` and two per group use, re-renders a mask whenever the clip and mask pair changes,
     and renders a definition again at every use, so a chain of groups that each use the one before
     twice is exponential (`draw_items`, `coverage` in `graphics_render.rs`). Layers sized to the
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
-  - `svg()` paints nothing beyond a tiling pattern with `extend = "pad"`, where cairo repeats the
-    tile's edge pixels.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.
   - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey

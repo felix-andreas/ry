@@ -716,17 +716,20 @@ enum Source<'db> {
     },
 }
 
+/// A library call a followed value came from, as its item and callee.
+type Producer<'db> = (Item<'db>, ExprId);
+
 struct Resolver<'db> {
     db: &'db dyn Db,
     files: ProjectFiles,
     /// Recursive helpers and self-referential assignments would otherwise loop.
     visited: HashSet<(Item<'db>, ExprId, Symbol)>,
     /// The heads of library calls a followed value came from, as item and callee.
-    producers: Vec<(Item<'db>, ExprId)>,
+    producers: Vec<Producer<'db>>,
     /// Each expression's sources and the producers found on the way, for one resolution. A
     /// variable reassigned from itself (`s <- structure(s, ...)`) reaches every assignment from
     /// every use, so without it the work grows as a power of the reassignments up to the depth.
-    source_cache: HashMap<(Item<'db>, ExprId), (Vec<Source<'db>>, Vec<(Item<'db>, ExprId)>)>,
+    source_cache: HashMap<Producer<'db>, (Vec<Source<'db>>, Vec<Producer<'db>>)>,
     /// Per field name, the items that write it; per item and name, those writes. A global
     /// receiver's writes are searched across the project once, not once per access.
     written_items: HashMap<Symbol, Vec<Item<'db>>>,

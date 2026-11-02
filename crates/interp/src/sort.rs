@@ -224,6 +224,10 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
         return Ok(nil());
     }
     check_sortable(x)?;
+    // Strings are compared through their characters, which a string declared as bytes lacks.
+    if length(x) > 1 {
+        values::refuse_bytes(x)?;
+    }
     let result = values::duplicate(x)?;
     values::clear_attributes(result);
     match result.kind() {
@@ -356,6 +360,11 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&key| values::materialize(key))
         .collect::<R<Vec<Sexp>>>()?;
+    if count > 1 {
+        for &key in &keys {
+            values::refuse_bytes(key)?;
+        }
+    }
     // GNU R's `orderVector1` and `listgreater` have no raw case.
     let columns: Vec<Option<Column<'_>>> = keys
         .iter()

@@ -41,7 +41,7 @@ use {
     crate::{
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch,
-        eval::{self, as_condition},
+        eval::{self, SwitchSelector, as_condition},
         interp,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
@@ -531,9 +531,13 @@ pub enum Op {
     /// `dst src guard call`: sets `dst` to `TRUE` or `FALSE` as the value in `src` of the `match`
     /// guard `guard` holds or not. Errors name `call`, the `match`.
     MatchCondition,
+    /// `dst src table`: the arm of a compiled `switch` that the selector in `src` chooses, as
+    /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
+    /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
+    SwitchArm,
 }
 
-pub const OPS: [Op; 40] = [
+pub const OPS: [Op; 41] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -574,6 +578,7 @@ pub const OPS: [Op; 40] = [
     Op::Move,
     Op::BoundEval,
     Op::MatchCondition,
+    Op::SwitchArm,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -911,6 +916,127 @@ unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
         SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
         _ => true,
     }
+}
+
+/// Whether a `switch` call with these arguments compiles: the selector is a plain first
+/// argument, there are alternatives (the special warns when there are none), no alternative is
+/// `...` (whose alternatives are only known at run time), and at most one alternative is a
+/// default (the special reports a second one as an error).
+unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
+    let Some(((selector_tag, selector), alternatives)) = args.split_first() else {
+        return false;
+    };
+    let defaults = alternatives
+        .iter()
+        .filter(|(tag, _)| switch_default(*tag))
+        .count();
+    *selector_tag == nil()
+        && *selector != symbols().dots
+        && *selector != missing_arg()
+        && !alternatives.is_empty()
+        && alternatives
+            .iter()
+            .all(|(_, value)| *value != symbols().dots)
+        && defaults <= 1
+}
+
+/// Whether an alternative with this tag is the default: it has no name, or an empty one.
+unsafe fn switch_default(tag: Sexp) -> bool {
+    tag == nil() || (tag.kind() == SexpType::Symbol && tag.car().bytes().is_empty())
+}
+
+/// Where [`switch_table`] keeps the alternatives' names, as a character vector.
+const SWITCH_NAMES: usize = 0;
+/// Where it keeps, for each name, the arm that name runs (0 for none).
+const SWITCH_NAME_ARMS: usize = 1;
+/// Where it keeps the default's arm (first; 0 for none, -1 for an empty default, which is an
+/// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
+/// alternative, which is an error).
+const SWITCH_POSITION_ARMS: usize = 2;
+/// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
+const SWITCH_NUMBERS: usize = 3;
+/// Where it keeps the `switch` call, which its errors name.
+const SWITCH_CALL: usize = 4;
+
+/// The table [`Op::SwitchArm`] reads for a `switch` with these alternatives, and the arms: the
+/// non-empty alternatives in order, numbered from 1. A name runs the first non-empty alternative
+/// at or after its own, as the special falls through empty ones.
+unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Vec<Sexp>)> {
+    let missing = missing_arg();
+    let mut arms = Vec::new();
+    let mut position_arms = vec![0];
+    for (tag, value) in alternatives {
+        if *value == missing {
+            position_arms.push(-1);
+            if switch_default(*tag) {
+                position_arms[0] = -1;
+            }
+        } else {
+            arms.push(*value);
+            position_arms.push(arms.len() as i32);
+            if switch_default(*tag) {
+                position_arms[0] = arms.len() as i32;
+            }
+        }
+    }
+    let mut names = Vec::new();
+    let mut name_arms = Vec::new();
+    for (position, (tag, _)) in alternatives.iter().enumerate() {
+        if tag.kind() == SexpType::Symbol {
+            names.push(tag.car());
+            let arm = position_arms[position + 1..]
+                .iter()
+                .copied()
+                .find(|&arm| arm > 0)
+                .unwrap_or(0);
+            name_arms.push(arm);
+        }
+    }
+    let heap = crate::heap();
+    let name_vector = values::alloc(SexpType::String, names.len())?;
+    for (index, name) in names.iter().enumerate() {
+        heap.set_element(name_vector, index, *name);
+    }
+    let name_arms = values::integer_vector(&name_arms)?;
+    let position_arms = values::integer_vector(&position_arms)?;
+    let mut numbers = Vec::with_capacity(arms.len() + 1);
+    for number in 0..=arms.len() {
+        numbers.push(values::scalar_integer(number as i32)?);
+    }
+    let numbers = values::list_vector(&numbers)?;
+    let table = values::list_vector(&[name_vector, name_arms, position_arms, numbers, call])?;
+    Ok((table, arms))
+}
+
+/// The arm number a `switch` runs for `selector`, from the table [`switch_table`] built, with
+/// the special's errors.
+unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
+    let numbers = table.element(SWITCH_NUMBERS);
+    let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
+    let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
+        SwitchSelector::Name(text) => {
+            let names = table.element(SWITCH_NAMES);
+            let matched = (0..length(names)).find(|&index| {
+                let name = names.element(index);
+                name == text || name.bytes() == text.bytes()
+            });
+            match matched {
+                Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
+                None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
+                None => position_arms[0],
+            }
+        }
+        SwitchSelector::Position(index) => match position_arms.get(index.max(0) as usize) {
+            Some(&arm) if index >= 1 => {
+                if arm < 0 {
+                    return Err(error("empty alternative in numeric switch"));
+                }
+                arm
+            }
+            _ => 0,
+        },
+    };
+    Ok(numbers.element(arm as usize))
 }
 
 /// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
@@ -1470,6 +1596,7 @@ impl Compiler {
                 ("break" | "next", 0) => !self.open_loops.is_empty(),
                 ("<-" | "=", 2) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("&&" | "||", 2) => plain,
+                ("switch", 1..) => switch_compiles(&args),
                 ("function", 2..) => true,
                 (".Internal", 1) => plain && compiled_internal(args[0].1)?.is_some(),
                 ("local", 1) => plain && args[0].1 != symbols().dots && args[0].1 != missing_arg(),
@@ -1632,6 +1759,7 @@ impl Compiler {
                 | ".ry_tuple"
                 | ".ry_tag"
                 | ".ry_match"
+                | "switch"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1867,6 +1995,27 @@ impl Compiler {
                     self.emit(Op::Invisible, &[]);
                 }
                 self.patch(done);
+            }
+            "switch" => {
+                self.expression(args[0].1, dst)?;
+                let (table, arms) = switch_table(call, &args[1..])?;
+                let numbers = table.element(SWITCH_NUMBERS);
+                let table = self.constant(table);
+                self.emit(Op::SwitchArm, &[dst, dst, table]);
+                let mut done = Vec::with_capacity(arms.len());
+                for (index, body) in arms.iter().enumerate() {
+                    let number = self.constant(numbers.element(index + 1));
+                    let skip = self.emit_patchable(Op::MatchLiteral, &[dst, number, 0]);
+                    self.expression(*body, dst)?;
+                    done.push(self.emit_patchable(Op::Jump, &[0]));
+                    self.patch(skip);
+                }
+                let constant = self.constant(nil());
+                self.emit(Op::Constant, &[dst, constant]);
+                self.emit(Op::Invisible, &[]);
+                for position in done {
+                    self.patch(position);
+                }
             }
             "for" => self.for_loop(call, args, dst)?,
             "while" => {
@@ -2462,6 +2611,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::MatchFail | Op::Move => 2,
         Op::BoundEval => 5,
         Op::MatchCondition => 4,
+        Op::SwitchArm => 3,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -2943,6 +3093,10 @@ unsafe fn step(
             set(operand(0), value);
         }
         Op::Move => set(operand(0), register(operand(1))),
+        Op::SwitchArm => {
+            let value = switch_arm(register(operand(1)), constants.element(operand(2)))?;
+            set(operand(0), value);
+        }
         Op::BoundEval => {
             let expression = constants.element(operand(1));
             let names = constants.element(operand(2));
