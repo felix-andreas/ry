@@ -325,6 +325,20 @@ pub struct FunctionType<'db> {
     /// The signature was inferred from an unannotated body, so a scalar parameter type is a
     /// claim of how the body uses the value, not a declared length.
     pub inferred: bool,
+    /// The body returns one of two values chosen by a logical flag with a literal default,
+    /// so a call that leaves the flag out or passes a literal returns that branch alone.
+    pub flag_return: Option<FlagReturn<'db>>,
+}
+
+/// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
+/// union of both branches, and these are the branches themselves. Inferred only, since an
+/// annotation has no syntax for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct FlagReturn<'db> {
+    pub parameter: Name<'db>,
+    pub default: bool,
+    pub when_true: Ty<'db>,
+    pub when_false: Ty<'db>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -735,6 +749,11 @@ fn mapped_kind<'db>(
             }),
             ret: map(function.ret),
             inferred: function.inferred,
+            flag_return: function.flag_return.map(|flag| FlagReturn {
+                when_true: map(flag.when_true),
+                when_false: map(flag.when_false),
+                ..flag
+            }),
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -783,6 +802,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
                 .iter()
                 .for_each(|rest| visit(rest.element));
             visit(function.ret);
+            if let Some(flag) = function.flag_return {
+                visit(flag.when_true);
+                visit(flag.when_false);
+            }
         }
         TyKind::Named(_, arguments) => arguments.iter().copied().for_each(visit),
     }

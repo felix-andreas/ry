@@ -1385,6 +1385,45 @@ show: <T> fn([tab]: T, fade: logical) -> character[]
 render: Unknown
 99..103 error[type-mismatch] expected `fn(T) -> U`, found `fn([tab]: V, fade: logical) -> character[]`
 
+#---- a_flag_default_selects_the_returned_branch
+# DistributionUtils' `pDist(..., valueOnly = TRUE)`: a call that leaves the flag out, or passes
+# a literal, returns that branch alone. Any other flag returns the union.
+p_dist <- function(q, valueOnly = TRUE) {
+  prob <- q * 2
+  if (valueOnly) prob else list(value = prob, error = prob)
+}
+gap <- function(x, p) p_dist(x) - p
+full <- function(x) p_dist(x, valueOnly = FALSE)$error
+either <- function(x, flag) p_dist(x, flag)
+#++++
+p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
+full: <T: numeric> fn(x: T) -> double
+either: <T: numeric, U> fn(x: T, flag: U) -> double | list{value: double, error: double}
+
+#---- the_other_branch_of_a_flag_default_is_still_checked
+p_dist <- function(q, valueOnly = TRUE) {
+  prob <- q * 2
+  if (valueOnly) prob else list(value = prob, error = prob)
+}
+bad <- function(x) p_dist(x, valueOnly = FALSE) - 1
+#++++
+p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+bad: Unknown
+139..167 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{value: double, error: double}`
+
+#---- a_reassigned_flag_selects_nothing
+p_dist <- function(q, valueOnly = TRUE) {
+  prob <- q * 2
+  valueOnly <- prob > 1
+  if (valueOnly) prob else list(value = prob)
+}
+gap <- function(x) p_dist(x) - 1
+#++++
+p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double}
+gap: Unknown
+149..158 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | list{value: double}`
+
 #---- an_inferred_logical_callback_parameter_takes_numbers
 # gmp's `lapply(0:(n-1L), Eulerian, n = n)`: a direct call `not(1L)` is accepted, so
 # passing the callback over integers is too.

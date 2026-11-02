@@ -26,11 +26,12 @@ use {
         stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any,
-            array, array_element, column_type, conflicting_tags, contains_inference_var,
-            erase_vars, for_each_child_type, is_ry_value_type, is_tag_type, map_child_types,
-            native_record, null, scalar, substitute_rigid, type_size, union_of, unknown,
+            Atomic, Constraint, FlagReturn, FrameKind, FunctionType, InferenceVar, Name,
+            NativeField, Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
+            TypeScheme, any, array, array_element, column_type, conflicting_tags,
+            contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
+            map_child_types, native_record, null, scalar, substitute_rigid, type_size, union_of,
+            unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -2506,6 +2507,11 @@ impl<'db> Checker<'db, '_> {
                     .pop()
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
+                let flag_return = if early_returns.is_empty() {
+                    self.flag_return(&module[parameters], *body)
+                } else {
+                    None
+                };
                 // The body may settle a formal on a type its default does not have
                 // (`function(class = NULL) { if (!length(class)) class <- ""; ... }`), yet a call
                 // that passes the default's own value is always fine.
@@ -2547,6 +2553,7 @@ impl<'db> Checker<'db, '_> {
                         variadic,
                         ret: return_ty,
                         inferred: true,
+                        flag_return,
                     }),
                 )
             }
@@ -7068,6 +7075,7 @@ impl<'db> Checker<'db, '_> {
             variadic: None,
             ret: declared.ret,
             inferred: false,
+            flag_return: None,
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -7251,6 +7259,9 @@ impl<'db> Checker<'db, '_> {
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
             signature.ret = self.join_early_returns(&early_returns, trailing_ty, *body);
+            if early_returns.is_empty() {
+                signature.flag_return = self.flag_return(&module[parameters], *body);
+            }
             self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
         } else {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
@@ -7330,6 +7341,59 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
+    /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
+    /// list(value = prob, error = err)`. A flag the body never reassigns decides the branch
+    /// from the call alone, so its two branch types are kept beside the joined return.
+    fn flag_return(&self, parameters: &[Formal], body: ExprId) -> Option<FlagReturn<'db>> {
+        let module = self.module;
+        let strip = |mut id: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(id) {
+                id = *inner;
+            }
+            id
+        };
+        let mut tail = strip(body);
+        while let ExpressionKind::Block { statements } = module.kind(tail) {
+            tail = strip(*module[statements].last()?);
+        }
+        let ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch: Some(else_branch),
+        } = module.kind(tail)
+        else {
+            return None;
+        };
+        let ExpressionKind::NameRef(name) = module.kind(strip(*condition)) else {
+            return None;
+        };
+        let formal = parameters.iter().find(|formal| formal.name == *name)?;
+        let ExpressionKind::Literal(LiteralKind::Logical(default)) =
+            module.kind(strip(formal.default?))
+        else {
+            return None;
+        };
+        if self.writes_name(body, *name) {
+            return None;
+        }
+        Some(FlagReturn {
+            parameter: Name::new(self.db, name),
+            default: *default,
+            when_true: *self.recorded.get(then_branch)?,
+            when_false: *self.recorded.get(else_branch)?,
+        })
+    }
+
+    fn writes_name(&self, id: ExprId, name: Symbol) -> bool {
+        if let ExpressionKind::Assign { target, .. } = self.module.kind(id)
+            && matches!(self.module.kind(*target), ExpressionKind::NameRef(written) if *written == name)
+        {
+            return true;
+        }
+        self.module
+            .any_child(id, |child| self.writes_name(child, name))
+    }
+
     fn collect_tail_expressions(&self, id: ExprId, into: &mut Vec<ExprId>) {
         match self.module.kind(id) {
             ExpressionKind::Block { statements } => match self.module[statements].last() {
@@ -10696,7 +10760,8 @@ impl<'db> Checker<'db, '_> {
                 let narrowed = findings.is_empty() && function.inferred;
                 self.errors.extend(findings);
                 if narrowed {
-                    self.narrow_echoed_parameter_unions(function, arguments)
+                    self.flag_selected_return(function, arguments)
+                        .unwrap_or_else(|| self.narrow_echoed_parameter_unions(function, arguments))
                 } else {
                     function.ret
                 }
@@ -10734,6 +10799,7 @@ impl<'db> Checker<'db, '_> {
                         }),
                         ret,
                         inferred: true,
+                        flag_return: None,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -10929,6 +10995,44 @@ impl<'db> Checker<'db, '_> {
                 unknown(self.db)
             }
         }
+    }
+
+    /// The branch a call selects when it leaves the flag out, so its default decides, or
+    /// passes a literal `TRUE` or `FALSE`.
+    fn flag_selected_return(
+        &self,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> Option<Ty<'db>> {
+        let flag = function.flag_return?;
+        let formal = function
+            .named
+            .iter()
+            .position(|parameter| parameter.name == flag.parameter)?;
+        let arena = self.arena;
+        let targets =
+            &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+        let passed = arguments.iter().zip(targets).find(
+            |(_, target)| matches!(target, Some(ArgumentTarget::Named(index)) if *index == formal),
+        );
+        let value = match passed {
+            None => flag.default,
+            Some((argument, _)) => {
+                let mut value = argument.value?;
+                while let ExpressionKind::Paren(inner) = self.module.kind(value) {
+                    value = *inner;
+                }
+                match self.module.kind(value) {
+                    ExpressionKind::Literal(LiteralKind::Logical(value)) => *value,
+                    _ => return None,
+                }
+            }
+        };
+        Some(if value {
+            flag.when_true
+        } else {
+            flag.when_false
+        })
     }
 
     /// The return of a call to an inferred signature whose return is a union.

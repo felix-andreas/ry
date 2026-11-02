@@ -20,8 +20,9 @@ use {
 /// inferred from a call lets a later call name its slots, while the same shape once declared has
 /// no names to match.
 /// A callback the body calls with two arities after testing `formals()` has no single declared
-/// shape that admits both calls.
-const KNOWN_UNWRITABLE: [&str; 12] = [
+/// shape that admits both calls. A return that a flag's default selects has no annotation
+/// syntax, so the declared form returns both branches.
+const KNOWN_UNWRITABLE: [&str; 14] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -34,6 +35,8 @@ const KNOWN_UNWRITABLE: [&str; 12] = [
     "semantics/tests/typing::correct_r__a_callback_called_with_the_arity_its_formals_report_is_not_an_arity_error :: new_source",
     "semantics/tests/typing::correct_r__a_callback_whose_first_call_passed_an_integer_takes_a_double_later :: palette",
     "semantics/tests/typing::correct_r__an_inferred_logical_callback_parameter_takes_numbers :: not",
+    "semantics/tests/typing::correct_r__an_element_fills_an_inferred_logical_parameter_after_a_forwarded_name :: eulerian",
+    "semantics/tests/typing::correct_r__a_flag_default_selects_the_returned_branch :: p_dist",
 ];
 
 #[test]
