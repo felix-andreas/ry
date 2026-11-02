@@ -18,6 +18,7 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        SourcePaths,
         diagnostics::{
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
             derive_from_syntax, project_fold_shares,
@@ -524,8 +525,9 @@ fn analyze_project_with(
         .collect();
     let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
     let mut project = Vec::with_capacity(checked.len());
+    let mut source_paths = BTreeMap::new();
     for index in ordered {
-        let (_, source, _) = &mut checked[index];
+        let (path, source, _) = &mut checked[index];
         // `ordered` is a permutation, so each source is moved out exactly once.
         let file = SourceFile::builder(mem::take(source), kinds[index])
             .durability(Durability::HIGH)
@@ -534,7 +536,15 @@ fn analyze_project_with(
         if reached[index] {
             project.push(file);
         }
+        // A file a package-only run leaves unanalysed can still be sourced by name, and then
+        // the check reads it as a fresh one would.
+        if let Some(relative) = relative_source_path(path, root) {
+            source_paths.insert(relative, file);
+        }
     }
+    let _: SourcePaths = SourcePaths::builder(source_paths)
+        .durability(Durability::HIGH)
+        .new(&db);
     let files: Vec<SourceFile> = files.into_iter().flatten().collect();
     let _: ProjectFiles = ProjectFiles::builder(project.clone())
         .durability(Durability::HIGH)
@@ -1395,6 +1405,17 @@ pub(crate) fn exclude_matcher(
             Err(CommandError)
         }
     }
+}
+
+/// `path` relative to `root` with `/` separators, the key a literal `source("...")` call is
+/// resolved against.
+pub(crate) fn relative_source_path(path: &Path, root: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let parts: Option<Vec<&str>> = relative
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect();
+    Some(parts?.join("/"))
 }
 
 /// Vendored dependency infrastructure rather than project code; scopes only the walk.

@@ -23,7 +23,7 @@ use {
         },
         values,
     },
-    syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes},
+    syntax::testing::{SplitMix64, for_each_seed, mutate_bytes},
 };
 
 const SEEDS: &[&str] = &[
@@ -43,11 +43,11 @@ const SEEDS: &[&str] = &[
 
 #[test]
 fn fuzz_lowering_never_panics() {
-    let mut rng = SplitMix64(0x5eed_1a7e);
-    for _ in 0..fuzz_iterations(400) {
-        let seed = SEEDS[rng.below(SEEDS.len())];
-        check_lowering_input(&String::from_utf8_lossy(&mutate_bytes(&mut rng, seed)));
-    }
+    for_each_seed(400, |seed| {
+        let mut rng = SplitMix64(seed);
+        let sample = SEEDS[rng.below(SEEDS.len())];
+        check_lowering_input(&String::from_utf8_lossy(&mutate_bytes(&mut rng, sample)));
+    });
 }
 
 /// Mutated streams of serialized seeds must read or fail with an R error, never panic.
@@ -55,8 +55,8 @@ fn fuzz_lowering_never_panics() {
 fn fuzz_unserialize_never_panics() {
     let seeds = serialized_seeds();
     assert!(!seeds.is_empty(), "no serialized seeds");
-    let mut rng = SplitMix64(0x5e71_a112);
-    for _ in 0..fuzz_iterations(400) {
+    for_each_seed(400, |seed| {
+        let mut rng = SplitMix64(seed);
         let mut bytes = seeds[rng.below(seeds.len())].clone();
         for _ in 0..1 + rng.below(4) {
             if bytes.is_empty() {
@@ -73,7 +73,7 @@ fn fuzz_unserialize_never_panics() {
             }
         }
         check_unserialize_input(&bytes);
-    }
+    });
 }
 
 /// The streams GNU R wrote, recorded for libR's conformance tests.
@@ -118,20 +118,14 @@ fn deparse_round_trips_lowered_seeds() {
 
 #[test]
 fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
-    let mut rng = SplitMix64(0xb17e_c0de);
-    for _ in 0..fuzz_iterations(300) {
-        check_bytecode_agreement(&mut rng);
-    }
+    for_each_seed(300, |seed| check_bytecode_agreement(&mut SplitMix64(seed)));
 }
 
 /// Random drawings, with nested and dangling definitions and degenerate geometry, render to
-/// every format without panicking and render identically twice.
+/// every format without panicking, identically twice, and as files a reader can parse.
 #[test]
 fn fuzz_render_drawing() {
-    let mut rng = SplitMix64(0x9a7_7e51);
-    for _ in 0..fuzz_iterations(40) {
-        check_render_drawing(&mut rng);
-    }
+    for_each_seed(40, |seed| check_render_drawing(&mut SplitMix64(seed)));
 }
 
 /// The fuzzer's first find: tiny-skia asserts that a stroked cubic's points are finite, so a path

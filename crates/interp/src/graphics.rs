@@ -5593,7 +5593,7 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
         let count = x.len().min(y.len());
-        let columns = if count == 0 { 0 } else { data.len() / count };
+        let columns = data.len().checked_div(count).unwrap_or(0);
         let largest = data
             .iter()
             .copied()

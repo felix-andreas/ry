@@ -3,7 +3,7 @@
 //! 1.17 under GNU R on the same inputs.
 
 use {
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
     table::{
         ColumnType, Schema, Table,
         convert::{
@@ -834,8 +834,8 @@ fn a_filtered_grouped_assignment_groups_only_the_selected_rows() {
 /// Grouped sums and means over random data with NAs, checked against a direct computation.
 #[test]
 fn fuzz_grouped_aggregates_against_a_reference() {
-    let mut rng = SplitMix64(0x7ab1e);
-    for _ in 0..fuzz_iterations(40) {
+    for_each_seed(40, |seed| {
+        let mut rng = SplitMix64(seed);
         let rows = 1 + rng.below(300);
         let groups = 1 + rng.below(12);
         let keys: Vec<i32> = (0..rows).map(|_| rng.below(groups) as i32).collect();
@@ -924,14 +924,14 @@ fn fuzz_grouped_aggregates_against_a_reference() {
                 assert!((means[index] - sum / present.len() as f64).abs() < 1e-9);
             }
         }
-    }
+    });
 }
 
 /// Random R vectors survive the trip into Arrow and back unchanged, NA and NaN included.
 #[test]
 fn fuzz_boundary_round_trip() {
-    let mut rng = SplitMix64(0xa11);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let length = rng.below(64);
         let vector = match rng.below(5) {
             0 => RVector::Integer(
@@ -998,7 +998,7 @@ fn fuzz_boundary_round_trip() {
             }
             _ => assert_eq!(vector, back),
         }
-    }
+    });
 }
 
 #[test]
@@ -1818,9 +1818,9 @@ fn assert_same_vector(kernel: RVector, plan: RVector, what: &str) {
 /// updates, at sizes that exercise the serial, parallel, dense and hashed paths.
 #[test]
 fn fuzz_kernels_agree_with_the_polars_plans() {
-    let mut rng = SplitMix64(0x6e4e1);
-    for iteration in 0..fuzz_iterations(60) {
-        let rows = if iteration % 10 == 9 {
+    for_each_seed(60, |seed| {
+        let mut rng = SplitMix64(seed);
+        let rows = if seed % 10 == 9 {
             70_000 + rng.below(70_000)
         } else {
             1 + rng.below(400)
@@ -1857,7 +1857,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             keyed,
             ..Query::default()
         };
-        let what = format!("iteration {iteration}: {grouped:?}");
+        let what = format!("seed {seed}: {grouped:?}");
         assert_same_output(
             execute(&mut table.fork(), grouped.clone()),
             execute_with_plans_only(&mut table.fork(), grouped),
@@ -1876,7 +1876,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             by,
             keyed,
         };
-        let what = format!("iteration {iteration}: {top:?}");
+        let what = format!("seed {seed}: {top:?}");
         assert_same_output(
             execute(&mut table.fork(), top.clone()),
             execute_with_plans_only(&mut table.fork(), top),
@@ -1904,7 +1904,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
         };
         // A big table joined on a key with few values multiplies its rows, so the lookup stays
         // small when the table is big.
-        let lookup_rows = if iteration % 10 == 9 {
+        let lookup_rows = if seed % 10 == 9 {
             1 + rng.below(8)
         } else {
             1 + rng.below(60)
@@ -1935,7 +1935,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             }),
             ..Query::default()
         };
-        let what = format!("iteration {iteration}: {joined:?}");
+        let what = format!("seed {seed}: {joined:?}");
         assert_same_output(
             execute(&mut subject.fork(), joined.clone()),
             execute_with_plans_only(&mut subject.fork(), joined),
@@ -1959,7 +1959,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
             }),
             ..Query::default()
         };
-        let what = format!("iteration {iteration}: {rolled:?}");
+        let what = format!("seed {seed}: {rolled:?}");
         assert_same_output(
             execute(&mut prices.fork(), rolled.clone()),
             execute_with_plans_only(&mut prices.fork(), rolled),
@@ -1967,7 +1967,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
         );
 
         let (mut kernel, mut plan) = (table.fork(), table.fork());
-        let what = format!("iteration {iteration}: {update:?}");
+        let what = format!("seed {seed}: {update:?}");
         assert_same_output(
             execute(&mut kernel, update.clone()),
             execute_with_plans_only(&mut plan, update),
@@ -1985,7 +1985,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
                 &format!("{what}, column {name}"),
             );
         }
-    }
+    });
 }
 
 #[test]
@@ -2035,86 +2035,88 @@ fn mult_keeps_the_first_or_last_match_as_data_table_does() {
 /// hashed partitions.
 #[test]
 fn large_grouped_medians_and_moments_match_the_plan() {
-    let mut rng = SplitMix64(7);
-    let rows = 300_000;
-    let groups: Vec<i32> = (0..rows).map(|_| rng.below(500) as i32).collect();
-    let x: Vec<f64> = (0..rows)
-        .map(|_| {
-            if rng.chance(1, 1000) {
-                NA_REAL
-            } else {
-                rng.below(10_000) as f64 / 7.0
-            }
-        })
-        .collect();
-    let y: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
-    let z: Vec<i32> = y
-        .iter()
-        .map(|y| *y as i32 / 3 + rng.below(100) as i32)
-        .collect();
-    let sparse: Vec<i32> = groups.iter().map(|group| group * 4_000_000).collect();
-    let table = frame(vec![
-        ("g", ints(&groups)),
-        ("sparse", ints(&sparse)),
-        ("x", doubles(&x)),
-        ("y", doubles(&y)),
-        ("z", ints(&z)),
-    ]);
-    let removed = |function| Expr::Aggregate {
-        function,
-        arg: Box::new(column("x")),
-        na_rm: true,
-    };
-    for key in ["g", "sparse"] {
-        let query = || Query {
-            select: Select::Columns(vec![
-                named("md", removed(Aggregate::Median)),
-                named("md_na", aggregate(Aggregate::Median, column("x"))),
-                named("sd", removed(Aggregate::Sd)),
-                named("var", aggregate(Aggregate::Var, column("y"))),
-                named(
-                    "cor",
-                    Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
-                ),
-            ]),
-            by: vec![named(key, column(key))],
-            ..Query::default()
+    for_each_seed(1, |seed| {
+        let mut rng = SplitMix64(seed);
+        let rows = 300_000;
+        let groups: Vec<i32> = (0..rows).map(|_| rng.below(500) as i32).collect();
+        let x: Vec<f64> = (0..rows)
+            .map(|_| {
+                if rng.chance(1, 1000) {
+                    NA_REAL
+                } else {
+                    rng.below(10_000) as f64 / 7.0
+                }
+            })
+            .collect();
+        let y: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
+        let z: Vec<i32> = y
+            .iter()
+            .map(|y| *y as i32 / 3 + rng.below(100) as i32)
+            .collect();
+        let sparse: Vec<i32> = groups.iter().map(|group| group * 4_000_000).collect();
+        let table = frame(vec![
+            ("g", ints(&groups)),
+            ("sparse", ints(&sparse)),
+            ("x", doubles(&x)),
+            ("y", doubles(&y)),
+            ("z", ints(&z)),
+        ]);
+        let removed = |function| Expr::Aggregate {
+            function,
+            arg: Box::new(column("x")),
+            na_rm: true,
         };
-        let mut kernel = run_table(&mut table.fork(), query());
-        let mut planned = match execute_with_plans_only(&mut table.fork(), query())
-            .map(|executed| executed.output)
-        {
-            Ok(Output::Table(result)) => result,
-            other => panic!("expected a table, got {other:?}"),
-        };
-        assert_eq!(read(&mut kernel, key), get(&mut planned, key));
-        for name in ["md", "md_na"] {
-            assert_eq!(
-                read(&mut kernel, name),
-                get(&mut planned, name),
-                "{key} {name}"
-            );
-        }
-        for name in ["sd", "var", "cor"] {
-            let (RVector::Double(left), RVector::Double(right)) =
-                (get(&mut kernel, name), get(&mut planned, name))
-            else {
-                panic!("{key} {name} is not a double column");
+        for key in ["g", "sparse"] {
+            let query = || Query {
+                select: Select::Columns(vec![
+                    named("md", removed(Aggregate::Median)),
+                    named("md_na", aggregate(Aggregate::Median, column("x"))),
+                    named("sd", removed(Aggregate::Sd)),
+                    named("var", aggregate(Aggregate::Var, column("y"))),
+                    named(
+                        "cor",
+                        Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
+                    ),
+                ]),
+                by: vec![named(key, column(key))],
+                ..Query::default()
             };
-            assert_eq!(left.len(), right.len(), "{key} {name}");
-            for (left, right) in left.iter().zip(&right) {
+            let mut kernel = run_table(&mut table.fork(), query());
+            let mut planned = match execute_with_plans_only(&mut table.fork(), query())
+                .map(|executed| executed.output)
+            {
+                Ok(Output::Table(result)) => result,
+                other => panic!("expected a table, got {other:?}"),
+            };
+            assert_eq!(read(&mut kernel, key), get(&mut planned, key));
+            for name in ["md", "md_na"] {
                 assert_eq!(
-                    is_na_real(*left),
-                    is_na_real(*right),
-                    "{key} {name}: {left} against {right}"
-                );
-                assert!(
-                    is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
-                    "{key} {name}: {left} against {right}"
+                    read(&mut kernel, name),
+                    get(&mut planned, name),
+                    "{key} {name}"
                 );
             }
+            for name in ["sd", "var", "cor"] {
+                let (RVector::Double(left), RVector::Double(right)) =
+                    (get(&mut kernel, name), get(&mut planned, name))
+                else {
+                    panic!("{key} {name} is not a double column");
+                };
+                assert_eq!(left.len(), right.len(), "{key} {name}");
+                for (left, right) in left.iter().zip(&right) {
+                    assert_eq!(
+                        is_na_real(*left),
+                        is_na_real(*right),
+                        "{key} {name}: {left} against {right}"
+                    );
+                    assert!(
+                        is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
+                        "{key} {name}: {left} against {right}"
+                    );
+                }
+            }
         }
-    }
+    });
 }
 
 /// Four integer keys whose ranges multiply past 64 bits, as db-benchmark's six-key question does
@@ -2122,47 +2124,49 @@ fn large_grouped_medians_and_moments_match_the_plan() {
 /// must still give the plan's groups in both `by` and `keyby` order, `NA` keys included.
 #[test]
 fn keys_too_wide_for_one_64_bit_code_group_like_the_plan() {
-    let mut rng = SplitMix64(11);
-    let rows = 200_000;
-    let key = |rng: &mut SplitMix64| -> Vec<i32> {
-        (0..rows)
-            .map(|_| {
-                if rng.chance(1, 500) {
-                    NA_INTEGER
-                } else {
-                    (rng.below(6) as i32 - 3) * 300_000_000 + rng.below(3) as i32
-                }
-            })
-            .collect()
-    };
-    let keys: Vec<Vec<i32>> = (0..4).map(|_| key(&mut rng)).collect();
-    let values: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
-    let table = frame(vec![
-        ("k1", ints(&keys[0])),
-        ("k2", ints(&keys[1])),
-        ("k3", ints(&keys[2])),
-        ("k4", ints(&keys[3])),
-        ("v", doubles(&values)),
-    ]);
-    for keyed in [false, true] {
-        let query = Query {
-            select: Select::Columns(vec![
-                named("v", aggregate(Aggregate::Sum, column("v"))),
-                named("n", Expr::Count),
-            ]),
-            by: ["k1", "k2", "k3", "k4"]
-                .iter()
-                .map(|name| named(name, column(name)))
-                .collect(),
-            keyed,
-            ..Query::default()
+    for_each_seed(1, |seed| {
+        let mut rng = SplitMix64(seed);
+        let rows = 200_000;
+        let key = |rng: &mut SplitMix64| -> Vec<i32> {
+            (0..rows)
+                .map(|_| {
+                    if rng.chance(1, 500) {
+                        NA_INTEGER
+                    } else {
+                        (rng.below(6) as i32 - 3) * 300_000_000 + rng.below(3) as i32
+                    }
+                })
+                .collect()
         };
-        assert_same_output(
-            execute(&mut table.fork(), query.clone()),
-            execute_with_plans_only(&mut table.fork(), query),
-            &format!("keyed {keyed}"),
-        );
-    }
+        let keys: Vec<Vec<i32>> = (0..4).map(|_| key(&mut rng)).collect();
+        let values: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
+        let table = frame(vec![
+            ("k1", ints(&keys[0])),
+            ("k2", ints(&keys[1])),
+            ("k3", ints(&keys[2])),
+            ("k4", ints(&keys[3])),
+            ("v", doubles(&values)),
+        ]);
+        for keyed in [false, true] {
+            let query = Query {
+                select: Select::Columns(vec![
+                    named("v", aggregate(Aggregate::Sum, column("v"))),
+                    named("n", Expr::Count),
+                ]),
+                by: ["k1", "k2", "k3", "k4"]
+                    .iter()
+                    .map(|name| named(name, column(name)))
+                    .collect(),
+                keyed,
+                ..Query::default()
+            };
+            assert_same_output(
+                execute(&mut table.fork(), query.clone()),
+                execute_with_plans_only(&mut table.fork(), query),
+                &format!("keyed {keyed}"),
+            );
+        }
+    });
 }
 
 /// A double `sum` adds each group's values in row order, as data.table does, however many threads
@@ -2703,7 +2707,6 @@ fn each_i_widens_an_overflowing_sum() {
 
 #[test]
 fn non_equi_joins_match_the_plan_on_random_tables() {
-    let mut rng = SplitMix64(0x006e_6f6e_6571_7569);
     let value = |rng: &mut SplitMix64| match rng.below(12) {
         0 => NA_REAL,
         1 => f64::NAN,
@@ -2722,7 +2725,8 @@ fn non_equi_joins_match_the_plan_on_random_tables() {
         2 => -0.0,
         _ => rng.below(4) as f64,
     };
-    for iteration in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let (x_rows, i_rows) = (rng.below(40), 1 + rng.below(12));
         let x = frame(vec![
             (
@@ -2797,7 +2801,7 @@ fn non_equi_joins_match_the_plan_on_random_tables() {
             rows: Rows::Join(join.clone()),
             ..Query::default()
         };
-        let what = format!("iteration {iteration}: {joined:?}");
+        let what = format!("seed {seed}: {joined:?}");
         assert_same_output(
             execute(&mut x.fork(), joined.clone()),
             execute_with_plans_only(&mut x.fork(), joined),
@@ -2812,13 +2816,13 @@ fn non_equi_joins_match_the_plan_on_random_tables() {
             ]),
             ..Query::default()
         };
-        let what = format!("iteration {iteration}: {grouped:?}");
+        let what = format!("seed {seed}: {grouped:?}");
         assert_same_output(
             execute(&mut x.fork(), grouped.clone()),
             execute_with_plans_only(&mut x.fork(), grouped),
             &what,
         );
-    }
+    });
 }
 
 /// The warnings `query` raises, after checking that the kernels and the plans raise the same ones.
@@ -3256,8 +3260,9 @@ fn a_csv_file_reads_into_the_column_types_fread_gives() {
     );
 }
 
-/// Mutated delimited text reads or fails cleanly under `io::check_csv_input`, which the
-/// coverage-guided `csv` target shares.
+/// Random and mutated delimited text reads or fails cleanly under `io::check_csv_input`, which
+/// the coverage-guided `csv` target shares, with random options and slice sizes. Now and then the
+/// text goes through a real file, read through its memory map with each slice's pages released.
 #[test]
 fn fuzz_csv_reading() {
     let seeds = [
@@ -3267,11 +3272,127 @@ fn fuzz_csv_reading() {
         "1,2\n3,4\n",
         "a,a,\n1,2,3\n",
     ];
-    let mut rng = SplitMix64(0xc5f_f022);
-    for _ in 0..fuzz_iterations(500) {
-        let seed = seeds[rng.below(seeds.len())];
-        io::check_csv_input(&syntax::testing::mutate_bytes(&mut rng, seed));
+    for_each_seed(500, |seed| {
+        let mut rng = SplitMix64(seed);
+        let bytes = if rng.chance(1, 2) {
+            let text = random_csv(&mut rng);
+            if rng.chance(1, 3) {
+                syntax::testing::mutate_bytes(&mut rng, &text)
+            } else {
+                text.into_bytes()
+            }
+        } else {
+            let source = seeds[rng.below(seeds.len())];
+            syntax::testing::mutate_bytes(&mut rng, source)
+        };
+        let options = random_read_options(&mut rng, &bytes);
+        let slice_bytes = 1 + rng.below(bytes.len().max(1) / 2 + 2);
+        io::check_csv_input(&bytes, &options, slice_bytes);
+        if rng.chance(1, 8) {
+            let path = std::env::temp_dir()
+                .join(format!("ry-table-fuzz-{}-{seed}.csv", std::process::id()));
+            std::fs::write(&path, &bytes).unwrap_or_else(|error| panic!("cannot write: {error}"));
+            io::check_csv_file(&path, &options, slice_bytes);
+            std::fs::remove_file(&path).unwrap_or_else(|error| panic!("cannot remove: {error}"));
+        }
+    });
+}
+
+/// A comma-separated file of a few dozen rows whose columns each hold one kind of value, with
+/// quoted fields that hold separators, doubled quotes and line breaks, missing values, and now
+/// and then a value deep in the file that the sniffer's sample may miss.
+fn random_csv(rng: &mut SplitMix64) -> String {
+    let width = 1 + rng.below(5);
+    let kinds: Vec<usize> = (0..width).map(|_| rng.below(5)).collect();
+    let mut text = String::new();
+    if rng.chance(3, 4) {
+        let names: Vec<String> = (0..width).map(|index| format!("c{index}")).collect();
+        text.push_str(&names.join(","));
+        text.push('\n');
     }
+    let rows = rng.below(80);
+    for row in 0..rows {
+        let fields: Vec<String> = kinds
+            .iter()
+            .map(|kind| {
+                if rng.chance(1, 12) {
+                    return ["", "NA"][rng.below(2)].to_string();
+                }
+                if row > 20 && rng.chance(1, 60) {
+                    return ["2.5", "x", "TRUE", "3000000000"][rng.below(4)].to_string();
+                }
+                match kind {
+                    0 => (rng.below(2000) as i32 - 1000).to_string(),
+                    1 => format!("{}.{}", rng.below(100), rng.below(10)),
+                    2 => ["TRUE", "FALSE", "T", "F"][rng.below(4)].to_string(),
+                    3 => format!("k{}", rng.below(6)),
+                    _ => match rng.below(4) {
+                        0 => "\"a, b\"".to_string(),
+                        1 => "\"say \"\"hi\"\"\"".to_string(),
+                        2 => "\"line\nbreak\"".to_string(),
+                        _ => format!("w{}", rng.below(4)),
+                    },
+                }
+            })
+            .collect();
+        text.push_str(&fields.join(","));
+        text.push_str(if rng.chance(1, 20) { "\r\n" } else { "\n" });
+    }
+    if rng.chance(1, 6) {
+        text.push_str("\n\n");
+    }
+    text
+}
+
+/// Options a reader may be given for `bytes`: factors, a leading `head`, and a projection that
+/// lists some of the sniffed columns in any order, now and then with a column the file lacks.
+fn random_read_options(rng: &mut SplitMix64, bytes: &[u8]) -> io::ReadOptions {
+    let columns = rng.chance(1, 2).then(|| {
+        let mut names: Vec<PlSmallStr> = sniff::sniff(bytes)
+            .columns
+            .into_iter()
+            .filter(|_| rng.chance(2, 3))
+            .map(|column| PlSmallStr::from(column.name.as_str()))
+            .collect();
+        if rng.chance(1, 2) {
+            names.reverse();
+        }
+        if rng.chance(1, 20) {
+            names.push(PlSmallStr::from_static("absent"));
+        }
+        names
+    });
+    io::ReadOptions {
+        columns,
+        rows: rng.chance(1, 3).then(|| rng.below(30)),
+        factors: rng.chance(1, 2),
+    }
+}
+
+/// A read that needs no columns used to panic inside Polars, which cannot parse none. Input:
+/// `"a,b\n1,2\n3,4\n"` with `columns: Some(vec![])`.
+#[test]
+fn a_read_of_no_columns_counts_the_rows() {
+    let path = std::env::temp_dir().join(format!("ry-table-no-columns-{}.csv", std::process::id()));
+    std::fs::write(&path, "a,b\n1,2\n3,4\n").unwrap_or_else(|error| panic!("{error}"));
+    let options = io::ReadOptions {
+        columns: Some(Vec::new()),
+        ..io::ReadOptions::default()
+    };
+    let table = io::read_csv_with(&path, &options);
+    std::fs::remove_file(&path).unwrap_or_else(|error| panic!("{error}"));
+    let table = table.unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!((table.frame().width(), table.height()), (0, 2));
+}
+
+/// A quote in the middle of a header field is text, as in every other row. Polars opened a quoted
+/// field there, so a whole read swallowed the rows into the header while a read in slices kept
+/// them. Input: `"c0,c1}\"x\n1,2\n3,4\n"`.
+#[test]
+fn a_stray_quote_in_the_header_is_text() {
+    let mut table = read_text("c0,c1}\"x\n1,2\n3,4\n");
+    assert_eq!(names(&table), ["c0", "c1}\"x"]);
+    assert_eq!(get(&mut table, "c0"), ints(&[1, 3]));
 }
 
 #[test]
@@ -3955,8 +4076,8 @@ fn permuted(vector: &RVector, rows: &[usize]) -> RVector {
 /// a reference that applies data.table's rules one row at a time.
 #[test]
 fn fuzz_sort_unique_and_runs_against_a_reference() {
-    let mut rng = SplitMix64(0x5047);
-    for _ in 0..fuzz_iterations(3) {
+    for_each_seed(3, |seed| {
+        let mut rng = SplitMix64(seed);
         let length = 70_000 + rng.below(70_000);
         let names = ["a", "b", "c", "row"];
         let mut vectors: Vec<RVector> = (0..3)
@@ -4079,5 +4200,5 @@ fn fuzz_sort_unique_and_runs_against_a_reference() {
                 "nafill {fill:?}"
             );
         }
-    }
+    });
 }

@@ -796,13 +796,13 @@ unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
     Ok(simple.then_some(function))
 }
 
+/// A constructor call's items, the layout it builds and each item's slot.
+type ConstructorPlan<'a> = (&'a [(Sexp, Sexp)], u32, Vec<usize>);
+
 /// The items of a `.ry_record`, `.ry_tuple` or `.ry_tag` call named `name`, the layout it
 /// builds and each item's slot, when its syntax fixes them and evaluating the items into
 /// registers is what the builtin's own evaluation would do.
-unsafe fn constructor<'a>(
-    name: &str,
-    args: &'a [(Sexp, Sexp)],
-) -> Option<(&'a [(Sexp, Sexp)], u32, Vec<usize>)> {
+unsafe fn constructor<'a>(name: &str, args: &'a [(Sexp, Sexp)]) -> Option<ConstructorPlan<'a>> {
     if args
         .iter()
         .any(|(_, value)| *value == symbols().dots || *value == missing_arg())

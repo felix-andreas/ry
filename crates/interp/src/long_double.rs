@@ -248,6 +248,8 @@ impl Add for LongDouble {
 impl Sub for LongDouble {
     type Output = LongDouble;
 
+    // Subtraction is exactly addition of the negated operand, which flips only the sign.
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn sub(self, other: LongDouble) -> LongDouble {
         self + other.negate()
     }

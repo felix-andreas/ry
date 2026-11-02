@@ -253,7 +253,7 @@ peek <- function(dt) {
 == R/dt.R
 summarize_sales: <T> fn(dt: T) -> Unknown
 add_revenue: <T> fn(dt: T) -> Unknown
-peek: <T> fn(dt: T) -> Unknown
+peek: <T> fn(dt: T) -> Any
 
 #---- base_indexing_still_reports_unresolved_names
 #~~~~ R/plain.R
