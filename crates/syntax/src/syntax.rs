@@ -494,7 +494,7 @@ pub enum GreenEvent<'a> {
     },
     /// The end of a node, after its last child.
     Leave(GreenRef<'a>),
-    /// A comment, string or number token, the only tokens a whole-file pass reads.
+    /// A comment or literal token, the only tokens a whole-file pass reads.
     Token {
         kind: SyntaxKind,
         text: &'a str,
@@ -504,8 +504,9 @@ pub enum GreenEvent<'a> {
 
 /// The nodes under `root`, `root` included, in preorder, read from the green tree, so the
 /// walk builds no [`SyntaxNode`]s. Pair it with [`node_at`] to build red nodes only for the
-/// few sites a pass needs. Tokens other than comments, strings and numbers only advance the
-/// offset: most elements of a tree are tokens, and the whole-file passes read only nodes and those.
+/// few sites a pass needs. Tokens other than comments and literals only advance the offset:
+/// most elements of a tree are tokens, and the whole-file passes read only nodes, comments and
+/// literals.
 #[inline]
 pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
     let root_green = root.green();
@@ -538,14 +539,7 @@ pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
             }
             NodeOrToken::Token(token) => {
                 let kind = RLanguage::kind_from_raw(token.kind());
-                if matches!(
-                    kind,
-                    SyntaxKind::COMMENT
-                        | SyntaxKind::STRING
-                        | SyntaxKind::DOUBLE
-                        | SyntaxKind::INTEGER
-                        | SyntaxKind::COMPLEX
-                ) {
+                if is_walked_token(kind) {
                     visit(GreenEvent::Token {
                         kind,
                         text: token.text(),
@@ -555,6 +549,18 @@ pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
             }
         }
     }
+}
+
+/// Whether [`walk_green`] reports a token of this kind; every other token only advances the offset.
+pub fn is_walked_token(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::COMMENT
+            | SyntaxKind::STRING
+            | SyntaxKind::DOUBLE
+            | SyntaxKind::INTEGER
+            | SyntaxKind::COMPLEX
+    )
 }
 
 /// The first node in preorder under `root` with this kind and exactly this range. A non-empty

@@ -743,8 +743,8 @@ beats a classic typed AST of structs with spans for four reasons.
   item's subtree stays structurally equal after an edit elsewhere in the file. That is the property
   per-item cutoffs are built on. An AST that carries spans shifts every span after any edit, which
   kills sub-file incrementality at the root.
-- **Structural sharing.** Immutable refcounted subtrees with builder-level dedup of identical small
-  nodes keep the resident tree near twice the source bytes.
+- **Structural sharing.** Immutable refcounted subtrees share identical tokens through the
+  builder, and a splice reparse shares every untouched subtree with the previous tree.
 
 Use the crate, not an in-house copy of the design. The value is subtle machinery already hardened
 over years in rust-analyzer: the thin-DST layout, red cursors with lazy offsets, node caching and
@@ -757,8 +757,8 @@ That is why inference never walks it. The checker runs on per-item HIR, and rowa
 fidelity layers, which are the IDE, the formatter and refactorings.
 
 Value equality is the mechanism, not pointer identity. rowan's green `Eq` is structural with a
-pointer fast path, and its node cache dedups only nodes with three children or fewer, so a
-from-scratch reparse shares no large subtree. rust-analyzer's barriers are likewise value equality
+pointer fast path, and ry's tree builder shares only tokens, never nodes (see "The cold check's
+per-call work" below), so a from-scratch reparse shares no subtree. rust-analyzer's barriers are likewise value equality
 on its `ItemTree` and `AstIdMap`. A statement-splice reparse of an open document can make those
 compares pointer-fast, but it is an optimization only. Parse stays a pure per-file query and
 correctness never depends on splicing.
@@ -2371,7 +2371,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - HIR lists are boxed slices and `lower_item` shrinks the arena, so a memoized item holds no
     slack. `ItemCheck.expression_types` is a dense table indexed by `ExprId` (ids are dense within
     an item).
-  - Parsing shares one rowan `NodeCache` per thread, replaced every 256 parses so a long-running
+  - Parsing shares one token cache per thread, replaced every 256 parses so a long-running
     server does not pin the garbage of replaced trees.
   - `check` parses each file once on all cores while collecting attached namespaces and used
     tokens, forgets the database instead of dropping it, and the binary uses mimalloc (a default
@@ -5170,3 +5170,41 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`debug`/`debugonce`** set closure gp bits and enter `Mode::FunctionEntry`, stopping with reason "function breakpoint". Code typed at the prompt has no file, so its frames get a `sourceReference` the client fetches with `source`.
 - **Data viewer.** `ryView` evaluates an expression (in a frame when stopped, else in the global env) and registers a view that preserves the object; `ryTable` returns one page of formatted rows, at most 1000; `ryRelease` drops it, and at most 32 views live at once. The data never leaves the runtime whole, so a million-row table costs one page. Variables carry `evaluateName` so the editor's "View Data" names the exact value. `View(x)` sends a `ryView` event to connections that sent `rySubscribe`; VS Code subscribes when it opens or attaches to a console.
 - **Live values in the language server** come from `ryGlobals` (names, class, summary, columns, promises unforced) with a 150 ms timeout (`ry::console_link`). Analysis stays the source of truth: the console only adds hover lines and completion items analysis lacks, and the simulator disables the link to stay deterministic.
+
+## The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder
+
+- **Previous shape.** Argument matching allocated its target and match vectors on the heap per
+  call, each item check cloned the stub library's schemes out of a salsa fetch per lookup, the
+  `GlobalEnv` lookups took `&str` and re-interned the name at every layer, parsing went through
+  rowan's `GreenNodeBuilder` with a per-thread `NodeCache`, and `ry check` read, rendered and
+  printed findings on one thread after analysis.
+- **Weakness.** Every one of those is per-call or per-token work that repeats millions of times on
+  a 300k-line project: allocator churn, scheme clones, repeated interning, and the node cache's
+  hashing of every small node to deduplicate it.
+- **Target shape.**
+  - Argument matching allocates in a `bumpalo::Bump` that lives for one item check
+    (`check_item_with_annotation`), and the checker borrows `ItemCheck`s and stub schemes instead of
+    cloning them. The stub library is fetched once per check.
+  - `GlobalEnv` methods take `hir::Symbol`; `types::Name::new` accepts anything `IntoSymbol`, so a
+    caller holding a symbol never round-trips through a string. `hir::Symbol` orders by a cached
+    8-byte big-endian prefix before comparing text, so sorted sets of symbols rarely touch memory.
+  - `syntax::parser::TreeBuilder` builds green nodes directly from a child stack and shares only
+    tokens, through a per-thread hash table plus a per-kind "last token" slot. Nodes are not
+    deduplicated: on the finance bench that costs about 70 MB of peak memory (440 to 510 MB) and
+    saves the node cache's hashing, and value equality of green trees (the firewall mechanism, see
+    the rowan entry) does not depend on sharing.
+  - The lexer has ASCII fast paths for identifiers, numbers and comment bodies, and keyword
+    lookup rejects by length and first byte.
+  - `ry check` reads sources and renders findings in parallel and prints them in path order, and it
+    hashes sources for the cache key only when the cache is read or written.
+  - `TypeDefinitions::of`, `read_context` and `SalsaGlobals::new` fetch the stub library, the
+    project files and the file kind up front instead of on first use. That records a few
+    dependencies a lookup answered file-locally used to skip, so an edit to those inputs
+    re-runs slightly more; all three change rarely (a stub or project-layout edit), and one
+    fetch per check is cheaper than one per lookup.
+- **Impact.** Callgrind on the finance bench (`ry check --no-cache`) went from 24.60 G to
+  22.6-22.8 G instructions across runs, with byte-identical diagnostics. In interleaved runs the
+  one-core median fell from 4.7 to 4.3 s and the 4-core median from about 1.6 to 1.48 s. The 1 s
+  cold-check target is not met, and the rest of the profile is flat across mimalloc, salsa's
+  dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
+  follow-ups").
