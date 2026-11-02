@@ -347,7 +347,10 @@ the database first cancels it.
 A fresh load on ry's runtime may also hold back the package's S4 definitions until first use. The
 loader decides which (`DeferredS4` in `crates/loader/src/loader.rs` states the rules), and the
 methods package's class and generic lookups in `crates/interp/src/methods.rs` force them on a miss;
-[package loading](/reference/package-loading#s4-definitions) has the contract.
+[package loading](/reference/package-loading#s4-definitions) has the contract. When the definitions
+read only S4 constructors and their own names, the loader gives the unit a cache key
+(`DeferredS4::cache_key`), and `.ry_force_s4` in `runtime.R` restores the bindings a previous process
+saved instead of running the definitions.
 
 ### Diagnostics
 
