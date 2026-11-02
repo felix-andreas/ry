@@ -3021,13 +3021,9 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 atom = None;
             }
             '*' | '+' | '?' => match atom {
-                // POSIX takes a repetition operator with nothing to repeat literally.
-                None => {
-                    output.push('\\');
-                    output.push(character);
-                    atom = Some(start);
-                    quantified = false;
-                }
+                // TRE drops a repetition operator with nothing to repeat, at the start of the
+                // pattern or right after `(`, `|` or `^`: `grepl("+ab", "xab")` is `TRUE`.
+                None => {}
                 Some(_) => {
                     output.push(character);
                     quantified = true;

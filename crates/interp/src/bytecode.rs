@@ -64,7 +64,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("mkCode", 2, do_mk_code),
     internal("bcClose", 3, |call| unsafe {
-        eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))
+        let closure = eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))?;
+        crate::heap().root(closure);
+        // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
+        // code passes constant arguments as values, which native code such as rlang observes.
+        // A body the compiler rejects stays an expression, as in `run_body`.
+        if let Ok(Some(code)) = compile(closure.cdr(), closure) {
+            crate::heap().set_cdr(closure, code);
+        }
+        Ok(closure)
     }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
@@ -1938,9 +1946,14 @@ impl Compiler {
                 // of a closure made on the spot, instead of `local`'s `eval.parent(substitute(
                 // eval(quote(expr), new.env())))`, which costs several calls and an `eval`.
                 let expression = args[0].1;
+                // The `function` call carries the srcref slot, NULL here, as the parser's does:
+                // rlang's `trace_back` zaps a frame call's `function` head by poking that slot.
                 let function_call = values::lcons(
                     symbols().function,
-                    values::cons(nil(), values::cons(expression, nil())?)?,
+                    values::cons(
+                        nil(),
+                        values::cons(expression, values::cons(nil(), nil())?)?,
+                    )?,
                 )?;
                 let immediate_call = values::lcons(function_call, nil())?;
                 let mark = self.next_register;
@@ -2829,22 +2842,24 @@ unsafe fn step(
         Op::CallGeneric => {
             let function = register(operand(1));
             let call = constants.element(operand(2));
-            // Only a closure's arguments become promises; a special reads them as expressions.
-            let arguments = if function.kind() == SexpType::Closure {
+            let value = if function.kind() == SexpType::Closure {
                 let mut compiled = constants.element(operand(2) + 1);
                 if compiled == unbound() {
                     compiled = compile_promise_arguments(machine.function, call.cdr())?;
                     crate::heap().set_element(constants, operand(2) as usize + 1, compiled);
                 }
-                if compiled == nil() {
+                let arguments = if compiled == nil() {
                     call.cdr()
                 } else {
                     compiled
-                }
+                };
+                let mut args = eval::Args::new();
+                eval::compiled_args_into(arguments, env, &mut args)?;
+                eval::apply_closure(call, function, &args, env, None)?
             } else {
-                call.cdr()
+                // A special reads its arguments as expressions, so they stay uncompiled.
+                eval::apply_call(call, function, call.cdr(), env)?
             };
-            let value = eval::apply_call(call, function, arguments, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }

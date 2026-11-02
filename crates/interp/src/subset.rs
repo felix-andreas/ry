@@ -747,6 +747,7 @@ unsafe fn array_subset(
         } else {
             nil()
         };
+        // Unlike a vector, a dimension never stretches to a longer logical subscript.
         if index.kind() == SexpType::Logical && length(index) > extent {
             return Err(crate::unwind::error_in(
                 call,
@@ -1469,6 +1470,29 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
+    // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads properties.
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        let args = [
+            Arg {
+                tag: nil(),
+                value: object,
+            },
+            Arg {
+                tag: nil(),
+                value: values::scalar_string_charsxp(symbol.car())?,
+            },
+        ];
+        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env)? {
+            return Ok(value);
+        }
+    }
+    if !object.has_gp(gp::S4_OBJECT) && symbol != symbols().dot_data {
+        let class = crate::dispatch::class_of(object)?;
+        return Err(call.error(format!(
+            "no applicable method for `@` applied to an object of class \"{}\"",
+            values::first_string(class).unwrap_or_default()
+        )));
+    }
     get_slot(object, symbol, call.call)
 }
 
@@ -1655,6 +1679,26 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
     let value = eval::eval(call.arg(2), call.env)?;
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        let args = [
+            Arg {
+                tag: nil(),
+                value: object,
+            },
+            Arg {
+                tag: nil(),
+                value: values::scalar_string_charsxp(symbol.car())?,
+            },
+            Arg {
+                tag: symbols().value,
+                value,
+            },
+        ];
+        if let Some(result) = crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env)?
+        {
+            return Ok(result);
+        }
+    }
 
     // The methods package checks the assignment against the class definition, using the
     // implicit class of an object without a class attribute, so `x@a <- 1` on a list fails.
@@ -3408,7 +3452,9 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
 unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mut items: Vec<(String, Sexp)> = Vec::new();
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
+    // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
+    // names, which `names()` exposes but `attributes()` does not.
+    if object.kind() == SexpType::Pairlist {
         let names = values::pairlist_names(object)?;
         if names != nil() {
             items.push(("names".into(), names));

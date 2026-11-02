@@ -77,6 +77,7 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     // Store or pass a value along without looking inside it.
     "list",
     "invisible",
+    "return",
     "assign",
     "withVisible",
     "lapply",

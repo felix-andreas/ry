@@ -11,7 +11,6 @@ use {
         space::Space,
     },
     hashbrown::HashTable,
-    std::hash::Hasher,
 };
 
 /// R's `cetype_t`, numbered as in GNU R.
@@ -69,12 +68,112 @@ pub(crate) struct StringTable {
     young: Vec<Sexp>,
 }
 
-/// The intern hash of a string, as the `CHARSXP` stores it.
-pub(crate) fn hash(bytes: &[u8], encoding_bits: u16) -> u32 {
-    let mut hasher = rustc_hash::FxHasher::default();
-    hasher.write(bytes);
-    hasher.write_u16(encoding_bits);
-    (hasher.finish() >> 32) as u32
+/// What one pass over a string's bytes tells `mk_char`: whether they hold a NUL byte, whether
+/// they are all ASCII, and their hash before the encoding is mixed in.
+pub(crate) struct Scan {
+    pub any_nul: bool,
+    pub ascii: bool,
+    state: u64,
+}
+
+const SEED_LOW: u64 = 0x243F_6A88_85A3_08D3;
+const SEED_HIGH: u64 = 0x1319_8A2E_0370_7344;
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// Reads the bytes once, a word at a time, for the NUL test, the ASCII test and the hash
+/// together. Re-interning a string that is already in the table costs little more than this pass
+/// and one probe, so the three used to be separate passes and are now one.
+#[inline]
+pub(crate) fn scan(bytes: &[u8]) -> Scan {
+    let length = bytes.len();
+    let (mut low, mut high) = (SEED_LOW, SEED_HIGH);
+    let (mut zero_bits, mut high_bits) = (0u64, 0u64);
+    // The zero-byte test of a word, which is nonzero exactly when some byte of the word is zero.
+    let zero_test = |word: u64| word.wrapping_sub(ONES) & !word & HIGHS;
+    if length >= 8 {
+        let mut rest = bytes;
+        while let Some((chunk, tail)) = rest.split_first_chunk::<16>() {
+            if tail.is_empty() {
+                break;
+            }
+            let (first, second) = (load(&chunk[..8]), load(&chunk[8..]));
+            zero_bits |= zero_test(first) | zero_test(second);
+            high_bits |= first | second;
+            let mixed = fold(low ^ first, PREVENT_ZERO_COLLAPSE ^ second);
+            low = high;
+            high = mixed;
+            rest = tail;
+        }
+        // The last one or two words, read so that they end at the last byte: they may overlap
+        // each other or bytes already mixed in, which the tests and the hash both tolerate.
+        let last = load(&bytes[length - 8..]);
+        let before = load(&bytes[length.saturating_sub(16).min(length - 8)..][..8]);
+        zero_bits |= zero_test(last) | zero_test(before);
+        high_bits |= last | before;
+        low ^= before;
+        high ^= last;
+    } else if length >= 4 {
+        let first = u64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        let tail = &bytes[length - 4..];
+        let last = u64::from(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]));
+        // The upper halves are padding, so they are set to a nonzero, ASCII byte for the tests.
+        let pad = 0x0101_0101_0000_0000;
+        zero_bits |= zero_test(first | pad) | zero_test(last | pad);
+        high_bits |= first | last;
+        low ^= first;
+        high ^= last;
+    } else if length > 0 {
+        let (first, middle, last) = (bytes[0], bytes[length / 2], bytes[length - 1]);
+        zero_bits = u64::from(first == 0 || middle == 0 || last == 0);
+        high_bits = u64::from(first | middle | last);
+        low ^= u64::from(first);
+        high ^= (u64::from(last) << 8) | u64::from(middle);
+    }
+    Scan {
+        any_nul: zero_bits != 0,
+        ascii: high_bits & HIGHS == 0,
+        state: fold(low, high) ^ length as u64,
+    }
+}
+
+/// The intern hash of a string, as the `CHARSXP` stores it: the scan's hash with the encoding
+/// bits mixed in, since the same bytes in two encodings are two strings.
+#[inline]
+pub(crate) fn hash(scan: &Scan, encoding_bits: u16) -> u32 {
+    (fold(scan.state, SEED_HIGH ^ u64::from(encoding_bits)) >> 32) as u32
+}
+
+const PREVENT_ZERO_COLLAPSE: u64 = 0xA409_3822_299F_31D0;
+
+/// The folded multiply: the high and low halves of the full 128-bit product, xored.
+#[inline]
+fn fold(left: u64, right: u64) -> u64 {
+    let product = u128::from(left) * u128::from(right);
+    (product as u64) ^ ((product >> 64) as u64)
+}
+
+#[inline]
+fn load(bytes: &[u8]) -> u64 {
+    let mut word = [0u8; 8];
+    word.copy_from_slice(&bytes[..8]);
+    u64::from_le_bytes(word)
+}
+
+/// Whether the interned string `candidate` holds exactly `bytes`. Most strings are short, and two
+/// overlapping word loads compare them where a call to `memcmp` would cost more than the compare.
+#[inline]
+unsafe fn same_bytes(candidate: Sexp, bytes: &[u8]) -> bool {
+    let length = bytes.len();
+    if unsafe { candidate.length() } as usize != length {
+        return false;
+    }
+    let stored = unsafe { std::slice::from_raw_parts(candidate.data() as *const u8, length) };
+    if (8..=16).contains(&length) {
+        load(stored) == load(bytes) && load(&stored[length - 8..]) == load(&bytes[length - 8..])
+    } else {
+        stored == bytes
+    }
 }
 
 /// The table's hash for a stored 32-bit hash. The table takes its control bits from the top of
@@ -88,10 +187,11 @@ impl StringTable {
         self.table.len()
     }
 
+    #[inline]
     pub unsafe fn find(&self, hash: u32, bytes: &[u8], encoding_bits: u16) -> Option<Sexp> {
         self.table
             .find(spread(hash), |&candidate| unsafe {
-                candidate.bytes() == bytes && candidate.gp() & gp::ENCODING == encoding_bits
+                candidate.gp() & gp::ENCODING == encoding_bits && same_bytes(candidate, bytes)
             })
             .copied()
     }

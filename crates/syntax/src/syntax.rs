@@ -20,7 +20,7 @@ pub use {
 };
 use {
     rowan::{GreenNode, GreenNodeData, GreenTokenData, Language, NodeOrToken, WalkEvent},
-    std::{mem, ptr, sync::Arc},
+    std::{borrow::Cow, mem, ptr, sync::Arc},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -598,6 +598,21 @@ fn node_at_empty(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Optio
         stack[start..].reverse();
     }
     None
+}
+
+/// The source text of `node`, read from the green tree. `node.text().to_string()` builds a red
+/// node for every element it passes, and a single-token node, such as a name, is borrowed
+/// without any allocation.
+pub fn node_text(node: &SyntaxNode) -> Cow<'_, str> {
+    let Cow::Borrowed(green) = node.green() else {
+        return Cow::Owned(node.text().to_string());
+    };
+    if let Some(text) = GreenRef(green).single_token_text() {
+        return Cow::Borrowed(text);
+    }
+    let mut text = String::with_capacity(usize::from(green.text_len()));
+    for_each_token(node, |_, token| text.push_str(token));
+    Cow::Owned(text)
 }
 
 /// Every token under `node` in source order, read from the green tree.

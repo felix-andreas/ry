@@ -24,3 +24,10 @@ setMethod("Summary", "Box", function(x, ..., na.rm = FALSE) {
 b <- new("Box", x = c(3, 1, 2))
 max(b)
 min(b)
+
+# A logical subscript longer than its dimension is an error; a shorter one recycles.
+m <- matrix(1:36, 6)
+long_rows <- c(TRUE, rep(FALSE, 8))
+print(tryCatch(m[long_rows, ], error = conditionMessage))
+print(tryCatch(m[, long_rows, drop = FALSE], error = conditionMessage))
+print(m[c(TRUE, FALSE), ])

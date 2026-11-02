@@ -14,8 +14,8 @@ use {
         subset::select_elements,
         unwind::{R, error},
         values::{
-            self, alloc, as_logical_scalar, char_str, get_attr, length, na_string, nil, string_at,
-            symbols,
+            self, alloc, alloc_uninit, as_logical_scalar, char_str, get_attr, ints_mut, length,
+            na_string, nil, string_at, symbols,
         },
     },
     heap::{
@@ -432,13 +432,13 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
         )));
     }
     let nas_last = na_last == 1;
-    let radix_keys: Option<Vec<Vec<u64>>> = columns
+    let radix_keys: Option<Vec<SortKey<'_>>> = columns
         .iter()
         .zip(&directions)
         .map(|(column, &decreasing)| {
             column
                 .as_ref()
-                .and_then(|column| sort_keys(column, decreasing, nas_last))
+                .and_then(|column| sort_key(column, decreasing, nas_last))
         })
         .collect();
     let (order, ends) = match radix_keys {
@@ -449,7 +449,8 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
                 for position in 1..=order.len() {
                     if position == order.len()
                         || keys.iter().any(|key| {
-                            key[order[position - 1] as usize] != key[order[position] as usize]
+                            key.get(order[position - 1] as usize)
+                                != key.get(order[position] as usize)
                         })
                     {
                         ends.push(position as i32);
@@ -502,8 +503,8 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             (order, ends)
         }
     };
-    let mut result: Vec<i32> = order.iter().map(|&index| index as i32 + 1).collect();
-    if na_last == NA_LOGICAL {
+    let permutation = if na_last == NA_LOGICAL {
+        let mut result: Vec<i32> = order.iter().map(|&index| index as i32 + 1).collect();
         for (slot, &index) in result.iter_mut().zip(&order) {
             if columns
                 .iter()
@@ -516,8 +517,17 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
         if ends.is_none() {
             result.retain(|&index| index != 0);
         }
-    }
-    let permutation = values::integer_vector(&result)?;
+        values::integer_vector(&result)?
+    } else {
+        // The columns borrow heap memory, so they are dropped before anything allocates; the
+        // order goes straight into the result rather than through a second buffer.
+        drop(columns);
+        let permutation = alloc_uninit(SexpType::Integer, order.len())?;
+        for (slot, &index) in ints_mut(permutation).iter_mut().zip(&order) {
+            *slot = index as i32 + 1;
+        }
+        permutation
+    };
     if let Some(ends) = ends {
         let largest = ends
             .iter()
@@ -1110,128 +1120,157 @@ impl Column<'_> {
 /// order: decreasing when `decreasing` is set (except for first-appearance codes, which keep
 /// their order), with every NA equal to every other and placed last or first. `None` for a key
 /// the radix sort does not read.
-fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Vec<u64>> {
-    // Non-NA keys lie strictly between 0 and `top`, so NAs take one end of the range.
-    let place = |key: Option<u64>, top: u64| match key {
-        Some(key) if decreasing => top - key,
-        Some(key) => key,
-        None if na_last => top,
-        None => 0,
-    };
-    match column {
-        Column::Integer(items) => {
-            let top = 1u64 << 32;
-            Some(
-                items
-                    .iter()
-                    .map(|&value| {
-                        let key = (value != NA_INTEGER)
-                            .then(|| (i64::from(value) - i64::from(i32::MIN)) as u64);
-                        place(key, top)
-                    })
-                    .collect(),
-            )
-        }
-        Column::Real(items) => Some(
-            items
-                .iter()
-                .map(|&value| {
-                    // The IEEE bits ordered as unsigned integers, with -0 read as 0. NaN bit
-                    // patterns map past both infinities, so 0 and `u64::MAX` stay free.
-                    let key = (!value.is_nan()).then(|| {
-                        let bits = if value == 0.0 { 0 } else { value.to_bits() };
-                        if bits >> 63 == 1 {
-                            !bits
-                        } else {
-                            bits | 1 << 63
-                        }
-                    });
-                    place(key, u64::MAX)
-                })
-                .collect(),
-        ),
-        Column::Raw(items) => Some(
-            items
-                .iter()
-                .map(|&value| place(Some(u64::from(value) + 1), 257))
-                .collect(),
-        ),
-        Column::Grouped(items) => Some(items.iter().map(|&code| code as u64).collect()),
+fn sort_key<'a>(column: &'a Column<'_>, decreasing: bool, na_last: bool) -> Option<SortKey<'a>> {
+    let source = match column {
+        Column::Integer(items) => KeySource::Integer(items),
+        Column::Real(items) => KeySource::Real(items),
+        Column::Raw(items) => KeySource::Raw(items),
+        Column::Grouped(items) => KeySource::Grouped(items),
         Column::Bytes(items) => {
-            let mut distinct: FxHashMap<&str, u64> = FxHashMap::default();
+            let mut distinct: FxHashMap<&str, u32> = FxHashMap::default();
             for item in items.iter().flatten() {
                 distinct.entry(item.as_ref()).or_insert(0);
             }
             let mut sorted: Vec<&str> = distinct.keys().copied().collect();
             sorted.sort_unstable();
             for (rank, text) in sorted.iter().enumerate() {
-                distinct.insert(text, rank as u64 + 1);
+                distinct.insert(text, rank as u32 + 1);
             }
-            let top = sorted.len() as u64 + 1;
-            Some(
-                items
-                    .iter()
-                    .map(|item| place(item.as_deref().map(|text| distinct[text]), top))
-                    .collect(),
-            )
+            let ranks = items
+                .iter()
+                .map(|item| item.as_deref().map_or(0, |text| distinct[text]))
+                .collect();
+            KeySource::Ranked {
+                ranks,
+                top: sorted.len() as u64 + 1,
+            }
         }
-        Column::Complex(_) | Column::String(_) => None,
+        Column::Complex(_) | Column::String(_) => return None,
+    };
+    Some(SortKey {
+        source,
+        decreasing,
+        na_last,
+    })
+}
+
+/// One radix sort key: maps a row to an unsigned integer whose order is the order the key asks
+/// for. Keys are computed when a pass reads them rather than stored, which keeps a sort's
+/// working memory to the order and one pass's values.
+struct SortKey<'a> {
+    source: KeySource<'a>,
+    decreasing: bool,
+    na_last: bool,
+}
+
+enum KeySource<'a> {
+    Integer(&'a [i32]),
+    Real(&'a [f64]),
+    Raw(&'a [u8]),
+    /// First-appearance codes, which keep their order whatever the direction says.
+    Grouped(&'a [i32]),
+    /// Byte-order ranks from 1, with 0 for NA, below `top`.
+    Ranked {
+        ranks: Vec<u32>,
+        top: u64,
+    },
+}
+
+impl SortKey<'_> {
+    #[inline]
+    fn get(&self, index: usize) -> u64 {
+        // Non-NA keys lie strictly between 0 and `top`, so NAs take one end of the range.
+        let place = |key: Option<u64>, top: u64| match key {
+            Some(key) if self.decreasing => top - key,
+            Some(key) => key,
+            None if self.na_last => top,
+            None => 0,
+        };
+        match &self.source {
+            KeySource::Integer(items) => {
+                let value = items[index];
+                let key =
+                    (value != NA_INTEGER).then(|| (i64::from(value) - i64::from(i32::MIN)) as u64);
+                place(key, 1 << 32)
+            }
+            KeySource::Real(items) => {
+                let value = items[index];
+                // The IEEE bits ordered as unsigned integers, with -0 read as 0. NaN bit patterns
+                // map past both infinities, so 0 and `u64::MAX` stay free.
+                let key = (!value.is_nan()).then(|| {
+                    let bits = if value == 0.0 { 0 } else { value.to_bits() };
+                    if bits >> 63 == 1 {
+                        !bits
+                    } else {
+                        bits | 1 << 63
+                    }
+                });
+                place(key, u64::MAX)
+            }
+            KeySource::Raw(items) => place(Some(u64::from(items[index]) + 1), 257),
+            KeySource::Grouped(items) => items[index] as u64,
+            KeySource::Ranked { ranks, top } => {
+                let rank = ranks[index];
+                place((rank != 0).then_some(u64::from(rank)), *top)
+            }
+        }
     }
 }
 
 /// The stable order of `count` rows by `keys`, the first key most significant: a least
 /// significant digit radix sort, one key at a time from the last, each over only the digits
-/// its range spans.
-fn radix_order(keys: &[Vec<u64>], count: usize) -> Vec<u32> {
+/// its range spans. Each pass gathers its key's values in the current order, so the values and
+/// the order move together through the digit passes as two parallel arrays.
+fn radix_order(keys: &[SortKey<'_>], count: usize) -> Vec<u32> {
     const BITS: u32 = 11;
     const BUCKETS: usize = 1 << BITS;
     let mut order: Vec<u32> = (0..count as u32).collect();
-    let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(count);
-    let mut scratch: Vec<(u64, u32)> = Vec::new();
+    let mut spare_order: Vec<u32> = Vec::new();
+    let mut values: Vec<u64> = Vec::with_capacity(count);
+    let mut spare_values: Vec<u64> = Vec::new();
     let mut histogram = vec![0usize; BUCKETS];
     for key in keys.iter().rev() {
-        let Some(&low) = key.iter().min() else {
+        values.clear();
+        values.extend(order.iter().map(|&index| key.get(index as usize)));
+        let Some(&low) = values.iter().min() else {
             continue;
         };
-        let high = key.iter().copied().max().unwrap_or(low);
+        let high = values.iter().copied().max().unwrap_or(low);
         let span = high - low;
         if span == 0 {
             continue;
         }
+        spare_order.resize(count, 0);
         // A dense key (such as a permutation or small-range integers) sorts in one counting
-        // pass, which beats two or more digit passes over (key, index) pairs.
+        // pass, which beats two or more digit passes.
         if span < count.max(1 << 16) as u64 {
             histogram.clear();
             histogram.resize(span as usize + 2, 0);
-            for &index in &order {
-                histogram[(key[index as usize] - low) as usize + 1] += 1;
+            for &value in &values {
+                histogram[(value - low) as usize + 1] += 1;
             }
             for bucket in 1..histogram.len() {
                 histogram[bucket] += histogram[bucket - 1];
             }
-            let mut sorted = vec![0u32; count];
-            for &index in &order {
-                let bucket = &mut histogram[(key[index as usize] - low) as usize];
-                sorted[*bucket] = index;
+            for (&value, &index) in values.iter().zip(&order) {
+                let bucket = &mut histogram[(value - low) as usize];
+                spare_order[*bucket] = index;
                 *bucket += 1;
             }
-            order = sorted;
+            std::mem::swap(&mut order, &mut spare_order);
             histogram.clear();
             histogram.resize(BUCKETS, 0);
             continue;
         }
-        pairs.clear();
-        pairs.extend(
-            order
-                .iter()
-                .map(|&index| (key[index as usize] - low, index)),
-        );
-        scratch.resize(count, (0, 0));
+        for value in &mut values {
+            *value -= low;
+        }
+        spare_values.resize(count, 0);
         let digits = (u64::BITS - span.leading_zeros()).div_ceil(BITS);
         for digit in 0..digits {
             let shift = digit * BITS;
             histogram.fill(0);
-            for &(value, _) in &pairs {
+            for &value in &values {
                 histogram[((value >> shift) as usize) & (BUCKETS - 1)] += 1;
             }
             if histogram.iter().any(|&bucket| bucket == count) {
@@ -1243,15 +1282,15 @@ fn radix_order(keys: &[Vec<u64>], count: usize) -> Vec<u32> {
                 *bucket = start;
                 start += size;
             }
-            for &pair in &pairs {
-                let bucket = &mut histogram[((pair.0 >> shift) as usize) & (BUCKETS - 1)];
-                scratch[*bucket] = pair;
+            for (&value, &index) in values.iter().zip(&order) {
+                let bucket = &mut histogram[((value >> shift) as usize) & (BUCKETS - 1)];
+                spare_values[*bucket] = value;
+                spare_order[*bucket] = index;
                 *bucket += 1;
             }
-            std::mem::swap(&mut pairs, &mut scratch);
+            std::mem::swap(&mut values, &mut spare_values);
+            std::mem::swap(&mut order, &mut spare_order);
         }
-        order.clear();
-        order.extend(pairs.iter().map(|&(_, index)| index));
     }
     order
 }

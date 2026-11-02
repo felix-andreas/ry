@@ -2,30 +2,22 @@
 #@ param ASSETS int 3 8
 #@ param TARGET float 0.001 0.004 4
 # Mean-variance portfolio construction with a quadratic programme.
-#: fn([assets]: integer, [seed]: integer) -> matrix
-covariance_@ID@ <- function(assets = @ASSETS@L, seed = 3L) {
+covariance_@ID@ <- function(assets: integer = @ASSETS@L, seed: integer = 3L) -> matrix {
   set.seed(seed)
-  #: matrix
-  loadings <- matrix(stats::rnorm(assets * assets), assets)
-  #: matrix
-  ridge <- diag(0.05, assets)
+  loadings: matrix <- matrix(stats::rnorm(assets * assets), assets)
+  ridge: matrix <- diag(0.05, assets)
   crossprod(loadings) / assets + ridge
 }
 
-#: fn(sigma: matrix, [expected]: double[] | NULL, [target]: double | NULL) -> double[]
-min_variance_@ID@ <- function(sigma, expected = NULL, target = NULL) {
-  #: integer
-  n <- nrow(sigma)
-  #: matrix
-  constraints <- matrix(1, n, 1)
+min_variance_@ID@ <- function(sigma: matrix, expected: double[] | NULL = NULL, target: double | NULL = NULL) -> double[] {
+  n: integer <- nrow(sigma)
+  constraints: matrix <- matrix(1, n, 1)
   bounds <- 1
   if (!is.null(expected) && !is.null(target)) {
-    #: matrix
-    constraints <- cbind(constraints, expected)
+    constraints: matrix <- cbind(constraints, expected)
     bounds <- c(bounds, target)
   }
-  #: matrix
-  constraints <- cbind(constraints, diag(n))
+  constraints: matrix <- cbind(constraints, diag(n))
   bounds <- c(bounds, rep(0, n))
   solution <- quadprog::solve.QP(
     Dmat = 2 * sigma, dvec = rep(0, n), Amat = constraints, bvec = bounds,
@@ -36,22 +28,17 @@ min_variance_@ID@ <- function(sigma, expected = NULL, target = NULL) {
   weights
 }
 
-#: fn(weights: double[], sigma: matrix) -> double
-portfolio_risk_@ID@ <- function(weights, sigma) {
+portfolio_risk_@ID@ <- function(weights: double[], sigma: matrix) -> double {
   sqrt(drop(t(weights) %*% sigma %*% weights))
 }
 
-#: fn(sigma: matrix) -> double[]
-risk_parity_@ID@ <- function(sigma) {
-  #: integer
-  n <- nrow(sigma)
-  #: fn(w: matrix) -> double
-  objective <- function(w) {
+risk_parity_@ID@ <- function(sigma: matrix) -> double[] {
+  n: integer <- nrow(sigma)
+  objective <- function(w: matrix) -> double {
     contribution <- w * (sigma %*% w)
     sum((contribution - mean(contribution))^2)
   }
-  #: fn(w: matrix) -> list{ceq: double, c: NULL}
-  equality <- function(w) list(ceq = sum(w) - 1, c = NULL)
+  equality <- function(w: matrix) -> list{ceq: double, c: NULL} list(ceq = sum(w) - 1, c = NULL)
   result <- NlcOptim::solnl(
     X = rep(1 / n, n), objfun = objective,
     confun = equality,
