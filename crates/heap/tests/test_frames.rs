@@ -1,10 +1,10 @@
 //! Hashed frames against a model of GNU R's chained hash table. Random assignments and removals
 //! must leave the frame listing its bindings, and reporting its bucket counts and chain counter,
-//! exactly as the model does. `FUZZ_ITERS` scales the budget.
+//! exactly as the model does. Each seed of [`for_each_seed`] is one random run.
 
 use {
     heap::{Heap, object::Sexp},
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 /// GNU R's table, held the plain way: each bucket lists its names newest first.
@@ -116,7 +116,5 @@ fn run(seed: u64) {
 
 #[test]
 fn fuzz_hashed_frames_follow_gnu_r_table() {
-    for seed in 0..fuzz_iterations(60) as u64 {
-        run(seed);
-    }
+    for_each_seed(60, run);
 }

@@ -5,8 +5,9 @@
 use {
     crate::{
         hir::{
-            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module,
-            NameSite, PatId, PatternKind, Symbol, UnaryOperator, destructure_leaves,
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
+            MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
     },
@@ -449,7 +450,6 @@ impl Context<'_> {
                 lhs,
                 rhs,
             } => {
-                use crate::hir::BinaryOperator;
                 // `a %op% b` calls `%op%`: a quiet read that keeps a project definition alive.
                 if let Some(name) = special_name {
                     self.naming.quiet_operator_reads.insert(*name);
@@ -1056,6 +1056,16 @@ impl Context<'_> {
                     self.premint_frame_assignments(arm.body);
                 }
             }
+            // R never evaluates a formula's or a help request's operands, and resolution skips
+            // them, so an assignment inside binds nothing in this frame.
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Tilde | BinaryOperator::Help,
+                ..
+            }
+            | ExpressionKind::Unary {
+                operator: UnaryOperator::Tilde | UnaryOperator::Help,
+                ..
+            } => {}
             // A masked argument gets its own scope when it is resolved, so its assignments
             // mint nothing in this frame.
             ExpressionKind::Call { callee, arguments }

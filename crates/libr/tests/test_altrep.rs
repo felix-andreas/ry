@@ -12,7 +12,7 @@ use {
         process::Command,
         sync::OnceLock,
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 const CPLXSXP: c_int = 15;
@@ -442,7 +442,7 @@ fn altrep_views_match_ordinary_vectors() {
     let r = r();
     altreptest(&r);
     let wrap: unsafe extern "C" fn(Sexp) -> Sexp = function(&r, "R_tryWrap");
-    for seed in 0..fuzz_iterations(40) as u64 {
+    for_each_seed(40, |seed| {
         let mut rng = SplitMix64(seed);
         let mark = r.protected.get();
         r.stress(seed % 5 == 4);
@@ -532,5 +532,5 @@ fn altrep_views_match_ordinary_vectors() {
         }
         r.stress(false);
         r.release_to(mark);
-    }
+    });
 }

@@ -2780,7 +2780,7 @@ fn unlisted_frame_binder<'db>(
             .get_or_init(|| FrameBinders::of(db, item))
             .binder(name, deferred);
     }
-    frame_binder(db, item, types::Name::new(db, &name), deferred)
+    frame_binder(db, item, types::Name::new(db, name), deferred)
 }
 
 /// Each symbol an item reads from its frame, with its immediate and deferred binders.

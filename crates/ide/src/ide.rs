@@ -3475,7 +3475,7 @@ fn nested_functions(function: &SyntaxNode) -> Vec<DocumentSymbol> {
             && let Some(value) = binary.rhs().filter(|rhs| rhs.kind() == FUNCTION_DEF)
         {
             found.push(DocumentSymbol {
-                name: display_name_text(&name.text().to_string()),
+                name: display_name_text(name.text()),
                 kind: DocumentSymbolKind::Function,
                 detail: function_detail(&value),
                 range: node.text_range(),
@@ -7698,13 +7698,12 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                                     namespace.children().filter(|child| child.kind() == NAME);
                                 let package = names.next()?;
                                 let used = names.next()?;
-                                (used.text() == name.as_str()
-                                    && is_own_package(db, &package.text().to_string()))
-                                .then(|| Occurrence {
-                                    file,
-                                    range: used.text_range(),
-                                    is_declaration: false,
-                                })
+                                (used.text() == name.as_str() && is_own_package(db, package.text()))
+                                    .then(|| Occurrence {
+                                        file,
+                                        range: used.text_range(),
+                                        is_declaration: false,
+                                    })
                             }),
                     );
                     let Some(naming) = item_naming(db, item) else {

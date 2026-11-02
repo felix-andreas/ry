@@ -396,7 +396,7 @@ pub unsafe extern "C" fn Rf_allocS4Object() -> Sexp {
 pub unsafe extern "C" fn Rf_ScalarLogical(value: c_int) -> Sexp {
     // GNU R returns its shared `TRUE`, `FALSE` and `NA` here, and packages compare the result's
     // address against them (data.table's `setattr` does).
-    enter(|| Ok(interp::values::scalar_logical(value)?))
+    enter(|| interp::values::scalar_logical(value))
 }
 
 #[unsafe(no_mangle)]

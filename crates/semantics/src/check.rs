@@ -2105,11 +2105,7 @@ fn shape_verdict<'db>(
             },
         });
     }
-    let filled = |formal: usize| {
-        targets
-            .iter()
-            .any(|target| *target == Some(ArgumentTarget::Named(formal)))
-    };
+    let filled = |formal: usize| targets.contains(&Some(ArgumentTarget::Named(formal)));
     let mut missing: Vec<String> = function
         .named
         .iter()
