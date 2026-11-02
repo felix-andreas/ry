@@ -2320,6 +2320,20 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
+  - Rendering speed (release build, `ORACLE_RY=target/release/ry oracle gallery --repeats 4`):
+    the whole gallery takes 23.7 s on GNU R and 29.1 s on ry. Base graphics (2.8 s against 2.2 s)
+    and grid (0.60 s against 0.39 s) are faster on ry, but ggplot2 (12.4 s against 15.8 s),
+    lattice (5.8 s against 8.1 s) and PerformanceAnalytics (2.1 s against 2.7 s) are 1.2 to 1.9
+    times slower, worst on `lattice_wireframe` and `pa_rolling_performance`. The devices are not
+    the cost (`pdf(NULL)` is as slow): the time is in the packages' R code, and callgrind shows a
+    flat profile of closure calls, frame setup, argument binding, allocation and builtin dispatch.
+    Measured per call against GNU R: a closure call 0.75 µs against 0.35, `pmin` 15.7 against 6.2,
+    `vapply` 8.2 against 3.4, `mostattributes<-` 10.6 against 4.0, `diff` 8.1 against 4.8. The JIT
+    makes it worse on these bodies: it compiles functions that are mostly tier-0 steps, so `pmin`
+    runs in about 10 µs with `RY_JIT=off`, and `vapply` over an anonymous function takes 306 µs
+    under `RY_JIT=force`. A gate on the ratio of native to tier-0 steps was tried without a clear
+    win. Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
+    path), not a graphics fix.
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
   build: 63 of 66 end with GNU R's exit status, 26 print exactly its output). Two divergences are
   accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`
