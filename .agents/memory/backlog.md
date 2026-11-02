@@ -87,10 +87,12 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
-- **`pkg::name` on an inactive shipped namespace is not validated.** `dplyr::mutat` in a script with
-  no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
-  `::` loads without attaching; validating it against the shipped manifest and stub types without
-  activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
+- **Platform-conditional `pkg::name` reads are reported "not exported".** 17 corpus reads, such as
+  `utils::shortPathName`, `utils::readRegistry` and `grDevices::win.metafile`, name Windows-only
+  exports the Linux-generated manifests lack, and `parallel::splitList` and `base::check_tzones`
+  are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
+  `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
+  argument is a probe and could skip validation.
 - **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
   c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`

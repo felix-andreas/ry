@@ -5587,3 +5587,12 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   already-`Unknown` argument leaves ambiguous returns `Unknown` without a new strict origin. The
   argument's own origin is the report (or it was silenced on purpose, as a masked read is), so the
   old extra origin on the call only duplicated it (`unknown-origins.R.test`).
+
+## `pkg::name` on an inactive shipped namespace checks the shipped export list
+
+- An inactive conditional namespace stays out of the stub library, so its names never resolve
+  bare reads. `stubs::dormant_namespace_exports` reads the shipped manifest plus that package's
+  stub declarations directly from `StubSources`, without activating anything, and
+  `diagnostics::namespace_read_message` reports a missing name as "not exported".
+- A package with stubs but no shipped manifest is not checked, since partial stubs would report
+  real exports. `:::` reads stay unchecked as everywhere.

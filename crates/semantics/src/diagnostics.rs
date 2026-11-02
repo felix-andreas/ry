@@ -25,7 +25,10 @@ use {
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, project_type_definitions, statement_annotations,
-        stubs::{CONDITIONAL_NAMESPACES, StubLibrary, namespace_exports, namespace_known, stubs},
+        stubs::{
+            CONDITIONAL_NAMESPACES, StubLibrary, dormant_namespace_exports, namespace_exports,
+            namespace_known, stubs,
+        },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -1918,14 +1921,16 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed. A shipped package
-        // the project neither declares nor attaches is real too: `pkg::name` loads it
-        // without attaching it, so a script may use it that way alone.
-        false
-            if declared_dependency(db, &read.package)
-                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
-        {
-            None
+        // A declared dependency without stubs is real, just undescribed.
+        false if declared_dependency(db, &read.package) => None,
+        // A shipped package the project neither declares nor attaches is real too: `pkg::name`
+        // loads it without attaching it, so a script may use it that way alone. Its name is
+        // still checked against the shipped export list, without activating the namespace for
+        // bare names.
+        false if CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) => {
+            let name = read.name.as_ref()?;
+            (!read.internal && dormant_namespace_exports(db, &read.package, name) == Some(false))
+                .then(|| format!("`{name}` is not exported by `{}`.", read.package))
         }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {

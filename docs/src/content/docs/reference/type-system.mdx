@@ -2765,9 +2765,11 @@ scoping.
   any shipped export manifest outside R's own packages, stays inactive until the project uses the
   package, and a `pkg::name` read does not count as use. The read is still accepted, because
   `pkg::name` loads a package without attaching it, so a script may use a package that way alone.
-  Until the package is used, the name is not validated and types as `Unknown`, so in a script with
-  no `library(dplyr)` and no `DESCRIPTION`, both `dplyr::mutate` and a misspelled `dplyr::mutat`
-  pass.
+  Until the package is used, the read types as `Unknown`, but its name is still checked against
+  the package's shipped export manifest and stubs, so in a script with no `library(dplyr)` and no
+  `DESCRIPTION`, `dplyr::mutate` passes and a misspelled `dplyr::mutat` warns "not exported". A
+  shipped package with typed stubs but no export manifest is not checked this way, because its
+  stubs may describe only part of it.
 - A project stub that overrides a shipped name's type does not remove the name from its shipped
   namespace, so `stats::sd` stays valid under an `sd` override.
 - A qualified read that could not be validated types as `Unknown`, and is a strict-mode origin.
