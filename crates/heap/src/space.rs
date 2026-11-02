@@ -515,7 +515,6 @@ unsafe fn drop_frame(object: Sexp) {
     }
 }
 
-/// The slots of word `word` that exist in a page of `slots` slots.
 /// Finds the first run of free slots at or after `from` among a page's first `slots`, marks it
 /// allocated, and returns its slot range. A run stops at the first allocated slot, so on a page
 /// with no objects it is the whole page.
@@ -575,6 +574,7 @@ fn run_mask(bit: usize, run: usize) -> u64 {
     }
 }
 
+/// The slots of word `word` that exist in a page of `slots` slots.
 fn valid_slots(slots: usize, word: usize) -> u64 {
     match slots.saturating_sub(word * 64) {
         0 => 0,

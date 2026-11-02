@@ -1578,11 +1578,11 @@ impl Heap {
         if young > self.small_trigger {
             return self.allocate_small_slow(kind, class, size, zeroed, keep);
         }
-        self.young_bytes = young;
         let memory = self
             .space
             .allocate(class)
             .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        self.young_bytes = young;
         Ok(self.init_small(memory, kind, class, zeroed))
     }
 
