@@ -281,17 +281,47 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 .ry_defer_s4 <- function(state, deferred) {
   # A method for another package's generic is stored under that package's name, which only the
   # generic itself knows.
+  # Their methods are found through the tables in the generic's own environment, which
+  # `getMethod()` and `existsMethod()` read without any lookup the interpreter sees, so each
+  # table becomes a promise that runs the definitions too.
+  tables <- list()
   for (name in deferred$foreign_generics) {
-    package <- attr(get(name, envir = state$ns, mode = "function"), "package")
-    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, package))
+    generic <- get(name, envir = state$ns, mode = "function")
+    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, attr(generic, "package")))
+    environment <- environment(generic)
+    for (table in intersect(c(".MTable", ".AllMTable"), names(environment))) {
+      tables[[length(tables) + 1L]] <- list(
+        environment = environment, name = table, value = get(table, envir = environment)
+      )
+    }
   }
   state$s4_deferred <- deferred
+  state$s4_tables <- tables
+  for (table in tables) {
+    .ry_s4_table_placeholder(state, table)
+  }
   force <- function() .ry_force_s4(state)
   generics <- c(deferred$generics, deferred$foreign_generics)
   .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, generics, force))
   for (name in deferred$names) {
     .ry_s4_placeholder(state, name)
   }
+}
+
+.ry_s4_table_placeholder <- function(state, table) {
+  delayedAssign(table$name, {
+    .ry_force_s4(state)
+    get(table$name, envir = table$environment, inherits = FALSE)
+  }, assign.env = table$environment)
+}
+
+# Puts back the method tables of other packages' generics that the held-back definitions
+# replaced with promises.
+.ry_restore_s4_tables <- function(state) {
+  for (table in state$s4_tables) {
+    assign(table$name, table$value, envir = table$environment)
+  }
+  state$s4_tables <- NULL
 }
 
 .ry_s4_placeholder <- function(state, name) {
@@ -309,6 +339,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     return(invisible())
   }
   state$s4_deferred <- NULL
+  .ry_restore_s4_tables(state)
   ns <- state$ns
   rm(list = deferred$names[deferred$names %in% names(ns)], envir = ns)
   # The attached package environment shares the placeholder bindings, and the methods package
@@ -428,6 +459,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     return(invisible())
   }
   state$s4_deferred <- NULL
+  .ry_restore_s4_tables(state)
   .Internal(ryLoaderUndefer(state$root))
   rm(list = deferred$names[deferred$names %in% names(state$ns)], envir = state$ns)
 }
