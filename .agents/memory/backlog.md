@@ -3035,7 +3035,8 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- More quick fixes: a missing `library()` for a namespaced name.
+- Completion misses on CRAN corpora (`ry debug analysis-stats`): names imported from packages with no stub and no export manifest (purrr's `vctrs` and `rlang` imports) are never offered, so completion should read an installed package's NAMESPACE exports; the two-character prefix ranks a local helper (`check_rate`) below library names that share it. The import quick fix reads only export manifests, not the installed library.
+- Signature help's active parameter miscounts after an argument with no value (`f(x = , a, |)`), in both the typed and the formals path (`cursor_index` in `ide.rs`).
 - Semantic tokens: coloring of `$` fields and frame columns.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
