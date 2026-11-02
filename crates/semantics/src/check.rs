@@ -2,6 +2,7 @@
 //! back through an undo log instead of cloning the environment.
 
 use {
+    bumpalo::{Bump, collections::Vec as BumpVec},
     crate::{
         DataPath, Db, TypeDefinitions,
         annotations::Annotation,
@@ -600,11 +601,13 @@ pub fn check_item_with_annotation<'db>(
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
     }
+    let arena = Bump::new();
     let mut context = Checker {
         db,
         module,
         naming,
         globals,
+        arena: &arena,
         library: stubs(db),
         table,
         frame_level: 0,
@@ -1028,6 +1031,9 @@ struct Checker<'db, 'a> {
     module: &'a Module,
     naming: &'a ItemNaming,
     globals: Option<&'a dyn GlobalEnv<'db>>,
+    /// Scratch space for the short-lived vectors of argument matching, which runs for every
+    /// call and every overload probe. It is freed in one step when the check ends.
+    arena: &'a Bump,
     /// Fetched once per check: the checker consults the stubs at most calls, and each salsa
     /// fetch records a dependency edge on the running query.
     library: Option<&'db StubLibrary<'db>>,
@@ -1616,13 +1622,14 @@ pub enum ArgumentTarget {
 /// FUN = f)` sends `character(1)` to `FUN.VALUE`. Positionals then fill fixed
 /// parameters, then unclaimed named formals before `...`. `None` marks a `...` forward.
 /// The checker and the editor's parameter hints share it, so both agree on where an argument goes.
-pub fn argument_targets(
+pub fn argument_targets<'arena>(
     db: &dyn Db,
+    arena: &'arena Bump,
     function: &FunctionType<'_>,
     arguments: &[ArgumentShape<'_>],
-) -> Vec<Option<ArgumentTarget>> {
-    let mut targets: Vec<Option<ArgumentTarget>> = arguments.iter().map(|_| None).collect();
-    let mut claimed = vec![false; function.named.len()];
+) -> &'arena mut [Option<ArgumentTarget>] {
+    let targets = arena.alloc_slice_fill_copy(arguments.len(), None);
+    let claimed = arena.alloc_slice_fill_copy(function.named.len(), false);
 
     for (index, argument) in arguments.iter().enumerate() {
         if argument.forwards_dots {
@@ -1740,7 +1747,7 @@ pub fn argument_targets(
         && function.variadic.is_none()
         && targets.contains(&Some(ArgumentTarget::UndeclaredName))
     {
-        for target in &mut targets {
+        for target in targets.iter_mut() {
             if let Some(ArgumentTarget::Positional(_)) = target {
                 *target = Some(ArgumentTarget::UndeclaredName);
             }
@@ -1757,14 +1764,14 @@ enum ConditionSite {
     Operand,
 }
 
-fn argument_shapes<'a>(arguments: &'a [CallArgument<'_>]) -> Vec<ArgumentShape<'a>> {
-    arguments
-        .iter()
-        .map(|argument| ArgumentShape {
-            name: argument.name.as_deref(),
-            forwards_dots: argument.forwards_dots,
-        })
-        .collect()
+fn argument_shapes<'arena, 'a>(
+    arena: &'arena Bump,
+    arguments: &'a [CallArgument<'_>],
+) -> &'arena [ArgumentShape<'a>] {
+    arena.alloc_slice_fill_iter(arguments.iter().map(|argument| ArgumentShape {
+        name: argument.name.as_deref(),
+        forwards_dots: argument.forwards_dots,
+    }))
 }
 
 fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
@@ -9991,8 +9998,9 @@ impl<'db> Checker<'db, '_> {
             let TyKind::Function(function) = resolved.kind(self.db) else {
                 continue;
             };
-            let function = function.clone();
-            let targets = argument_targets(self.db, &function, &argument_shapes(arguments));
+            let arena = self.arena;
+            let targets =
+                argument_targets(self.db, arena, &function, argument_shapes(arena, arguments));
             let target_ty = |target: &Option<ArgumentTarget>| match target {
                 Some(ArgumentTarget::Positional(index)) => function.positional.get(*index).copied(),
                 Some(ArgumentTarget::Named(index)) => {
@@ -10049,7 +10057,7 @@ impl<'db> Checker<'db, '_> {
                 })
                 .collect();
             let snapshot = self.table.snapshot();
-            let accepts = arguments.iter().zip(&targets).zip(deferred).all(
+            let accepts = arguments.iter().zip(targets.iter()).zip(deferred).all(
                 |((argument, target), &deferred)| {
                     if deferred {
                         return true;
@@ -10218,8 +10226,7 @@ impl<'db> Checker<'db, '_> {
         };
         match resolved.kind(self.db) {
             TyKind::Function(function) => {
-                let function = function.clone();
-                let findings = self.match_arguments(callee_range, &function, arguments);
+                let findings = self.match_arguments(callee_range, function, arguments);
                 self.errors.extend(findings);
                 function.ret
             }
@@ -10464,16 +10471,19 @@ impl<'db> Checker<'db, '_> {
     ) -> Vec<TypeError<'db>> {
         let total = function.positional.len() + function.named.len();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
-        let targets = argument_targets(self.db, function, &argument_shapes(arguments));
+        let arena = self.arena;
+        let targets = &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
 
         // A function-typed argument may be checked against arguments forwarded to it later
         // (`lapply(x, gsub, pattern = "a")`), so the rest intake must be known up front.
-        let forwarded_argument_indexes: Vec<usize> = targets
-            .iter()
-            .enumerate()
-            .filter(|(_, target)| matches!(target, Some(ArgumentTarget::Rest)))
-            .map(|(index, _)| index)
-            .collect();
+        let forwarded_argument_indexes = BumpVec::from_iter_in(
+            targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| matches!(target, Some(ArgumentTarget::Rest)))
+                .map(|(index, _)| index),
+            arena,
+        );
 
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();

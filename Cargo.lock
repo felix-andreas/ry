@@ -1740,6 +1740,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 name = "ide"
 version = "0.4.0-beta"
 dependencies = [
+ "bumpalo",
  "salsa",
  "semantics",
  "syntax",
@@ -3867,6 +3868,7 @@ name = "semantics"
 version = "0.4.0-beta"
 dependencies = [
  "boxcar",
+ "bumpalo",
  "hashbrown 0.17.1",
  "rowan",
  "rustc-hash 2.1.3",

@@ -1004,7 +1004,7 @@ mod tests {
         assert!(!package_scheme_exists(&db, "definitely_not_a_name"));
     }
 
-    fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
+    fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> &'db ItemCheck<'db> {
         let file = SourceFile::new(db, source.to_owned(), DocumentKind::Package);
         ProjectFiles::new(db, vec![file]);
         let item = item_tree(db, file)[0];

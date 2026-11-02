@@ -1847,7 +1847,7 @@ fn check_item_against<'db>(
 )]
 pub fn global_scheme<'db>(db: &'db dyn Db, item: Item<'db>) -> types::TypeScheme<'db> {
     item_check(db, item)
-        .and_then(|check| check.scheme)
+        .and_then(|check| check.scheme.clone())
         .unwrap_or_else(|| types::TypeScheme::monomorphic(types::unknown(db)))
 }
 
@@ -1879,7 +1879,7 @@ fn global_scheme_recover<'db>(
 }
 
 #[salsa::tracked(
-    returns(clone),
+    returns(as_ref),
     cycle_fn = item_check_recover,
     cycle_initial = item_check_initial
 )]
@@ -2770,7 +2770,6 @@ mod tests {
             !bad_check.errors.is_empty(),
             "character into numeric parameter must report"
         );
-        drop((use_check, bad_check));
 
         util.set_text(&mut db)
             .to("add <- function(x, y) y + x\n".to_owned());

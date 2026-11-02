@@ -3,6 +3,7 @@
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
 use {
+    bumpalo::Bump,
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
@@ -1018,8 +1019,10 @@ fn positional_parameters<'db>(
         .iter()
         .position(|shape| shape.forwards_dots)
         .unwrap_or(shapes.len());
-    argument_targets(db, function, &shapes)
-        .into_iter()
+    let arena = Bump::new();
+    argument_targets(db, &arena, function, &shapes)
+        .iter()
+        .copied()
         .zip(arguments)
         .take(known)
         .filter(|(_, argument)| argument.name.is_none())
@@ -5460,7 +5463,7 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let callee_targets = (!naming.callee_fallbacks.is_empty())
         .then(|| item_check(db, item))
         .flatten()
-        .map(|check| check.callee_targets);
+        .map(|check| &check.callee_targets);
     let reaches = |expression: &ExprId, resolved: BindingId| match callee_targets
         .as_ref()
         .and_then(|targets| targets.get(expression))
