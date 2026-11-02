@@ -55,6 +55,9 @@
 @type POSIXct
 @type difftime
 @type environment
+# What a `tryCatch` or `withCallingHandlers` handler receives. Its fields depend on what signalled it, so it
+# is opaque, like rlang's conditions.
+@type condition
 
 # Operator methods. R gives a class arithmetic and comparison through S3 group
 # generics (`Ops.Date`), and a declaration named the way R names the method is

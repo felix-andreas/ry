@@ -246,7 +246,9 @@ impl Parser<'_> {
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
-        error.incomplete = self.peek_significant(self.pos, true).is_none();
+        let found = self.peek_significant(self.pos, true);
+        error.incomplete = found.is_none();
+        error.found = found.map(|(_, pos)| self.token_range(pos));
         self.errors.push(error);
     }
 
@@ -372,6 +374,13 @@ impl Parser<'_> {
                 Some(WHITESPACE | NEWLINE | ANNOTATION_MARKER | COMMENT)
             )
         {
+            // `#` after an annotation starts a plain comment, so a second `#:` on the line would
+            // be read as prose and its type silently dropped.
+            if self.at(COMMENT) && self.token_str(self.pos).starts_with("#:") {
+                self.error_here(
+                    "a second `#:` annotation on this line is read as a comment. Put each annotation on its own `#:` line",
+                );
+            }
             self.bump();
         }
     }

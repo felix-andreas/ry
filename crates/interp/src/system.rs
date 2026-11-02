@@ -162,6 +162,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
     internal("path.expand", 1, |call| unsafe {
+        if call.arg(0).kind() != SexpType::String {
+            return Err(call.error("invalid 'path' argument"));
+        }
         map_strings(call, crate::connections::expand_path)
     }),
     internal("basename", 1, |call| unsafe {
@@ -2442,11 +2445,14 @@ unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
             continue;
         };
         let directory = crate::connections::expand_path(&directory);
-        names.push(if full {
-            directory.clone()
-        } else {
-            String::new()
-        });
+        // Only a recursive listing names the directory itself, and only when it exists.
+        if recursive && Path::new(&directory).is_dir() {
+            names.push(if full {
+                directory.clone()
+            } else {
+                String::new()
+            });
+        }
         let mut paths = Vec::new();
         walk(Path::new(&directory), recursive, true, &mut paths, true);
         for path in paths.into_iter().filter(|path| path.is_dir()) {
@@ -2639,14 +2645,45 @@ unsafe fn do_file_rename(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
+    let show_warnings = values::as_logical_scalar(call.arg(1)) == 1;
     let recursive = values::as_logical_scalar(call.arg(2)) == 1;
-    let path = crate::connections::expand_path(&path);
-    let outcome = if recursive {
-        std::fs::create_dir_all(&path)
-    } else {
-        std::fs::create_dir(&path)
+    let expanded = crate::connections::expand_path(&path);
+    let path = match expanded.trim_end_matches('/') {
+        "" => expanded.as_str(),
+        trimmed => trimmed,
     };
-    scalar_bool(outcome.is_ok())
+    let cannot_create = |directory: &str, failure: std::io::Error| -> R<Sexp> {
+        if show_warnings {
+            crate::conditions::warning(format!(
+                "cannot create dir '{directory}', reason '{}'",
+                crate::connections::os_message(&failure)
+            ))?;
+        }
+        scalar_bool(false)
+    };
+    // GNU R makes each parent in turn and then the path itself, so `dir.create("a/.",
+    // recursive = TRUE)` makes `a` and still reports that `a/.` exists.
+    if recursive {
+        for (index, _) in path.match_indices('/').filter(|(index, _)| *index > 0) {
+            let parent = &path[..index];
+            match std::fs::create_dir(parent) {
+                Err(failure) if failure.kind() != std::io::ErrorKind::AlreadyExists => {
+                    return cannot_create(parent, failure);
+                }
+                _ => {}
+            }
+        }
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => scalar_bool(true),
+        Err(failure) if failure.kind() == std::io::ErrorKind::AlreadyExists => {
+            if show_warnings {
+                crate::conditions::warning(format!("'{path}' already exists"))?;
+            }
+            scalar_bool(false)
+        }
+        Err(failure) => cannot_create(path, failure),
+    }
 }
 
 unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {

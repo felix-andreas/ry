@@ -15,7 +15,7 @@ adjust_@ID@ <- function(p: double[], method: character[] = c("bonferroni", "holm
 }
 
 discoveries_@ID@ <- function(p: double[], alpha: double = @ALPHA@) -> integer[] {
-  vapply(c("bonferroni", "holm", "BH"), function(m) sum(adjust_@ID@(p, m) < alpha), integer(1))
+  vapply(c("bonferroni", "holm", "BH"), function(m: character) -> integer sum(adjust_@ID@(p, m) < alpha), integer(1))
 }
 
 required_sample_@ID@ <- function(delta: double, sd: double = 1, power: double = 0.8) -> double {

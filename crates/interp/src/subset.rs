@@ -673,8 +673,13 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     let count = length(object);
     let names = values::names(object);
+    // A parsed expression's per-element source references are subset along with it, as in GNU
+    // R, so `attr(exprs[i], "srcref")` still locates element `i`.
+    let srcrefs = get_attr(object, symbols().srcref);
+    let srcrefs = (srcrefs.kind() == SexpType::List).then_some(srcrefs);
     if dims.is_none()
         && names == nil()
+        && srcrefs.is_none()
         && let Some(result) = gather_plain(object, index)?
     {
         return Ok(result);
@@ -692,6 +697,22 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
             values::set_elt(new_names, position, name);
         }
         values::set_attr(result, symbols().names, new_names)?;
+    }
+    if let Some(srcrefs) = srcrefs
+        && index != missing_arg()
+    {
+        let positions: Vec<usize> = indices
+            .iter()
+            .map(|&index| {
+                if index < length(srcrefs) {
+                    index
+                } else {
+                    usize::MAX
+                }
+            })
+            .collect();
+        let selected = select_elements(srcrefs, &positions)?;
+        values::set_attr(result, symbols().srcref, selected)?;
     }
     // A one-dimensional array stays one when indexed.
     if let Some(dims) = dims
@@ -3569,15 +3590,36 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
     let attributes = call.arg(1);
-    if object == nil() {
-        if attributes == nil() {
-            return Ok(nil());
+    // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
+    let object = match call.arg(0) {
+        object if object != nil() => modifiable(object)?,
+        _ if attributes == nil() => return Ok(nil()),
+        _ => alloc(SexpType::List, 0)?,
+    };
+    // The value is checked before anything is cleared, so a bad one leaves the object as it was.
+    let names = values::names(attributes);
+    if attributes != nil() {
+        if attributes.kind() != SexpType::List {
+            return Err(call.error("attributes must be a list or NULL"));
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
+        if length(attributes) > 0 && names == nil() {
+            return Err(call.error("attributes must be named"));
+        }
+        // GNU R checks the names from the second on; an empty first name fails later, when
+        // it is installed as a symbol.
+        if length(attributes) > 0 && names.element(0).bytes().is_empty() {
+            return Err(call.error("attempt to use zero-length variable name"));
+        }
+        for index in 1..length(attributes) {
+            if names.element(index).bytes().is_empty() {
+                return Err(call.error(format!(
+                    "all attributes must have names [{} does not]",
+                    index + 1
+                )));
+            }
+        }
     }
-    let object = modifiable(object)?;
     let was_s4 = object.has_gp(gp::S4_OBJECT);
     values::clear_attributes(object);
     if attributes == nil() {
@@ -3587,13 +3629,6 @@ unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     // object keeps it an S4 object.
     if was_s4 && length(attributes) > 0 {
         object.set_gp_bits(gp::S4_OBJECT, true);
-    }
-    if attributes.kind() != SexpType::List {
-        return Err(call.error("attributes must be a list or NULL"));
-    }
-    let names = values::names(attributes);
-    if length(attributes) > 0 && names == nil() {
-        return Err(call.error("attributes must be named"));
     }
     // `dim` goes first, so `dimnames` can be checked against it.
     for pass in 0..2 {

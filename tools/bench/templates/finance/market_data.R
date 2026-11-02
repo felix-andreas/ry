@@ -11,7 +11,7 @@ alias Prices@ID@ = data.table{symbol: character[], date: Date, price: double[]}
 fetch_prices_@ID@ <- function(symbols: character[], start: Date, end: Date, source: (fn(symbols: character[], start: Date, end: Date) -> Prices@ID@) | NULL = NULL) -> Prices@ID@ {
   if (is.null(source)) {
     connection <- Rblpapi::blpConnect()
-    source <- function(symbols, start, end) Rblpapi::bdh(symbols, "PX_LAST", start, end, con = connection)
+    source <- function(symbols: character[], start: Date, end: Date) -> Prices@ID@ Rblpapi::bdh(symbols, "PX_LAST", start, end, con = connection)
   }
   source(symbols, start, end)
 }

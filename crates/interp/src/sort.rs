@@ -1583,6 +1583,34 @@ fn complex_less(left: Rcomplex, right: Rcomplex) -> bool {
     left.r < right.r || (left.r == right.r && left.i < right.i)
 }
 
+/// GNU R's `rsort_with_index`: a shell sort with Knuth's gaps (1, 4, 13, 40, ...) that orders
+/// `(key, payload)` pairs by key, NaN last. It is not stable, and graphics code that draws in
+/// this order (`persp`'s facets) must break ties the way GNU R does.
+pub(crate) fn rsort_with_index<T: Copy>(items: &mut [(f64, T)]) {
+    let greater = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
+        (true, false) => true,
+        (false, false) => left > right,
+        _ => false,
+    };
+    let count = items.len();
+    let mut gap = 1;
+    while gap <= count / 9 {
+        gap = 3 * gap + 1;
+    }
+    while gap > 0 {
+        for index in gap..count {
+            let item = items[index];
+            let mut slot = index;
+            while slot >= gap && greater(items[slot - gap].0, item.0) {
+                items[slot] = items[slot - gap];
+                slot -= gap;
+            }
+            items[slot] = item;
+        }
+        gap /= 3;
+    }
+}
+
 /// Shell sort with Sedgewick's gaps 4^k + 3 * 2^(k - 1) + 1 (1, 8, 23, 77, 281, ...), moving an
 /// element while its predecessor is `greater`.
 fn shell_sort<T: Copy>(items: &mut [T], greater: impl Fn(T, T) -> bool) {

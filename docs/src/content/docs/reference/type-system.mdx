@@ -33,6 +33,10 @@ binding or expression it describes. Consecutive `#:` lines with no blank line be
 - `#: @if-unknown TYPE` is an [unknown-only coercion](#unknown-only-coercions).
 - `#: @new NOMINAL_TYPE` is a [nominal introduction](#nominal-introduction).
 
+After an annotation, a `#` starts a plain comment, so `#: double # amount in euros` is the type
+`double` with a note. A second `#:` on the same line is an error, because it would otherwise be
+read as that note and its type dropped: write each annotation on its own line.
+
 A block is one of three kinds, which cannot be mixed: a single line in one of those forms, an
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
 lines, or a definition block of `@type` and `@alias` lines.
@@ -616,9 +620,10 @@ the declaration's arity:
 #### Type aliases
 
 An alias is purely structural: writing its name is the same as writing the type it stands for. It
-creates no new identity, and may appear anywhere a type may, including inside a larger type. Using
-an alias that expands in a cycle is an error, reported where it is used; a cycle no annotation uses
-is not reported.
+creates no new identity, and may appear anywhere a type may, including inside a larger type. An
+alias whose expansion reaches itself, directly or through other aliases, is an error reported at
+each declaration on the cycle, whether or not an annotation uses it. An annotation that uses such an
+alias checks nothing.
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
@@ -2293,6 +2298,14 @@ to such a name is resolved separately at each call site:
   argument, so `Reduce(add, list(1, 2), "start")` with a numeric `add` is reported at `"start"`. A
   function that closes over the enclosing function's own type variables, `right =`, `accumulate =`
   and `simplify =` keep the stub's signature.
+- A function whose body ends in `Reduce(f, x, init = init)` over its own formals folds the same way
+  at its call sites. This covers a purrr-style wrapper whose `f` is a local
+  `function(a, b) .f(a, b, ...)`. With `reduce <- function(.x, .f, ..., .init)` written that way,
+  `reduce(sizes, .init = list(0), function(output, input) c(output, list(input)))` folds the callback
+  from `list(0)` instead of pinning the accumulator to the start's type, and
+  `reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")` is reported at
+  `"zero"`. A wrapper with an early `return`, or a call that also passes arguments on through the
+  wrapper's `...`, keeps its ordinary signature.
 
 Only a declaration file can overload a name, because a name with several signatures has no single
 most general type and must be resolved by search rather than inferred. A `#:` annotation on your own
@@ -2328,7 +2341,10 @@ join does not merge or coerce branch types beyond unification; it records the al
 - A branch whose type is still undetermined is never pinned by the other branch.
   `function(flag, x) if (flag) x else "s"` is `<T> fn(flag: logical, [x]: T) -> T | character`, not
   `fn(flag: logical, x: character)`, because unifying would make a caller wrong because of a line
-  that is not wrong. The same holds for a variable nested inside a branch, so
+  that is not wrong. A variable that only carries a bound such as `numeric` is not pinned by a
+  branch that is not a plain vector either, so in
+  `if (is.null(L)) rho + rho0 else L %*% rho + rho0` the result is `T | matrix`, not a `rho` that
+  must be a matrix. The same holds for a variable nested inside a branch, so
   `if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)` is
   `list{character[], character[]} | list{T, T}`.
 - A branch whose variable the body has already constrained may unify with the other branch, because
@@ -2346,7 +2362,10 @@ join does not merge or coerce branch types beyond unification; it records the al
 
 A branch *diverges* when it never falls through to the code after the `if`: `return(...)`,
 `stop(...)`, `break`, or `next`, a block ending in one of those, or an `if ... else` whose branches
-both diverge. A diverging branch contributes neither its value nor the state of its variables, so
+both diverge. The `else` of an `exists("name")` test counts as diverging when `name` is a function
+that a stub of an attached package types and the project does not define, because that fallback
+exists only for older versions: `if (exists("emptyenv")) emptyenv() else NULL` is `environment`.
+A probe for a name no stub types keeps both branches. A diverging branch contributes neither its value nor the state of its variables, so
 `x <- if (c) return(NULL) else 5` gives `x` the type `double`, and a variable written inside a
 diverging branch does not join into the state after the `if`.
 
@@ -2460,6 +2479,20 @@ The details:
   `is.numeric(y) && y + 1 > 0` leaves `a` open, where `y + 1 > 0` alone would require it to be
   numeric.
 - `is.na(x)` is not a type guard, because being `NA` is a property of a value, not of a type.
+- A test that two values differ in being `NULL` ties them together for the rest of the body. After
+  `if (is.null(A) != is.null(b)) stop(...)`, a later `!is.null(A)` also rules `NULL` out of `b`.
+  The same holds for `xor(is.null(A), is.null(b))` and for the spelled-out
+  `is.null(A) && !is.null(b) || !is.null(A) && is.null(b)`. A write to either variable, even on one
+  branch, ends the tie.
+- A one-argument call to a function that is not a type test, such as `is_loaded(package)`, is
+  remembered on its true edge. A callee whose only `NULL` return is a statement
+  `if (!pred(x)) return(NULL)` in its body, on a formal it never rewrites and with no other return
+  that may be `NULL`, returns without `NULL` when the caller's argument is a variable on which
+  `pred` was already found true.
+  With `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`,
+  `if (!is_loaded(package)) stop("not loaded")` followed by `parent.env(ns_env(package))` checks,
+  while the same call without the test is reported. A write to the variable after the test, even
+  on one branch or in a loop, forgets it.
 
 #### Lazy arguments and required formals
 
@@ -2560,6 +2593,11 @@ control-flow construct recognized by its bare name, as `local` is, rather than a
   contributes no trailing value, so `function() return(TRUE)` is `fn() -> logical`, not
   `fn() -> logical | NULL`. A body that ends in `stop()` contributes none either, so
   `function(x) { if (x) return(1L); stop("no") }` is `fn(x: logical) -> integer`.
+- An inferred return type reads a bare `return(NA)` as a missing value of the other returns' type
+  when they all share one atomic type, so a function that returns `NA` on one path and a string on
+  the others is `-> character`. Otherwise the `NA` joins as `logical`, as in
+  `fn(x: logical) -> list{double} | logical`. A declared return type still checks `return(NA)` as
+  `logical`, so declare `-> character` with `return(NA_character_)`.
 - The `return` expression itself yields no value where it stands, so it types as `NULL` locally and is
   not a strict-mode origin, just like `break` and `next`.
 - The returned expression is checked like any other expression.
@@ -2732,8 +2770,10 @@ upper_names <- function(x) {
   `function(x, callback) callback(x)` and `function(format) format(1L)` infer the parameter as a
   function, even though base has a `format`. A call declares no parameter names, so a later call
   may name an argument the first call passed by position: after `f(pars, arglist)`, the call
-  `f(pars = pars + 1, arglist)` takes a slot without checking it, while an argument beyond the
-  slots the first call used is still an error, unless the body reads `formals()` or `formalArgs()` of that
+  `f(pars = pars + 1, arglist)` takes a slot without checking it. A later call may also omit an
+  argument an earlier call passed, relying on the callee's default, so after
+  `api(op, options = list(), version = "v1")` the call `api(op, version = "v1")` checks. An argument
+  beyond the slots the first call used is still an error, unless the body reads `formals()` or `formalArgs()` of that
   parameter anywhere. Code that does so picks the call by the callback's arity, as in
   `if (length(formals(handler)) == 1) handler(src) else handler(src, call)`, so a call with
   another argument count is not checked. Which slot the name took is unknown, so the call's

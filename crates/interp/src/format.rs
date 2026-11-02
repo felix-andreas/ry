@@ -649,6 +649,19 @@ fn encode_into(result: &mut String, text: &str, quote: Option<char>) {
     }
 }
 
+/// A "bytes" string as GNU R spells it: printable ASCII as itself and every other byte as
+/// `\xNN`.
+pub fn bytes_spelling(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        match byte {
+            0x20..0x80 => text.push(byte as char),
+            _ => text.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    text
+}
+
 /// Pads `text` to `width` display columns, on the left (right-justified) or the right.
 pub fn pad(text: &str, width: usize, left: bool) -> String {
     let current = display_width(text);
@@ -819,28 +832,38 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let items: Vec<Option<String>> = match vector.kind() {
         SexpType::String => {
             let strings = values::strings(vector);
+            // A "bytes" string becomes plain text holding its `\xNN` spelling, and every string
+            // is measured as `print` would escape it, so a backslash takes two columns.
             let texts: Vec<String> = strings
                 .iter()
-                .map(|item| item.clone().unwrap_or_else(|| "NA".into()))
+                .enumerate()
+                .map(|(index, item)| {
+                    let charsxp = vector.element(index);
+                    match item {
+                        Some(_) if charsxp.has_gp(gp::BYTES) => bytes_spelling(charsxp.bytes()),
+                        Some(text) => text.clone(),
+                        None => "NA".into(),
+                    }
+                })
                 .collect();
-            let common = texts
+            let widths: Vec<usize> = texts
                 .iter()
-                .map(|text| display_width(text))
-                .max()
-                .unwrap_or(0)
-                .max(min_width);
+                .map(|text| display_width(&encode_string(text, None)))
+                .collect();
+            let common = widths.iter().copied().max().unwrap_or(0).max(min_width);
             strings
                 .iter()
                 .zip(texts)
-                .map(|(original, text)| {
+                .zip(widths)
+                .map(|((original, text), width)| {
                     if original.is_none() && !na_encode {
                         return None;
                     }
+                    let total = common.saturating_sub(width);
                     Some(match justify_mode {
-                        0 => pad(&text, common, false),
-                        1 => pad(&text, common, true),
+                        0 => text + &" ".repeat(total),
+                        1 => " ".repeat(total) + &text,
                         2 => {
-                            let total = common.saturating_sub(display_width(&text));
                             let left = total / 2;
                             format!("{}{}{}", " ".repeat(left), text, " ".repeat(total - left))
                         }
