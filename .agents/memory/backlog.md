@@ -380,13 +380,6 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
-- **In flight: records as the fast choice.** The round's items, in order:
-  - speculate on plain-list element reads (below);
-  - make `Construct` a real JIT op (coordinate with the JIT session);
-  - compile a guarded `match` instead of running the special;
-  - bound `List.range` and `List.repeat` with a clear error past a size limit;
-  - have the typed finbench/dsbench conversion use records, tuples and tags, and measure them
-    against `list(kind=)` equivalents.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
@@ -395,10 +388,6 @@ protects construction but nothing after it.
   escape check on the closure's body; closures the helper creates itself are already covered
   (`decisions.md`, "Moving a collection into a helper's parameter").
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
-- `l[[i]]` on a list compiles to `Intrinsic::Element` with a boxed result, so arithmetic on the
-  element runs in tier 0. Tuple items and record fields speculate on the site's type feedback
-  (`Analysis::slot_read`) and stay native; a list element read should do the same, with a type
-  check that hands off to tier 0 on a mismatch.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
 - The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code

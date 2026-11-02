@@ -609,32 +609,42 @@ unsafe fn guard_condition(
     env: Sexp,
     call: Sexp,
 ) -> R<bool> {
+    let condition = eval_bound(guard, bindings, env)?;
+    guard_holds(condition, guard, call)
+}
+
+/// Evaluates `expression` in a new child of `env` that binds each name of `bindings`.
+unsafe fn eval_bound(expression: Sexp, bindings: &[(Sexp, Sexp)], env: Sexp) -> R<Sexp> {
     let scratch = values::new_env(env)?;
     for &(name, bound) in bindings {
         eval::define(name, bound, scratch)?;
     }
-    let condition = eval::eval(guard, scratch)?;
-    if condition.kind() == SexpType::Record {
-        return Err(boundary_error(condition, guard, call));
-    }
-    eval::as_condition(condition, call)
+    eval::eval(expression, scratch)
 }
 
-/// [`guard_condition`] for compiled code, whose bound names are the symbols in the list `names`
-/// and whose values are `bound`, in the same order.
-pub unsafe fn guard_holds(
-    guard: Sexp,
+/// [`eval_bound`] for compiled code, whose bound names are the symbols in the list `names` and
+/// whose values are `bound`, in the same order.
+pub unsafe fn eval_bound_registers(
+    expression: Sexp,
     names: Sexp,
     bound: &[Sexp],
     env: Sexp,
-    call: Sexp,
-) -> R<bool> {
+) -> R<Sexp> {
     let bindings: Vec<(Sexp, Sexp)> = bound
         .iter()
         .enumerate()
         .map(|(index, &value)| (names.element(index), value))
         .collect();
-    guard_condition(guard, &bindings, env, call)
+    eval_bound(expression, &bindings, env)
+}
+
+/// Whether the value of the `match` guard `guard` holds, as `if` reads a condition, except that
+/// a record, tuple or tag gets the boundary error.
+pub unsafe fn guard_holds(condition: Sexp, guard: Sexp, call: Sexp) -> R<bool> {
+    if condition.kind() == SexpType::Record {
+        return Err(boundary_error(condition, guard, call));
+    }
+    eval::as_condition(condition, call)
 }
 
 /// The value a failed `match` names, shortened to one line.

@@ -1643,7 +1643,9 @@ impl<'a> Builder<'a> {
                     },
                 }
             }
-            Op::MatchFail => self.opaque_step(state, None, &[], Effect::Opaque),
+            // It always signals an error, so nothing runs after it: treating it as opaque would
+            // only forget the frame's types at the join after the `match`.
+            Op::MatchFail => self.opaque_step(state, None, &[], Effect::PureUnlessObserved),
             Op::Construct => {
                 state.registers[operand(0)] = Ty::Boxed;
                 state.visible = Some(true);
@@ -1663,10 +1665,30 @@ impl<'a> Builder<'a> {
                     ty,
                 }
             }
-            // A guard runs R code in a scratch frame, which may read any variable.
-            Op::MatchGuard => {
-                self.opaque_step(state, Some((operand(0), Ty::Lgl)), &[], Effect::Opaque)
-            }
+            // The expression runs R code in a scratch frame, which may read any variable.
+            Op::BoundEval => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            Op::MatchCondition => match state.registers[operand(1)] {
+                Ty::Lgl => {
+                    state.registers[operand(0)] = Ty::Lgl;
+                    Action::Move {
+                        dst: operand(0),
+                        src: operand(1),
+                        ty: Ty::Lgl,
+                    }
+                }
+                // Reading a condition runs no R code, but `NA` or a record signals an error.
+                _ => self.opaque_step(
+                    state,
+                    Some((operand(0), Ty::Lgl)),
+                    &[],
+                    Effect::PureUnlessObserved,
+                ),
+            },
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
@@ -3008,11 +3030,15 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::MatchGuard => {
+        Op::BoundEval => {
             kill(operand(0), live);
             for register in operand(3)..operand(3) + operand(4) {
                 gen_(register, live);
             }
+        }
+        Op::MatchCondition => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
         }
         Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::EndStatement => {

@@ -232,6 +232,13 @@ fn seeds_agree_across_tiers() {
             "(n = 30L)",
             false,
         ),
+        // A guard that calls a closure on a bound name evaluates that call in a scratch frame,
+        // beside an inlined guard, in every tier.
+        (
+            "big <- function(z) z > 4\ns <- 0\nfor (i in 1:n) { s <- s + match (:Some(i %% 7L)) { :Some(x) if (big(x)) => 1, :Some(x) if (abs(x - 2L) < 1L) => 10, _ => 0.5 } }\ns",
+            "(n = 30L)",
+            false,
+        ),
         // Records, tuples and tags built in compiled code from unboxed doubles, integers,
         // logicals and NA, and from a boxed vector, read back through fields and `match`.
         (
