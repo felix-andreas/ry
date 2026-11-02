@@ -17,6 +17,7 @@ use {
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::object::{Sexp, SexpType, gp},
+    rustc_hash::FxHashSet,
     std::rc::Rc,
 };
 
@@ -48,6 +49,32 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("R_get_primname", primitive_name),
     ("new_object", new_object_routine),
 ];
+
+/// S4 definitions a package loader holds back until first use. Looking up one of `classes` or
+/// `generics` by name calls `force` first, which runs them and defines what was looked up.
+pub struct DeferredDefinitions {
+    /// Identifies the definitions to [`drop_deferred_definitions`]: one loaded package each.
+    pub key: String,
+    pub classes: FxHashSet<Box<[u8]>>,
+    pub generics: FxHashSet<Box<[u8]>>,
+    /// A closure of no arguments.
+    pub force: Sexp,
+}
+
+/// Registers `definitions`, replacing any registered under the same key.
+pub fn defer_definitions(definitions: DeferredDefinitions) {
+    let deferred = &mut interp().globals.deferred_definitions;
+    deferred.retain(|existing| existing.key != definitions.key);
+    deferred.push(definitions);
+}
+
+/// Forgets the definitions registered under `key`, without running them.
+pub fn drop_deferred_definitions(key: &str) {
+    interp()
+        .globals
+        .deferred_definitions
+        .retain(|existing| existing.key != key);
+}
 
 /// `R_dispatchGeneric`: selects and runs the method of generic `generic` named `name` for the
 /// arguments in the generic's frame `env`.
@@ -602,7 +629,10 @@ unsafe fn class_from_cache(call: &NativeCall<'_>) -> R<Sexp> {
                 return Ok(nil());
             }
             let symbol = values::install_charsxp(class.element(0))?;
-            let value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
+            let mut value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
+            if value == unbound() && force_deferred(class.element(0).bytes(), Lookup::Class)? {
+                value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
+            }
             if value == unbound() {
                 return Ok(nil());
             }
@@ -643,6 +673,7 @@ unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
     let package = values::first_string(package)
         .unwrap_or_default()
         .into_owned();
+    force_deferred(symbol_name(symbol).as_bytes(), Lookup::Generic)?;
     let generic = find_generic(symbol, env, &package)?;
     if generic == nil() && values::as_logical_scalar(must_find) == 1 {
         return Err(call.error(format!(
@@ -651,6 +682,31 @@ unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
         )));
     }
     Ok(generic)
+}
+
+enum Lookup {
+    Class,
+    Generic,
+}
+
+/// Runs the deferred definitions that define the class or generic `name`, if any, and reports
+/// whether it ran some. They are unregistered first, so a lookup they make themselves finds
+/// nothing deferred.
+unsafe fn force_deferred(name: &[u8], lookup: Lookup) -> R<bool> {
+    let deferred = &mut interp().globals.deferred_definitions;
+    let Some(position) = deferred.iter().position(|definitions| match lookup {
+        Lookup::Class => definitions.classes.contains(name),
+        Lookup::Generic => definitions.generics.contains(name),
+    }) else {
+        return Ok(false);
+    };
+    let definitions = deferred.remove(position);
+    let heap = crate::heap();
+    heap.preserve(definitions.force);
+    let result = values::call(definitions.force, &[])
+        .and_then(|call| eval::eval(call, values::global_env()));
+    heap.release(definitions.force);
+    result.map(|_| true)
 }
 
 /// The first generic function bound to `symbol` from `env` outward (from `package`, unless

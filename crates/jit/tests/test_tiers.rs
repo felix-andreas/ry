@@ -299,6 +299,29 @@ fn seeds_agree_across_tiers() {
     });
 }
 
+/// A speculation that fails after a load forced its promise must not make tier 0 load the
+/// variable again: the forced promise would read as visible, though forcing `n <- 0` left the
+/// value invisible. The integer call makes the compiled code speculate on an integer `x`.
+#[test]
+fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            jit::install_mode(Mode::Force);
+            run("visibility <- function(x) .Internal(withVisible(x))[[2L]]");
+            let outcomes: Vec<String> = ["n <- 0", "3L", "3L", "n <- 0", "3L", "n <- 0"]
+                .iter()
+                .map(|argument| run(&format!("visibility({argument})")))
+                .collect();
+            jit::install_mode(Mode::Off);
+            assert_eq!(
+                outcomes,
+                ["FALSE", "TRUE", "TRUE", "FALSE", "TRUE", "FALSE"]
+            );
+        }
+    });
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.

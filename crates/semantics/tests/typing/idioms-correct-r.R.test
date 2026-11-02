@@ -87,8 +87,8 @@ f: fn() -> Any
 f <- function(x) unique(x, foo = TRUE)
 g <- function(x) head(x, n = 2, keepnums = FALSE)
 #++++
-f: <T> fn(x: T) -> Any
-g: <T> fn(x: T) -> Any
+f: <T> fn(x: T) -> T
+g: <T> fn(x: T) -> T
 
 #---- a_parameter_shadowing_an_unstubbed_base_function
 draw <- function(range, pretty = TRUE) {
@@ -386,7 +386,7 @@ flip <- function(phi, flag, m) {
   t(m)
 }
 #++++
-flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
+flip: <T, U> fn(phi: T, flag: logical, m: U) -> Any
 
 #---- a_condition_accepts_an_optional_logical
 pluck <- function(config, key) {
@@ -1044,7 +1044,7 @@ widths <- function(words) vapply(words, my_helper, integer(1))
 #++++
 my_helper: NULL
 widths: Unknown
-44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 4 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
+44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
 
 #---- a_branch_with_an_open_variable_inside_a_list_is_not_pinned_by_the_other_branch
 split_deps <- function(dp) if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)

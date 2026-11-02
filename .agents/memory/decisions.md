@@ -3002,9 +3002,12 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** libr's `Runtime` held its own options environment that nothing wrote, so `Rf_GetOption1` always returned `NULL` and packages (data.table's `datatable.*` options) saw defaults only.
 - **Target shape.** `Rf_GetOption1` walks `interp::envir::options()`, the interpreter's `.Options` pairlist, which is the single store `options()` writes.
 
-## parallel's natives without fork
+## parallel's fork routines
 
-- `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.
+- `crates/interp/src/parallel.rs` implements all of parallel's `.Call` routines: the L'Ecuyer stream jumps and the `mc_*` fork routines behind `mcfork`, `mclapply` and `mcparallel`. The pipe protocol is GNU R's (a native-endian `R_xlen_t` length, then the bytes; a zero length means the child is exiting), because parallel's R code drives it unchanged.
+- **Fork safety.** The runtime starts no helper threads (no GC, JIT or I/O threads), so `fork()` copies a consistent interpreter and no lock can be held by a thread that does not exist in the child. What would be copied wrongly is buffered output, so `mc_fork` first flushes standard output and error and every file connection's write buffer (`connections::flush_pending_writes`). The child closes its siblings' pipes, so a sibling's standard input still reaches its end. `mc_exit` ends the child with `_exit`, so the master's exit handlers and buffers are not run twice.
+- **Reaping without SIGCHLD.** GNU R reaps from a SIGCHLD handler, and its children wait for SIGUSR1 before exiting. ry does neither: a child exits at once, and the master calls `waitpid(WNOHANG)` on released children at the start of each routine. A child is released (its pipes closed) only once its pipe reaches its end or it is removed, detached or estranged, so its pid cannot be reused while it still names a tended child. `mc_children` lists tended children only, which `mccollect`'s loop needs in order to end.
+- **Cleanup scopes.** `mc_prepare_cleanup` pushes a mark, and each child records the innermost mark at its fork. `mc_cleanup` acts on the children forked since the innermost mark (all children when there is none) and pops the mark only when it signals or detaches, because `mccollect`'s `cleanup(FALSE, FALSE)` runs inside `mclapply`'s scope and must not end it.
 
 ## Corpus package tests: compatibility details that are easy to get wrong
 
@@ -4321,6 +4324,28 @@ check` releases its trees once, and memoized records are compact" below).
   and `rep(unknown, 2)` a vector: the unknown argument was the one choosing the candidate. Rejected: taking the union of the fits' results. It is sound, but it
   turns silence into false operand errors downstream (operators do not dispatch per union member),
   against "the checker presumes R code is correct".
+- When the fits still disagree and no unchecked argument is an inferred `Unknown` (each is `Any`,
+  or a forwarded `...`, whose element type is `Any`), the call is `Any`, not `Unknown`, as in mypy:
+  the `Any` is an opt-out, and opting out of a call's argument opts out of the call. Strict mode
+  reports only `Unknown`, so `#: fn(x: Any) -> double` over `sum(x)`, and `utils::head(...)`, are
+  clean, while an `Unknown` argument still makes the call a strict finding. A stub's `Any` result
+  (`nrow`) was already silent when the stub has one signature, so this makes overloaded and plain
+  calls agree. An unannotated parameter is a type parameter, not an inferred `Unknown`, so
+  `t(m)` on an untyped `m` is `Any` too; strict mode already reports the parameter itself.
+- The cost is that an `Any` result hides a mismatch every candidate would share:
+  `#: fn(x: Any) -> character` over `sum(x)` is clean, though each `sum` candidate returns a number.
+  Rejected: joining the disagreeing results (`integer | double`), because the union then fails an
+  honest `-> double` annotation and operators do not dispatch per union member. Picking a common
+  family without a union would be the refinement, if the hidden mismatches turn out to matter.
+
+## A formula is the nominal `formula`, and its operands are not judged
+
+- `~` (unary and binary) types as `formula` (`infer_formula` in `check.rs`). Its operands are
+  inferred for hover and goto-definition, but their errors and strict origins are dropped, because
+  they name model variables (data-frame columns, `.`, `I(x^2)`) that are not bindings in scope.
+  Previously `~` was `Unknown`, so every model call and every `dcast(dt, id ~ n)` was a strict
+  finding that could not even be annotated inline. Rejected: typing operands as ordinary
+  expressions, which would report every column name as unresolved.
 
 ## `$`, `[` and `[[` dispatch to a class's subset method
 
@@ -4490,6 +4515,48 @@ check` releases its trees once, and memoized records are compact" below).
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
 
+## The C API draws from the interpreter's generator
+
+- **Before.** `libr` kept its own Mersenne Twister for `unif_rand`, `norm_rand`, `exp_rand` and
+  `R_unif_index`, beside the interpreter's `interp::random`, which implements every RNG kind. The
+  two shared only `.Random.seed`, so a package calling `unif_rand` after `RNGkind("Marsaglia-Multicarry")`
+  read a seed its copy could not parse (doParallel's stress test failed with "'.Random.seed' is not
+  a valid integer vector"), and `R_sample_kind` always answered `Rejection`.
+- **Now.** `libr::arith`'s `Rng` delegates every draw to `interp::random`, and
+  `GetRNGstate`/`PutRNGstate` are the interpreter's `get_rng_state`/`put_rng_state`.
+  `R_sample_kind` reports the method `RNGkind(sample.kind =)` chose. `R_binom_kind` still
+  hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
+- **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave
+  exactly as under GNU R, and every kind the interpreter supports works from C at no extra cost.
+
+## Typed checking costs per name, not per file
+
+- **Before.** Each file built `visible_type_definitions`, a merged map of every stub and project type
+  definition, so typed analysis paid files times types in time and memory: on typed finbench the
+  diagnostics stage took 2.5 s against 0.2 s untyped. Every `#:` block was also lowered again by each
+  diagnostic pass that read it (parse stage, dangling annotations, argument lists, agreement,
+  declaration sites), and the non-local read classification ran twice, once for the ordinary check
+  and once for strict mode.
+- **Now.** `TypeDefinitions` (`semantics.rs`) is a `Copy` view over one file that looks a name up in
+  that file (scripts, or no `ProjectFiles`), then in the tracked per-name projection
+  `project_type_definition(files, name)`, then in the stubs; nothing merges the sets. The unknown-type
+  check tests each reference by name and builds the full known set only to rank suggestions after a
+  miss. `file_comment_annotations` lowers each `#:` block once per file, keyed by start offset, and
+  `comment_annotation` finds one by binary search. `file_unresolved_non_locals` (`diagnostics.rs`)
+  memoizes the classification per item, keeping only reads that do not resolve.
+- **Impact.** Typed `ry check` on finbench went from 2.43 s / 831 MiB to about 1.9 s / 644 MiB
+  (untyped 1.65 s / 533 MiB). The per-name projection also means an edit to one type definition
+  re-verifies only the readers of that name.
+- **`ry load` remembers a clean strict verdict** (`preflight::check_package`). The pre-check cannot
+  share a database with the runtime's loader, which lives in `libR.so`, so instead a clean result is
+  stored in `<cache dir>/ry/strict/<hash of the package root>`, holding a 128-bit fingerprint (two
+  differently seeded SipHashes) of the ry binary's path, size and mtime, the configuration's `Debug`
+  form, every R file the project analysis walks, the override stubs, `DESCRIPTION`, `NAMESPACE` and the
+  data-file layouts. One record per package keeps the cache from growing with edits, and a refusal is
+  never stored, so its errors print every time. A first load still pays the check; running the check
+  inside the runtime loader's own analysis would remove that and was not done, because that loader
+  analyses only what purity needs.
+
 # Decision record: matching GNU R's own tests where its behavior is an artifact
 
 GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its implementation, not from the language. Each is reproduced from observed output (black-box against Rscript), never from GNU R's source.
@@ -4631,6 +4698,53 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
   the contract.
 
+## `ry check` keeps an on-disk record of its findings
+
+- **Measured first.** On 4 cores, a cold check of the 300,000-line finance bench takes about 1.45 s
+  wall and 5 CPU seconds. Every pass already spreads over the cores: deriving the syntax facts used
+  3.8 cores, naming 3.6, and the item check 3.7. Releasing the trees (0.05 s) and setup (0.05 s) are
+  the only serial parts. More parallelism therefore has no headroom on this machine, and a cold run
+  under 1 s needs about a third less CPU work, not more threads.
+- **Previous shape.** Each run started from nothing. The salsa memos live only in memory, and
+  salsa 0.28 neither exposes its dependency graph nor persists memos without serde on every value,
+  including the global `Ty` table.
+- **Target shape.** `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`) records the findings,
+  not the memos. Each file's record holds its content fingerprint, its surface fingerprint (the
+  text without top-level function bodies, unless a body can write or declare outside its frame),
+  the files its check read through interface edges, and the `NAMESPACE` imports it uses. The whole
+  record is keyed by the ry binary (hashed by its bytes), the configuration, `NAMESPACE`,
+  `DESCRIPTION`, the data files and the stubs. With no changed file, every finding replays. When
+  every changed file keeps its surface, only the changed files and their dependents are checked.
+  Anything else checks all files. A directory with no `ry.toml` or `DESCRIPTION` gets no record.
+  The architecture page's "The check cache" section has the details.
+- **Why the surface rule is sound.** One file's check reads other files without an interface edge
+  only through name-keyed project-wide maps. Those are folds of per-file shares, so the surface
+  fingerprints each share as `diagnostics::project_fold_shares` spells it, beside the text outside
+  function bodies. A text rule alone was not enough: a `UseMethod` call or a `#: @type` inside a
+  body feeds the S3-generic and type-declaration folds, and a review reproduced both as stale
+  findings before the shares were added. Inferred schemes are the remaining body-dependent fact,
+  and the recorded interface dependencies cover them. On all three benches, a file's dependency
+  closure has a median size of 0, a 90th percentile of 1 and a maximum of 1.
+- **Measured.** On the finance bench, a replay takes 0.10 s (57 MB peak), a body edit 0.45 s, and a
+  cold run with the record written 0.1 s more than `--no-cache`. The data-science and biostatistics
+  benches replay in 0.09 s and 0.07 s. The output is byte-identical to a run with `--no-cache`.
+- **Floor of a partial run.** It still parses every file, because the project-wide folds read every
+  file's item tree. It warms those folds on all cores, and keeps its trees instead of releasing
+  them: releasing walks every item serially and cost more than it saved.
+- **Checked.** With invariants on, every run that reuses findings is compared against a fresh run
+  and panics on a difference. A seeded simulation drives that comparison with body and signature
+  edits, `<<-`, `library`, `assign`, `setClass`, `UseMethod` and S3 methods, `#: @type` in and
+  outside bodies, script files, and added and removed files
+  (`cached_checks_match_fresh_checks_across_seeded_edits` in `cli.rs`).
+
+## Corpus-driven stub and overload fixes
+
+- A name the item writes with `<<-` reads as `Unknown` unless the project defines it (`read_non_local` in `check.rs`, via `top_level::super_assigned_names` over the item's own HIR, so no project-wide map is read). Before, openxlsx's Reference Class field `t <<- t[-inds]` resolved to base `t` and indexing it was a false report.
+- `grepl`, `grep`, `regexpr` and `gregexpr` take `pattern: character[]` as a second overload, not a union: a union parameter makes an untyped caller parameter infer the union, which then fails at `paste0(collapse = p)` (gt). `sub` and `gsub` keep `character` because no corpus code needed more.
+- Overload resolution settles one narrowing disagreement: a scalar narrowing wins over the same atom's vector. A general "most specific by `compatible`" rule was tried and rejected, because it picked list shapes (`list[named: ...]`) that later reads rejected, adding ten corpus false reports.
+- `menu`'s `choices` is one union including `list[Any]`, because a list and a character overload disagree and would make an untyped caller `Unknown`.
+- The cost of the second `grepl` candidate: `grepl(1L, x)` now reports "no overload matches" over the whole call instead of the argument.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a
@@ -4690,3 +4804,27 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
   `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
 
+## A load holds back S4 definitions and caches its index across processes
+
+- **Deferred S4** (`loader::deferred_s4`, `.ry_force_s4` in `runtime.R`). Previously every top-level
+  `setClass`, `setGeneric`, `setMethod` and `setValidity` ran eagerly through the `methods` package,
+  about 300 ms on the 326,000-line bench package. On ry's runtime a package's S4 definitions are now
+  held back as one unit: each name they bind becomes a placeholder promise, and the interpreter's
+  class-cache miss and `R_getGeneric` hooks (`interp::methods`) force them. A force during the load
+  runs only the definitions before the current statement, so order is GNU R's. The unit is
+  all-or-nothing because S4 registration is global state (class tables, generic method tables) that
+  no per-name promise could reproduce; the rules that keep it eager (a method on a generic the package
+  does not define, a reference class, a definition reading a name bound later, a generator name that
+  is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
+  pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
+  no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
+- **The load-index cache** (`index_cache`, `read_index_cache`, `write_index_cache` in `loader.rs`).
+  Previously every cold start parsed all files and derived their facts (about 280 ms on 4 cores).
+  The whole `PackageIndex` is now cached per package root, keyed by an xxh3-128 over the build id
+  and every input (strictness, DESCRIPTION, NAMESPACE, each path and text). The cache is package-level,
+  not per file, because the per-file salsa queries all chain off the parse and cannot be fed a stored
+  result without re-parsing; a hit therefore skips salsa analysis entirely and the runtime parses
+  each item's slice of text when it is first forced (`Source::Text`). The build id is a hash of the
+  analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
+  invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
+  detached, cancellable db clone so the first reload does not pay for it.

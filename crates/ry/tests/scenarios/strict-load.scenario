@@ -1,0 +1,38 @@
+# A package author in strict mode loads the package, fixes what strict mode refuses, and loads
+# again. A clean verdict is remembered, so the next load skips the check, but an edit that
+# breaks strict mode is still refused.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| strict = true
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file R/area.R
+| area <- function(width, height) width$value * height
+
+run ry load -e "print(area(2, 3))"
+expect exit 1
+expect stderr "parameter `width` has no type"
+expect stderr "so this code does not run"
+
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) width * height
+
+run ry load -e "print(area(2, 3))"
+expect exit 0
+expect stdout "[1] 6"
+
+run ry load -e "print(area(2, 3))"
+expect exit 0
+expect stdout "[1] 6"
+
+file R/value.R
+| value <- function(x) x$value
+
+run ry load -e "print(area(2, 3))"
+expect exit 1
+expect stderr "strict mode found 2 errors, so this code does not run"
