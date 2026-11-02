@@ -21,6 +21,7 @@ use {
         sorted::{SortedMap, SortedSet},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    salsa::plumbing::AsId,
     std::{
         cell::{OnceCell, RefCell},
         collections::{BTreeMap, BTreeSet},
@@ -147,8 +148,8 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
     if db.one_shot()
         && let Some(parse) = HELD_TREE.with_borrow(|held| {
             held.as_ref()
-                .filter(|(held, _)| *held == file)
-                .map(|(_, parse)| parse.clone())
+                .filter(|held| held.file == file)
+                .map(|held| held.parse.clone())
         })
     {
         // The read the memo would have recorded.
@@ -171,15 +172,27 @@ pub fn with_held_tree<T>(db: &dyn Db, file: SourceFile, work: impl FnOnce() -> T
     if !db.one_shot() {
         return work();
     }
-    let tree = db.splice_cache().parse(file, file.text(db));
-    let previous = HELD_TREE.replace(Some((file, tree)));
+    let parse = db.splice_cache().parse(file, file.text(db));
+    let previous = HELD_TREE.replace(Some(HeldTree {
+        file,
+        parse,
+        items: FxHashMap::default(),
+    }));
     let result = work();
     HELD_TREE.set(previous);
     result
 }
 
+/// A held file's tree, and the subtrees of its items read so far: every per-item pass reads an
+/// item's syntax, and finding it in the file's tree costs several lookups and an allocation.
+struct HeldTree {
+    file: SourceFile,
+    parse: Parse,
+    items: FxHashMap<salsa::Id, Option<ItemSyntax>>,
+}
+
 thread_local! {
-    static HELD_TREE: RefCell<Option<(SourceFile, Parse)>> = const { RefCell::new(None) };
+    static HELD_TREE: RefCell<Option<HeldTree>> = const { RefCell::new(None) };
 }
 
 #[salsa::tracked(returns(clone))]
@@ -313,7 +326,26 @@ pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> 
     // A one-shot run never edits, so the firewall buys nothing there, and a memo per item would
     // keep its file's tree alive after the file's syntax pass ([`with_held_tree`]).
     if db.one_shot() {
-        return item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())));
+        let file = *item.file(db);
+        let key = item.as_id();
+        let build = || item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())));
+        let held = HELD_TREE.with_borrow(|held| {
+            held.as_ref()
+                .filter(|held| held.file == file)
+                .map(|held| held.items.get(&key).cloned())
+        });
+        match held {
+            Some(Some(syntax)) => return syntax,
+            Some(None) => {}
+            None => return build(),
+        }
+        let syntax = build();
+        HELD_TREE.with_borrow_mut(|held| {
+            if let Some(held) = held.as_mut() {
+                held.items.insert(key, syntax.clone());
+            }
+        });
+        return syntax;
     }
     item_syntax_memo(db, item)
 }
