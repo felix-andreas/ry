@@ -953,7 +953,8 @@ fn fuzz_stdlib_traversals_agree_with_model() {
     // every library traversal the JIT compiles into a loop, each checked against a model of the
     // library in Rust. Tier 0 and compiled code must both give the model's value, so a hand-off
     // from the loop (an `NA` answer, an overflow, an element of another type, a collection that
-    // is not one) must still end where the model says. `STDLIB_FUZZ_SEED` replays one case.
+    // is not one, an Array, which fails the loop's type guard as an ALTREP list does) must still
+    // end where the model says. `STDLIB_FUZZ_SEED` replays one case.
     let base = std::env::var("STDLIB_FUZZ_SEED")
         .ok()
         .and_then(|seed| seed.parse::<u64>().ok());
@@ -1030,7 +1031,8 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
     let forwards: Vec<usize> = (0..items.len()).collect();
     let backwards: Vec<usize> = (0..items.len()).rev().collect();
     let add = |acc: Scalar, x: Scalar| arith(acc, x, '+');
-    match rng.below(14) {
+    let array = homogeneous_array(rng, &items);
+    let (call, model) = match rng.below(14) {
         0 => {
             let (name, order) = if rng.chance(1, 2) {
                 ("walk", &forwards)
@@ -1310,7 +1312,28 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
             };
             (format!("List.{name}({list}, function(x) {text})"), model)
         }
+    };
+    // An Array holds the same items, but the compiled loop must hand it back to tier 0, the
+    // path an ALTREP list takes too. A traversal that returns a collection would return an
+    // Array, which the model does not describe, so only the other ones use it.
+    match array {
+        Some(array) if call.starts_with("List.") && !matches!(model, Model::List(_)) => {
+            (call.replacen(&list, &array, 1), model)
+        }
+        _ => (call, model),
     }
+}
+
+/// The items as an Array literal, now and then, when they share one type and none is `NA`.
+fn homogeneous_array(rng: &mut SplitMix64, items: &[Scalar]) -> Option<String> {
+    // An Array holds no `NA`, so a list with one stays a list.
+    let all_int = items.iter().all(|item| matches!(item, Scalar::Int(Some(_))));
+    let all_dbl = items.iter().all(|item| matches!(item, Scalar::Dbl(Some(_))));
+    if items.is_empty() || !(all_int || all_dbl) || !rng.chance(1, 4) {
+        return None;
+    }
+    let rendered: Vec<String> = items.iter().map(|&item| scalar(item)).collect();
+    Some(format!("[{}]", rendered.join(", ")))
 }
 
 /// Up to 24 numbers: integers, doubles or a mix, now and then `NA` or an integer near the limit,
