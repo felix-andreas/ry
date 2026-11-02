@@ -57,10 +57,6 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   new name.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
-- **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
-  reload that re-registers it and never removed.
-- **A declared `S3method` whose function does not exist** registers a promise that fails at
-  dispatch; R refuses the load instead.
 - **A strict package's reload checks the whole package**: every load that changes something runs
   `preflight::check_package`, a fresh analysis of all of `R/` (the clean verdict is cached by
   fingerprint, so an unchanged package costs a hash). Checking only the files the plan changed, in

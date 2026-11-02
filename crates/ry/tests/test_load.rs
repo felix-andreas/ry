@@ -853,3 +853,44 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
         assert!(printed.contains("\n2 \n"), "{runtime}: {printed}");
     }
 }
+
+#[test]
+fn s3_registrations_refuse_a_missing_method_and_keep_one_delayed_hook() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: methodical\nVersion: 1.0\n"),
+        (
+            "NAMESPACE",
+            "S3method(print, foo)\nS3method(notinstalledpkg::frob, foo)\nexport(make)\n",
+        ),
+        ("R/a.R", ""),
+    ]);
+    let file = root.path().join("R/a.R").display().to_string();
+    let original = "make <- function() structure(1, class = 'foo')\n\
+                    print.foo <- function(x, ...) cat('a foo\\n')\n\
+                    frob.foo <- function(x) 1\n";
+    // Each reload rebinds `frob.foo`, which re-registers its delayed hook.
+    let script = format!(
+        "print(make())\n\
+         writeLines(c(\"make <- function() structure(1, class = 'foo')\", \
+         \"print.foo <- function(x, ...) cat('a foo!\\\\n')\", 'frob.foo <- function(x) 2'), {file:?})\n\
+         load_all({root:?}, quiet = TRUE)\nprint(make())\n\
+         cat('hooks', length(getHook(packageEvent('notinstalledpkg', 'onLoad'))), '\\n')\n\
+         writeLines(\"make <- function() structure(1, class = 'foo')\", {file:?})\n\
+         cat(tryCatch(load_all({root:?}, quiet = TRUE), error = conditionMessage), '\\n')\n",
+        root = root.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        fs::write(root.path().join("R/a.R"), original).expect("write file");
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("a foo\na foo!\nhooks 1"), "{runtime}: {printed}");
+        assert!(
+            printed.contains("object 'print.foo' not found whilst loading namespace 'methodical'"),
+            "{runtime}: {printed}"
+        );
+    }
+}

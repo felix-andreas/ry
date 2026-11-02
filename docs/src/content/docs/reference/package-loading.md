@@ -32,6 +32,7 @@ This page is the exact behavior.
   each in C-locale order; R CMD INSTALL would refuse such a package, but `load_all()` appends them
   too.
 - **`NAMESPACE`** works as in an installed package: imports, `S3method()` registrations, and exports.
+  A declared method whose function the package does not define refuses the load, as R does.
   With `export_all = TRUE` every object in the namespace is attached as `package:<name>`, as with
   `load_all()`.
 - **Datasets in `data/`** are read into the namespace's lazy data the way `data()` reads them:

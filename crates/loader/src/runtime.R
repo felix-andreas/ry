@@ -667,16 +667,25 @@ View <- function(x, title) {
 }
 
 # The table entry is a promise for the namespace binding, so registering a method does not
-# force its lazy definition. A reload re-registers every method it rebinds.
+# force its lazy definition. A reload re-registers every method it rebinds. A declared method
+# whose function the package does not define refuses the load, as R does.
 .ry_register_s3 <- function(ns, name, method) {
+  if (!exists(method$`function`, envir = ns, inherits = FALSE)) {
+    stop(sprintf("object '%s' not found whilst loading namespace '%s'", method$`function`, name),
+         call. = FALSE)
+  }
   generic <- method$generic
+  .ry_remove_s3_hook(name, method)
   if (grepl("::", generic, fixed = TRUE)) {
     package <- sub("::.*$", "", generic)
     generic <- sub("^.*::", "", generic)
     if (!isNamespaceLoaded(package)) {
-      setHook(packageEvent(package, "onLoad"), function(...) {
+      hook <- function(...) {
         .ry_register_s3_in(ns, generic, method$class, method$`function`, asNamespace(package))
-      })
+      }
+      setHook(packageEvent(package, "onLoad"), hook)
+      assign(.ry_s3_hook_key(name, method), list(package = package, hook = hook),
+             envir = .ry_s3_hooks)
       return(invisible())
     }
     .ry_register_s3_in(ns, generic, method$class, method$`function`, asNamespace(package))
@@ -695,7 +704,28 @@ View <- function(x, title) {
                 get(function_name, envir = ns, inherits = FALSE), assign.env = table)
 }
 
+# The delayed registrations `.ry_register_s3` left for packages not yet loaded, by package,
+# generic and class, so a reload replaces its hook instead of adding another.
+.ry_s3_hooks <- new.env(hash = TRUE, parent = emptyenv())
+
+.ry_s3_hook_key <- function(name, method) {
+  paste(name, method$generic, method$class, sep = "\r")
+}
+
+.ry_remove_s3_hook <- function(name, method) {
+  key <- .ry_s3_hook_key(name, method)
+  entry <- .ry_s3_hooks[[key]]
+  if (is.null(entry)) {
+    return(invisible())
+  }
+  rm(list = key, envir = .ry_s3_hooks)
+  event <- packageEvent(entry$package, "onLoad")
+  kept <- Filter(function(hook) !identical(hook, entry$hook), getHook(event))
+  setHook(event, kept, "replace")
+}
+
 .ry_unregister_s3 <- function(ns, method) {
+  .ry_remove_s3_hook(getNamespaceName(ns), method)
   generic <- sub("^.*::", "", method$generic)
   lookup <- ns
   if (grepl("::", method$generic, fixed = TRUE)) {
