@@ -204,9 +204,6 @@ pub struct Plan {
     pub strict: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
-    /// The `if` directives of `NAMESPACE`, whose conditions the host evaluates and passes to
-    /// the next plan.
-    pub namespace_conditionals: Vec<String>,
 }
 
 /// The values the host gave the conditions of each `if` directive in `NAMESPACE`, by the
@@ -465,13 +462,7 @@ impl Loader {
         // Taken from the stamps the read takes before it reads each file, so an edit made
         // while the plan is read shows as a change later.
         let (fingerprint, planned) = match self.read(&root, Some(conditions)) {
-            Ok((inputs, fingerprint, conditionals)) => {
-                let planned = self.plan_inputs(&root, inputs, full).map(|mut plan| {
-                    plan.namespace_conditionals = conditionals;
-                    plan
-                });
-                (fingerprint, planned)
-            }
+            Ok((inputs, fingerprint)) => (fingerprint, self.plan_inputs(&root, inputs, full)),
             // The read stopped before it took any stamp, so the package is as it was.
             Err(LoadError::Conditionals(conditionals)) => {
                 return Err(LoadError::Conditionals(conditionals));
@@ -504,7 +495,7 @@ impl Loader {
         let Ok(root) = find_package_root(path) else {
             return;
         };
-        let Ok((inputs, _, _)) = self.read(&root, None) else {
+        let Ok((inputs, _)) = self.read(&root, None) else {
             return;
         };
         // A failure is the plan's to report: it reads the same sources.
@@ -749,7 +740,7 @@ impl Loader {
 
     /// Adopts a state saved by an earlier process as what is loaded.
     pub fn restore(&mut self, state: LoadState) -> Result<(), LoadError> {
-        let (inputs, _, _) = self.read(&state.root, None)?;
+        let (inputs, _) = self.read(&state.root, None)?;
         let (position, _, _) = self.sync(
             &state.root,
             inputs.description,
@@ -891,7 +882,7 @@ impl Loader {
         &mut self,
         root: &Path,
         conditions: Option<&NamespaceConditions>,
-    ) -> Result<(PackageInputs, Option<u64>, Vec<String>), LoadError> {
+    ) -> Result<(PackageInputs, Option<u64>), LoadError> {
         let mut fingerprint = Fingerprint::default();
         let description_path = root.join("DESCRIPTION");
         fingerprint.path(&description_path);
@@ -904,15 +895,15 @@ impl Loader {
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(LoadError::Io(namespace_path, error)),
         };
-        let (namespace, conditionals) = match conditions {
+        let namespace = match conditions {
             Some(conditions) => {
                 let resolved = resolve_namespace_conditionals(&namespace, conditions);
                 if !resolved.resolved {
                     return Err(LoadError::Conditionals(resolved.conditionals));
                 }
-                (resolved.text, resolved.conditionals)
+                resolved.text
             }
-            None => (namespace, Vec::new()),
+            None => namespace,
         };
         let paths = collated_r_files(root, &parse_description_collate(&description))?;
         let known = self.stamps.entry(root.to_path_buf()).or_default();
@@ -948,7 +939,7 @@ impl Loader {
         };
         // `source_fingerprint` has none for a package without `R/`.
         let fingerprint = root.join("R").is_dir().then(|| fingerprint.finish());
-        Ok((inputs, fingerprint, conditionals))
+        Ok((inputs, fingerprint))
     }
 
     /// Sets the analysis inputs to `files`, writing only what changed, and returns the
@@ -1701,7 +1692,6 @@ pub fn diff<'text>(
         strict: index.strict,
         namespace: index.namespace.clone(),
         warnings,
-        namespace_conditionals: Vec::new(),
     }
 }
 
@@ -1972,7 +1962,6 @@ impl Plan {
             run_on_load: false,
             strict: state.index.strict,
             warnings: Vec::new(),
-            namespace_conditionals: Vec::new(),
         }
     }
 

@@ -655,6 +655,8 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     )
     .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));
     if let Err(error) = assembled {
+        // The assembly error is the one to report. A staging directory left behind is named by
+        // this process's id and removed first by the next assembly under that id.
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
@@ -667,6 +669,8 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
                 let stale = entry != home
                     && fs::read_to_string(entry.join(".libr")).is_ok_and(|other| other == source);
                 // A session still running from a stale home keeps its mapping of that `libR`.
+                // Pruning only saves disk once the new home is in place, so a home that cannot
+                // be removed now is tried again when the next home is built.
                 if stale {
                     drop(fs::remove_dir_all(&entry));
                 }
@@ -674,11 +678,11 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
             Ok(home)
         }
         // Another process renamed its home into place first.
-        Err(_) if home.join("etc").join("Makeconf").exists() => {
-            drop(fs::remove_dir_all(&staging));
-            Ok(home)
-        }
+        Err(_) if home.join("etc").join("Makeconf").exists() => fs::remove_dir_all(&staging)
+            .map(|()| home)
+            .map_err(io_error(&staging)),
         Err(error) => {
+            // The rename error is the one to report, as for a failed assembly above.
             drop(fs::remove_dir_all(&staging));
             Err(Error::Io(home, error))
         }
@@ -1792,8 +1796,8 @@ pub fn compile(home: &Path, package: &Path, libraries: &[PathBuf]) -> Result<()>
     let mut paths = libraries.to_vec();
     paths.push(home.join("library"));
     let built = compile_in(home, package, &name, &description, &paths, &target);
-    drop(fs::remove_dir_all(&target));
-    built.map(drop)
+    let removed = fs::remove_dir_all(&target).map_err(io_error(&target));
+    built.and_then(|_| removed)
 }
 
 /// Runs the `configure` script of the source tree `build` and compiles its `src/`, returning the

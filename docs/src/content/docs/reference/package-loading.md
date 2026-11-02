@@ -44,8 +44,8 @@ This page is the exact behavior.
   `load_all()`.
 - **`if` in `NAMESPACE`** works as in GNU R: at every load, the condition is evaluated in the
   global environment, and the directives on the branch it takes apply, so
-  `if (.Platform$OS.type == "windows") export(f)` exports `f` only on Windows. A condition that
-  fails stops the load with its error. `ry check` cannot evaluate R, so it reads the directives
+  `if (.Platform$OS.type == "windows") export(f)` exports `f` only on Windows. This holds inside
+  a top-level `{ }` block too. A condition that fails stops the load with its error. `ry check` cannot evaluate R, so it reads the directives
   of both branches: an import on either one resolves the names it brings in.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled and loaded,
   and `.onLoad` and `.onAttach` run. On ry's runtime, `src/` is compiled by ry itself, against

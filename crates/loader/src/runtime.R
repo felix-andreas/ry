@@ -56,12 +56,19 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   full <- isTRUE(full) || !current
   started <- proc.time()[["elapsed"]]
   .ry_phase(NULL)
-  # R evaluates the conditions of NAMESPACE's `if` directives at every load, so they are
-  # evaluated again for the directives the last load had, and once more when the plan names
-  # directives that are new.
-  plan <- .ry_request(root, full, .ry_namespace_conditions(state$namespace_conditionals))
-  if (isTRUE(plan$unresolved)) {
-    plan <- .ry_request(root, full, .ry_namespace_conditions(plan$namespace_conditionals))
+  # R evaluates the conditions of NAMESPACE's `if` directives at every load, and only those of
+  # the directives the file holds now, so the first request sends no values and the plan names
+  # the directives whose conditions it needs. A file edited between two requests names new
+  # ones, and the same values twice means the plan cannot use them.
+  conditions <- ""
+  repeat {
+    plan <- .ry_request(root, full, conditions)
+    if (!isTRUE(plan$unresolved)) break
+    evaluated <- .ry_namespace_conditions(plan$namespace_conditionals)
+    if (identical(evaluated, conditions)) {
+      stop("the `if` directives in NAMESPACE could not be resolved", call. = FALSE)
+    }
+    conditions <- evaluated
   }
   .ry_phase("plan")
   if (!is.null(plan$error)) {
@@ -89,7 +96,6 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   state$export_all <- export_all
   state$namespace_spec <- plan$namespace
-  state$namespace_conditionals <- plan$namespace_conditionals
   # Exports are resynced by scanning every name in the namespace, which a reload that only
   # rebinds existing names cannot change.
   plan$keeps_names <- isTRUE(plan$keeps_names) && !resync

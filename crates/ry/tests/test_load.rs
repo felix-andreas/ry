@@ -1233,6 +1233,9 @@ fn namespace_if_directives_are_evaluated_at_every_load_on_both_runtimes() {
         )
     };
     let edited = format!("{namespace}if (TRUE) export(later)\n");
+    // A condition the file no longer holds is not evaluated, even one that would now fail,
+    // and an `if` inside a top-level `{` block is resolved like any other.
+    let braced = "{\n  export(always)\n  if (FALSE) export(never) else export(modern)\n}\n";
     for runtime in RUNTIMES {
         fs::write(&path, namespace).expect("write NAMESPACE");
         let output = ry_load_on(
@@ -1247,6 +1250,12 @@ fn namespace_if_directives_are_evaluated_at_every_load_on_both_runtimes() {
                     path = path.display().to_string()
                 ),
                 &probe("edited"),
+                "Sys.getenv <- function(...) stop('a stale condition ran')",
+                &format!(
+                    "writeLines({braced:?}, {path:?})",
+                    path = path.display().to_string()
+                ),
+                &probe("braced"),
             ],
         );
         let printed = text(&output);
@@ -1261,6 +1270,10 @@ fn namespace_if_directives_are_evaluated_at_every_load_on_both_runtimes() {
         );
         assert!(
             printed.contains("edited: always flagged later modern"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("braced: always modern"),
             "{runtime}: {printed}"
         );
         assert!(!printed.contains("ignored"), "{runtime}: {printed}");

@@ -2873,6 +2873,7 @@ first lines R had already read, leaving R mid-command.
   and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
   `test_standard_library.rs` keeps both equal to what the runtime binds.
 
+
 # Decision record: the JIT tier
 
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
@@ -3400,6 +3401,7 @@ first lines R had already read, leaving R mid-command.
   query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
   tables never shrink.
 
+
 ## Types and names are hash-consed outside salsa
 
 - **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
@@ -3531,6 +3533,7 @@ first lines R had already read, leaving R mid-command.
   they work whether or not the package is attached first.
 - **Impact:** column checks and completion cover the whole query rather than one bracket;
   incremental analysis is unchanged, since the refinement reads only the item's own recorded types.
+
 
 # Decision record: positioning
 
@@ -5267,6 +5270,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
   `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
 
+
 ## DataFrame expression operands are checked against the engine's own typing
 
 - **Previous shape.** `frame_expression` in `check.rs` computed each expression's column type but
@@ -5468,6 +5472,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Formatting** is per chunk (`format::format_chunks`), returning one edit per changed chunk, so prose, fences and inline code are never rewritten. An indented chunk (inside a list item) is skipped, because re-indenting it would need the list's indentation. Range formatting is off for literate files.
 - **Completion** answers only inside an R region (`syntax::literate::r_regions`), so typing prose shows nothing. Code lenses other than reference counts are dropped, because "Run file" and "Run test" mean nothing for a report.
 - **VS Code** matches literate files by glob, because their language id depends on which extension is installed.
+
 
 ## A running console is a debug adapter, a data source, and a live-value source on one socket
 
@@ -5677,7 +5682,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`MatchFail`** always signals an error, so the JIT treats it as `PureUnlessObserved` and leaves every register `Bottom` after it. As an opaque step that fell through with its registers' stale types, it widened the join after each `match` (a reused temporary still typed as the scrutinee's record) and left the loop's arithmetic in tier 0.
 - **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
 - **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
-- **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger` and data-science `readings` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
+- **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger`, data-science `readings` and biostatistics `followup` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances. The replacement is line for line, so the untyped form must have exactly as many lines as the `#:=` run.
 
 ## A strict reload re-checks through a persistent salsa database
 
@@ -5697,8 +5702,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 ## `if` in NAMESPACE is evaluated by the host, then resolved in text
 
 - **Previous shape.** The loader's `NamespaceSpec` put every `if` directive in `unsupported`, and the load warned and ignored it; the checker's `namespace_directives` skipped it too.
-- **Shape.** R evaluates conditions, Rust parses directives. `.ry_namespace_conditions` (runtime.R) walks each top-level `if` as `parseNamespaceFile` does (global environment, only the taken branch, depth first) and encodes the values; every transport carries them as one string (`loader::parse_namespace_conditions`), because the embedded `.Call` routines take only strings. `Loader::read` replaces each `if` with the directives on its taken branches (`metadata::resolve_namespace_conditionals`) before anything parses `NAMESPACE`, so the spec, the diff, the index cache key and the analysis all see the NAMESPACE R would build, with directive order kept.
-- **Unknown directives.** Values are keyed by the directive's source text. A directive without values fails the read with `LoadError::Conditionals` before any stamp is taken (a stamp taken for a discarded read would hide the edit from the next one), the host returns `list(unresolved = TRUE, namespace_conditionals =)`, and R evaluates and plans again. R remembers the directives of the last load, so only a load that meets a new `if` pays the second round trip.
+- **Shape.** R evaluates conditions, Rust parses directives. `.ry_namespace_conditions` (runtime.R) walks each `if` at top level or inside a top-level `{` as `parseNamespaceFile` does (global environment, only the taken branch, depth first) and encodes the values; every transport carries them as one string (`loader::parse_namespace_conditions`), because the embedded `.Call` routines take only strings. `Loader::read` replaces each `if` with the directives on its taken branches (`metadata::resolve_namespace_conditionals`) before anything parses `NAMESPACE`, so the spec, the diff, the index cache key and the analysis all see the NAMESPACE R would build, with directive order kept.
+- **Unknown directives.** Values are keyed by the directive's source text. A directive without values fails the read with `LoadError::Conditionals` before any stamp is taken (a stamp taken for a discarded read would hide the edit from the next one), the host returns `list(unresolved = TRUE, namespace_conditionals =)`, and R evaluates and plans again, repeating while the plan names new directives. The first request of every load sends no values, because evaluating the conditions the last load had would run conditions the file may no longer hold, which GNU R never does; a package with an `if` in NAMESPACE therefore plans twice per load.
 - **Checker.** Analysis cannot evaluate R, so it reads both branches, which avoids false unresolved reports for platform-conditional imports.
 
 ## An integer and a double joined stay unboxed

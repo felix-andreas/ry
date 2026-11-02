@@ -505,10 +505,7 @@ pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
 
 fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
     let mut spec = NamespaceSpec::default();
-    for node in root.children() {
-        if !is_expression_kind(node.kind()) {
-            continue;
-        }
+    for node in unbraced_directives(root) {
         let Some(Call {
             callee: directive,
             qualified: false,
@@ -647,8 +644,8 @@ pub fn resolve_namespace_conditionals(
         return unchanged(Vec::new());
     }
     let root = syntax::parse(source).syntax_node();
-    let conditionals: Vec<SyntaxNode> = root
-        .children()
+    let conditionals: Vec<SyntaxNode> = unbraced_directives(&root)
+        .into_iter()
         .filter(|node| node.kind() == SyntaxKind::IF_EXPR)
         .collect();
     if conditionals.is_empty() {
@@ -683,6 +680,31 @@ pub fn resolve_namespace_conditionals(
             .collect(),
         resolved,
     }
+}
+
+/// The top-level expressions of `NAMESPACE` in order, with each `{` block replaced by the
+/// expressions inside it, as R's `parseNamespaceFile` reads them.
+fn unbraced_directives(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    let mut directives = Vec::new();
+    let mut pending: Vec<SyntaxNode> = root
+        .children()
+        .filter(|node| is_expression_kind(node.kind()))
+        .collect();
+    pending.reverse();
+    while let Some(node) = pending.pop() {
+        if node.kind() == SyntaxKind::BRACE_EXPR {
+            pending.extend(
+                node.children()
+                    .filter(|child| is_expression_kind(child.kind()))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+        } else {
+            directives.push(node);
+        }
+    }
+    directives
 }
 
 /// Collects the directives `node` contributes when its conditions take `values`, or `None`

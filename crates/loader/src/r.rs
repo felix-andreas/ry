@@ -273,10 +273,6 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
         ),
         ("run_on_load".into(), RValue::Logical(plan.run_on_load)),
         ("warnings".into(), strings(&plan.warnings)),
-        (
-            "namespace_conditionals".into(),
-            strings(&plan.namespace_conditionals),
-        ),
     ])
 }
 
