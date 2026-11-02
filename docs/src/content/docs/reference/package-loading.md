@@ -144,9 +144,8 @@ Functions keep their source references on both runtimes, so `print()` shows them
 `getSrcLocation()`, tracebacks and the debugger point into your files, as long as
 `options(keep.source = TRUE)` is set, which is the default in an interactive session. On ry's runtime
 a lazily bound definition gets its source reference when it is first used, and a file's `srcfile` is
-built only then. On GNU R, a definition placed after a non-ASCII character on the same line,
-such as `m <- function() "é"; n <- function() 3`, reports a column as many places too far right as
-that character has extra bytes in UTF-8; its line, byte offsets and printed text are right.
+built only then. Columns count characters and byte offsets count bytes on both runtimes, so in
+`m <- function() "é"; n <- function() 3` the definition of `n` starts at column 27 and byte 28.
 
 ## The load-index cache
 
@@ -194,9 +193,10 @@ importer keeps its old imports with a warning until you reload it.
   dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
   order, where `data()` reads only one.
 - A reload that leaves a declared S3 method without its function is refused before it changes
-  anything, unless it also runs top-level statements or reloads `R/sysdata.rda`, either of which
-  could define the function. Then the refusal comes after they ran, and the namespace holds the
-  new code.
+  anything, unless it reruns a top-level statement that may bind a name it computes, such as
+  `assign(paste0("print.", class), ...)`, which could define the function. Then the refusal comes
+  after the statements ran, and the namespace holds the new code. In a file that is not strict,
+  every statement other than a function definition counts as such a statement.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards. On ry's runtime the old library stays mapped, and
   the rebuilt one loads from a fresh copy of the file, because the system loader would otherwise

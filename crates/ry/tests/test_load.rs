@@ -710,7 +710,8 @@ fn source_references_point_into_the_file() {
     let script = format!(
         "options(keep.source = TRUE)\nload_all({root:?}, full = TRUE)\n\
          cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n\
-         print(later)\ncat('byte', utils::getSrcLocation(n, 'byte'), '\\n')\nprint(n)\n",
+         print(later)\ncat('byte', utils::getSrcLocation(n, 'byte'), '\\n')\n\
+         cat('column', utils::getSrcLocation(n, 'column'), '\\n')\nprint(n)\n",
         root = root.path().display().to_string(),
     );
     for runtime in RUNTIMES {
@@ -724,7 +725,7 @@ fn source_references_point_into_the_file() {
             "{runtime}: {printed}"
         );
         assert!(
-            printed.contains("byte 28 \nfunction() 3\n"),
+            printed.contains("byte 28 \ncolumn 27 \nfunction() 3\n"),
             "{runtime}: {printed}"
         );
     }
@@ -1037,6 +1038,50 @@ fn s3_registrations_refuse_a_missing_method_and_keep_one_delayed_hook() {
         // The refusal came before the reload changed anything.
         assert!(
             printed.contains("'methodical' \na foo!\n"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
+fn s3_refusal_comes_first_when_sysdata_changes_and_after_code_that_may_define_the_method() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: timely\nVersion: 1.0\n"),
+        ("NAMESPACE", "S3method(print, foo)\nexport(make)\n"),
+        ("R/a.R", ""),
+    ]);
+    let original = "make <- function() structure(1, class = 'foo')\n\
+                    print.foo <- function(x, ...) cat('a foo', limit, '\\n')\n";
+    let file = root.path().join("R/a.R").display().to_string();
+    let sysdata = root.path().join("R/sysdata.rda").display().to_string();
+    // The first reload drops `print.foo` and rewrites `sysdata.rda`, which is refused before
+    // `limit` changes. The second defines the method with a computed name, which only running
+    // the statement can show.
+    let script = format!(
+        "limit <- 1; save(limit, file = {sysdata:?}); load_all({root:?}, quiet = TRUE)\n\
+         print(make())\n\
+         writeLines(\"make <- function() structure(1, class = 'foo')\", {file:?})\n\
+         limit <- 2; save(limit, file = {sysdata:?})\n\
+         cat(tryCatch({{ load_all({root:?}, quiet = TRUE); 'loaded' }}, error = conditionMessage), '\\n')\n\
+         print(make())\n\
+         writeLines(c(\"make <- function() structure(1, class = 'foo')\", \
+         \"assign(paste0('print', '.foo'), function(x, ...) cat('computed foo', limit, '\\\\n'))\"), {file:?})\n\
+         load_all({root:?}, quiet = TRUE)\nprint(make())\n",
+        root = root.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        fs::write(root.path().join("R/a.R"), original).expect("write file");
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains(
+                "a foo 1 \nobject 'print.foo' not found whilst loading namespace 'timely' \n\
+                 a foo 1 \ncomputed foo 2 \n"
+            ),
             "{runtime}: {printed}"
         );
     }

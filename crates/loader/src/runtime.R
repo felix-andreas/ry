@@ -125,16 +125,25 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 # A reload that would leave a declared S3 method without its function is refused before it
-# changes anything, as R refuses such a package. When the reload runs statements or reads
-# `sysdata.rda`, either may define the function, so `.ry_register_s3` checks after them instead.
+# changes anything, as R refuses such a package. The new `sysdata.rda` is read into a scratch
+# environment here, so its names count. Only a statement that may write a name it computes
+# (`run_writes` is `NULL`) can still define the function, and then `.ry_register_s3` checks
+# after the statements ran instead.
 .ry_refuse_missing_s3 <- function(state, plan) {
-  if (length(plan$run_path) || !identical(plan$sysdata, "keep")) {
+  sysdata <- character()
+  state$sysdata_pending <- NULL
+  if (identical(plan$sysdata, "load")) {
+    state$sysdata_pending <- new.env(parent = emptyenv())
+    sysdata <- load(file.path(state$root, "R", "sysdata.rda"), envir = state$sysdata_pending)
+  }
+  if (is.null(plan$run_writes)) {
     return(invisible())
   }
+  gone <- c(plan$remove, if (!identical(plan$sysdata, "keep")) state$sysdata)
   for (method in plan$s3_register) {
     name <- method$`function`
-    bound <- name %in% plan$bind_name ||
-      (!(name %in% plan$remove) && exists(name, envir = state$ns, inherits = FALSE))
+    bound <- name %in% plan$bind_name || name %in% plan$run_writes || name %in% sysdata ||
+      (!(name %in% gone) && exists(name, envir = state$ns, inherits = FALSE))
     if (!bound) {
       stop(sprintf("object '%s' not found whilst loading namespace '%s'", name, state$name),
            call. = FALSE)
@@ -427,7 +436,12 @@ View <- function(x, title) {
     if (length(state$sysdata)) {
       rm(list = intersect(state$sysdata, ls(ns, all.names = TRUE)), envir = ns)
     }
-    state$sysdata <- if (identical(plan$sysdata, "load")) {
+    state$sysdata <- if (!is.null(state$sysdata_pending)) {
+      pending <- state$sysdata_pending
+      state$sysdata_pending <- NULL
+      list2env(as.list(pending, all.names = TRUE), envir = ns)
+      ls(pending, all.names = TRUE, sorted = FALSE)
+    } else if (identical(plan$sysdata, "load")) {
       load(file.path(state$root, "R", "sysdata.rda"), envir = ns)
     } else {
       character()

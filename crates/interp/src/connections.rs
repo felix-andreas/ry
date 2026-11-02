@@ -1191,7 +1191,9 @@ unsafe fn do_url(call: &Call<'_>) -> R<Sexp> {
             Some("http" | "ftp") => {
                 "the 'internal' method of url() is defunct for http:// and ftp:// URLs".to_owned()
             }
-            Some("https") => "https:// URLs are not supported by the \"internal\" method".to_owned(),
+            Some("https") => {
+                "https:// URLs are not supported by the \"internal\" method".to_owned()
+            }
             Some("ftps") => "ftps:// URLs are not supported by this method".to_owned(),
             _ => "URL scheme unsupported by this method".to_owned(),
         }));

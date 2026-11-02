@@ -141,6 +141,12 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
         ("run_start".into(), integers(&plan.run, |code| code.start)),
         ("run_end".into(), integers(&plan.run, |code| code.end)),
         (
+            "run_writes".into(),
+            plan.run_writes
+                .clone()
+                .map_or(RValue::Null, RValue::Character),
+        ),
+        (
             "touched".into(),
             plan.touched_names().map_or(RValue::Null, RValue::Character),
         ),

@@ -174,6 +174,10 @@ pub struct Plan {
     pub bind: Vec<Code>,
     /// Top-level code to run, in collation order.
     pub run: Vec<Code>,
+    /// Every name the statements of `run` write, when all of them are effect-free and so
+    /// write only names known before they run. `None` when one may write a name it computes,
+    /// as `assign(paste0("print.", class), ...)` does.
+    pub run_writes: Option<Vec<String>>,
     /// Statements of `run` that a backend may hold back until first use instead.
     pub deferred_s4: Option<DeferredS4>,
     pub sysdata: SysdataChange,
@@ -1547,6 +1551,16 @@ pub fn diff<'text>(
         .filter(|(_, rerun)| **rerun)
         .map(|((path, item, _, effect_free), _)| eager_code(path, item, *effect_free))
         .collect();
+    let run_writes = eager
+        .iter()
+        .zip(&rerun)
+        .filter(|(_, rerun)| **rerun)
+        .map(|((_, item, _, effect_free), _)| effect_free.then_some(&item.binds))
+        .collect::<Option<Vec<_>>>()
+        .map(|binds| {
+            let names: BTreeSet<String> = binds.into_iter().flatten().cloned().collect();
+            names.into_iter().collect()
+        });
     // A fresh load runs every eager statement, so positions in `eager` are positions in `run`.
     let deferred_s4 = if full { deferred_s4(index) } else { None };
     // Another statement may make the same registration, which then stays.
@@ -1672,6 +1686,7 @@ pub fn diff<'text>(
         bind,
         run_on_load: full || changed.contains(".onLoad"),
         run,
+        run_writes,
         deferred_s4,
         sysdata,
         data,
@@ -1943,6 +1958,7 @@ impl Plan {
             unregister: Vec::new(),
             bind: Vec::new(),
             run: Vec::new(),
+            run_writes: Some(Vec::new()),
             deferred_s4: None,
             sysdata: SysdataChange::Keep,
             data: None,

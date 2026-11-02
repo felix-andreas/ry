@@ -51,14 +51,6 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
   and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
   or `src/` does not trigger a rerun.
-- **A reload that runs statements refuses a missing S3 method late**: `.ry_refuse_missing_s3`
-  checks before anything changes only when the reload runs no statement and keeps
-  `sysdata.rda`, since either could define the function; otherwise `.ry_register_s3` refuses
-  after the namespace already holds the new code. Knowing every name a statement may bind would
-  close it.
-- **On GNU R, a srcref after a non-ASCII character on its line has its column off** by the
-  character's extra UTF-8 bytes (`gnur.R`, `.ry_parse` pads by bytes so byte offsets and
-  printing are right); ry's runtime is exact. Documented under Source references.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
   3 ms and preparing 4 to 5 ms. One `stat` per file (about 2 ms) finds the edit, and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for

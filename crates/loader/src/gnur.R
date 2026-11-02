@@ -30,14 +30,52 @@
     previous <- options(keep.parse.data = FALSE)
     on.exit(options(previous))
     # Padding by the bytes of the line before the code keeps the byte offsets that printing a
-    # function reads exact. A multibyte character there still shifts the character columns.
+    # function reads exact. A multibyte character there makes the character columns on that
+    # line too large by its extra bytes, which `.ry_shift_columns` takes back.
     srcfile <- .ry_srcfile(state, path)
     prefix <- substr(srcfile$lines[[line]], 1L, column)
-    padded <- c(character(line - 1L), paste0(strrep(" ", nchar(prefix, type = "bytes")), text))
-    parse(text = padded, srcfile = srcfile, keep.source = TRUE, encoding = "UTF-8")
+    bytes <- nchar(prefix, type = "bytes")
+    padded <- c(character(line - 1L), paste0(strrep(" ", bytes), text))
+    expressions <- parse(text = padded, srcfile = srcfile, keep.source = TRUE, encoding = "UTF-8")
+    shift <- bytes - nchar(prefix, type = "chars")
+    if (shift > 0L) .ry_shift_columns(expressions, line, shift) else expressions
   } else {
     parse(text = text, keep.source = FALSE, encoding = "UTF-8")
   }
+}
+
+# Moves every character column on `line` of the source references in `expressions` left by
+# `shift`: those of each expression, of each `{` block's statements, and of each function.
+.ry_shift_columns <- function(expressions, line, shift) {
+  move <- function(reference) {
+    if (!inherits(reference, "srcref")) return(reference)
+    if (reference[[1L]] == line) reference[[5L]] <- reference[[5L]] - shift
+    if (reference[[3L]] == line) reference[[6L]] <- reference[[6L]] - shift
+    reference
+  }
+  # A function's formals hold the empty symbol for a parameter without a default, and a call
+  # holds it for an empty argument, so only calls, formals and references are visited.
+  move_all <- function(references) {
+    if (is.list(references)) lapply(references, move) else move(references)
+  }
+  walk <- function(node) {
+    references <- attr(node, "srcref")
+    if (!is.null(references)) attr(node, "srcref") <- move_all(references)
+    for (i in seq_along(node)) {
+      if (is.call(node[[i]]) || is.pairlist(node[[i]]) && !is.null(node[[i]])) {
+        node[[i]] <- walk(node[[i]])
+      } else if (inherits(node[[i]], "srcref")) {
+        node[[i]] <- move(node[[i]])
+      }
+    }
+    node
+  }
+  for (i in seq_along(expressions)) {
+    if (is.call(expressions[[i]])) expressions[[i]] <- walk(expressions[[i]])
+  }
+  attr(expressions, "srcref") <- move_all(attr(expressions, "srcref"))
+  attr(expressions, "wholeSrcref") <- move(attr(expressions, "wholeSrcref"))
+  expressions
 }
 
 # Built on first use: only a definition that is forced needs its file's lines.
