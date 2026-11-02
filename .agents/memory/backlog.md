@@ -28,7 +28,7 @@ The quality bar is four things.
 
 - **Byte strings print with GNU R's padding.** In a printed character vector, GNU R pads a `"bytes"` string by the width of its `\xNN` spelling before the backslash is escaped, one column narrower than ry. `formatC` on one pads by its byte count. Both are cosmetic.
 - **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
-- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 14.2k per reading against 4.5k, where `out[[i]] <- list(...)` runs through `complex_assign` and `do_list` instead of compiled code. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 ## Open: base R kernels against GNU R
 
@@ -546,15 +546,17 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
-- **First-call compiles stop at builtins and subscripts.** A fully typed closure compiles at its
-  first call from its signature (`decisions.md`, "the JIT tier"), but a body that calls a builtin
-  or subscripts a value has no result type until feedback arrives, so `vasicek_paths` is refused
-  as COLD at its first call. Its loop runs 2,000 iterations, under the 10,000 back-edge threshold,
-  so it stays in tier 0. Result types for common builtins (`length`, `numeric`, `matrix`, `sqrt`,
-  `rnorm`) and for `[` on typed vectors would let it compile at the first call.
-- **Cold-code cost of typing is unmeasured.** finbench's typed variant uses `#:` comments, which
-  never reach the runtime, so measuring typed against untyped with the JIT on needs an
-  inline-annotated variant (or the strict session's typed finbench) first.
+- **First-call compiles stop at multi-index subscripts and unknown builtins.** A fully typed
+  closure compiles at its first call, and base builtins with a known result type (`seq_len`,
+  `sum`, `sqrt`, `[` on a vector, element-wise arithmetic; `analysis.rs`, `builtin_result`) no
+  longer block it, so `vasicek_paths` compiles at its first call. A builtin outside that table
+  whose result feeds arithmetic, or `m[i, ]`, still declines as COLD until feedback arrives.
+- **ry's tier 0 trails GNU R on whole test suites.** Typed beats untyped at runtime (finbench
+  30-file slice, callgrind, analysis excluded: typed 71.5G against untyped 72.1G with the JIT on,
+  71.7G against 73.7G off), but wall clock is level with GNU R or up to 15% behind (finbench about
+  105 s on GNU R). The gap is interpreter cost spread across all test families, not the JIT; the
+  remaining tier cost is Cranelift compile time and `jit_load`/`jit_step` glue. A cold strict
+  check of the typed package costs about 4G instructions (0.5 s) once per binary.
 - **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
   `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
   `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
@@ -727,7 +729,7 @@ item's span in constant time, and `item_spans` itself is consumed per file. Incr
 holds:
 every project reported zero item rechecks per keystroke and zero resolve steps, with edited-file
 diagnostics at a 2.5 ms median on ggplot2 and a 21.3 ms median at 277,586 lines, which is inside the
-stated bar. rowan re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
+stated bar. Re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
 binary search.
 
 ### Two measurement lessons from this review
@@ -3089,12 +3091,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   with wall time unchanged within noise (median about 1.34 s). The
   1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
   self cost. What is left is structural:
-  - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still
-    built by metadata's namespace and call scans, `item_declared_pure`, `lower_type`,
-    `statement_annotations` and the inline-annotation sites. A flat green tree of our own (one
-    node array per file, children as index ranges) would remove both.
-  - salsa's per-query edge bookkeeping, about 2.5% of instructions, which only fewer and coarser
-    queries remove.
-  - checker work itself: `infer_ordinary_call` is about a fifth of all instructions inclusive.
+  - Done: rowan is replaced by ry's own flat preorder tree with windowed item trees, one-shot name
+    lookups read the project maps once per query, unlisted frame binders are built once per item,
+    and overload probes reject by call shape before instantiating (`decisions.md`, "The syntax
+    tree is ry's own flat preorder arena" and "Overload probes reject by call shape first"). The
+    finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
+    callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
+    build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
+  - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
+    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut.
+  - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
+    and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
     times on the slice), which a small-buffer type would absorb.

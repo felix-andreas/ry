@@ -323,8 +323,8 @@ pub mod gp {
     /// must respect before it updates a value in place.
     pub const COMPILED_FRAME: u16 = 1 << 9;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
-    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
-    /// compiled code revalidates its lookups only when the epoch moved.
+    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
+    /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
     pub const WATCHED: u16 = 1 << 10;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.

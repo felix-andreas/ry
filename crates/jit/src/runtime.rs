@@ -104,22 +104,38 @@ pub struct Compiled {
     pub speculations: Vec<Speculation>,
     /// The binding epoch the speculations were last checked against.
     pub epoch: Cell<u64>,
+    /// Each speculation's symbol's lookup stamp when it was last checked.
+    pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
 /// activation whose frame is `frame`. Every change that could alter such a lookup moves the
-/// binding epoch (see `gp::WATCHED`), so an unchanged epoch proves the lookups without walking
-/// them. `thorough` walks them anyway, for an activation whose frame may have bound a watched
-/// name before the name was watched.
+/// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
+/// unchanged stamps of the speculated symbols, prove the lookups without walking them.
+/// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
+/// before the name was watched.
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
-    if epoch == compiled.epoch.get() && !thorough {
-        return true;
+    if !thorough {
+        if epoch == compiled.epoch.get() {
+            return true;
+        }
+        // The epoch moves on any binding outside a function frame, which a test suite or a
+        // package load makes all the time, so most moves concern names no speculation uses.
+        let unchanged = compiled
+            .speculations
+            .iter()
+            .zip(&compiled.stamps)
+            .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
+        if unchanged {
+            compiled.epoch.set(epoch);
+            return true;
+        }
     }
-    for speculation in &compiled.speculations {
+    for (speculation, stamp) in compiled.speculations.iter().zip(&compiled.stamps) {
         // The body's own lookups start past its frame, because the compiler cannot see the
         // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
         // locals `UseMethod` copies in can each bind the name there.
@@ -135,6 +151,7 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
                 if found.cell == speculation.cell && found.function == speculation.function => {}
             _ => return false,
         }
+        stamp.set(heap.lookup_stamp(speculation.symbol));
     }
     compiled.epoch.set(epoch);
     true
