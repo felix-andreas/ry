@@ -1727,3 +1727,14 @@ timer <- function() {
 }
 #++++
 timer: fn() -> list{fn() -> difftime, fn() -> POSIXct}
+
+#---- lapply_walks_the_parts_of_a_formula
+parts <- function() lapply(y ~ x + z, deparse)
+#++++
+parts: fn() -> list[character]
+
+#---- lapply_over_a_formula_still_checks_the_callback
+parts <- function() lapply(y ~ x + z, 42)
+#++++
+parts: Unknown
+38..40 error[type-mismatch] expected `fn(T) -> U`, found `double`

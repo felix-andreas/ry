@@ -152,11 +152,12 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is back down to 99. About 17 of the rest are true bugs in the packages; most of the
+lifecycle, and is back down to 98. About 20 of the rest are true bugs in the packages; most of the
 others are false reports on correct R. The classes:
 
 - **True bugs the corpus run reports, left as reported.** kernlab `ramloss(...)` is a typo for
-  `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2),
+  `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2) and
+  `logHypDens <- function(y) log(dhyperb(t, ...))`, which reads base `t` for `y`,
   DBI coerce calls that leave out `to` (5), ff passes `verbose` (3), rugarch reads `temph` for
   `tmph`, mclust leaves out `k`, NlcOptim (2), processx `new_not_implemented_error` without `call`, diffobj
   `!is.valid.width(...)` and `!is.valid.guide.fun(...)` negate a value R rejects with "invalid

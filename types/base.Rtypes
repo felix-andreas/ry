@@ -564,7 +564,8 @@ apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # vector does not fit it at all and takes the general form below, which also takes
 # `NULL` (`lapply(NULL, f)` is `list()`).
 lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
-lapply : <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+# A formula is a call, and `lapply` walks its parts (`~`, the left side, the right side).
+lapply : <T, U> fn(X: list[T] | T[] | NULL | formula, FUN: fn(T) -> U, ...: Any) -> list[U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
