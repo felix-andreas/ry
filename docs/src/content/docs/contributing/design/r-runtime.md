@@ -782,8 +782,9 @@ generates the data on first use), and `--groupby-only` limits a run to the group
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
 `ry run` beat data.table under GNU R on every question, and all three runs give the
-same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
-driven from Rust, without R.
+same checksums. Each cell is the faster of two runs, in seconds, and the last row is each engine's
+peak resident memory over the whole run. The last column is the same engine driven from Rust,
+without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
@@ -810,10 +811,9 @@ driven from Rust, without R.
 | total | 25.91 | 6.27 | 9.16 |
 <!-- /bench-table:1e7 -->
 
-At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
-that adds 100 columns needs more than this machine's 15 GB. db-benchmark's 5 GB size (1e8 rows) is
-out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 GB and data.table's q10
-at 6.4 GB, and both grow with the row count.
+At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
+group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
+machine's 15 GB. The last row is each engine's peak resident memory over the whole run.
 
 <!-- bench-table:5e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
@@ -831,10 +831,13 @@ at 6.4 GB, and both grow with the row count.
 | total | 29.84 | 11.83 | 15.97 |
 <!-- /bench-table:5e7 -->
 
+<!-- bench-table:1e8 -->
+<!-- /bench-table:1e8 -->
+
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
-in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
-allocation-heavy questions, because the allocator returns large blocks to the OS between queries
-(`.agents/memory/backlog.md`, "Large allocations page-fault on every query").
+in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
+same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R
+calls around it.
 
 `tools/bench/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
 rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the
