@@ -8,7 +8,9 @@ use {
         Frame,
         annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
-        bytecode, conditions, deparse, dispatch, interp, moves, scope,
+        bytecode,
+        coerce::{CoercionWarnings, real_to_int},
+        conditions, deparse, dispatch, interp, moves, scope,
         unwind::{Jump, R, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
@@ -17,7 +19,7 @@ use {
         },
     },
     heap::{
-        Formal,
+        ENVIRONMENT_BYTES, Formal, TRIPLE_BYTES,
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
@@ -961,32 +963,29 @@ pub unsafe fn bind_arguments(
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
     let formals = function.car();
-    let heap = crate::heap();
-    let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
-    heap.root(env);
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    if supplied.is_none() && positional(formals, args) {
-        // Most calls pass every argument by position to a function without `...`, which needs no
-        // matching table: argument `i` binds formal `i`, and the formals past the last argument
-        // are missing.
-        let mut formal = formals;
-        let mut index = 0;
-        while formal.kind() == SexpType::Pairlist {
-            let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-            bindings.push(formal_binding(env, formal, actual)?);
-            formal = formal.cdr();
-            index += 1;
-        }
+    // Most calls pass every argument by position to a function without `...`, which needs no
+    // matching table: argument `i` binds formal `i`, and the formals past the last argument are
+    // missing.
+    let actuals = if supplied.is_none() && positional(formals, args) {
+        None
     } else {
-        let actuals = match_args(formals, args, call)?;
-        let mut formal = formals;
-        for &actual in &actuals {
-            bindings.push(formal_binding(env, formal, actual)?);
-            formal = formal.cdr();
-        }
+        Some(match_args(formals, args, call)?)
+    };
+    let env = frame_environment(function, formals)?;
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
+    let mut formal = formals;
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let actual = match &actuals {
+            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_arg()),
+            None => args.get(index).map_or(missing_arg(), |arg| arg.value),
+        };
+        bindings.push(formal_binding(env, formal, actual)?);
+        formal = formal.cdr();
+        index += 1;
     }
-    heap.define_formals(env, &bindings)?;
+    let heap = crate::heap();
+    heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
@@ -995,6 +994,20 @@ pub unsafe fn bind_arguments(
             }
         }
     }
+    Ok(env)
+}
+
+/// A fresh, rooted function frame for a call of `function`, after one collection check that
+/// covers the frame, a binding cell and a default promise per formal, so the caller builds them
+/// with the `_uncollected` allocators. The caller keeps the arguments alive, and the formals'
+/// defaults are reachable from `function`.
+unsafe fn frame_environment(function: Sexp, formals: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = values::length(formals);
+    heap.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count, &[function]);
+    let env = heap.alloc_environment_uncollected(function.tag(), count)?;
+    heap.root(env);
+    env.set_gp_bits(gp::FUNCTION_FRAME, true);
     Ok(env)
 }
 
@@ -1008,10 +1021,7 @@ pub unsafe fn apply_closure_moved(
     sys_parent: Sexp,
 ) -> R<Sexp> {
     let formals = function.car();
-    let heap = crate::heap();
-    let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
-    heap.root(env);
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    let env = frame_environment(function, formals)?;
     let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     let mut formal = formals;
     let mut index = 0;
@@ -1021,7 +1031,8 @@ pub unsafe fn apply_closure_moved(
         formal = formal.cdr();
         index += 1;
     }
-    heap.define_formals(env, &bindings)?;
+    let heap = crate::heap();
+    heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
     let promargs = args_pairlist(args)?;
     heap.untrack_references(promargs);
@@ -1045,7 +1056,8 @@ unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
 }
 
 /// The binding of the formal at the head of `formal` to its matched argument, or to a promise of
-/// its default when the argument is missing.
+/// its default when the argument is missing. The promise comes from the budget that
+/// [`frame_environment`] reserved, so it needs no root before the frame holds it.
 unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     let missing = missing_arg();
     let symbol = formal.tag();
@@ -1056,7 +1068,7 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
         let value = if default.kind().is_atomic() || default == nil() {
             default
         } else {
-            make_promise(default, env)?
+            crate::heap().alloc_triple_uncollected(SexpType::Promise, unbound(), default, env)?
         };
         return Ok(Formal {
             symbol,
@@ -1071,12 +1083,16 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     })
 }
 
-/// The arguments as a pairlist of their values or promises, which a frame records.
+/// The arguments as a rooted pairlist of their values or promises, which a frame records. The
+/// caller keeps the values alive, so one collection check covers every cell.
 pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
+    let heap = crate::heap();
+    heap.reserve(TRIPLE_BYTES * args.len(), &[]);
     let mut list = nil();
     for arg in args.iter().rev() {
-        list = cons_tagged(arg.value, list, arg.tag)?;
+        list = heap.alloc_triple_uncollected(SexpType::Pairlist, arg.value, list, arg.tag)?;
     }
+    heap.root(list);
     Ok(list)
 }
 
@@ -1706,9 +1722,7 @@ unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
                 }
             }
             SexpType::Language => {
-                if functions {
-                    walk(expression.car(), functions, names);
-                } else if expression.car().kind() == SexpType::Language {
+                if functions || expression.car().kind() == SexpType::Language {
                     walk(expression.car(), functions, names);
                 }
                 let mut cell = expression.cdr();
@@ -2148,60 +2162,111 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let alternatives = &alternatives[..];
-    if !values::is_string_scalar(selector) && length(selector) != 1 {
-        return Err(call.error("EXPR must be a length 1 vector"));
+    let selector = switch_selector(selector, call.call)?;
+    if alternatives.is_empty() {
+        crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
     }
-    if selector.kind() == SexpType::String {
-        let text = values::string_at(selector, 0);
-        let missing = missing_arg();
-        if let Some(text) = text {
-            for (position, arg) in alternatives.iter().enumerate() {
-                if arg.tag.kind() == SexpType::Symbol && symbol_name(arg.tag) == text.as_ref() {
-                    // Fall through empty alternatives to the next non-empty one, and to an
-                    // invisible NULL when every later one is empty.
-                    for later in &alternatives[position..] {
-                        if later.value != missing {
-                            return eval(later.value, call.env);
-                        }
-                    }
-                    interp().visible = false;
-                    return Ok(nil());
+    let missing = missing_arg();
+    let text = match selector {
+        SwitchSelector::Name(text) => text,
+        SwitchSelector::Position(index) => {
+            if index >= 1 && (index as usize) <= alternatives.len() {
+                let arg = alternatives[index as usize - 1];
+                if arg.value == missing {
+                    return Err(error("empty alternative in numeric switch"));
+                }
+                return eval(arg.value, call.env);
+            }
+            interp().visible = false;
+            return Ok(nil());
+        }
+    };
+    // GNU R rejects a second default before it looks for a match, naming the calling function
+    // rather than the `switch`.
+    let defaults: Vec<&Arg> = alternatives
+        .iter()
+        .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
+        .collect();
+    if defaults.len() > 1 {
+        return Err(error(
+            "duplicate 'switch' defaults: '".to_string()
+                + &deparse::deparse_one_line(defaults[0].value)
+                + "' and '"
+                + &deparse::deparse_one_line(defaults[1].value)
+                + "'",
+        ));
+    }
+    for (position, arg) in alternatives.iter().enumerate() {
+        if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
+            // Fall through empty alternatives to the next non-empty one, and to an invisible
+            // NULL when every later one is empty.
+            for later in &alternatives[position..] {
+                if later.value != missing {
+                    return eval(later.value, call.env);
                 }
             }
+            interp().visible = false;
+            return Ok(nil());
         }
-        let defaults: Vec<&Arg> = alternatives
-            .iter()
-            .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
-            .collect();
-        if defaults.len() > 1 {
-            return Err(call.error(
-                "duplicate 'switch' defaults: '".to_string()
-                    + &deparse::deparse_one_line(defaults[0].value)
-                    + "' and '"
-                    + &deparse::deparse_one_line(defaults[1].value)
-                    + "'",
-            ));
-        }
-        if let Some(default) = defaults.first() {
-            if default.value == missing {
-                interp().visible = false;
-                return Ok(nil());
-            }
-            return eval(default.value, call.env);
-        }
-        interp().visible = false;
-        return Ok(nil());
     }
-    let index = values::as_integer_scalar(selector);
-    if index >= 1 && (index as usize) <= alternatives.len() {
-        let arg = alternatives[index as usize - 1];
-        if arg.value == missing_arg() {
-            return Err(error("empty alternative in numeric switch"));
+    match defaults.first() {
+        Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
+        Some(default) => eval(default.value, call.env),
+        None => {
+            interp().visible = false;
+            Ok(nil())
         }
-        return eval(arg.value, call.env);
     }
-    interp().visible = false;
-    Ok(nil())
+}
+
+/// What a `switch` selector chooses by.
+pub(crate) enum SwitchSelector {
+    /// The string's `CHARSXP`. `NA` selects an alternative named `NA`, since GNU R compares
+    /// the translated text.
+    Name(Sexp),
+    /// The 1-based position of a numeric selector, or a value outside the alternatives.
+    Position(i32),
+}
+
+/// The error GNU R's AST `switch` raises when no name matches and the default is empty, from
+/// evaluating the empty argument. Its byte compiler returns an invisible `NULL` instead; code
+/// that relies on that already fails on a closure's first, uncompiled call.
+pub(crate) const SWITCH_EMPTY_DEFAULT: &str = "argument is missing, with no default";
+
+/// Checks a `switch` selector and reads it, with GNU R's warnings for a factor and for a
+/// number that does not fit an integer. Errors and the factor warning name `call`, the
+/// `switch`; the coercion warnings name the calling function, as in GNU R.
+pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSelector> {
+    if !selector.kind().is_vector() || length(selector) != 1 {
+        return Err(error_in(call, "EXPR must be a length 1 vector"));
+    }
+    if selector.kind() == SexpType::String {
+        return Ok(SwitchSelector::Name(selector.element(0)));
+    }
+    if values::inherits(selector, "factor") {
+        crate::conditions::warning_call(
+            call,
+            "EXPR is a \"factor\", treated as integer.\n Consider using 'switch(as.character( * ), ...)' instead.",
+        )?;
+    }
+    let mut warnings = CoercionWarnings::default();
+    let position = match selector.kind() {
+        SexpType::Real => {
+            let (position, out_of_range) = real_to_int(values::reals(selector)[0]);
+            warnings.integer_range = out_of_range;
+            position
+        }
+        SexpType::Complex => {
+            let value = values::complexes(selector)[0];
+            let (position, out_of_range) = real_to_int(value.r);
+            warnings.integer_range = out_of_range;
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            position
+        }
+        _ => values::as_integer_scalar(selector),
+    };
+    warnings.report()?;
+    Ok(SwitchSelector::Position(position))
 }
 
 unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {

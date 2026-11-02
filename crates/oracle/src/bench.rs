@@ -106,6 +106,9 @@ pub struct Options {
     pub timeout: Duration,
     /// Run only GNU R, to record a baseline or time it alone.
     pub skip_ry: bool,
+    /// Run only ry, to time it alone. Every test then counts as matching, and the GNU R columns
+    /// repeat ry's.
+    pub skip_gnu_r: bool,
     /// Leave the package copy, the driver and each runtime's report and stderr in place.
     pub keep: bool,
 }
@@ -134,6 +137,11 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
     let driver = scratch.join("bench.R");
     std::fs::write(&driver, BENCH_DRIVER).map_err(setup_error(&driver))?;
 
+    if options.skip_gnu_r {
+        let ry = run_suite(&copy, &name, &driver, "ry", &scratch, options)?;
+        remove_scratch(&scratch, options);
+        return Ok(compare_runs(&name, &ry, &ry, Some(&ry)));
+    }
     let gnu_r = run_suite(&copy, &name, &driver, "gnu-r", &scratch, options)?;
     // A second GNU R run finds the values GNU R does not reproduce itself (a fresh UUID, a
     // temporary path, a timestamp), which are then compared by status only.
@@ -142,12 +150,16 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
         true => None,
         false => Some(run_suite(&copy, &name, &driver, "ry", &scratch, options)?),
     };
+    remove_scratch(&scratch, options);
+    Ok(compare_runs(&name, &gnu_r, &gnu_r_again, ry.as_ref()))
+}
+
+fn remove_scratch(scratch: &Path, options: &Options) {
     if options.keep {
         eprintln!("kept {}", scratch.display());
-    } else if let Err(error) = std::fs::remove_dir_all(&scratch) {
+    } else if let Err(error) = std::fs::remove_dir_all(scratch) {
         eprintln!("could not remove {}: {error}", scratch.display());
     }
-    Ok(compare_runs(&name, &gnu_r, &gnu_r_again, ry.as_ref()))
 }
 
 /// Matches tests by file, name and occurrence, because a generated suite may repeat a name.

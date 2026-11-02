@@ -8,7 +8,7 @@ patient_document_@ID@ <- function(id: integer) -> Patient@ID@ {
     resourceType = "Patient",
     id = sprintf("pat-%03d", id),
     birthDate = format(as.Date("1960-01-01") + id * 400L),
-    observations = lapply(1:2, function(i) list(code = c("bp", "hr")[[i]], value = 60 + id * i))
+    observations = lapply(1:2, function(i: integer) -> list{code: character, value: double} list(code = c("bp", "hr")[[i]], value = 60 + id * i))
   )
 }
 
@@ -28,7 +28,7 @@ store_documents_@ID@ <- function(documents: list[Patient@ID@], container: charac
       AzureStor::upload_blob(AzureStor::blob_container(endpoint, container), textConnection(body), name)
     }
   }
-  names <- vapply(documents, function(d) paste0(d$id, ".json"), character(1))
+  names <- vapply(documents, function(d: Patient@ID@) -> character paste0(d$id, ".json"), character(1))
   for (i in seq_along(documents)) {
     backend(container, names[[i]], as.character(jsonlite::toJSON(documents[[i]], auto_unbox = TRUE)))
   }
@@ -38,7 +38,7 @@ store_documents_@ID@ <- function(documents: list[Patient@ID@], container: charac
 test_that("records @ID@ round trip through JSON", {
   documents <- lapply(seq_len(@PATIENTS@), patient_document_@ID@)
   stored <- list()
-  names <- store_documents_@ID@(documents, "container", backend = function(container, name, body) stored[[name]] <<- body)
+  names <- store_documents_@ID@(documents, "container", backend = function(container: character, name: character, body: character) -> character stored[[name]] <<- body)
   expect_length(names, @PATIENTS@)
   expect_equal(length(stored), @PATIENTS@)
   parsed <- parse_documents_@ID@(jsonlite::toJSON(documents, auto_unbox = TRUE))

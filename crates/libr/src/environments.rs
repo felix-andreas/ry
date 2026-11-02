@@ -63,9 +63,7 @@ pub unsafe fn cell_value(cell: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn assign_cell(cell: Sexp, value: Sexp) -> ApiResult<()> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
         if cell.has_gp(gp::BINDING_LOCKED) {
-            return Err(error(format!(
-                "cannot change active binding if binding is locked"
-            )));
+            return Err(error("cannot change active binding if binding is locked"));
         }
         let global = runtime().heap.known().global_env;
         crate::eval::apply_closure_or_primitive(cell.cdr(), &[value], global)?;
@@ -745,7 +743,7 @@ pub unsafe extern "C" fn R_MakeActiveBinding(symbol: Sexp, function: Sexp, env: 
         if let Some(cell) = runtime().heap.frame_cell(env, symbol)
             && !cell.has_gp(gp::ACTIVE_BINDING)
         {
-            return Err(error(format!("symbol already has a regular binding")));
+            return Err(error("symbol already has a regular binding"));
         }
         let cell = rebind(symbol, function, env)?;
         cell.set_gp_bits(gp::ACTIVE_BINDING, true);

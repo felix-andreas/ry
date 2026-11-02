@@ -27,9 +27,10 @@ section lists the places where ry reports correct code instead.
 
 These are known bugs, not design decisions:
 
-- **Column names in packages without typed declarations.** After `library(tidyr)`,
-  `pivot_longer(d, cols = c(a, b))` reports `a` and `b`. A top-level
-  `utils::globalVariables(c("a", "b"))` silences them, as it does for `R CMD check`.
+- **A bare `NA` returned as a missing string.** A function that returns `NA` on one path and a
+  string on another returns `logical | character`, because `NA` is `logical`. Passing that result
+  on to a `character` parameter, such as `system.file(package = name)`, is reported even after an
+  `is.na(name)` check, since being `NA` is not part of a type. Return `NA_character_` instead.
 - **A trailing comma for rlang's dynamic dots.** dplyr's verbs accept `mutate(d, y = 1, )`, but ry
   reports the trailing comma as it would for `c(1, 2, )`.
 - **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown

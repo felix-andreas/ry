@@ -1077,7 +1077,7 @@ fn fixed_fast(out: &mut String, value: f64, precision: usize) -> bool {
     };
     let magnitude = value.abs();
     let scaled = magnitude * power;
-    if !(scaled < 4_503_599_627_370_496.0) {
+    if scaled.is_nan() || scaled >= 4_503_599_627_370_496.0 {
         return false;
     }
     // `scaled + error` is the exact product, since 10^precision is exact for these powers.

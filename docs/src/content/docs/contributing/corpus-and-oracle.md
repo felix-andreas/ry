@@ -133,8 +133,8 @@ killed. `ORACLE_RY` picks the ry binary; copy it, with `libR.so` beside it, to a
 first if you rebuild while a long run is going.
 
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
-measures the container, not ry. With the packages ry installed itself, ry passes 135 of the 164
-that GNU R passes (82.3%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
+measures the container, not ry. With the packages ry installed itself, ry passes 140 of the 164
+that GNU R passes (85.4%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
 `MEMORY.md` records the current rate.
 
 ## Installing on ry
@@ -186,8 +186,8 @@ ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
 On the 125 cases the suite held when it was last run under R 4.6.1, `compare` passed 118 of them,
-against 124 of 125 under 4.3.3 at the time (today every case passes under 4.3.3). Four of the
-remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
+against 124 of 125 under 4.3.3 at the time. Today all 203 cases pass under 4.3.3, except the two
+knitr cases on a machine without knitr. Four of the remaining 4.6.1 differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
 and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
 seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
 calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines

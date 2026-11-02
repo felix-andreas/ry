@@ -1909,7 +1909,7 @@ unsafe fn set_par(
         }
         "fin" => {
             let size = par_reals(value, name, 2)?;
-            if size.iter().any(|size| !(*size > 0.0)) {
+            if size.iter().any(|size| size.is_nan() || *size <= 0.0) {
                 return Err(invalid_par(name));
             }
             pars.figure_region = FigureRegion::Size([size[0], size[1]]);
@@ -1921,7 +1921,7 @@ unsafe fn set_par(
         "font.sub" => pars.font_sub = par_font(value, name)?,
         "lab" => {
             let lab = par_reals(value, name, 3)?;
-            if lab.iter().any(|count| !(*count >= 0.0)) {
+            if lab.iter().any(|count| count.is_nan() || *count < 0.0) {
                 return Err(invalid_par(name));
             }
             pars.lab = [lab[0] as i32, lab[1] as i32, lab[2] as i32];
@@ -1962,7 +1962,7 @@ unsafe fn set_par(
         "mex" => pars.mex = par_positive(value, name)?,
         "mfrow" | "mfcol" => {
             let shape = par_reals(value, name, 2)?;
-            if shape.iter().any(|count| !(*count >= 1.0)) {
+            if shape.iter().any(|count| count.is_nan() || *count < 1.0) {
                 return Err(invalid_par(name));
             }
             let (rows, columns) = (shape[0] as usize, shape[1] as usize);
@@ -2022,7 +2022,7 @@ unsafe fn set_par(
         "pch" => pars.pch = par_pch(value)?,
         "pin" => {
             let size = par_reals(value, name, 2)?;
-            if size.iter().any(|size| !(*size > 0.0)) {
+            if size.iter().any(|size| size.is_nan() || *size <= 0.0) {
                 return Err(invalid_par(name));
             }
             pars.plot_region = PlotRegion::Size([size[0], size[1]]);
@@ -6771,7 +6771,7 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
         let count = x.len().min(y.len());
-        let columns = if count == 0 { 0 } else { data.len() / count };
+        let columns = data.len().checked_div(count).unwrap_or(0);
         let largest = data
             .iter()
             .copied()

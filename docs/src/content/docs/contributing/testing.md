@@ -169,6 +169,11 @@ on purpose.
   R names, the quick fixes the diagnostics and default lints offer, and, when the source has a `$0`
   marker, every step of selection expansion from it. Run it with
   `cargo test -p ide --test test_ide_fixtures structure`.
+- **`crates/ide/tests/migrate`**: the data.table to DataFrame rewrites behind the code actions and
+  `ry migrate data-table`. Each case is one script whose attached packages are the ones it attaches,
+  and the expectation lists every rewrite as its title, the original lines (`- `) and the
+  replacement (`+ `), or `no rewrite`. A `$0` marker also lists the code actions offered there. Run
+  it with `cargo test -p ide --test test_ide_fixtures migrate`.
 
 ## Fuzzing and property tests
 
@@ -260,6 +265,9 @@ on the right thing. Wherever the cursor sits on a name, two stronger properties 
 
 An off-by-one injected where item-relative ranges convert back to absolute offsets passes the
 containment check and fails name identity on the first seed.
+
+The data.table rewrites are checked once per input: they never overlap, every range lies inside
+the text, and when the input parses cleanly, so does the text with every rewrite applied.
 
 Completion is sampled once per completion context (the kind of token the cursor sits in or after)
 rather than at every offset, because it costs far more per call than any other feature and its
@@ -619,7 +627,7 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
 The two corpus suites pass without a corpus and report that they skipped.
 
 These suites need a C and C++ toolchain, and GNU R for the second suite and the generator check.
-`RY_SKIP_GNU_R=1` skips the parts that need GNU R, and without it a missing R is a failure.
+The parts that need GNU R find it through the `R` on `PATH`, taking its headers from `R CMD config --cppflags` and its `Rscript` from `PATH`, so Debian's split layout and a source build both work. When no `R` is on `PATH`, or `RY_SKIP_GNU_R=1` is set, those parts print why and skip.
 
 ### The language server
 

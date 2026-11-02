@@ -879,7 +879,7 @@ scale_by <- function(value, factor) value * factor
 f <- function(x) x |> scale_by(2, factor = _)
 #++++
 scale_by: <T: numeric> fn(value: T, factor: T) -> T
-f: fn(x: double) -> double
+f: <T: numeric> fn(x: T) -> double
 
 #---- placeholder_without_the_piped_first_argument_is_missing_an_argument
 scale_by <- function(value, factor) value * factor

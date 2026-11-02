@@ -1164,9 +1164,9 @@ unsafe fn group_dispatch(
                     || name == "+.Date"
                     || (minus && (name == "-.POSIXt" || name == "-.Date"))
             };
-            if left.method == right.method {
-                (0, 0)
-            } else if right_name == "Ops.difftime" && date_arithmetic(&left_name, true) {
+            if left.method == right.method
+                || (right_name == "Ops.difftime" && date_arithmetic(&left_name, true))
+            {
                 (0, 0)
             } else if left_name == "Ops.difftime" && date_arithmetic(&right_name, false) {
                 (1, 1)

@@ -259,10 +259,7 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         SexpType::Real => {
             let positions = values::reals(index);
-            if positions
-                .iter()
-                .any(|&position| !(position >= 1.0) && !position.is_nan())
-            {
+            if positions.iter().any(|&position| position < 1.0) {
                 return Ok(None);
             }
             let position_of = |position: &f64| {
@@ -722,7 +719,7 @@ unsafe fn array_subset(
         && let ([row, column], &[rows, columns]) = (indices, dims)
         && *column == missing_arg()
         && columns != 1
-        && let Some(row) = matrix_row(*row, rows)
+        && let Some(row) = matrix_position(*row, rows)
         && matches!(
             object.kind(),
             SexpType::Real | SexpType::Integer | SexpType::Logical
@@ -735,7 +732,37 @@ unsafe fn array_subset(
             gather_row(values::ints_mut(result), values::ints(object), row, rows);
         }
         if dimnames.kind() == SexpType::List && dimnames.element(1) != nil() {
-            let names = values::duplicate(dimnames.element(1))?;
+            // The dimnames vector may carry names of its own, which the result's names drop.
+            let names = values::shallow_duplicate(dimnames.element(1))?;
+            values::clear_attributes(names);
+            values::set_attr(result, symbols().names, names)?;
+        }
+        return Ok(result);
+    }
+    // `m[, j]` is one contiguous run, the shape `apply` takes once per row or column.
+    if drop
+        && let ([row, column], &[rows, columns]) = (indices, dims)
+        && *row == missing_arg()
+        && rows != 1
+        && let Some(column) = matrix_position(*column, columns)
+        // C code can set a `dim` that disagrees with the length, which the general path reports.
+        && (column + 1) * rows <= length(object)
+        && matches!(
+            object.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+        )
+    {
+        let start = column * rows;
+        let result = values::alloc_uninit(object.kind(), rows)?;
+        if object.kind() == SexpType::Real {
+            values::reals_mut(result).copy_from_slice(&values::reals(object)[start..start + rows]);
+        } else {
+            values::ints_mut(result).copy_from_slice(&values::ints(object)[start..start + rows]);
+        }
+        if dimnames.kind() == SexpType::List && dimnames.element(0) != nil() {
+            // The dimnames vector may carry names of its own, which the result's names drop.
+            let names = values::shallow_duplicate(dimnames.element(0))?;
+            values::clear_attributes(names);
             values::set_attr(result, symbols().names, names)?;
         }
         return Ok(result);
@@ -836,9 +863,10 @@ unsafe fn array_subset(
     Ok(result)
 }
 
-/// The zero-based row a scalar subscript selects in a matrix of `rows` rows, when it is a plain
-/// positive in-range number; anything else takes the general path, which also reports errors.
-unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
+/// The zero-based position a scalar subscript selects along a matrix dimension of `extent`, when
+/// it is a plain positive in-range number; anything else takes the general path, which also
+/// reports errors.
+unsafe fn matrix_position(index: Sexp, extent: usize) -> Option<usize> {
     if index.is_altrep() || length(index) != 1 || values::has_attributes(index) {
         return None;
     }
@@ -850,7 +878,7 @@ unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
         _ => return None,
     };
     // NaN fails both comparisons, and `m[2.7, ]` truncates to the second row.
-    (position >= 1.0 && position < rows as f64 + 1.0).then(|| position as usize - 1)
+    (position >= 1.0 && position < extent as f64 + 1.0).then(|| position as usize - 1)
 }
 
 /// Copies row `row` of a column-major matrix with `rows` rows into `target`, one element per
@@ -1953,7 +1981,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         // `m[i, ] <- value` on a plain numeric matrix writes one strided row in place.
         if let ([row, column], &[rows, columns]) = (indices, &dims[..])
             && *column == missing_arg()
-            && let Some(row) = matrix_row(*row, rows)
+            && let Some(row) = matrix_position(*row, rows)
             && value != result
             && value.kind() == result.kind()
             && value_count > 0
@@ -4119,7 +4147,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         .map_or(call.call, |position| frames[position].call);
                     crate::conditions::warning_call(
                         closure_call,
-                        &format!(
+                        format!(
                             "number of {direction} of result is not a multiple of vector length (arg {})",
                             position + 1
                         ),

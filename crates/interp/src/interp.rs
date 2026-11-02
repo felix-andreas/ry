@@ -53,6 +53,8 @@ pub mod latex;
 pub mod linalg;
 pub mod long_double;
 pub mod lower;
+#[path = "../../rcmd/src/makeconf.rs"]
+mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;

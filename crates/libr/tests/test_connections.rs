@@ -117,9 +117,10 @@ fn the_header_lays_out_rconn_like_gnu_r() {
     };
     let ry_include = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
     assert_eq!(run_probe(&ry_include, "ry"), expected);
-    let gnu_include = std::path::Path::new("/usr/share/R/include");
-    if gnu_r_available() && gnu_include.join("R_ext/Connections.h").exists() {
-        assert_eq!(run_probe(gnu_include, "gnu"), expected);
+    if let Some(gnu_r) = gnu_r()
+        && gnu_r.include.join("R_ext/Connections.h").exists()
+    {
+        assert_eq!(run_probe(&gnu_r.include, "gnu"), expected);
     }
 }
 
