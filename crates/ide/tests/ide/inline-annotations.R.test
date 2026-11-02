@@ -169,7 +169,7 @@ action: Add inferred type annotations for the whole file
   edit 10..10 -> "<T: numeric>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
-completion (51): twice, HoltWinters, Num.bitwise_and, Num.bitwise_not, Num.bitwise_or, Num.bitwise_xor, .__C__MethodWithNextWithTrace, RtangleWritedoc
+completion (53): twice, HoltWinters, Num.bitwise_and, Num.bitwise_not, Num.bitwise_or, Num.bitwise_xor, .__C__MethodWithNextWithTrace, RtangleWritedoc
 hint @10<T: numeric>
 hint @12: T
 hint @13 -> T

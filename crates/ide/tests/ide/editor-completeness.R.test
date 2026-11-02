@@ -184,7 +184,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (82): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+completion (83): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
 hint @18<T, U>
 hint @24: T
 hint @32: U
