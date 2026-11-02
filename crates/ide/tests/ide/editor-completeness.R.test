@@ -904,3 +904,38 @@ hint @591: list{k: double}
 hint @626: list{k: double}
 hint @661: list{k: double}
 hint @696: list{k: double}
+
+#---- signature_after_an_empty_argument_moves_on
+f <- function(first = 1L, second = 2L, third = 3L) first
+f(1L, , $0)
+#++++
+hover 57..66: integer
+definition: none
+references: none
+rename: none
+signature: <T, U, V> fn(first: T = 1L, second: U = 2L, third: V = 3L) -> T
+parameters: first: T = 1L | second: U = 2L | [third: V = 3L]
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T, U, V>"
+  edit 19..19 -> ": T"
+  edit 32..32 -> ": U"
+  edit 44..44 -> ": V"
+  edit 50..50 -> " -> T"
+completion (128+): second = , third = , f, function, break, else, FALSE, for
+hint @13<T, U, V>
+hint @19: T
+hint @32: U
+hint @44: V
+hint @50 -> T
+
+#---- untyped_signature_after_an_empty_argument_moves_on
+helpers <- list(run = function(first, second, third) NULL)
+helpers$run(1, , $0)
+#++++
+hover 59..77: NULL
+definition: none
+references: none
+rename: none
+signature: fn([first]: Unknown, [second]: Unknown, [third]: Unknown) -> NULL
+parameters: [first]: Unknown | [second]: Unknown | [[third]: Unknown]
+completion (128+): second = , third = , helpers, function, NULL, list, break, else

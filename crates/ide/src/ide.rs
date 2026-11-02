@@ -1658,11 +1658,12 @@ pub fn signature_help_with(
     calls.sort_by_key(|(range, id)| (range.len(), range.start(), *id));
 
     let mut typed = None;
-    for (_, id) in &calls {
+    for (range, id) in &calls {
         let ExpressionKind::Call { callee, arguments } = &hir.kind(*id) else {
             continue;
         };
         let arguments = &hir[arguments];
+        let cursor_index = argument_index_at(db, position.item, hir, *range, arguments, offset);
         let function = check
             .expression_types
             .get(callee)
@@ -1671,7 +1672,7 @@ pub fn signature_help_with(
         let schemes = callee_name(hir, *callee).and_then(|name| stubs(db)?.schemes.get(&name));
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
-            typed = Some((*callee, function, overloads, arguments));
+            typed = Some((*callee, function, overloads, arguments, cursor_index));
             break;
         }
         // A call the checker types specially (`list`, or anything in quoted code such as an R6
@@ -1682,7 +1683,7 @@ pub fn signature_help_with(
                 scheme,
                 arguments,
                 hir,
-                position.relative,
+                cursor_index,
             )));
         }
         if let Some(signature) = untyped_signature(
@@ -1690,20 +1691,20 @@ pub fn signature_help_with(
             position.item,
             *callee,
             arguments,
-            position.relative,
+            cursor_index,
             installed,
         ) {
             return Some(single_signature(signature));
         }
     }
-    let (callee, function, overloads, arguments) = typed?;
+    let (callee, function, overloads, arguments, cursor_index) = typed?;
 
     // An overloaded stub name lists every candidate, even before a commitment: an incomplete call
     // matches none, which is exactly when a reader needs the shapes on offer.
     if let Some(schemes) = overloads {
         let mut signatures: Vec<SignatureData> = schemes
             .iter()
-            .map(|scheme| scheme_signature(db, scheme, arguments, hir, position.relative))
+            .map(|scheme| scheme_signature(db, scheme, arguments, hir, cursor_index))
             .collect();
         let selected = check.selected_overloads.get(&callee).copied().unwrap_or(0);
         // The committed candidate renders instantiated with this call site's types.
@@ -1715,7 +1716,7 @@ pub fn signature_help_with(
                 &TypeScheme::monomorphic(function),
                 arguments,
                 hir,
-                position.relative,
+                cursor_index,
             );
         }
         return Some(SignatureHelp {
@@ -1737,7 +1738,7 @@ pub fn signature_help_with(
     } else {
         TypeScheme::monomorphic(function)
     };
-    let mut signature = scheme_signature(db, &scheme, arguments, hir, position.relative);
+    let mut signature = scheme_signature(db, &scheme, arguments, hir, cursor_index);
     if let Some(name) = callee_name(hir, callee)
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
         && let Some(files) = ProjectFiles::try_get(db)
@@ -1747,6 +1748,51 @@ pub fn signature_help_with(
         show_defaults(&mut signature, &formals_of(&node).unwrap_or_default());
     }
     Some(single_signature(signature))
+}
+
+/// The index of the argument the cursor is in. An empty argument (`f(a, , b)`) has no position
+/// in the HIR, so the syntax tree counts the commas before the cursor, and a piped value, which
+/// the HIR adds as the first argument, comes before the argument list. `call` is relative to
+/// the item, `offset` to the file.
+fn argument_index_at(
+    db: &dyn Db,
+    item: Item<'_>,
+    hir: &Module,
+    call: TextRange,
+    arguments: &[Argument],
+    offset: TextSize,
+) -> usize {
+    let Some(node) = item_node(db, item) else {
+        return 0;
+    };
+    let item_offset = node.text_range().start();
+    let call = call + item_offset;
+    let at_cursor = match node.covering_element(TextRange::empty(offset)) {
+        SyntaxElement::Node(node) => Some(node),
+        SyntaxElement::Token(token) => token.parent(),
+    };
+    // The outermost syntactic call inside the HIR call, which for `x |> f(y)` is `f(y)`.
+    let Some(list) = at_cursor
+        .into_iter()
+        .flat_map(|node| node.ancestors())
+        .filter(|ancestor| {
+            ancestor.kind() == CALL_EXPR && call.contains_range(ancestor.text_range())
+        })
+        .last()
+        .and_then(|call| call.children().find(|child| child.kind() == ARGUMENT_LIST))
+    else {
+        return 0;
+    };
+    let piped = arguments
+        .iter()
+        .filter_map(|argument| argument.value)
+        .filter(|&value| hir.range(value).end() + item_offset <= list.text_range().start())
+        .count();
+    let commas = list
+        .children_with_tokens()
+        .filter(|element| element.kind() == COMMA && element.text_range().end() <= offset)
+        .count();
+    piped + commas
 }
 
 fn single_signature(signature: SignatureData) -> SignatureHelp {
@@ -1763,12 +1809,12 @@ fn untyped_signature(
     item: Item<'_>,
     callee: ExprId,
     arguments: &[Argument],
-    position: TextSize,
+    cursor_index: usize,
     installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
 ) -> Option<SignatureData> {
     let formals = untyped_formals(db, item, callee, installed)?;
     let hir = item_hir(db, item).as_ref()?;
-    Some(formals_signature(&formals, arguments, hir, position))
+    Some(formals_signature(&formals, arguments, hir, cursor_index))
 }
 
 /// The formals of an untyped callee, as [`untyped_signature`] finds them.
@@ -1815,7 +1861,7 @@ fn formals_signature(
     formals: &[Formal],
     arguments: &[Argument],
     hir: &Module,
-    position: TextSize,
+    cursor_index: usize,
 ) -> SignatureData {
     let mut label = String::from("fn(");
     let mut parameters = Vec::with_capacity(formals.len());
@@ -1835,7 +1881,7 @@ fn formals_signature(
     SignatureData {
         label,
         parameters,
-        active_parameter: formals_active_parameter(formals, arguments, hir, position),
+        active_parameter: formals_active_parameter(formals, arguments, hir, cursor_index),
     }
 }
 
@@ -1846,7 +1892,7 @@ fn formals_active_parameter(
     formals: &[Formal],
     arguments: &[Argument],
     hir: &Module,
-    cursor: TextSize,
+    cursor_index: usize,
 ) -> Option<usize> {
     if formals.is_empty() {
         return None;
@@ -1858,14 +1904,6 @@ fn formals_active_parameter(
             .iter()
             .position(|formal| formal.name == name && formal.name != "...")
     };
-    let cursor_index = arguments
-        .iter()
-        .filter(|argument| {
-            argument
-                .value
-                .is_some_and(|value| hir.range(value).end() < cursor)
-        })
-        .count();
     let mut consumed = vec![false; formals.len()];
     for (index, argument) in arguments.iter().enumerate() {
         if index != cursor_index
@@ -1991,7 +2029,7 @@ fn scheme_signature(
     scheme: &TypeScheme<'_>,
     arguments: &[Argument],
     hir: &Module,
-    position: TextSize,
+    cursor_index: usize,
 ) -> SignatureData {
     let mut renderer = TypeRenderer::default();
     let TyKind::Function(function) = scheme.body.kind(db) else {
@@ -2007,7 +2045,7 @@ fn scheme_signature(
         .unwrap_or_default();
     let (label, parameters) = render_signature(db, &mut renderer, prefix, function);
     let active_parameter =
-        active_parameter(db, function, parameters.len(), arguments, hir, position);
+        active_parameter(db, function, parameters.len(), arguments, hir, cursor_index);
     SignatureData {
         label,
         parameters,
@@ -6061,7 +6099,7 @@ fn active_parameter(
     rendered_count: usize,
     arguments: &[Argument],
     hir: &Module,
-    cursor: TextSize,
+    cursor_index: usize,
 ) -> Option<usize> {
     if rendered_count == 0 {
         return None;
@@ -6100,17 +6138,6 @@ fn active_parameter(
             .find(|(slot, taken)| !**taken && positionally_fillable(*slot))
             .map(|(slot, _)| slot)
     };
-
-    // Arguments ending before the cursor are complete; the cursor sits on the next, possibly
-    // unwritten, one.
-    let cursor_index = arguments
-        .iter()
-        .filter(|argument| {
-            argument
-                .value
-                .is_some_and(|value| hir.range(value).end() < cursor)
-        })
-        .count();
 
     let mut consumed = vec![false; matchable_count];
     for argument in arguments.iter().take(cursor_index) {
