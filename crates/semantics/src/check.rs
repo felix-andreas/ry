@@ -1613,7 +1613,11 @@ fn guard_kind(name: &str) -> Option<GuardKind> {
     Some(match name {
         "is.null" => GuardKind::Null,
         "is.character" => GuardKind::Family(GuardFamily::Character),
-        "is.logical" => GuardKind::Family(GuardFamily::Logical),
+        // `isTRUE(x)` and `isFALSE(x)` hold only for a single logical, and code that tests
+        // `isFALSE(result)` on a `FALSE | list` result reads the list on the other edge, as car
+        // does throughout. A logical that fails the test is `TRUE`, which correct R reads as no
+        // list, so the other edge drops the logical as `is.logical` does.
+        "is.logical" | "isTRUE" | "isFALSE" => GuardKind::Family(GuardFamily::Logical),
         "is.integer" => GuardKind::Family(GuardFamily::Integer),
         "is.double" => GuardKind::Family(GuardFamily::Double),
         "is.numeric" => GuardKind::Family(GuardFamily::Numeric),

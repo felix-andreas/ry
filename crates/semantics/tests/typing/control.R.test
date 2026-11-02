@@ -895,3 +895,19 @@ counted <- function(n) {
 B1: <T: scalar numeric> fn(n: T) -> NULL
 bernoulli: <T: scalar numeric> fn(n: T) -> list[NULL]
 counted: <T: scalar numeric> fn(n: T) -> double[]
+
+#---- is_false_rules_out_a_false_result
+# car returns `FALSE` when a fit fails and tests the result with `isFALSE()`.
+fit <- function(a) {
+  if (isFALSE(a)) return(FALSE)
+  as.list(a)
+}
+use <- function(a) {
+  x <- fit(a)
+  if (isFALSE(x)) 0 else x$m
+}
+check <- function(flag) if (isTRUE(flag)) "on" else "off"
+#++++
+fit: <T> fn(a: T) -> logical | list[Any]
+use: <T> fn(a: T) -> Any
+check: <T> fn(flag: T) -> character
