@@ -11,7 +11,7 @@ use {
         strings::Encoding,
     },
     std::collections::HashSet,
-    syntax::testing::{SplitMix64, for_each_seed},
+    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations},
 };
 
 #[derive(Clone)]
