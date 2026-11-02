@@ -27,7 +27,10 @@ use {
         strings::Encoding,
     },
     memchr::memmem,
-    pcre2::bytes::{Regex as PerlRegex, RegexBuilder as PerlRegexBuilder},
+    pcre2::bytes::{
+        CaptureLocations as PerlCaptureLocations, Regex as PerlRegex,
+        RegexBuilder as PerlRegexBuilder,
+    },
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{borrow::Cow, cell::RefCell, rc::Rc},
@@ -1849,19 +1852,22 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
         options,
         CompileErrors::for_text(&pattern, text, use_bytes),
     )?;
-    let mut hits = Vec::with_capacity(count);
-    for index in 0..count {
+    let hit = |index: usize| -> R<bool> {
         let found = match subject_at(text, index, use_bytes) {
             Some(_) if !valid_subject(text, index, use_bytes, options, false)? => false,
             Some(element) => matcher.find_at(&element, 0)?.is_some(),
             None => false,
         };
-        hits.push(found != invert);
-    }
+        Ok(found != invert)
+    };
     if logical {
-        let hits: Vec<i32> = hits.into_iter().map(i32::from).collect();
-        return values::logical_vector(&hits);
+        let result = values::alloc_uninit(SexpType::Logical, count)?;
+        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+            *slot = i32::from(hit(index)?);
+        }
+        return Ok(result);
     }
+    let hits = (0..count).map(hit).collect::<R<Vec<bool>>>()?;
     let selected: Vec<usize> = (0..count).filter(|&index| hits[index]).collect();
     if !value {
         let indices: Vec<i32> = selected.iter().map(|&index| index as i32 + 1).collect();
@@ -2621,8 +2627,13 @@ enum Matcher {
         longest: meta::Regex,
         shortest: bool,
     },
-    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
-    Perl(Rc<PerlRegex>),
+    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does. Every match reuses `locations`,
+    /// because fresh capture locations carry fresh match data, and with it a JIT stack of the
+    /// 64 MB maximum, which made `gsub` with groups about 40 times slower than GNU R.
+    Perl {
+        regex: Rc<PerlRegex>,
+        locations: Rc<RefCell<PerlCaptureLocations>>,
+    },
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2714,9 +2725,29 @@ impl Matcher {
     /// The first match at or after byte `from`, as a byte range.
     fn find_at(&self, text: &str, from: usize) -> R<Option<(usize, usize)>> {
         match self {
-            Matcher::Literal(finder) => Ok(finder
-                .find(&text.as_bytes()[from..])
-                .map(|start| (from + start, from + start + finder.needle().len()))),
+            Matcher::Literal(finder) => {
+                let haystack = &text.as_bytes()[from..];
+                let needle = finder.needle();
+                // R strings are mostly short, where the searcher's setup outweighs its scan and
+                // comparing at each candidate first byte is several times faster.
+                let start = if haystack.len() < 64 {
+                    match needle.split_first() {
+                        Some((&first, rest)) => haystack
+                            .iter()
+                            .enumerate()
+                            .position(|(start, &byte)| {
+                                byte == first
+                                    && haystack
+                                        .get(start + 1..start + needle.len())
+                                        .is_some_and(|tail| tail == rest)
+                            }),
+                        None => Some(0),
+                    }
+                } else {
+                    finder.find(haystack)
+                };
+                Ok(start.map(|start| (from + start, from + start + needle.len())))
+            }
             Matcher::Pattern(regex) => regex
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
@@ -2739,7 +2770,7 @@ impl Matcher {
                     .map_or(found.end(), |longest| longest.end());
                 Ok(Some((found.start(), end)))
             }
-            Matcher::Perl(regex) => regex
+            Matcher::Perl { regex, .. } => regex
                 .find_at(text.as_bytes(), from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(perl_matching_error),
@@ -2789,10 +2820,20 @@ impl Matcher {
                         .collect(),
                 ))
             }
-            Matcher::Perl(regex) => {
-                let mut locations = regex.capture_locations();
+            Matcher::Perl { regex, locations } => {
+                // Matching never re-enters itself, so the shared locations are always free; a
+                // fresh set keeps a surprise re-entry correct rather than a panic.
+                let mut fresh;
+                let mut shared = locations.try_borrow_mut();
+                let locations = match shared.as_deref_mut() {
+                    Ok(locations) => locations,
+                    Err(_) => {
+                        fresh = regex.capture_locations();
+                        &mut fresh
+                    }
+                };
                 let found = regex
-                    .captures_read_at(&mut locations, text.as_bytes(), from)
+                    .captures_read_at(locations, text.as_bytes(), from)
                     .map_err(perl_matching_error)?;
                 Ok(found.map(|_| {
                     (0..locations.len())
@@ -2810,7 +2851,7 @@ impl Matcher {
             Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
                 regex.captures_len().saturating_sub(1)
             }
-            Matcher::Perl(regex) => regex.captures_len().saturating_sub(1),
+            Matcher::Perl { regex, .. } => regex.captures_len().saturating_sub(1),
         }
     }
 
@@ -2823,7 +2864,7 @@ impl Matcher {
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
                 .collect(),
-            Matcher::Perl(regex) => regex
+            Matcher::Perl { regex, .. } => regex
                 .capture_names()
                 .iter()
                 .skip(1)
@@ -2855,7 +2896,10 @@ unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
         // long subject such as 5,000 repeats of `(a|b)+`.
         .max_jit_stack_size(Some(64 * 1024 * 1024));
     match builder.build(pattern) {
-        Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
+        Ok(regex) => Ok(Matcher::Perl {
+            locations: Rc::new(RefCell::new(regex.capture_locations())),
+            regex: Rc::new(regex),
+        }),
         Err(failure) => {
             // The crate prefixes PCRE2's message with its own text, which GNU R does not print.
             // GNU R prints the message and the rest of the pattern from the error's byte offset.
