@@ -364,14 +364,22 @@ impl Entropy for ByteStream<'_> {
 /// harness's whole input: the case builds its generator with `SplitMix64(seed)` and must draw
 /// nothing else, so the replay reproduces the failure byte for byte.
 pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
-    let iterations: Option<u64> = env::var("FUZZ_ITERS").ok().and_then(|value| value.parse().ok());
-    let seeds = match env::var("FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok()) {
+    let iterations: Option<u64> = env::var("FUZZ_ITERS")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let seeds = match env::var("FUZZ_SEED")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
         Some(first) => first..first.saturating_add(iterations.unwrap_or(1)),
         None => 0..iterations.unwrap_or(default as u64),
     };
     for seed in seeds {
         if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
-            panic!("seed {seed} failed; replay with\n    {}", replay_command(seed));
+            panic!(
+                "seed {seed} failed; replay with\n    {}",
+                replay_command(seed)
+            );
         }
     }
 }
@@ -382,7 +390,10 @@ pub fn replay_command(seed: u64) -> String {
     let package = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "<package>".to_owned());
     let binary = env::current_exe()
         .ok()
-        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
         .map(|stem| match stem.rsplit_once('-') {
             Some((name, hash)) if hash.chars().all(|c| c.is_ascii_hexdigit()) => name.to_owned(),
             _ => stem,

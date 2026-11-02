@@ -745,7 +745,10 @@ mod tests {
     #[test]
     fn queries_split_like_gnu_r() {
         for (raw, fields) in [
-            ("a=%3D&b=c=d&&e=", &[("a", "="), ("b", "c=d"), ("", ""), ("e", "")][..]),
+            (
+                "a=%3D&b=c=d&&e=",
+                &[("a", "="), ("b", "c=d"), ("", ""), ("e", "")][..],
+            ),
             ("=v&k&y=a+b%26c", &[("", "v"), ("", "k"), ("y", "a b&c")]),
             ("k=%2&j=3", &[("k", " j=3"), ("", "")]),
             ("k=%&j=3&z", &[("k", ""), ("", "z"), ("", "")]),
@@ -886,7 +889,9 @@ mod tests {
         };
         let body = (method != "GET" && rng.chance(1, 2)).then(|| {
             let length = 1 + rng.below(40);
-            (0..length).map(|_| (rng.next_u64() & 0xFF) as u8).collect::<Vec<u8>>()
+            (0..length)
+                .map(|_| (rng.next_u64() & 0xFF) as u8)
+                .collect::<Vec<u8>>()
         });
         let content_type = (body.is_some() && rng.chance(1, 2)).then(|| "text/plain".to_owned());
         let mut lines = vec![format!("Host: 127.0.0.1:{}", rng.below(65536))];
