@@ -148,6 +148,30 @@ pub fn check_ide_invariants(source: &str) {
         }
     }
 
+    // The rewrites never overlap, stay inside the text, and never turn code that parses into
+    // code that does not.
+    let rewrites = crate::data_table_rewrites(&db, file);
+    for pair in rewrites.windows(2) {
+        if let [first, second] = pair {
+            assert!(
+                first.range.end() <= second.range.start(),
+                "overlapping data.table rewrites in {source:?}: {:?} and {:?}",
+                first.range,
+                second.range
+            );
+        }
+    }
+    for rewrite in &rewrites {
+        check_range(&db, file, rewrite.range, "data.table rewrite");
+    }
+    if !rewrites.is_empty() && parse(source).errors().is_empty() {
+        let migrated = crate::apply_data_table_rewrites(source, &rewrites);
+        assert!(
+            parse(&migrated).errors().is_empty(),
+            "the data.table rewrites of {source:?} do not parse: {migrated:?}"
+        );
+    }
+
     let hints = crate::inlay_hints(&db, file, None);
     for hint in &hints {
         assert!(

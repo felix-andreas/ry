@@ -13,7 +13,7 @@ make_frame_@ID@ <- function(rows: integer = @ROWS@L, seed: integer = 2L) -> data
 }
 
 standardise_@ID@ <- function(frame: data.frame, columns: character[] = c("age", "income")) -> data.frame {
-  frame[columns] <- lapply(frame[columns], function(x) as.numeric(scale(x)))
+  frame[columns] <- lapply(frame[columns], function(x: double[]) -> double[] as.numeric(scale(x)))
   frame
 }
 
@@ -25,13 +25,13 @@ one_hot_@ID@ <- function(frame: data.frame, column: character) -> data.frame {
   values: factor | character[] <- frame[[column]]
   labels <- as.character(values)
   levels <- sort(unique(labels))
-  encoded <- vapply(levels, function(level) as.integer(labels == level), integer(nrow(frame)))
+  encoded <- vapply(levels, function(level: character) -> integer[] as.integer(labels == level), integer(nrow(frame)))
   colnames(encoded) <- paste0(column, "_", levels)
   cbind(frame[setdiff(names(frame), column)], encoded)
 }
 
 missingness_@ID@ <- function(frame: data.frame) -> double[named] {
-  purrr::map_dbl(frame, function(column) mean(is.na(column)))
+  purrr::map_dbl(frame, function(column: Any) -> double mean(is.na(column)))
 }
 #@ test
 test_that("features @ID@ are well formed", {

@@ -15,7 +15,7 @@ describe_run_@ID@ <- function(results: double[]) -> character {
 }
 #@ test
 test_that("progress run @ID@ finishes", {
-  results: double[] <- run_steps_@ID@(bar = list(tick = function() invisible()))
+  results: double[] <- run_steps_@ID@(bar = list(tick = function() -> NULL invisible()))
   expect_equal(results, seq_len(@STEPS@)^2)
   expect_match(describe_run_@ID@(results), "@STEPS@ step")
 })

@@ -17,6 +17,10 @@ const SEEDS: &[&str] = &[
     "`odd name` <- 5\nuse <- `odd name`\n",
     "broken <- function( {\n",
     "s <- \"unterminated\n",
+    "dt <- data.table::fread(\"sales.csv\")\nbig <- dt[units > 2L & region != \"eu\"]\n",
+    "dt <- data.table::data.table(g = c(\"a\", \"b\"), v = 1:2)\nout <- dt[v > 1L, .(total = sum(v), n = .N), by = .(g)]\n",
+    "dt <- data.table::as.data.table(list(v = 1:3))\ndt[, w := v * 2L]\ndata.table::setorder(dt, -v)\n",
+    "a <- data.table::data.table(k = 1:2)\nb <- data.table::data.table(k = 2:3)\nj <- a[b, on = \"k\"][, .(k)]$k\n",
 ];
 
 /// Inputs the coverage-guided `ide` target has broken; only the invariants must hold.

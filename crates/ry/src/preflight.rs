@@ -234,13 +234,21 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             &resolve_note,
         );
     }
-    checks.insert(
-        key,
-        match check {
-            Checked::Recorded(..) => None,
-            Checked::Kept(check, _) => Some(check),
-        },
-    );
+    let kept = match check {
+        Checked::Recorded(analysis, _) => {
+            // Freeing every memo of a large package takes longer than any phase of its check,
+            // and the loader is waiting for this verdict, so the memos are freed beside it.
+            if let Err(error) = thread::Builder::new()
+                .name("ry-strict-check-free".to_owned())
+                .spawn(move || drop(analysis))
+            {
+                panic!("the thread that frees the strict check should spawn: {error}");
+            }
+            None
+        }
+        Checked::Kept(check, _) => Some(check),
+    };
+    checks.insert(key, kept);
     drop(checks);
     if problems == 0 {
         return Ok(Verdict::Run);

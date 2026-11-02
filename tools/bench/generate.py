@@ -322,7 +322,7 @@ def dependencies_file():
     allow = {"R6": " # ry: allow(object-system)"}
     listed = [name for name in names if name in REGISTRY]
     entries = "\n    ".join(
-        f"`{name}` = function(...) {name}::{REGISTRY[name]}(...){'' if index == len(listed) - 1 else ','}{allow.get(name, '')}"
+        f"`{name}` = function(...: Any) -> Any {name}::{REGISTRY[name]}(...){'' if index == len(listed) - 1 else ','}{allow.get(name, '')}"
         for index, name in enumerate(listed)
     )
     return DEPENDENCIES.replace("@PACKAGES@", packages).replace("@ENTRIES@", entries)
@@ -334,7 +334,7 @@ backend_packages: character[] <- c(
 )
 
 dependency_versions <- function() -> character[] {
-  vapply(backend_packages, function(name) as.character(utils::packageVersion(name)), character(1))
+  vapply(backend_packages, function(name: character) -> character as.character(utils::packageVersion(name)), character(1))
 }
 
 missing_dependencies <- function() -> character[] {

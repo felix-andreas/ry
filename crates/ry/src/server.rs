@@ -855,7 +855,7 @@ impl Worker {
         let namespace = fs::read_to_string(root.join("NAMESPACE")).ok();
         let description = fs::read_to_string(root.join("DESCRIPTION")).ok();
         let key = check_cache::key(
-            executable,
+            &check_cache::build_identity(executable),
             &self.config,
             &root,
             &scan_data_files(&root),
@@ -895,7 +895,7 @@ impl Worker {
             None => check_cache::Fingerprint::default(),
         };
         let (record, stale) =
-            match check_cache::plan(Some(record), key, &paths, &contents, surface_of) {
+            match check_cache::plan(Some(record), key, &paths, &contents, |_| true, surface_of) {
                 check_cache::Plan::Fresh => return HashMap::new(),
                 check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
                 check_cache::Plan::Partial { previous, stale } => (previous, stale),
