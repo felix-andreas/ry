@@ -99,7 +99,7 @@ use {
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
     },
-    heap::{Heap, Marker, RootSource, object::Sexp},
+    heap::{Heap, Marker, RootSource, object::{Sexp, SexpType}},
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
 };
