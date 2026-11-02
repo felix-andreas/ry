@@ -4,8 +4,13 @@
 //! package never touches the library.
 
 use {
-    ide::{Formal, PackageTarget, function_formals},
-    rdb::{PackageSource, find_package, library_paths, package_source, topic_documentation},
+    ide::{Formal, Installed, PackageTarget, function_formals},
+    rdb::{
+        PackageSource, find_package, library_paths, namespace_names, package_source,
+        topic_documentation,
+    },
+    regex::Regex,
+    semantics::metadata::parse_namespace_spec,
     std::{
         collections::HashMap,
         fs,
@@ -22,6 +27,7 @@ pub struct InstalledPackages {
     library: Vec<PathBuf>,
     directories: HashMap<String, Option<PathBuf>>,
     sources: HashMap<String, Option<Arc<GeneratedSource>>>,
+    exports: HashMap<String, Option<Arc<[String]>>>,
     /// Where generated sources are written so an editor can open them; `None` keeps them in
     /// memory only, which is all the coverage probe needs.
     cache: Option<PathBuf>,
@@ -42,6 +48,7 @@ impl InstalledPackages {
             library: library_paths(project_root),
             directories: HashMap::new(),
             sources: HashMap::new(),
+            exports: HashMap::new(),
             cache,
         }
     }
@@ -60,7 +67,7 @@ impl InstalledPackages {
     }
 
     /// The parameters of the function the name is bound to, read from its generated source.
-    pub fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
+    fn formals_of(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
         let (source, range) = self.definition(target)?;
         // The definition's `function(...)` header comes first, so a bounded window parses it
         // without reading a long body; a body cut mid-expression only adds parse errors after it.
@@ -128,6 +135,66 @@ impl InstalledPackages {
             definitions: definitions.into_iter().collect(),
         })
     }
+}
+
+impl Installed for InstalledPackages {
+    fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
+        self.formals_of(target)
+    }
+
+    fn exports(&mut self, package: &str) -> Option<Arc<[String]>> {
+        if let Some(found) = self.exports.get(package) {
+            return found.clone();
+        }
+        let found = self
+            .directory(package)
+            .and_then(|directory| read_exports(package, &directory))
+            .map(Arc::from);
+        self.exports.insert(package.to_owned(), found.clone());
+        found
+    }
+}
+
+/// The installed package's exports, sorted: its `NAMESPACE`'s `export` names, and the objects
+/// of its lazy-load index that an `exportPattern` matches. R applies the patterns to the
+/// namespace when it loads the package, so the index stands in for that namespace.
+fn read_exports(package: &str, directory: &Path) -> Option<Vec<String>> {
+    let namespace = match fs::read_to_string(directory.join("NAMESPACE")) {
+        Ok(text) => parse_namespace_spec(&text),
+        Err(error) => {
+            tracing::warn!("cannot read the NAMESPACE of installed package {package}: {error}");
+            return None;
+        }
+    };
+    let mut exports = namespace.exports;
+    if !namespace.export_patterns.is_empty() {
+        // R's patterns are extended regular expressions, which `regex` reads for the anchors,
+        // classes and alternations that `exportPattern` uses in practice.
+        let patterns: Vec<Regex> = namespace
+            .export_patterns
+            .iter()
+            .filter_map(|pattern| match Regex::new(pattern) {
+                Ok(regex) => Some(regex),
+                Err(error) => {
+                    tracing::warn!("{package}: unsupported exportPattern {pattern:?}: {error}");
+                    None
+                }
+            })
+            .collect();
+        match namespace_names(directory) {
+            Ok(names) => exports.extend(
+                names
+                    .into_iter()
+                    .filter(|name| patterns.iter().any(|pattern| pattern.is_match(name))),
+            ),
+            Err(error) => {
+                tracing::warn!("cannot read the namespace of installed package {package}: {error}")
+            }
+        }
+    }
+    exports.sort_unstable();
+    exports.dedup();
+    Some(exports)
 }
 
 /// Keyed by the package's installed version, so an upgrade regenerates the file instead of

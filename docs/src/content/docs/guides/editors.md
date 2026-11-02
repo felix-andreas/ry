@@ -16,7 +16,10 @@ You get:
 - hover with the inferred type of any expression, parameter or loop variable
 - completion, including the fields of a list such as `person$`, the members of `pkg::`, and the
   argument names a call still accepts (`second = `), also for R6 methods and untyped package
-  functions; names you use often in the project rank ahead of keywords and the rest of the library
+  functions; a package without a stub completes the exports listed in its installed `NAMESPACE`;
+  the enclosing function's own variables rank first, then names you use often in the project
+- a quick fix for an unknown name that qualifies it (`pkg::name`) or, in a script, adds
+  `library(pkg)`, for a stub package or an installed package the project already uses
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition

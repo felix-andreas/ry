@@ -271,6 +271,17 @@ lens references "helper"
 lens test "adds one" at line 2
 lens test "named description" at line 5
 
+#---- an_installed_package_the_project_reads_offers_its_exports
+columns <- fakepkg::fetch_columns()
+fetch_rows()
+#++++
+symbol columns (Value) at "columns"
+token "fakepkg" Namespace
+token "fetch_columns" LibraryFunction
+token "fetch_rows" Function
+fix Qualify as `fakepkg::fetch_rows`: "" -> "fakepkg::"
+lens run file at line 1
+
 #---- definitions_alone_have_nothing_to_run
 square <- function(x) x^2
 limit <- 10

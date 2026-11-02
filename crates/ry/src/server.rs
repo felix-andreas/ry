@@ -2693,10 +2693,7 @@ impl LanguageServer for ServerState {
             let files = ProjectFiles::get(&worker.db);
             let result = worker
                 .cancellable(|worker| {
-                    let installed = &mut worker.installed;
-                    ide::completion_with(&worker.db, files, file, offset, &mut |target| {
-                        installed.as_mut()?.formals(target)
-                    })
+                    ide::completion_with(&worker.db, files, file, offset, &mut worker.installed)
                 })
                 .unwrap_or_default();
             let (mut items, is_incomplete) = match result {
@@ -2772,10 +2769,7 @@ impl LanguageServer for ServerState {
             };
             let help = worker
                 .cancellable(|worker| {
-                    let installed = &mut worker.installed;
-                    ide::signature_help_with(&worker.db, file, offset, &mut |target| {
-                        installed.as_mut()?.formals(target)
-                    })
+                    ide::signature_help_with(&worker.db, file, offset, &mut worker.installed)
                 })
                 .unwrap_or_default();
             Ok(help.map(|help| {
@@ -2828,7 +2822,13 @@ impl LanguageServer for ServerState {
                     let mut actions = Vec::new();
                     if wants_quick_fixes {
                         actions.extend(ide::diagnostic_fixes(&fixable, range));
-                        actions.extend(ide::import_fixes(&worker.db, file, &fixable, range));
+                        actions.extend(ide::import_fixes(
+                            &worker.db,
+                            file,
+                            &fixable,
+                            range,
+                            &mut worker.installed,
+                        ));
                         actions.extend(ide::code_actions(&worker.db, file, range));
                     }
                     // Listed beside the quick fixes only when it does more than one of them.

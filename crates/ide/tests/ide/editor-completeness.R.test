@@ -939,3 +939,59 @@ rename: none
 signature: fn([first]: Unknown, [second]: Unknown, [third]: Unknown) -> NULL
 parameters: [first]: Unknown | [second]: Unknown | [[third]: Unknown]
 completion (128+): second = , third = , helpers, function, NULL, list, break, else
+
+#---- completion_after_a_namespace_reads_the_installed_exports
+rows <- fakepkg::fe$0
+#++++
+hover 8..19: fe
+hover-definition: installed fe from fakepkg
+definition: installed fe from fakepkg
+references: none
+rename: none
+signature: none
+completion (2): fetch_columns, fetch_rows
+
+#---- signature_of_an_installed_function_without_stubs
+rows <- fakepkg::fetch_rows(con, $0)
+#++++
+hover 8..34: Unknown
+definition: none
+references: none
+rename: none
+signature: fn(con, limit = 10)
+parameters: con | [limit = 10]
+completion (128+): limit = , rows, fakepkg, break, else, FALSE, for, function
+
+#---- completion_ranks_a_local_before_library_names
+found <- c(exists("a"), exists("b"), exists("c"), exists("d"), exists("e"))
+fetch <- function(expiry) {
+  ex$0
+}
+#++++
+hover 106..108: ex
+hover-definition: installed ex from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed ex from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": logical[]"
+completion (32): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+hint @5: logical[]
+
+#---- completion_of_a_call_ranks_locals_with_the_globals
+found <- c(exists("a"), exists("b"), exists("c"), exists("d"), exists("e"))
+fetch <- function(expiry) {
+  ex$0(1)
+}
+#++++
+hover 106..108: ex
+hover-definition: installed ex from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed ex from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": logical[]"
+completion (32): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+hint @5: logical[]

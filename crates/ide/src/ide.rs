@@ -34,6 +34,7 @@ use {
         collections::{BTreeSet, HashMap, HashSet},
         iter::once,
         mem,
+        sync::Arc,
     },
     syntax::{
         SyntaxElement,
@@ -1600,6 +1601,36 @@ pub struct SignatureData {
     pub active_parameter: Option<usize>,
 }
 
+/// What the editor host reads from the installed R library for packages the stubs do not
+/// declare. The analysis itself does no I/O, so these answers come from the host, and `()`
+/// answers nothing.
+pub trait Installed {
+    /// The parameters of the function the target names.
+    fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>>;
+    /// The names the installed package exports.
+    fn exports(&mut self, package: &str) -> Option<Arc<[String]>>;
+}
+
+impl Installed for () {
+    fn formals(&mut self, _target: &PackageTarget) -> Option<Vec<Formal>> {
+        None
+    }
+
+    fn exports(&mut self, _package: &str) -> Option<Arc<[String]>> {
+        None
+    }
+}
+
+impl<T: Installed> Installed for Option<T> {
+    fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
+        self.as_mut()?.formals(target)
+    }
+
+    fn exports(&mut self, package: &str) -> Option<Arc<[String]>> {
+        self.as_mut()?.exports(package)
+    }
+}
+
 /// A parameter of a function the analysis has no type for, as R spells it: `...` is a formal
 /// like any other, and `default` is the default's source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1628,7 +1659,7 @@ pub fn function_formals(source: &str) -> Option<Vec<Formal>> {
 /// The active parameter follows R's argument matching: a named argument takes the parameter it
 /// names, a positional one the first open slot (parameters after `...` match by name only).
 pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<SignatureHelp> {
-    signature_help_with(db, file, offset, &mut |_| None)
+    signature_help_with(db, file, offset, &mut ())
 }
 
 /// [`signature_help`] that can also show a call into an installed package the stubs do not
@@ -1637,7 +1668,7 @@ pub fn signature_help_with(
     db: &dyn Db,
     file: SourceFile,
     offset: TextSize,
-    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+    installed: &mut dyn Installed,
 ) -> Option<SignatureHelp> {
     let position = position_in_item(db, file, offset)?;
     let hir = item_hir(db, position.item).as_ref()?;
@@ -1810,7 +1841,7 @@ fn untyped_signature(
     callee: ExprId,
     arguments: &[Argument],
     cursor_index: usize,
-    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+    installed: &mut dyn Installed,
 ) -> Option<SignatureData> {
     let formals = untyped_formals(db, item, callee, installed)?;
     let hir = item_hir(db, item).as_ref()?;
@@ -1822,7 +1853,7 @@ fn untyped_formals(
     db: &dyn Db,
     item: Item<'_>,
     callee: ExprId,
-    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+    installed: &mut dyn Installed,
 ) -> Option<Vec<Formal>> {
     let files = ProjectFiles::try_get(db)?;
     let hir = item_hir(db, item).as_ref()?;
@@ -1848,10 +1879,10 @@ fn untyped_formals(
     }
     let naming = item_naming(db, item).as_ref()?;
     match expression_target(db, files, item, naming, callee)? {
-        Target::Package(target) => installed(&target),
+        Target::Package(target) => installed.formals(&target),
         // A stub name without a scheme (`list`, which the checker types itself) still has the
         // formals its package defines.
-        Target::StubGlobal(name) => installed(&library_target(db, name)),
+        Target::StubGlobal(name) => installed.formals(&library_target(db, name)),
         _ => None,
     }
 }
@@ -2086,12 +2117,15 @@ pub enum CompletionSource {
 }
 
 impl CompletionSource {
-    /// Ranking classes: within one, more frequently spelled names come first.
-    fn group(self) -> u8 {
+    /// Ranking classes: within one, more frequently spelled names come first. A name in scope
+    /// in the enclosing function is the likeliest completion of a short prefix, ahead of the
+    /// library names a whole project spells far more often, unless a `(` already follows the
+    /// cursor: then the name is called, and most locals hold data, so they rank with the
+    /// globals by use.
+    fn group(self, called: bool) -> u8 {
         match self {
             CompletionSource::Argument => 0,
-            // A local is ranked with the globals by use: the item-local weight already favors it,
-            // and a parameter used everywhere must not bury `return`.
+            CompletionSource::Local if !called => 1,
             CompletionSource::Local
             | CompletionSource::Global
             | CompletionSource::Keyword
@@ -2149,7 +2183,7 @@ pub fn completion(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<CompletionResult> {
-    completion_with(db, files, file, offset, &mut |_| None)
+    completion_with(db, files, file, offset, &mut ())
 }
 
 /// [`completion`] that also offers the argument names of a call into an installed package the
@@ -2159,7 +2193,7 @@ pub fn completion_with(
     files: ProjectFiles,
     file: SourceFile,
     offset: TextSize,
-    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+    installed: &mut dyn Installed,
 ) -> Option<CompletionResult> {
     let (context, query) = completion_context(file.text(db), offset)?;
     let root = semantics::parse(db, file).syntax_node();
@@ -2182,13 +2216,13 @@ pub fn completion_with(
 
     let usage = Usage::of(db, files, file, offset);
     if let Some(items) = tag_completions(db, files, file, offset, &query) {
-        return finish_completions(items, &query, &usage);
+        return finish_completions(items, &query, &usage, false);
     }
     if let Some(items) = pattern_completions(db, file, offset, &query) {
-        return finish_completions(items, &query, &usage);
+        return finish_completions(items, &query, &usage, false);
     }
     if let Some(items) = literal_field_completions(db, file, offset, &query) {
-        return finish_completions(items, &query, &usage);
+        return finish_completions(items, &query, &usage, false);
     }
 
     // Resolving a scheme can type-check its item, so call shapes are filled in only for the
@@ -2200,7 +2234,7 @@ pub fn completion_with(
         }
         CompletionContext::Item => dollar_completions(db, files, file, offset, &query),
         CompletionContext::Namespace { package } => {
-            namespace_completions(db, files, &package, &query)
+            namespace_completions(db, files, &package, &query, installed)
         }
         CompletionContext::MaybeNamespace => return None,
         CompletionContext::Default => {
@@ -2320,11 +2354,23 @@ pub fn completion_with(
                         }),
                 );
             }
+            for package in installed_search_path(db) {
+                if let Some(exports) = installed.exports(&package) {
+                    items.extend(installed_completions(&package, &exports, &query));
+                }
+            }
             items
         }
     };
 
-    let mut result = finish_completions(items, &query, &usage)?;
+    let called = file.text(db).get(usize::from(offset)..).and_then(|rest| {
+        rest.trim_start_matches(|character: char| {
+            character.is_alphanumeric() || matches!(character, '.' | '_')
+        })
+        .chars()
+        .next()
+    }) == Some('(');
+    let mut result = finish_completions(items, &query, &usage, called)?;
     let mut unresolved: HashMap<&str, usize> = result
         .items
         .iter()
@@ -2511,19 +2557,20 @@ pub fn has_quick_fix(diagnostic: &Diagnostic) -> bool {
 /// Most packages an unresolved name offers imports from; more would bury the list.
 const IMPORT_CANDIDATES: usize = 3;
 
-/// For each unresolved-name finding that touches `viewport` whose name a stub package exports,
-/// the edits that reach that package. The caller passes the findings it publishes, as for
+/// For each unresolved-name finding that touches `viewport` whose name a package exports, the
+/// edits that reach that package. A stub package is found by its declarations; a package
+/// without stubs is found among the installed packages the project already uses, which
+/// `installed` lists the exports of. The caller passes the findings it publishes, as for
 /// [`diagnostic_fixes`].
 pub fn import_fixes(
     db: &dyn Db,
     file: SourceFile,
     diagnostics: &[Diagnostic],
     viewport: TextRange,
+    installed: &mut dyn Installed,
 ) -> Vec<CodeAction> {
-    let Some(sources) = StubSources::try_get(db) else {
-        return Vec::new();
-    };
-    let exporting = &exporting_namespaces(db, sources).0;
+    let exporting = StubSources::try_get(db).map(|sources| &exporting_namespaces(db, sources).0);
+    let mut used_packages: Option<Vec<String>> = None;
     let text = file.text(db);
     let mut actions = Vec::new();
     for diagnostic in diagnostics.iter().filter(|diagnostic| {
@@ -2540,14 +2587,26 @@ pub fn import_fixes(
         else {
             continue;
         };
-        let Some(packages) = exporting.get(name) else {
-            continue;
+        let packages: Vec<String> = match exporting.and_then(|exporting| exporting.get(name)) {
+            Some(packages) => packages
+                .iter()
+                .filter(|package| package.as_str() != STANDARD_LIBRARY)
+                .take(IMPORT_CANDIDATES)
+                .cloned()
+                .collect(),
+            None => used_packages
+                .get_or_insert_with(|| installed_used_packages(db))
+                .iter()
+                .filter(|package| {
+                    installed
+                        .exports(package)
+                        .is_some_and(|exports| exports.iter().any(|export| export == name))
+                })
+                .take(IMPORT_CANDIDATES)
+                .cloned()
+                .collect(),
         };
-        for package in packages
-            .iter()
-            .filter(|package| package.as_str() != STANDARD_LIBRARY)
-            .take(IMPORT_CANDIDATES)
-        {
+        for package in &packages {
             actions.push(CodeAction {
                 title: format!("Qualify as `{package}::{name}`"),
                 kind: CodeActionKind::ImportName,
@@ -2572,6 +2631,41 @@ pub fn import_fixes(
         }
     }
     actions
+}
+
+/// The packages without stubs that the project already depends on, attaches, or reads with
+/// `::`, sorted: where an unresolved name most plausibly comes from, and few enough that
+/// reading each one's installed exports stays cheap.
+fn installed_used_packages(db: &dyn Db) -> Vec<String> {
+    let mut packages: BTreeSet<String> = BTreeSet::new();
+    if let Some(metadata) = PackageMetadata::try_get(db) {
+        packages.extend(metadata.dependencies(db).iter().cloned());
+        packages.extend(
+            metadata
+                .imports(db)
+                .iter()
+                .map(|(package, _)| package.clone()),
+        );
+        packages.extend(metadata.attached(db).iter().cloned());
+    }
+    if let Some(files) = ProjectFiles::try_get(db) {
+        for &project_file in files.files(db) {
+            packages.extend(
+                spelled_names(db, project_file)
+                    .namespace
+                    .iter()
+                    .map(|(package, _)| package.clone()),
+            );
+        }
+    }
+    let library = stubs(db);
+    packages
+        .into_iter()
+        .filter(|package| {
+            !is_own_package(db, package)
+                && !library.is_some_and(|library| library.knows_namespace(package))
+        })
+        .collect()
 }
 
 /// Where a new `library` call goes: after the last top-level `library` or `require` call
@@ -4397,7 +4491,7 @@ fn string_subscript_completion(
             )
         })
         .collect();
-    finish_completions(items, query, &Usage::none())
+    finish_completions(items, query, &Usage::none(), false)
 }
 
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
@@ -4527,7 +4621,7 @@ fn annotation_completion(
                 ..CompletionItem::new(label, CompletionKind::Variable, source)
             }),
     );
-    finish_completions(items, query, &Usage::none())
+    finish_completions(items, query, &Usage::none(), false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5519,11 +5613,18 @@ fn namespace_completions(
     files: ProjectFiles,
     package: &str,
     query: &str,
+    installed: &mut dyn Installed,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    if let Some(library) = stubs(db)
-        && let Some(exports) = library.exports_by_namespace.get(package)
+    let stub_exports =
+        stubs(db).and_then(|library| Some((library, library.exports_by_namespace.get(package)?)));
+    if stub_exports.is_none()
+        && !is_own_package(db, package)
+        && let Some(exports) = installed.exports(package)
     {
+        items.extend(installed_completions(package, &exports, query));
+    }
+    if let Some((library, exports)) = stub_exports {
         items.extend(
             exports
                 .iter()
@@ -5545,8 +5646,8 @@ fn namespace_completions(
                 }),
         );
     }
-    // A package without stubs still completes what the project reads from it; with stubs, the
-    // spelled names add the internals read through `:::`.
+    // The spelled names add what the project reads from a package that is not installed here,
+    // and the internals read through `:::`.
     for &project_file in files.files(db) {
         let spelled = &spelled_names(db, project_file).namespace;
         let start =
@@ -5568,6 +5669,49 @@ fn namespace_completions(
         );
     }
     items
+}
+
+/// The exports of an installed package the stubs do not declare, completed untyped. As for
+/// manifest-only names, a non-syntactic name is skipped because a bare reference needs
+/// backticks.
+fn installed_completions(package: &str, exports: &[String], query: &str) -> Vec<CompletionItem> {
+    exports
+        .iter()
+        .filter(|name| is_syntactic_name(name) && search_match(name, query).is_some())
+        .map(|name| CompletionItem {
+            documentation: Some(format!("From the installed `{package}` package.")),
+            ..CompletionItem::new(
+                name.clone(),
+                CompletionKind::Variable,
+                CompletionSource::Stdlib,
+            )
+        })
+        .collect()
+}
+
+/// The packages whose exports a bare name can reach that only the installed library describes:
+/// those the project's `NAMESPACE` imports whole or that a project file attaches, minus the
+/// project's own package and every package the stubs declare.
+fn installed_search_path(db: &dyn Db) -> Vec<String> {
+    let Some(metadata) = PackageMetadata::try_get(db) else {
+        return Vec::new();
+    };
+    let library = stubs(db);
+    let mut packages: Vec<String> = Vec::new();
+    let imported = metadata
+        .imports(db)
+        .iter()
+        .filter(|(_, imported)| imported.is_none())
+        .map(|(package, _)| package);
+    for package in imported.chain(metadata.attached(db)) {
+        if !packages.contains(package)
+            && !is_own_package(db, package)
+            && !library.is_some_and(|library| library.knows_namespace(package))
+        {
+            packages.push(package.clone());
+        }
+    }
+    packages
 }
 
 /// The packages the project already reads with `::`, completed as the start of a `pkg::name`.
@@ -5604,6 +5748,7 @@ fn finish_completions(
     items: Vec<CompletionItem>,
     query: &str,
     usage: &Usage<'_>,
+    called: bool,
 ) -> Option<CompletionResult> {
     let mut ranked: Vec<(Option<MatchScore>, u8, Reverse<u32>, usize)> = {
         let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
@@ -5624,7 +5769,7 @@ fn finish_completions(
                 let uses = usage.count(name);
                 Some((
                     search_match(&item.label, query),
-                    item.source.group(),
+                    item.source.group(called),
                     Reverse(uses),
                     index,
                 ))
@@ -5748,7 +5893,7 @@ fn argument_name_completions(
     file: SourceFile,
     offset: TextSize,
     query: &str,
-    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+    installed: &mut dyn Installed,
 ) -> Vec<CompletionItem> {
     let Some(position) = position_in_item(db, file, offset) else {
         return Vec::new();

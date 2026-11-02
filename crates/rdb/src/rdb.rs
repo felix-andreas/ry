@@ -307,14 +307,21 @@ pub fn topic_documentation(package_dir: &Path, topic: &str) -> Option<String> {
 /// Whether the namespace of the package at `package_dir` has an object called `name`,
 /// exported or not.
 pub fn defines(package_dir: &Path, name: &str) -> bool {
-    let Ok(description) = Description::read(package_dir) else {
-        return false;
-    };
+    namespace_names(package_dir).is_ok_and(|names| names.iter().any(|variable| variable == name))
+}
+
+/// Every object in the namespace of the package at `package_dir`, exported or not, in the
+/// lazy-load index's order. Reads only the index, not the objects.
+pub fn namespace_names(package_dir: &Path) -> io::Result<Vec<String>> {
+    let description = Description::read(package_dir)?;
     let path = package_dir
         .join("R")
         .join(format!("{}.rdx", description.package));
-    read_index(&path)
-        .is_ok_and(|index| index.variables.iter().any(|(variable, _)| variable == name))
+    Ok(read_index(&path)?
+        .variables
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// A lazy-load database's index: where each object's record is, and how records are

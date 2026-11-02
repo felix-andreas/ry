@@ -30,6 +30,7 @@ console.workspace = true
 ignore.workspace = true
 miette.workspace = true
 rdb = { path = "../rdb" }
+regex.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true
 serde = { workspace = true, features = ["derive"] }
