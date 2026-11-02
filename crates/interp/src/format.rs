@@ -52,9 +52,13 @@ impl Settings {
     pub unsafe fn current_scipen() -> i32 {
         let scipen = crate::envir::get_option("scipen");
         if scipen == nil() {
-            0
-        } else {
-            values::as_integer_scalar(scipen)
+            return 0;
+        }
+        // A `scipen` that is not a number (`options(scipen = "a")`) reads as NA, which GNU R's
+        // width comparison then treats like 0.
+        match values::as_integer_scalar(scipen) {
+            NA_INTEGER => 0,
+            value => value,
         }
     }
 

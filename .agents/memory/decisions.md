@@ -5958,9 +5958,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## Base kernels pick their data structure by the value range
 
-- **Previous shape.** `split()` grew each piece as it scattered, `as.character()` on integers formatted and interned every element, the cumulative functions zeroed their result before filling it, `strsplit()` probed the session-wide string table for every piece, and `substr()` recycled `start` and `stop` with a division per element. Each was 1.2x to 2.7x GNU R's time.
-- **Shape.** `split()` counts each level first and scatters into exact-size pieces. `as.character()` on integers (`coerce.rs::integers_as_strings`) interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. `cumsum` and friends allocate with `values::alloc_uninit`, and real `cummax`/`cummin` run a branch-light loop until the first NaN. `strsplit()` interns ASCII pieces through the call's `values::StringMemo`, and `substr()` recycles by counters. Each falls back to the general path when the range is wide, so no input is slower than before.
-- **Impact** (`tools/bench/base`, ry time over GNU R's): at 1e6 rows `table` 0.28 (one factor) and 0.36 (two), `split` 0.83, `cut` 0.77; at 1e7 rows `cumsum` 0.90, `cummax` 1.00, `strsplit` 0.90, `substr` 0.79.
+- **Previous shape.** `as.character()` on integers formatted and interned every element, the cumulative functions zeroed their result before filling it, `strsplit()` probed the session-wide string table for every piece, and `substr()` recycled `start` and `stop` with a division per element. Each was 1.2x to 2.7x GNU R's time.
+- **Shape.** `as.character()` on integers (`coerce.rs::integers_as_strings`) interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. `cumsum` and friends allocate with `values::alloc_uninit`, and real `cummax`/`cummin` run a branch-light loop until the first NaN. `strsplit()` interns ASCII pieces through the call's `values::StringMemo`, and `substr()` recycles by counters. Each falls back to the general path when the range is wide, so no input is slower than before.
+- **Impact** (`tools/bench/base`, ry time over GNU R's): at 1e6 rows `table` 0.28 (one factor) and 0.36 (two), `cut` 0.77; at 1e7 rows `cumsum` 0.90, `cummax` 1.00, `strsplit` 0.90, `substr` 0.79.
 
 ## Runtime error checks follow GNU R's order and blame
 
@@ -5970,6 +5970,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 ## A formula's dot expands to the sum GNU R prints
 
 - `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
+
 ## The data.table migration is one engine in `ide`, read off the checker's types
 
 - **Where it lives.** `crates/ide/src/migrate.rs` (`data_table_rewrites`, `apply_data_table_rewrites`) is a pure read of the analysis database, like every editor feature. `code_actions` offers each rewrite that overlaps the viewport plus one whole-file action, and `ry migrate data-table` (`cli::migrate_data_table`) analyzes the requested files exactly as `ry check` does and applies the same list, so the editor and the CLI cannot disagree. It is not a lint fix: a lint's fix is local to its diagnostic and needs no types, while a rewrite needs the target's type and the columns it knows.

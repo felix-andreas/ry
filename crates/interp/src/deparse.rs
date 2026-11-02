@@ -1191,7 +1191,7 @@ impl Deparser {
     unsafe fn list(&mut self, list: Sexp, opener: &str) {
         let count = length(list);
         let names = get_attr(list, symbols().names);
-        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(list);
+        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(list, self.opts);
         self.print(opener);
         let mut broken = false;
         for index in 0..count {
@@ -1218,7 +1218,7 @@ impl Deparser {
     unsafe fn name_prefix(&mut self, names: Sexp, index: usize) {
         let name = names.element(index);
         if name == values::na_string() {
-            self.print("`NA` = ");
+            self.print("\"NA\" = ");
             return;
         }
         let text = char_str(name);
@@ -1257,7 +1257,7 @@ impl Deparser {
             return;
         }
         let names = get_attr(vector, symbols().names);
-        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector);
+        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector, self.opts);
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
         if is_integer_run(vector) {
@@ -1411,7 +1411,7 @@ impl Deparser {
             let skip_names = tag == symbols().names
                 && self.opts & options::NICE_NAMES != 0
                 && !matches!(object.kind(), SexpType::Language)
-                && nice_names_ok(object);
+                && nice_names_ok(object, self.opts);
             if !skip_names && tag != symbols().srcref {
                 self.print(", ");
                 let name = symbol_name(tag);
@@ -1474,7 +1474,7 @@ pub unsafe fn source_lines(srcref: Sexp) -> Option<Vec<String>> {
 }
 
 /// Whether names can be written inline (`c(a = 1)`) rather than as an attribute.
-unsafe fn nice_names_ok(object: Sexp) -> bool {
+unsafe fn nice_names_ok(object: Sexp, opts: u32) -> bool {
     let names = get_attr(object, symbols().names);
     if names.kind() != SexpType::String {
         return false;
@@ -1482,7 +1482,8 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
     if !object.kind().is_vector() || length(names) != length(object) {
         return false;
     }
-    // All-empty names, or an `NA` name, need the attribute form.
+    // All-empty names need the attribute form, and so does an `NA` name when attributes are
+    // shown, because only `structure()` can bring the `NA` back; without them it is written `"NA"`.
     let any_named = (0..length(names)).any(|index| !values::is_blank(names.element(index)));
     let any_na = (0..length(names)).any(|index| names.element(index) == values::na_string());
     // In `c(...)` these names would match `c()`'s own arguments instead of naming elements.
@@ -1494,7 +1495,7 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
             )
         });
     // A run deparses as `from:to`, which has no room for names.
-    any_named && !any_na && !names_an_argument && !is_integer_run(object)
+    any_named && !(any_na && opts & options::SHOW_ATTRIBUTES != 0) && !names_an_argument && !is_integer_run(object)
 }
 
 /// A run of at least two consecutive integers, increasing or decreasing, which deparses as
@@ -1586,7 +1587,7 @@ unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
             cell = cell.cdr();
             continue;
         }
-        if tag != symbols().names || !nice_names || !nice_names_ok(object) {
+        if tag != symbols().names || !nice_names || !nice_names_ok(object, options::SHOW_ATTRIBUTES) {
             return true;
         }
         cell = cell.cdr();
