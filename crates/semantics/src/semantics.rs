@@ -527,13 +527,23 @@ const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"]
 
 /// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
+    package_scheme_exists_in(db, ProjectFiles::try_get(db), stubs::stubs(db), name)
+}
+
+/// [`package_scheme_exists`] for a caller that already holds the project and the stubs.
+pub fn package_scheme_exists_in(
+    db: &dyn Db,
+    files: Option<ProjectFiles>,
+    library: Option<&stubs::StubLibrary<'_>>,
+    name: &str,
+) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db).is_some_and(|files| package_binds(db, files, name)) {
+    if files.is_some_and(|files| package_binds(db, files, name)) {
         return true;
     }
-    stubs::stubs(db).is_some_and(|library| {
+    library.is_some_and(|library| {
         library.schemes.contains_key(name)
             || library.nominals.contains(name)
             || library.known_exports.contains(name)
@@ -1971,6 +1981,8 @@ struct SalsaGlobals<'db, 'a> {
     group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
     files: Option<ProjectFiles>,
     file: SourceFile,
+    definitions: TypeDefinitions<'db>,
+    library: Option<&'db stubs::StubLibrary<'db>>,
     // A body reads the same few globals many times, and each salsa read pays for interning
     // its key and verifying the memo, so a check looks each one up once.
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
@@ -1984,24 +1996,46 @@ struct SalsaGlobals<'db, 'a> {
 /// declarations, which are visible to itself alone, shadow the project's, and the project's
 /// shadow the stubs'. A merged map per file would copy every visible definition into every
 /// file that reads one, which costs time and memory in proportion to files times types.
-#[derive(Debug, Clone, Copy)]
-pub struct TypeDefinitions {
+#[derive(Clone, Copy)]
+pub struct TypeDefinitions<'db> {
     file: SourceFile,
+    package_file: bool,
+    files: Option<ProjectFiles>,
+    library: Option<&'db stubs::StubLibrary<'db>>,
 }
 
-impl TypeDefinitions {
-    pub fn of(file: SourceFile) -> Self {
-        Self { file }
+impl std::fmt::Debug for TypeDefinitions<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypeDefinitions")
+            .field("file", &self.file)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'db> TypeDefinitions<'db> {
+    /// Fetches what every lookup needs once, because a checker asks about hundreds of names
+    /// per item and each salsa fetch records a dependency edge.
+    pub fn of(db: &'db dyn Db, file: SourceFile) -> Self {
+        Self {
+            file,
+            package_file: *file.kind(db) == DocumentKind::Package,
+            files: ProjectFiles::try_get(db),
+            library: stubs::stubs(db),
+        }
     }
 
-    pub fn get<'db>(
+    pub fn library(self) -> Option<&'db stubs::StubLibrary<'db>> {
+        self.library
+    }
+
+    pub fn get(
         self,
         db: &'db dyn Db,
         name: types::Name<'db>,
     ) -> Option<&'db annotations::NamedDefinition<'db>> {
-        let files = ProjectFiles::try_get(db);
         // A package file's definitions are the project's, unless there is no project.
-        if (files.is_none() || *self.file.kind(db) != DocumentKind::Package)
+        if (self.files.is_none() || !self.package_file)
             && let Some(definition) = file_type_definitions(db, self.file)
                 .iter()
                 .rev()
@@ -2009,12 +2043,12 @@ impl TypeDefinitions {
         {
             return Some(definition);
         }
-        if let Some(files) = files
+        if let Some(files) = self.files
             && let Some(definition) = project_type_definition(db, files, name)
         {
             return Some(definition);
         }
-        stubs::stubs(db)?.type_definitions.get(&name)
+        self.library?.type_definitions.get(&name)
     }
 }
 
@@ -2043,7 +2077,7 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
 /// sets on a plain list, which no type tracks, so arithmetic on a list may be that method.
 #[salsa::tracked]
 fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
-    let definitions = TypeDefinitions::of(file);
+    let definitions = TypeDefinitions::of(db, file);
     let tracked = |class: &String| {
         definitions
             .get(db, types::Name::new(db, class.as_str()))
@@ -2169,6 +2203,8 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             group,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            definitions: TypeDefinitions::of(db, *item.file(db)),
+            library: stubs::stubs(db),
             schemes: RefCell::default(),
             item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
@@ -2316,8 +2352,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
-        let library = stubs::stubs(self.db)?;
-        library.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 
     fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
@@ -2366,7 +2401,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         {
             return Some(scheme);
         }
-        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 
     fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
@@ -2378,16 +2413,16 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
             .find_map(|layer| self.layer_scheme(layer, interned))
     }
 
-    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
-        let library = stubs::stubs(self.db)?;
+    fn library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+        let library = self.library?;
         match library.schemes.get(name) {
-            Some(candidates) => Some(candidates.clone()),
-            None => library.known_exports.contains(name).then(Vec::new),
+            Some(candidates) => Some(candidates),
+            None => library.known_exports.contains(name).then_some(&[]),
         }
     }
 
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
-        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
+    fn overloads(&self, name: &str, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
+        let candidates = self.library?.schemes.get(name)?;
         if candidates.len() < 2 {
             return None;
         }
@@ -2396,11 +2431,11 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
-        Some(candidates.clone())
+        Some(candidates)
     }
 
-    fn type_definitions(&self) -> TypeDefinitions {
-        TypeDefinitions::of(self.file)
+    fn type_definitions(&self) -> TypeDefinitions<'db> {
+        self.definitions
     }
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
@@ -2412,7 +2447,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 }
 

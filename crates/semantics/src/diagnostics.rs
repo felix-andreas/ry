@@ -25,7 +25,7 @@ use {
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, project_type_definitions, statement_annotations,
-        stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
+        stubs::{CONDITIONAL_NAMESPACES, StubLibrary, namespace_exports, namespace_known, stubs},
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -631,9 +631,15 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
-            else {
+            let NonLocalRead::Unresolved { suggestion } = classify_non_local_read(
+                db,
+                &read_context(db, file),
+                item_index,
+                &check,
+                naming,
+                expression,
+                *name,
+            ) else {
                 continue;
             };
             let suggestion =
@@ -690,6 +696,7 @@ enum NonLocalRead {
 /// classification probes several project-wide name tables per read.
 #[salsa::tracked(returns(ref))]
 fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId, NonLocalRead)>> {
+    let context = read_context(db, file);
     item_spans(db, file)
         .iter()
         .enumerate()
@@ -704,7 +711,7 @@ fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId,
                 .iter()
                 .filter_map(|(expression, name)| {
                     let read = classify_non_local_read(
-                        db, file, item_index, &check, naming, expression, *name,
+                        db, &context, item_index, &check, naming, expression, *name,
                     );
                     (read != NonLocalRead::Resolvable).then_some((*expression, read))
                 })
@@ -726,10 +733,37 @@ fn non_local_read(
         .map_or(&NonLocalRead::Resolvable, |(_, read)| read)
 }
 
+/// What every read in a file consults, fetched once per file rather than once per read.
+struct ReadContext<'db> {
+    file: SourceFile,
+    positions: &'db FxHashMap<Symbol, usize>,
+    files: Option<ProjectFiles>,
+    test_files: Option<ProjectFiles>,
+    library: Option<&'db StubLibrary<'db>>,
+    super_globals: &'db BTreeSet<Symbol>,
+}
+
+fn read_context(db: &dyn Db, file: SourceFile) -> ReadContext<'_> {
+    let files = ProjectFiles::try_get(db);
+    ReadContext {
+        file,
+        positions: frame_slot_positions(db, file),
+        files,
+        test_files: files.filter(|_| {
+            matches!(
+                *file.kind(db),
+                DocumentKind::Test | DocumentKind::TestHelper
+            )
+        }),
+        library: stubs(db),
+        super_globals: super_globals(db, file),
+    }
+}
+
 /// Guards run cheapest first: most non-local reads resolve through frame slots.
 fn classify_non_local_read(
     db: &dyn Db,
-    file: SourceFile,
+    context: &ReadContext<'_>,
     item_index: usize,
     check: &ItemCheck<'_>,
     naming: &ItemNaming,
@@ -740,7 +774,8 @@ fn classify_non_local_read(
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)
+    let file = context.file;
+    if let Some(&earliest) = context.positions.get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
             || naming.deferred_quiet_reads.contains(expression))
@@ -756,19 +791,14 @@ fn classify_non_local_read(
     if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
         return NonLocalRead::Resolvable;
     }
-    let files = ProjectFiles::try_get(db);
-    let test_files = files.filter(|_| {
-        matches!(
-            *file.kind(db),
-            DocumentKind::Test | DocumentKind::TestHelper
-        )
-    });
-    if crate::package_scheme_exists(db, name)
+    let files = context.files;
+    let test_files = context.test_files;
+    if crate::package_scheme_exists_in(db, files, context.library, name)
         || test_files.is_some_and(|_| {
             let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
-        || super_globals(db, file).contains(&symbol)
+        || context.super_globals.contains(&symbol)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -809,7 +839,7 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let definitions = TypeDefinitions::of(file);
+    let definitions = TypeDefinitions::of(db, file);
     let stub_nominals = stubs(db).map(|library| &library.nominals);
     let is_known = |name: &str| {
         stub_nominals.is_some_and(|nominals| nominals.contains(name))
@@ -871,7 +901,7 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// The depth and vector findings use the typing code so they vanish when typing is off.
 fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    let definitions = TypeDefinitions::of(file);
+    let definitions = TypeDefinitions::of(db, file);
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
     let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
@@ -1040,7 +1070,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
     if statements.is_empty() && definitions_both_ways.is_empty() {
         return Vec::new();
     }
-    let definitions = TypeDefinitions::of(file);
+    let definitions = TypeDefinitions::of(db, file);
     let mut diagnostics = Vec::new();
     for candidate in statements.iter().chain(definitions_both_ways) {
         let pair = match candidate {
@@ -1522,7 +1552,7 @@ fn same_type<'db>(
     db: &'db dyn Db,
     left: Ty<'db>,
     right: Ty<'db>,
-    definitions: TypeDefinitions,
+    definitions: TypeDefinitions<'db>,
 ) -> bool {
     left == right
         || canonical_type(db, left, definitions, 0) == canonical_type(db, right, definitions, 0)
@@ -1531,7 +1561,7 @@ fn same_type<'db>(
 fn canonical_type<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    definitions: TypeDefinitions,
+    definitions: TypeDefinitions<'db>,
     depth: usize,
 ) -> Ty<'db> {
     // An alias cycle is reported elsewhere; past this depth the type is compared as written.
@@ -1571,7 +1601,7 @@ fn canonical_type<'db>(
 fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
-    definitions: TypeDefinitions,
+    definitions: TypeDefinitions<'db>,
     stub_nominals: &FxHashSet<String>,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();

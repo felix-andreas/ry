@@ -3927,7 +3927,7 @@ fn representation<'db>(db: &'db dyn Db, file: SourceFile, ty: Ty<'db>) -> Ty<'db
         let TyKind::Named(name, arguments) = current.kind(db) else {
             break;
         };
-        let Some(definition) = TypeDefinitions::of(file).get(db, *name) else {
+        let Some(definition) = TypeDefinitions::of(db, file).get(db, *name) else {
             break;
         };
         if definition.parameters.len() != arguments.len() {

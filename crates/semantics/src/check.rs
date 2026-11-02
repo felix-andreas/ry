@@ -22,7 +22,7 @@ use {
             is_column_update, query_index_arguments,
         },
         sorted::{SortedMap, SortedSet},
-        stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
+        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -34,6 +34,7 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
+        borrow::Cow,
         mem,
         ops::Range,
         rc::Rc,
@@ -541,7 +542,7 @@ pub trait GlobalEnv<'db> {
 
     /// `None` when the name has at most one candidate or a package/local definition
     /// shadows the stub set.
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<TypeScheme<'db>>>;
+    fn overloads(&self, name: &str, deferred: bool) -> Option<&'db [TypeScheme<'db>]>;
 
     /// A project definition has its own attributable site, so a reference propagates
     /// its `Unknown` instead of re-originating one.
@@ -554,7 +555,7 @@ pub trait GlobalEnv<'db> {
     /// Every stub candidate for `name`, ignoring project definitions: what `pkg::name` or a
     /// call that skipped the project's non-function binding reaches. Empty for an export
     /// the stubs list without a type.
-    fn library_candidates(&self, name: &str) -> Option<Vec<TypeScheme<'db>>>;
+    fn library_candidates(&self, name: &str) -> Option<&'db [TypeScheme<'db>]>;
 
     /// What a call reaches once its lookup has left the file's top-level frame without finding
     /// a function, the library aside. A package file's frame is the namespace itself, so it
@@ -568,7 +569,7 @@ pub trait GlobalEnv<'db> {
 
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
-    fn type_definitions(&self) -> TypeDefinitions;
+    fn type_definitions(&self) -> TypeDefinitions<'db>;
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
 
@@ -604,6 +605,7 @@ pub fn check_item_with_annotation<'db>(
         module,
         naming,
         globals,
+        library: stubs(db),
         table,
         frame_level: 0,
         discarded_if: None,
@@ -1026,6 +1028,9 @@ struct Checker<'db, 'a> {
     module: &'a Module,
     naming: &'a ItemNaming,
     globals: Option<&'a dyn GlobalEnv<'db>>,
+    /// Fetched once per check: the checker consults the stubs at most calls, and each salsa
+    /// fetch records a dependency edge on the running query.
+    library: Option<&'db StubLibrary<'db>>,
     table: InferenceTable<'db>,
     /// A binding's right-hand side infers one level deeper so a function generalizes at
     /// its binding; a stored monotype lowers back to this level, or a later
@@ -1112,7 +1117,7 @@ enum FunctionLookup<'db> {
     /// The callee's type, already recorded for the head.
     Found(Ty<'db>),
     /// The library's candidates, past every project binding of the name.
-    Library(Symbol, Vec<TypeScheme<'db>>),
+    Library(Symbol, &'db [TypeScheme<'db>]),
     /// The nearest binding is untyped and also read as a value, and an outer binding of the
     /// name holds a function, so the call may reach either one and is not checked.
     Undetermined,
@@ -2017,7 +2022,9 @@ impl<'db> Checker<'db, '_> {
         // A standard-library type such as `data.frame` comes from its own constructors, so the
         // advice to wrap a value with `@new` would be wrong there.
         let declared = self.table.definition(self.db, *name);
-        let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
+        let from_stubs = self
+            .library
+            .and_then(|library| library.type_definitions.get(name));
         if declared.is_some() && declared == from_stubs {
             return false;
         }
@@ -2340,7 +2347,8 @@ impl<'db> Checker<'db, '_> {
                 package,
                 name,
             } => {
-                let validated = validated_namespace_name(self.db, *internal, package, name);
+                let validated =
+                    validated_namespace_name(self.db, self.library, *internal, package, name);
                 let reaches_project = namespace_reaches_project(self.db, package);
                 let name = *name;
                 match validated.as_ref().and_then(|name| {
@@ -2348,7 +2356,7 @@ impl<'db> Checker<'db, '_> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        globals.library_candidates(name)?.pop()
+                        globals.library_candidates(name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -2638,7 +2646,10 @@ impl<'db> Checker<'db, '_> {
             _ => return,
         };
         if accepts_native(function)
-            || (may_be_library && namespace_exports(self.db, STANDARD_LIBRARY, function))
+            || (may_be_library
+                && self
+                    .library
+                    .is_some_and(|library| library.exports(STANDARD_LIBRARY, function)))
         {
             return;
         }
@@ -5887,7 +5898,7 @@ impl<'db> Checker<'db, '_> {
         lhs: ExprId,
         rhs: ExprId,
     ) -> Option<Ty<'db>> {
-        let library = stubs(self.db)?;
+        let library = self.library?;
         if !library.schemes.contains_key(name) {
             return None;
         }
@@ -6046,15 +6057,20 @@ impl<'db> Checker<'db, '_> {
             ] {
                 let Some(candidates) = globals
                     .overloads(&method, false)
-                    .or_else(|| globals.scheme(&method, false).map(|scheme| vec![scheme]))
+                    .map(Cow::Borrowed)
+                    .or_else(|| {
+                        globals
+                            .scheme(&method, false)
+                            .map(|scheme| Cow::Owned(vec![scheme]))
+                    })
                     .filter(|candidates| !candidates.is_empty())
                 else {
                     continue;
                 };
                 declared_any = true;
-                for scheme in candidates {
+                for scheme in candidates.iter() {
                     let snapshot = self.table.snapshot();
-                    let instantiated = self.instantiate(&scheme);
+                    let instantiated = self.instantiate(scheme);
                     let resolved = self.table.shallow_resolve(self.db, instantiated);
                     let TyKind::Function(function) = resolved.kind(self.db) else {
                         self.table.rollback(snapshot);
@@ -7536,7 +7552,7 @@ impl<'db> Checker<'db, '_> {
 
     /// The library's candidates for `name` when the last one, which a plain read takes, is a
     /// function.
-    fn library_function(&mut self, name: Symbol) -> Option<Vec<TypeScheme<'db>>> {
+    fn library_function(&mut self, name: Symbol) -> Option<&'db [TypeScheme<'db>]> {
         let candidates = self.globals?.library_candidates(&name)?;
         match candidates.last() {
             Some(last) if self.callable(last.body) == Callable::No => None,
@@ -9311,7 +9327,8 @@ impl<'db> Checker<'db, '_> {
                 package,
                 name,
             } => {
-                let name = validated_namespace_name(self.db, *internal, package, name)?;
+                let name =
+                    validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
                     let schemes = self.globals?.library_candidates(&name)?;
                     if schemes.len() < 2 {
@@ -9376,12 +9393,17 @@ impl<'db> Checker<'db, '_> {
                 let method = format!("{generic}.{class}");
                 globals
                     .overloads(&method, false)
-                    .or_else(|| globals.scheme(&method, false).map(|scheme| vec![scheme]))
+                    .map(Cow::Borrowed)
+                    .or_else(|| {
+                        globals
+                            .scheme(&method, false)
+                            .map(|scheme| Cow::Owned(vec![scheme]))
+                    })
                     .filter(|candidates| !candidates.is_empty())
             })?;
-        for scheme in candidates {
+        for scheme in candidates.iter() {
             let snapshot = self.table.snapshot();
-            let instantiated = self.instantiate(&scheme);
+            let instantiated = self.instantiate(scheme);
             let resolved = self.table.shallow_resolve(self.db, instantiated);
             let TyKind::Function(function) = resolved.kind(self.db) else {
                 self.table.rollback(snapshot);
@@ -10144,12 +10166,12 @@ impl<'db> Checker<'db, '_> {
                 )
             {
                 // An export the stubs list without a type is still a function.
-                if let Some(mut candidates) = self
+                if let Some(candidates) = self
                     .globals
                     .and_then(|globals| globals.library_candidates(name.as_str()))
                 {
-                    argument.named_function = Some(match candidates.pop() {
-                        Some(scheme) => self.instantiate(&scheme),
+                    argument.named_function = Some(match candidates.last() {
+                        Some(scheme) => self.instantiate(scheme),
                         None => unknown(self.db),
                     });
                 }
@@ -12131,7 +12153,7 @@ impl<'db> Checker<'db, '_> {
                 range,
                 callback.function,
                 callback.name.clone(),
-                &callback.schemes,
+                callback.schemes,
                 &call_arguments,
             );
             results.push((ty, self.errors.split_off(recorded_errors)));
@@ -13606,7 +13628,7 @@ impl BoundFormals {
 struct Callback<'db> {
     function: ExprId,
     name: String,
-    schemes: Vec<TypeScheme<'db>>,
+    schemes: &'db [TypeScheme<'db>],
 }
 
 /// The types an apply-family function hands its callback one at a time, and whether the
@@ -14051,7 +14073,7 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
 /// diamond is not a cycle. Nominal definitions may legitimately recurse.
 fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
-    definitions: TypeDefinitions,
+    definitions: TypeDefinitions<'db>,
     ty: Ty<'db>,
     expanding: &mut FxHashSet<Name<'db>>,
 ) -> Option<String> {
@@ -14098,6 +14120,7 @@ fn namespace_reaches_project(db: &dyn Db, package: &Option<Symbol>) -> bool {
 /// every such read resolves.
 fn validated_namespace_name(
     db: &dyn Db,
+    library: Option<&StubLibrary<'_>>,
     internal: bool,
     package: &Option<Symbol>,
     name: &Option<Symbol>,
@@ -14110,11 +14133,11 @@ fn validated_namespace_name(
     if is_own_package(db, package.as_str()) {
         return Some(name);
     }
-    match namespace_known(db, package.as_str()) {
+    match library.map(|library| library.knows_namespace(package.as_str())) {
         None => Some(name),
         Some(false) => None,
         Some(true) => {
-            if internal || namespace_exports(db, package.as_str(), &name) {
+            if internal || library.is_some_and(|library| library.exports(package.as_str(), &name)) {
                 Some(name)
             } else {
                 None
