@@ -2052,7 +2052,9 @@ impl Default for GcPolicy {
             // A larger nursery collects less often but touches more fresh memory before its
             // first collection, and first touches are what a short-lived process pays for most.
             young_limit: 8 * 1024 * 1024,
-            // GNU R's initial vector heap trigger, `R_VSIZE`.
+            // Counts only large vectors allocated since the last collection, unlike GNU R's
+            // 64 MB `R_VSIZE`, which also counts live data. A 64 MB budget let dead temporaries
+            // of vectorized kernels pile up to about 50 MB above GNU R's peak at a million rows.
             young_large_limit: 16 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,

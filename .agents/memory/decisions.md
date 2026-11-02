@@ -1829,6 +1829,27 @@ an empty script took over 300 s in a debug build. It now takes about 7 s, with t
 `opt-level = 2` in the dev profile. Under stress, every eighth collection is major while the heap
 is small, and past that one per sixteenth of the live objects, which keeps the total linear.
 
+**Peak memory comes from what the heap keeps alive, not from the allocator.** At 1e6 rows the base
+kernels' peak RSS was 1.1 to 1.6 times GNU R's, and three causes accounted for it:
+- **Leaves skip the mark stack.** `Heap::mark` sets a leaf's mark bit without pushing it, where a
+  leaf is a CHARSXP or atomic vector with no attributes that is not ALTREP. A million-element
+  character vector used to push every CHARSXP, which grew the mark stack to 8 MB, and the stack
+  keeps its capacity. Tier-0 relies on marking tracing every non-leaf object's attrib slot.
+- **The young budget for large vectors is 16 MB, not 64 MB.** It counts only large vectors
+  allocated since the last collection, so 64 MB let dead temporaries pile up about 50 MB above
+  GNU R's peak, whose 64 MB `R_VSIZE` also counts live data. The setup of
+  `tools/bench/base/kernels.R` went from 166 MB to 148 MB (GNU R 134 MB) with no slower kernel.
+- **Builtins write into the result vector.** `sample.int` and the random deviates built Rust
+  vectors and copied them, holding about 10 MB of scratch at the peak.
+- **Rejected:** mapping large vector bodies with `mmap` and unmapping them once a collection leaves
+  them unused did not lower any peak (rowSums rose from 168 to 173 MB), and
+  `MIMALLOC_PURGE_DELAY=0` lowered the setup peak by only 4 MB. The same peaks with glibc
+  `malloc` in libR confirm that the allocator's retention is not the gap.
+- **Not heap:** ry starts about 13 MB above GNU R, and smaps puts all of it in clean, file-backed
+  code pages (about 18 MB of `libR.so` and 9 MB of the `ry` binary faulted in, against 3 MB of
+  GNU R's `libR.so`); anonymous memory is at parity. RELR relocations would cut `.rela.dyn` but
+  need glibc 2.36.
+
 **Removing a binding is O(1) amortized** (`crates/heap/src/env.rs`). The slot stays in place with a
 sentinel symbol, the hash index drops its key, and the frame compacts once half its slots are
 removed. Removing by shifting kept insertion order but rewrote every later index entry, so `rm()`
