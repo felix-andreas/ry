@@ -1398,7 +1398,8 @@ unsafe fn candidate_from_r(problem: &Problem<'_>, point: &[f64]) -> R<Vec<f64>> 
         .collect())
 }
 
-// integrate.
+// integrate, and the C API's `Rdqags` and `Rdqagi`, which adapt this QUADPACK (Piessens, de
+// Doncker-Kapenga, Ueberhuber and Kahaner, 1983) to C integrands.
 
 /// `call_dqags(f, rho, lower, upper, abs.tol, rel.tol, limit)`: QUADPACK's QAGS on a finite
 /// interval.
@@ -1410,18 +1411,19 @@ pub unsafe fn call_dqags(call: &NativeCall<'_>) -> R<Sexp> {
     let abs_tol = values::as_real_scalar(call.arg(4));
     let rel_tol = values::as_real_scalar(call.arg(5));
     let limit = values::as_integer_scalar(call.arg(6));
-    let mut integrand = Integrand {
+    let mut integrand = RIntegrand {
         call,
         function,
         env,
     };
+    let mut workspace = Workspace::new(limit.max(1) as usize);
     let outcome = qags(
         &mut integrand,
         lower,
         upper,
         abs_tol,
         rel_tol,
-        limit.max(1) as usize,
+        &mut workspace.subintervals(),
     )?;
     integration_result(outcome)
 }
@@ -1436,20 +1438,91 @@ pub unsafe fn call_dqagi(call: &NativeCall<'_>) -> R<Sexp> {
     let abs_tol = values::as_real_scalar(call.arg(4));
     let rel_tol = values::as_real_scalar(call.arg(5));
     let limit = values::as_integer_scalar(call.arg(6));
-    let mut integrand = Integrand {
+    let mut integrand = RIntegrand {
         call,
         function,
         env,
     };
+    let mut workspace = Workspace::new(limit.max(1) as usize);
     let outcome = qagi(
         &mut integrand,
         bound,
         infinite,
         abs_tol,
         rel_tol,
-        limit.max(1) as usize,
+        &mut workspace.subintervals(),
     )?;
     integration_result(outcome)
+}
+
+/// A vectorized integrand: replaces every abscissa in `x` by the integrand's value there.
+pub trait Integrand {
+    unsafe fn evaluate(&mut self, x: &mut [f64]) -> R<()>;
+}
+
+/// The subintervals of an adaptive integration as QUADPACK lays them out in its `work` and
+/// `iwork` arrays: left ends, right ends, estimates and error estimates, each with one slot
+/// per allowed subinterval, and the 1-based order of the error estimates from largest down.
+/// The C API passes the caller's arrays, so they hold the subdivision afterwards.
+pub struct Subintervals<'a> {
+    pub left: &'a mut [f64],
+    pub right: &'a mut [f64],
+    pub estimate: &'a mut [f64],
+    pub error: &'a mut [f64],
+    pub order: &'a mut [i32],
+}
+
+/// What an adaptive integration reports: the integral, its error estimate, the number of
+/// subintervals used and QUADPACK's `ier` (0 success, 1 subdivision limit, 2 roundoff, 3 bad
+/// integrand behavior, 4 no convergence, 5 probable divergence, 6 invalid tolerances).
+pub struct Quadrature {
+    pub result: f64,
+    pub error: f64,
+    pub last: usize,
+    pub status: i32,
+}
+
+/// QUADPACK's QAGS: the integral over the finite `[a, b]` with the 21-point Gauss-Kronrod
+/// rule. The number of subintervals allowed is the length of `intervals.left`.
+pub unsafe fn qags(
+    f: &mut dyn Integrand,
+    a: f64,
+    b: f64,
+    abs_tol: f64,
+    rel_tol: f64,
+    intervals: &mut Subintervals<'_>,
+) -> R<Quadrature> {
+    adaptive(
+        intervals,
+        abs_tol,
+        rel_tol,
+        a,
+        b,
+        (b - a).abs() * 0.375,
+        &mut |lower, upper| kronrod21(f, lower, upper),
+    )
+}
+
+/// QUADPACK's QAGI: the integral over `(bound, Inf)` (`infinite` 1), `(-Inf, bound)` (-1) or
+/// the whole line (2), mapped onto (0, 1] and integrated with the 15-point rule.
+pub unsafe fn qagi(
+    f: &mut dyn Integrand,
+    bound: f64,
+    infinite: i32,
+    abs_tol: f64,
+    rel_tol: f64,
+    intervals: &mut Subintervals<'_>,
+) -> R<Quadrature> {
+    let bound = if infinite == 2 { 0.0 } else { bound };
+    adaptive(
+        intervals,
+        abs_tol,
+        rel_tol,
+        0.0,
+        1.0,
+        0.375,
+        &mut |lower, upper| kronrod15_infinite(f, bound, infinite, lower, upper),
+    )
 }
 
 unsafe fn integration_result(outcome: Quadrature) -> R<Sexp> {
@@ -1462,13 +1535,13 @@ unsafe fn integration_result(outcome: Quadrature) -> R<Sexp> {
 }
 
 /// The R integrand, evaluated on a whole vector of abscissae at once.
-struct Integrand<'a> {
+struct RIntegrand<'a> {
     call: &'a NativeCall<'a>,
     function: Sexp,
     env: Sexp,
 }
 
-impl Integrand<'_> {
+impl Integrand for RIntegrand<'_> {
     unsafe fn evaluate(&mut self, x: &mut [f64]) -> R<()> {
         let call = self.call;
         let (function, env) = (self.function, self.env);
@@ -1497,11 +1570,33 @@ impl Integrand<'_> {
     }
 }
 
-struct Quadrature {
-    result: f64,
-    error: f64,
-    last: usize,
-    status: i32,
+/// QUADPACK workspace the interpreter allocates for one integration.
+struct Workspace {
+    values: Vec<f64>,
+    order: Vec<i32>,
+}
+
+impl Workspace {
+    fn new(limit: usize) -> Workspace {
+        Workspace {
+            values: vec![0.0; 4 * limit],
+            order: vec![0; limit],
+        }
+    }
+
+    fn subintervals(&mut self) -> Subintervals<'_> {
+        let limit = self.order.len();
+        let (left, rest) = self.values.split_at_mut(limit);
+        let (right, rest) = rest.split_at_mut(limit);
+        let (estimate, error) = rest.split_at_mut(limit);
+        Subintervals {
+            left,
+            right,
+            estimate,
+            error,
+            order: &mut self.order,
+        }
+    }
 }
 
 /// The 21-point Kronrod abscissae on [-1, 1] (the even ones are the 10-point Gauss
@@ -1593,7 +1688,7 @@ fn rule_error(difference: f64, absolute: f64, deviation: f64) -> f64 {
 }
 
 /// The 21-point Gauss-Kronrod rule on `[a, b]`.
-unsafe fn kronrod21(f: &mut Integrand<'_>, a: f64, b: f64) -> R<Rule> {
+unsafe fn kronrod21(f: &mut dyn Integrand, a: f64, b: f64) -> R<Rule> {
     let center = (a + b) * 0.5;
     let half = (b - a) * 0.5;
     // The abscissae in the order the integrand sees them: the center, the Gauss points in
@@ -1652,7 +1747,7 @@ unsafe fn kronrod21(f: &mut Integrand<'_>, a: f64, b: f64) -> R<Rule> {
 /// The 15-point Gauss-Kronrod rule on `[a, b]` within (0, 1], for the integral over the
 /// infinite range mapped there by `x = bound + sign (1 - t) / t`.
 unsafe fn kronrod15_infinite(
-    f: &mut Integrand<'_>,
+    f: &mut dyn Integrand,
     bound: f64,
     infinite: i32,
     a: f64,
@@ -1706,50 +1801,11 @@ unsafe fn kronrod15_infinite(
     })
 }
 
-unsafe fn qags(
-    f: &mut Integrand<'_>,
-    a: f64,
-    b: f64,
-    abs_tol: f64,
-    rel_tol: f64,
-    limit: usize,
-) -> R<Quadrature> {
-    adaptive(
-        limit,
-        abs_tol,
-        rel_tol,
-        a,
-        b,
-        (b - a).abs() * 0.375,
-        &mut |lower, upper| kronrod21(f, lower, upper),
-    )
-}
-
-unsafe fn qagi(
-    f: &mut Integrand<'_>,
-    bound: f64,
-    infinite: i32,
-    abs_tol: f64,
-    rel_tol: f64,
-    limit: usize,
-) -> R<Quadrature> {
-    let bound = if infinite == 2 { 0.0 } else { bound };
-    adaptive(
-        limit,
-        abs_tol,
-        rel_tol,
-        0.0,
-        1.0,
-        0.375,
-        &mut |lower, upper| kronrod15_infinite(f, bound, infinite, lower, upper),
-    )
-}
-
 /// QUADPACK's QAGSE/QAGIE driver: bisects the interval with the largest error estimate,
 /// keeping the error estimates sorted, and accelerates convergence by Wynn's epsilon
 /// algorithm over the sequence of estimates once the smallest intervals dominate the error.
 unsafe fn adaptive(
-    limit: usize,
+    intervals: &mut Subintervals<'_>,
     abs_tol: f64,
     rel_tol: f64,
     a: f64,
@@ -1760,6 +1816,18 @@ unsafe fn adaptive(
     let epsilon = f64::EPSILON;
     let underflow = f64::MIN_POSITIVE;
     let overflow = f64::MAX;
+    let Subintervals {
+        left: lower,
+        right: upper,
+        estimate: results,
+        error: errors,
+        order,
+    } = intervals;
+    let limit = lower.len();
+    lower[0] = a;
+    upper[0] = b;
+    results[0] = 0.0;
+    errors[0] = 0.0;
     if abs_tol <= 0.0 && rel_tol < (50.0 * epsilon).max(0.5e-28) {
         return Ok(Quadrature {
             result: 0.0,
@@ -1768,14 +1836,6 @@ unsafe fn adaptive(
             status: 6,
         });
     }
-    // Interval lists, 1-based as QUADPACK keeps them so that `order` can hold indices.
-    let mut lower = vec![0.0; limit + 1];
-    let mut upper = vec![0.0; limit + 1];
-    let mut results = vec![0.0; limit + 1];
-    let mut errors = vec![0.0; limit + 1];
-    let mut order = vec![0usize; limit + 1];
-    lower[1] = a;
-    upper[1] = b;
     let first = rule(a, b)?;
     let mut result = first.result;
     let mut abserr = first.error;
@@ -1783,9 +1843,9 @@ unsafe fn adaptive(
     let magnitude = result.abs();
     let mut bound = abs_tol.max(rel_tol * magnitude);
     let mut last = 1usize;
-    results[1] = result;
-    errors[1] = abserr;
-    order[1] = 1;
+    results[0] = result;
+    errors[0] = abserr;
+    order[0] = 1;
     let mut status = 0;
     if abserr <= 100.0 * epsilon * defabs && abserr > bound {
         status = 2;
@@ -1829,19 +1889,19 @@ unsafe fn adaptive(
     let mut summed = false;
     last = 2;
     while last <= limit {
-        let a1 = lower[max_error];
-        let b1 = 0.5 * (lower[max_error] + upper[max_error]);
+        let a1 = lower[max_error - 1];
+        let b1 = 0.5 * (lower[max_error - 1] + upper[max_error - 1]);
         let a2 = b1;
-        let b2 = upper[max_error];
+        let b2 = upper[max_error - 1];
         let error_last = error_max;
         let left = rule(a1, b1)?;
         let right = rule(a2, b2)?;
         let area12 = left.result + right.result;
         let error12 = left.error + right.error;
         error_sum = error_sum + error12 - error_max;
-        area = area + area12 - results[max_error];
+        area = area + area12 - results[max_error - 1];
         if left.deviation != left.error && right.deviation != right.error {
-            if (results[max_error] - area12).abs() <= 1e-5 * area12.abs()
+            if (results[max_error - 1] - area12).abs() <= 1e-5 * area12.abs()
                 && error12 >= 0.99 * error_max
             {
                 if extrapolating {
@@ -1854,8 +1914,8 @@ unsafe fn adaptive(
                 roundoff3 += 1;
             }
         }
-        results[max_error] = left.result;
-        results[last] = right.result;
+        results[max_error - 1] = left.result;
+        results[last - 1] = right.result;
         bound = abs_tol.max(rel_tol * area.abs());
         if roundoff1 + roundoff2 >= 10 || roundoff3 >= 20 {
             status = 2;
@@ -1870,27 +1930,27 @@ unsafe fn adaptive(
             status = 4;
         }
         if right.error > left.error {
-            lower[max_error] = a2;
-            lower[last] = a1;
-            upper[last] = b1;
-            results[max_error] = right.result;
-            results[last] = left.result;
-            errors[max_error] = right.error;
-            errors[last] = left.error;
+            lower[max_error - 1] = a2;
+            lower[last - 1] = a1;
+            upper[last - 1] = b1;
+            results[max_error - 1] = right.result;
+            results[last - 1] = left.result;
+            errors[max_error - 1] = right.error;
+            errors[last - 1] = left.error;
         } else {
-            lower[last] = a2;
-            upper[max_error] = b1;
-            upper[last] = b2;
-            errors[max_error] = left.error;
-            errors[last] = right.error;
+            lower[last - 1] = a2;
+            upper[max_error - 1] = b1;
+            upper[last - 1] = b2;
+            errors[max_error - 1] = left.error;
+            errors[last - 1] = right.error;
         }
         sort_errors(
             limit,
             last,
             &mut max_error,
             &mut error_max,
-            &errors,
-            &mut order,
+            errors,
+            order,
             &mut nr_max,
         );
         if error_sum <= bound {
@@ -1917,7 +1977,7 @@ unsafe fn adaptive(
             error_large += error12;
         }
         if !extrapolating {
-            if (upper[max_error] - lower[max_error]).abs() > small {
+            if (upper[max_error - 1] - lower[max_error - 1]).abs() > small {
                 last += 1;
                 continue;
             }
@@ -1932,9 +1992,9 @@ unsafe fn adaptive(
                 last
             };
             for _ in nr_max..=upper_bound {
-                max_error = order[nr_max];
-                error_max = errors[max_error];
-                if (upper[max_error] - lower[max_error]).abs() > small {
+                max_error = order[nr_max - 1] as usize;
+                error_max = errors[max_error - 1];
+                if (upper[max_error - 1] - lower[max_error - 1]).abs() > small {
                     bisect_large = true;
                     break;
                 }
@@ -1973,8 +2033,8 @@ unsafe fn adaptive(
         if status == 5 {
             break;
         }
-        max_error = order[1];
-        error_max = errors[max_error];
+        max_error = order[0] as usize;
+        error_max = errors[max_error - 1];
         nr_max = 1;
         extrapolating = false;
         small *= 0.5;
@@ -1982,7 +2042,7 @@ unsafe fn adaptive(
         last += 1;
     }
     let last = last.min(limit);
-    let sum_results = |last: usize| results[1..=last].iter().sum::<f64>();
+    let sum_results = |last: usize| results[..last].iter().sum::<f64>();
     if !summed {
         // QUADPACK's labels 100 to 130: choose between the extrapolated and summed results.
         let mut use_sum = false;
@@ -2030,7 +2090,7 @@ unsafe fn adaptive(
     })
 }
 
-/// QUADPACK's QPSRT: keeps `order[1..]` listing the intervals by decreasing error estimate
+/// QUADPACK's QPSRT: keeps `order` listing the intervals by decreasing error estimate
 /// (only as deep as the remaining subdivisions can use), after interval `max_error` was
 /// split into itself and `last`; then selects the `nr_max`-th largest for bisection.
 fn sort_errors(
@@ -2039,21 +2099,21 @@ fn sort_errors(
     max_error: &mut usize,
     error_max: &mut f64,
     errors: &[f64],
-    order: &mut [usize],
+    order: &mut [i32],
     nr_max: &mut usize,
 ) {
     if last <= 2 {
-        order[1] = 1;
-        order[2] = 2;
+        order[0] = 1;
+        order[1] = 2;
     } else {
-        let largest = errors[*max_error];
+        let largest = errors[*max_error - 1];
         if *nr_max != 1 {
             for _ in 1..*nr_max {
-                let successor = order[*nr_max - 1];
-                if largest <= errors[successor] {
+                let successor = order[*nr_max - 2] as usize;
+                if largest <= errors[successor - 1] {
                     break;
                 }
-                order[*nr_max] = successor;
+                order[*nr_max - 1] = successor as i32;
                 *nr_max -= 1;
             }
         }
@@ -2062,45 +2122,45 @@ fn sort_errors(
         } else {
             last
         };
-        let smallest = errors[last];
+        let smallest = errors[last - 1];
         let bottom = depth - 1;
         let begin = *nr_max + 1;
         let mut inserted_at = None;
         for i in begin..=bottom {
-            let successor = order[i];
-            if largest >= errors[successor] {
+            let successor = order[i - 1] as usize;
+            if largest >= errors[successor - 1] {
                 inserted_at = Some(i);
                 break;
             }
-            order[i - 1] = successor;
+            order[i - 2] = successor as i32;
         }
         match inserted_at {
             None => {
-                order[bottom] = *max_error;
-                order[depth] = last;
+                order[bottom - 1] = *max_error as i32;
+                order[depth - 1] = last as i32;
             }
             Some(i) => {
-                order[i - 1] = *max_error;
+                order[i - 2] = *max_error as i32;
                 let mut k = bottom;
                 let mut placed = false;
                 for _ in i..=bottom {
-                    let successor = order[k];
-                    if smallest < errors[successor] {
-                        order[k + 1] = last;
+                    let successor = order[k - 1] as usize;
+                    if smallest < errors[successor - 1] {
+                        order[k] = last as i32;
                         placed = true;
                         break;
                     }
-                    order[k + 1] = successor;
+                    order[k] = successor as i32;
                     k -= 1;
                 }
                 if !placed {
-                    order[i] = last;
+                    order[i - 1] = last as i32;
                 }
             }
         }
     }
-    *max_error = order[*nr_max];
-    *error_max = errors[*max_error];
+    *max_error = order[*nr_max - 1] as usize;
+    *error_max = errors[*max_error - 1];
 }
 
 /// QUADPACK's QELG: Wynn's epsilon algorithm on `table[1..=size]`, which it extends and then

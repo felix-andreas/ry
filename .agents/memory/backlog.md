@@ -2334,9 +2334,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   asymptotic expansions or argument limits when a package hits them.
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
-- **Routines left to audit clean room:** the `optif9`/UNCMIN helpers, `fdhess`, the
-  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, and `dpofa`'s 1e-14
-  tolerance. Rewrite each from its published source as `decisions.md` describes.
 - **`pgamma` is a few ulps off GNU R for small shapes** (for example shape 0.5 or 0.01, where
   GNU R is exact against mpmath), and `qgamma` inherits that error times `1/shape`. This, not
   `qgamma` itself, is why about half of `qgamma`'s answers differ from GNU R in the last bits.

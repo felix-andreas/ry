@@ -407,7 +407,6 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     Ok(result)
 }
 
-/// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`.
 /// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`, plus `checkNA` from R 4.4 on,
 /// which only lets GNU R skip its NA scan, so the answer does not depend on it.
 unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
@@ -416,43 +415,52 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
     let rightmost_closed = values::as_logical_scalar(call.arg(2)) == 1;
     let all_inside = values::as_logical_scalar(call.arg(3)) == 1;
     let left_open = values::as_logical_scalar(call.arg(4)) == 1;
-    let count = breaks.len();
     let result = alloc(SexpType::Integer, length(points))?;
     for index in 0..length(points) {
         let value = values::reals(points)[index];
-        if value.is_nan() {
-            values::ints_mut(result)[index] = NA_INTEGER;
-            continue;
-        }
-        let mut interval = if left_open {
-            breaks
-                .iter()
-                .filter(|&&breakpoint| breakpoint < value)
-                .count()
+        values::ints_mut(result)[index] = if value.is_nan() {
+            NA_INTEGER
         } else {
-            breaks
-                .iter()
-                .filter(|&&breakpoint| breakpoint <= value)
-                .count()
-        } as i32;
-        if rightmost_closed && count > 0 {
-            if !left_open && value == breaks[count - 1] {
-                interval = count as i32 - 1;
-            } else if left_open && value == breaks[0] {
-                interval = 1;
-            }
-        }
-        // An empty `vec` has no inside, so every point stays in interval 0.
-        if all_inside && count > 0 {
-            if interval == 0 {
-                interval = 1;
-            } else if interval == count as i32 {
-                interval = count as i32 - 1;
-            }
-        }
-        values::ints_mut(result)[index] = interval;
+            find_interval(&breaks, value, rightmost_closed, all_inside, left_open).0
+        };
     }
     Ok(result)
+}
+
+/// The interval of the sorted `knots` holding `x`, shared with the C API's `findInterval2`:
+/// the number of knots at or below `x`, or strictly below it when `left_open`, so 0 means left
+/// of the knots and `knots.len()` right of them. `rightmost_closed` moves `x` equal to the
+/// last knot (the first when `left_open`) into the last (first) interval, and `all_inside`
+/// clamps to 1 and `len - 1`. The second value is `mflag`: -1 left of the knots, 1 right of
+/// them and 0 inside, before any clamping. An empty `knots` has no inside, so every point
+/// stays in interval 0.
+pub fn find_interval(
+    knots: &[f64],
+    x: f64,
+    rightmost_closed: bool,
+    all_inside: bool,
+    left_open: bool,
+) -> (i32, i32) {
+    let n = knots.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let (first, last) = (knots[0], knots[n - 1]);
+    let count = if left_open {
+        knots.partition_point(|&knot| knot < x)
+    } else {
+        knots.partition_point(|&knot| knot <= x)
+    } as i32;
+    let n = n as i32;
+    if count == 0 {
+        let inside = all_inside || (left_open && rightmost_closed && x == first);
+        return (inside as i32, -1);
+    }
+    if count == n {
+        let inside = all_inside || (!left_open && rightmost_closed && x == last);
+        return (if inside { n - 1 } else { n }, 1);
+    }
+    (count, 0)
 }
 
 /// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias, f.min), eps.correct, bounds)`:

@@ -41,7 +41,7 @@ pub unsafe fn nlm(call: &NativeCall<'_>) -> R<Sexp> {
     if n == 0 {
         return Err(call.error("invalid parameter length"));
     }
-    if start.iter().any(|value| value.is_nan()) {
+    if start.iter().any(|value| !value.is_finite()) {
         return Err(call.error("missing value in parameter"));
     }
     let want_hessian = values::as_logical_scalar(call.arg(2)) == 1;
@@ -63,14 +63,14 @@ pub unsafe fn nlm(call: &NativeCall<'_>) -> R<Sexp> {
         call,
         function,
         n,
-        last: None,
+        analytic_gradient: false,
+        analytic_hessian: false,
+        recent: Vec::with_capacity(RECENT_EVALUATIONS),
+        oldest: 0,
     };
-    let first = objective.evaluate(&start)?;
-    let analytic_gradient = first.gradient.is_some();
-    let analytic_hessian = analytic_gradient && first.hessian.is_some();
-    // GNU R calls the objective at the start once more before minimizing, so a function with
-    // side effects (a counter, a trace) sees the same sequence of calls only without this cache.
-    objective.last = None;
+    let (analytic_gradient, analytic_hessian) = objective.probe(&start)?;
+    objective.analytic_gradient = analytic_gradient;
+    objective.analytic_hessian = analytic_hessian;
     // Skipping the check of a derivative the objective does not supply is no request at all.
     let mut message = message;
     if !analytic_gradient {
@@ -1080,17 +1080,19 @@ unsafe fn line_search(
             let t1 = *fpls - f - lambda * slope;
             let t2 = previous_f - f - previous_lambda * slope;
             let t3 = 1.0 / (lambda - previous_lambda);
-            let a3 = t3 * (t1 / (lambda * lambda) - t2 / (previous_lambda * previous_lambda));
+            // Three times the cubic coefficient, grouped as 3 * t3 * (...) because that order
+            // reproduces GNU R's backtracking steps to the last bit.
+            let a3 = 3.0 * t3 * (t1 / (lambda * lambda) - t2 / (previous_lambda * previous_lambda));
             let b = t3
                 * (t2 * lambda / (previous_lambda * previous_lambda)
                     - t1 * previous_lambda / (lambda * lambda));
-            let discriminant = b * b - a3 * 3.0 * slope;
+            let discriminant = b * b - a3 * slope;
             let root = discriminant.sqrt();
             // One positive critical point means it is the minimum; two mean the first is.
             trial = if discriminant > b * b {
-                (-b + if a3 < 0.0 { -root } else { root }) / (a3 * 3.0)
+                (-b + if a3 < 0.0 { -root } else { root }) / a3
             } else {
-                (-b + if a3 < 0.0 { root } else { -root }) / (a3 * 3.0)
+                (-b + if a3 < 0.0 { root } else { -root }) / a3
             };
             if trial > lambda * 0.5 {
                 trial = lambda * 0.5;
@@ -1650,11 +1652,7 @@ fn secant_unfactored(
     }
     for j in 0..n {
         for i in j..n {
-            a.set(
-                i,
-                j,
-                a.get(i, j) + y[i] * y[j] / den1 - t[i] * t[j] / den2,
-            );
+            a.set(i, j, a.get(i, j) + y[i] * y[j] / den1 - t[i] * t[j] / den2);
         }
     }
 }
@@ -1670,27 +1668,83 @@ struct Evaluation {
 
 impl crate::unwind::Rooted for Evaluation {}
 
-/// The R objective, remembering its last evaluation so that a gradient or Hessian read from
-/// the attributes does not call the function again at the same point.
+/// How many evaluations the objective remembers. GNU R remembers five, which is visible in how
+/// often a function with side effects is called: the Hessian check revisits the start and the
+/// gradient check's points, and calls none of them again for up to four parameters.
+const RECENT_EVALUATIONS: usize = 5;
+
+/// The R objective, remembering its recent evaluations so that a gradient or Hessian read from
+/// the attributes, or a point visited again, does not call the function again.
 struct Objective<'a> {
     call: &'a NativeCall<'a>,
     function: Sexp,
     n: usize,
-    last: Option<Evaluation>,
+    /// Which attributes the probe at the start accepted; the others are never read.
+    analytic_gradient: bool,
+    analytic_hessian: bool,
+    /// A ring of the latest evaluations, where `oldest` is the one the next new point replaces.
+    recent: Vec<Evaluation>,
+    oldest: usize,
 }
 
 impl Objective<'_> {
+    /// Calls the objective at the start only to learn which derivatives it supplies, as GNU R
+    /// does: the value is not looked at and not cached, so minimizing calls the start again.
+    /// A derivative of the wrong length or mode is ignored with a warning, and a Hessian
+    /// counts only beside a gradient.
+    unsafe fn probe(&mut self, x: &[f64]) -> R<(bool, bool)> {
+        crate::scope(|| {
+            let argument = values::real_vector(x)?;
+            let expression = values::call(self.function, &[argument])?;
+            let result = eval::eval(expression, self.call.env)?;
+            let supplied = |name: &str, size: usize| -> R<bool> {
+                let found = values::get_attr(result, values::install(name)?);
+                if found == values::nil() {
+                    return Ok(false);
+                }
+                let numeric = matches!(found.kind(), SexpType::Integer | SexpType::Real);
+                if numeric && length(found) == size {
+                    return Ok(true);
+                }
+                self.call.warning(format!(
+                    "{name} supplied is of the wrong length or mode, so ignored"
+                ))?;
+                Ok(false)
+            };
+            let gradient = supplied("gradient", self.n)?;
+            let hessian = gradient && supplied("hessian", self.n * self.n)?;
+            Ok((gradient, hessian))
+        })
+    }
+
     unsafe fn evaluate(&mut self, x: &[f64]) -> R<&Evaluation> {
-        if !self.last.as_ref().is_some_and(|last| last.point == x) {
-            self.last = Some(self.compute(x)?);
-        }
-        match &self.last {
-            Some(last) => Ok(last),
+        let index = match self.recent.iter().position(|recent| recent.point == x) {
+            Some(index) => index,
+            None => {
+                let evaluation = self.compute(x)?;
+                if self.recent.len() < RECENT_EVALUATIONS {
+                    self.recent.push(evaluation);
+                    self.recent.len() - 1
+                } else {
+                    let index = self.oldest;
+                    self.recent[index] = evaluation;
+                    self.oldest = (index + 1) % RECENT_EVALUATIONS;
+                    index
+                }
+            }
+        };
+        match self.recent.get(index) {
+            Some(evaluation) => Ok(evaluation),
             None => Err(self.call.error("nlm lost its cached evaluation")),
         }
     }
 
     unsafe fn compute(&mut self, x: &[f64]) -> R<Evaluation> {
+        // A diverging iteration (an infinite value turns a difference gradient infinite) asks
+        // for a non-finite point, which GNU R rejects rather than passing to the objective.
+        if x.iter().any(|entry| !entry.is_finite()) {
+            return Err(self.call.error("non-finite value supplied by 'nlm'"));
+        }
         crate::scope(|| {
             let argument = values::real_vector(x)?;
             let expression = values::call(self.function, &[argument])?;
@@ -1717,12 +1771,18 @@ impl Objective<'_> {
                 }
                 _ => return Err(self.call.error("invalid function value in 'nlm' optimizer")),
             };
-            let attribute = |name: &str, size: usize| -> R<Option<Vec<f64>>> {
+            let attribute = |name: &str, size: usize, wanted: bool| -> R<Option<Vec<f64>>> {
+                if !wanted {
+                    return Ok(None);
+                }
                 let found = values::get_attr(result, values::install(name)?);
                 if found == values::nil() {
                     return Ok(None);
                 }
-                let numbers = real_values(coerce_vector(found, SexpType::Real)?)?;
+                // GNU R reads the first `size` entries of a longer attribute, and only the
+                // probe at the start insists on the exact length.
+                let mut numbers = real_values(coerce_vector(found, SexpType::Real)?)?;
+                numbers.truncate(size);
                 if numbers.len() != size {
                     return Err(self
                         .call
@@ -1733,8 +1793,8 @@ impl Objective<'_> {
             Ok(Evaluation {
                 point: x.to_vec(),
                 value,
-                gradient: attribute("gradient", self.n)?,
-                hessian: attribute("hessian", self.n * self.n)?,
+                gradient: attribute("gradient", self.n, self.analytic_gradient)?,
+                hessian: attribute("hessian", self.n * self.n, self.analytic_hessian)?,
             })
         })
     }
@@ -1760,11 +1820,10 @@ impl Problem for Objective<'_> {
     /// The `hessian` attribute is a full matrix by columns; UNCMIN reads its lower triangle.
     unsafe fn hessian(&mut self, x: &[f64], matrix: &mut Matrix<'_>) -> R<()> {
         let n = self.n;
-        if let Some(hessian) = &self.evaluate(x)?.hessian {
-            for j in 0..n {
-                for i in j..n {
-                    matrix.set(i, j, hessian[i + j * n]);
-                }
+        let hessian = self.evaluate(x)?.hessian.as_deref();
+        for j in 0..n {
+            for i in j..n {
+                matrix.set(i, j, hessian.map_or(0.0, |hessian| hessian[i + j * n]));
             }
         }
         Ok(())

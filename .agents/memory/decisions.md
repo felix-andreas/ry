@@ -3186,6 +3186,21 @@ first lines R had already read, leaving R mid-command.
   `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
   Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
   GNU R returns.
+- **One UNCMIN, one QUADPACK, one interval search, all in `interp`.** libR used to carry its own
+  copies of the routines behind `optif9`/`fdhess`, `Rdqags`/`Rdqagi` and `findInterval2`, next to
+  the interpreter's `nlm`, `integrate` and `findInterval`. The single copies are
+  `interp::stats_nlm` (all three methods, analytic derivatives, the `msg` bits, `fdhess`),
+  `interp::stats_optimize::{qags, qagi}` (writing into caller-owned `Subintervals`, so the C
+  entry points pass `work`/`iwork` straight through) and `interp::arith::find_interval`; libR
+  only converts C callbacks and arguments, as `lbfgsb` does. GNU R black box decided the details
+  the copies disagreed on: the cubic backtrack groups its coefficient as `3 * t3 * (...)`, and a
+  non-finite value (which nlm turns into the largest double) shrinks the step by ten. nlm's call
+  protocol is also GNU R's, as observed through call counts: an uncached probe at the start whose
+  value is ignored and which alone decides whether `gradient` and `hessian` attributes count
+  (wrong length or mode warns and ignores them), a ring of the five latest evaluations, and the
+  error "non-finite value supplied by 'nlm'" instead of a call at a non-finite point. Where GNU R
+  reads past a later attribute that is too short or missing, ry errors or uses zeros.
+  `stats__uncmin_quadpack.R` pins the iterates at full precision and the call protocol.
 - **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
   documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
   (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and
