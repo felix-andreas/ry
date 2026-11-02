@@ -125,7 +125,28 @@ ANNOTATION = re.compile(r"^[ \t]*#:.*\n", flags=re.M)
 
 
 def annotated(args, text):
-    return text if args.typed else ANNOTATION.sub("", text)
+    return typed_program(text) if args.typed else ANNOTATION.sub("", text)
+
+
+TYPED_LINE = re.compile(r"^([ \t]*)#:= ?(.*)$")
+
+
+def typed_program(text):
+    """The typed program: a run of `#:= CODE` lines replaces, one for one, the lines right after
+    it, so the typed program can use ry's records, tuples and tags where the untyped one, which
+    drops every `#:` line, keeps plain lists."""
+    lines, out, index = text.split("\n"), [], 0
+    while index < len(lines):
+        run = []
+        while index < len(lines) and (match := TYPED_LINE.match(lines[index])):
+            run.append(match.group(1) + match.group(2))
+            index += 1
+        out.extend(run)
+        index += len(run)
+        if not run and index < len(lines):
+            out.append(lines[index])
+            index += 1
+    return "\n".join(out)
 
 
 def strip_annotations(template):
@@ -174,8 +195,8 @@ def generate_package(args, domain, domain_templates, shared_templates):
             values = dict(draw(rng, param) for param in template.params)
             values["ID"] = identifier
             code = fill(template.code, values)
-            code_parts.append(code)
-            test_parts.append(fill(template.test, values))
+            code_parts.append(typed_program(code) if args.typed else code)
+            test_parts.append(fill(typed_program(template.test) if args.typed else template.test, values))
             namespace.update(fill(line, values) for line in template.ns)
             exports.extend(exported_names(code))
             used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", code + template.test))

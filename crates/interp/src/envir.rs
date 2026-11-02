@@ -1881,15 +1881,25 @@ unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
             if dots_env.kind() == SexpType::Environment {
                 let dots = find_var(symbols().dots, dots_env)?;
                 if dots.kind() == SexpType::Dots {
-                    for (dot_tag, dot_value) in values::pairlist_items(dots) {
-                        let code = if dot_value.kind() == SexpType::Promise {
-                            dot_value.cdr()
-                        } else {
-                            dot_value
+                    // GNU R's `subDots` names a symbol or call by its position, `..1`, so the
+                    // call still evaluates in the frame that holds the dots (`write.csv`
+                    // forwards its call with `eval.parent`). A constant stays as it is.
+                    for (index, (dot_tag, dot_value)) in
+                        values::pairlist_items(dots).into_iter().enumerate()
+                    {
+                        let mut code = dot_value;
+                        while code.kind() == SexpType::Promise {
+                            code = code.cdr();
+                        }
+                        let value = match code.kind() {
+                            SexpType::Symbol | SexpType::Language => {
+                                values::install_bytes(format!("..{}", index + 1).as_bytes())?
+                            }
+                            _ => code,
                         };
                         supplied.push(Arg {
                             tag: dot_tag,
-                            value: code,
+                            value,
                         });
                     }
                 }

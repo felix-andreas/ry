@@ -21,6 +21,7 @@ helper <- function() 1
 #++++
 source R/a.R
 bind helper from R/a.R:3:10
+affects callers value
 
 #---- a_deleted_function_is_removed
 #~~~~ before R/a.R
@@ -121,6 +122,7 @@ Class <- list(method = function() helper())
 #++++
 source R/a.R
 bind helper from R/a.R:1:10
+affects callers Class
 
 #---- a_deleted_statement_removes_what_only_it_bound
 #~~~~ before R/a.R
@@ -502,3 +504,20 @@ bind f from R/a.R:1:5
 load datasets data/prices.R data/rates.csv
 sync exports
 run .onLoad
+
+#==== callers
+#---- an_edit_reaches_the_functions_that_call_it_transitively
+#~~~~ before R/a.R
+helper <- function() 1
+middle <- function() helper() + 1
+outer <- function() middle() * 2
+unrelated <- function() 3
+#~~~~ after R/a.R
+helper <- function() 10
+middle <- function() helper() + 1
+outer <- function() middle() * 2
+unrelated <- function() 3
+#++++
+source R/a.R
+bind helper from R/a.R:1:10
+affects callers middle, outer

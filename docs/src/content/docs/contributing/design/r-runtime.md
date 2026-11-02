@@ -563,7 +563,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
   code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
-  only a few dozen times, which made the load slower.
+  only a few dozen times, which made the load slower. A fully typed closure, one with an inline
+  type on every formal, compiles on its first entry instead: the declared types seed the type
+  feedback of the instructions that have not run yet, and the guards on them stay. When even the
+  declared types leave an instruction's operand unknown (the result of an untyped builtin such as
+  `sum`, or `v[k]` with a formal `k`), the first-call compile is declined without counting against
+  the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -609,8 +614,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
-  call still enters through tier 0's call path and allocates a frame and forced promises), the use
-  of static types as early profiles, and freeing the machine code of invalidated bodies.
+  call still enters through tier 0's call path and allocates a frame and forced promises), result
+  types for builtins and for subscripts, which the early profiles of the next section need to cover
+  more than arithmetic on formals, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -619,7 +625,8 @@ treats them in two ways, depending on whether a guarantee exists:
 
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
-  call, so tier 1 can compile it on the first hot loop instead of after warmup. The guards stay.
+  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. Only
+  inline annotations reach the runtime; `#:` comments are invisible to it.
 - **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
   imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
   on purpose), so a strict package can still receive an imprecise value from typed code. ry
@@ -689,8 +696,9 @@ The rules the implementation settled:
   `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably
   pure constructor call lazy is not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
-  copies other development packages hold of a changed binding is not implemented; a session loads
-  one development package at a time without that cascade.
+  copies other development packages hold is done after every load: each loaded development package
+  whose `NAMESPACE` imports from the reloaded one runs its import directives again
+  (`.ry_update_importers` in `runtime.R`), which costs one pass over those directives.
 - **A reload is a diff over items.** A changed or new function is rebound and a deleted one removed.
   Statements in a changed file are matched to the file's old statements by content, in order, so an
   inserted statement runs alone while two swapped writers of a name rerun. A statement reruns when it
@@ -1008,10 +1016,9 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. Every oracle case in `crates/oracle/cases` but one matches GNU R 4.3.3
-   (`oracle compare --engine ry`). The exception, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
-   exit status and 26 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
+   The interpreter runs. Every oracle case in `crates/oracle/cases` matches GNU R 4.3.3
+   (`oracle compare --engine ry`). Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
+   exit status and 27 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
    `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.

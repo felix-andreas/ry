@@ -1,0 +1,179 @@
+[stdout]
+| [1]  4.160011187082528  2.999997346450021  0.599999283906177                Inf
+| [5] -0.800000432121806
+| 2 28 
+| calls 177 
+| [1] "probable coding error in analytic Hessian"
+| [1]  3.368057179571152 -0.834645234240100  0.701252238503863 -2.127009145766035
+| [5]  0.923914292830252
+| 4 100 
+| [1] "probable coding error in analytic gradient"
+| [1] "minimization function has no good digits in nlm"
+| [1]  3.98998332048084281 -0.99498600346244503  1.00000422781422560
+| [4] -0.00325996820649266  2.00151614623652696
+| 2 7 
+| [1]  1.84334762302418e+00  1.16487706844987e+00 -6.67157194768876e-09
+| 1 11 
+| [1] "invalid parameter length"
+| iteration = 0
+| Step:
+| [1] 0 0
+| Parameter:
+| [1] 0 0
+| Function Value
+| [1] 5
+| Gradient:
+| [1] -1.99999900019066 -3.99999899958203
+| 
+| iteration = 1
+| Step:
+| [1] 0.555555715996255 1.111111709548485
+| Parameter:
+| [1] 0.555555715996255 1.111111709548485
+| Function Value
+| [1] 1.08291309344952
+| Gradient:
+| [1] -0.203014065780494 -1.777775469771173
+| 
+| iteration = 2
+| Step:
+| [1] -0.0137090173380173  0.9507268892452987
+| Parameter:
+| [1] 0.541846698658238 2.061838598793784
+| Function Value
+| [1] 0.299928154329838
+| Gradient:
+| [1] -0.279963749294510  0.123679259448741
+| 
+| iteration = 3
+| Step:
+| [1]  0.1024733116489961 -0.0597110911178595
+| Parameter:
+| [1] 0.644320010307234 2.002127507675925
+| Function Value
+| [1] 0.298860872158756
+| Gradient:
+| [1] 0.35859687663730710 0.00425701747526897
+| 
+| iteration = 4
+| Step:
+| [1] -0.05841677160744252 -0.00678459800720499
+| Parameter:
+| [1] 0.585903238699791 1.995342909668720
+| Function Value
+| [1] 0.289340763186897
+| Gradient:
+| [1] -0.02366890239358099 -0.00931218529553805
+| 
+| iteration = 5
+| Step:
+| [1] 0.00359834858568886 0.00518193846596149
+| Parameter:
+| [1] 0.58950158728548 2.00052484813468
+| Function Value
+| [1] 0.289273896835043
+| Gradient:
+| [1] -0.00155795171208339  0.00105169679610785
+| 
+| iteration = 6
+| Step:
+| [1]  0.000267830671718539 -0.000556332604414678
+| Parameter:
+| [1] 0.589769417957199 1.999968515530266
+| Function Value
+| [1] 0.289273425614892
+| Gradient:
+| [1]  9.51119183412175e-05 -6.09689682074100e-05
+| 
+| iteration = 7
+| Parameter:
+| [1] 0.589754006736335 1.999998998345705
+| Function Value
+| [1] 0.28927342393957
+| Gradient:
+| [1] -3.43614026121486e-08 -3.30291515244941e-09
+| 
+| Relative gradient close to zero.
+| Current iterate is probably solution.
+| 
+| [1] 1
+| calls 18 [1] 0 1 1 0 0
+| 1 2 
+| calls 18 [1] 0 1 1 0 0
+| 1 2 
+| calls 6 [1] 0 1 1 0 0
+| 1 1 
+| warning: gradient supplied is of the wrong length or mode, so ignored 
+| calls 18 [1] 0 1 1 0 0
+| 1 2 
+| warning: gradient supplied is of the wrong length or mode, so ignored 
+| calls 18 [1] 0 1 1 0 0
+| 1 2 
+| calls 2 [1] "invalid function value in 'nlm' optimizer"
+| warning: NA/Inf replaced by maximum positive value 
+| calls 4 [1] "probable coding error in analytic gradient"
+| warning: NA/Inf replaced by maximum positive value 
+| calls 4 [1] "probable coding error in analytic gradient"
+| calls 4 [1] "probable coding error in analytic gradient"
+| warning: NAs introduced by coercion 
+| calls 4 [1]  2  0  0 NA NA
+| 1 0 
+| calls 3 [1] "invalid function value in 'nlm' optimizer"
+| warning: NA/Inf replaced by maximum positive value 
+| calls 4 [1] "probable coding error in analytic gradient"
+| warning: NA/Inf replaced by maximum positive value 
+| calls 4 [1] "probable coding error in analytic gradient"
+| calls 6 [1] 0 1 1 0 0
+| 1 1 
+| warning: NAs introduced by coercion 
+| calls 6 [1] 0 1 1 0 0
+| 1 1 
+| calls 18 [1] 0 1 1 0 0
+| 1 2 
+| warning: hessian supplied is of the wrong length or mode, so ignored 
+| calls 6 [1] 0 1 1 0 0
+| 1 1 
+| calls 5 [1]  2.46519032881566e-32  1.00000000000000e+00  1.00000000000000e+00
+| [4] -2.22044604925031e-16 -2.22044604925031e-16
+| 1 1 
+| calls 7 [1]  4.93038065763132e-32  1.00000000000000e+00  1.00000000000000e+00
+| [4]  1.00000000000000e+00  1.00000000000000e+00 -2.22044604925031e-16
+| [7] -2.22044604925031e-16 -2.22044604925031e-16 -2.22044604925031e-16
+| 1 1 
+| calls 9  [1]  6.16297582203915e-32  1.00000000000000e+00  1.00000000000000e+00
+|  [4]  1.00000000000000e+00  1.00000000000000e+00  1.00000000000000e+00
+|  [7] -2.22044604925031e-16 -2.22044604925031e-16 -2.22044604925031e-16
+| [10] -2.22044604925031e-16 -2.22044604925031e-16
+| 1 1 
+| calls 16  [1]  7.39557098644699e-32  1.00000000000000e+00  1.00000000000000e+00
+|  [4]  1.00000000000000e+00  1.00000000000000e+00  1.00000000000000e+00
+|  [7]  1.00000000000000e+00 -2.22044604925031e-16 -2.22044604925031e-16
+| [10] -2.22044604925031e-16 -2.22044604925031e-16 -2.22044604925031e-16
+| [13] -2.22044604925031e-16
+| 1 1 
+| [1] "missing value in parameter"
+| [1] 9.99999999794159e-01 9.36112408670697e-05 3.00000000000000e+00
+| [1] 9.33192798731132e-01 1.08798852262518e-07 4.00000000000000e+00
+| [1] 3.14159265302791e+00 2.65149992615399e-05 1.00000000000000e+01
+| [1] -1.00000000000000e+00  1.11022302462516e-15  6.00000000000000e+00
+| [1] 9.99999999999979e+00 6.80344669490296e-13 6.00000000000000e+00
+| [1] -4.34299969543978e-16  2.15383266777280e-14  4.00000000000000e+00
+| [1] "maximum number of subdivisions reached"
+| [1] "maximum number of subdivisions reached"
+| [1] "invalid parameter values"
+| [1]  0  1  1  3  3  4  5  5 NA
+| [1]  0  0  1  1  3  3  4  5 NA
+| [1]  1  1  1  3  3  4  4  4 NA
+| [1]  1  1  1  1  3  3  4  4 NA
+| [1]  0  1  1  3  3  4  4  5 NA
+| [1]  0  1  1  1  3  3  4  5 NA
+| [1]  1  1  1  3  3  4  4  4 NA
+| [1]  1  1  1  1  3  3  4  4 NA
+| [1]  0  0  0  0  0  0  0  0 NA
+| [1]  1  1  1  0  0  0  0  0 NA
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(1L, 1L, 1L, 0L, 0L, 0L, 0L, 0L, NA)

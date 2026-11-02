@@ -232,8 +232,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("digamma", 1, |call| unsafe { math1(call, Math::Digamma) }).generic(Generic::Math),
     builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) }).generic(Generic::Math),
     builtin("log", -1, do_log).generic(Generic::Math),
-    builtin("round", -1, |call| unsafe { round_like(call, false) }).generic(Generic::Math),
-    builtin("signif", -1, |call| unsafe { round_like(call, true) }).generic(Generic::Math),
+    builtin("round", -1, |call| unsafe { round_like(call, false) })
+        .generic(Generic::Math)
+        .keep_missing(),
+    builtin("signif", -1, |call| unsafe { round_like(call, true) })
+        .generic(Generic::Math)
+        .keep_missing(),
     builtin("cumsum", 1, |call| unsafe {
         cumulative(call, Cumulative::Sum)
     })
@@ -458,7 +462,6 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     Ok(result)
 }
 
-/// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`.
 /// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`, plus `checkNA` from R 4.4 on,
 /// which only lets GNU R skip its NA scan, so the answer does not depend on it.
 unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
@@ -467,43 +470,52 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
     let rightmost_closed = values::as_logical_scalar(call.arg(2)) == 1;
     let all_inside = values::as_logical_scalar(call.arg(3)) == 1;
     let left_open = values::as_logical_scalar(call.arg(4)) == 1;
-    let count = breaks.len();
     let result = alloc(SexpType::Integer, length(points))?;
     for index in 0..length(points) {
         let value = values::reals(points)[index];
-        if value.is_nan() {
-            values::ints_mut(result)[index] = NA_INTEGER;
-            continue;
-        }
-        let mut interval = if left_open {
-            breaks
-                .iter()
-                .filter(|&&breakpoint| breakpoint < value)
-                .count()
+        values::ints_mut(result)[index] = if value.is_nan() {
+            NA_INTEGER
         } else {
-            breaks
-                .iter()
-                .filter(|&&breakpoint| breakpoint <= value)
-                .count()
-        } as i32;
-        if rightmost_closed && count > 0 {
-            if !left_open && value == breaks[count - 1] {
-                interval = count as i32 - 1;
-            } else if left_open && value == breaks[0] {
-                interval = 1;
-            }
-        }
-        // An empty `vec` has no inside, so every point stays in interval 0.
-        if all_inside && count > 0 {
-            if interval == 0 {
-                interval = 1;
-            } else if interval == count as i32 {
-                interval = count as i32 - 1;
-            }
-        }
-        values::ints_mut(result)[index] = interval;
+            find_interval(&breaks, value, rightmost_closed, all_inside, left_open).0
+        };
     }
     Ok(result)
+}
+
+/// The interval of the sorted `knots` holding `x`, shared with the C API's `findInterval2`:
+/// the number of knots at or below `x`, or strictly below it when `left_open`, so 0 means left
+/// of the knots and `knots.len()` right of them. `rightmost_closed` moves `x` equal to the
+/// last knot (the first when `left_open`) into the last (first) interval, and `all_inside`
+/// clamps to 1 and `len - 1`. The second value is `mflag`: -1 left of the knots, 1 right of
+/// them and 0 inside, before any clamping. An empty `knots` has no inside, so every point
+/// stays in interval 0.
+pub fn find_interval(
+    knots: &[f64],
+    x: f64,
+    rightmost_closed: bool,
+    all_inside: bool,
+    left_open: bool,
+) -> (i32, i32) {
+    let n = knots.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let (first, last) = (knots[0], knots[n - 1]);
+    let count = if left_open {
+        knots.partition_point(|&knot| knot < x)
+    } else {
+        knots.partition_point(|&knot| knot <= x)
+    } as i32;
+    let n = n as i32;
+    if count == 0 {
+        let inside = all_inside || (left_open && rightmost_closed && x == first);
+        return (inside as i32, -1);
+    }
+    if count == n {
+        let inside = all_inside || (!left_open && rightmost_closed && x == last);
+        return (if inside { n - 1 } else { n }, 1);
+    }
+    (count, 0)
 }
 
 /// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias, f.min), eps.correct, bounds)`:
@@ -2717,7 +2729,9 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             result
         }
-        (SexpType::String, _) => {
+        // GNU R coerces anything but integers and complexes to double first, so a list of
+        // numbers (`cumprod(lapply(x, length))`) works.
+        (SexpType::String | SexpType::List, _) => {
             let converted = coerce_vector(operand, SexpType::Real)?;
             let args = [Arg {
                 tag: nil(),
@@ -2875,29 +2889,34 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             scalar_integer(total as i32)
         }
         Summary::Product => {
-            // The same NaN order as the sum: first wins within an argument, NA across them.
-            let mut total = 1.0;
-            let mut na = false;
+            // Each argument's product accumulates in x87 long double, as GNU R's does, and the
+            // arguments' products then multiply as doubles. The first NaN wins, within an
+            // argument and across them, so `prod(NaN, NA)` is NaN.
+            let mut total: f64 = 1.0;
             for &item in &items {
-                let mut item_product: f64 = 1.0;
+                let mut product = LongDouble::from(1.0);
+                let mut nan = None;
                 for index in 0..length(item) {
                     let value = real_at(item, index);
                     if na_rm && value.is_nan() {
                         continue;
                     }
-                    if item_product.is_nan() {
+                    if value.is_nan() {
+                        nan = Some(value);
                         break;
                     }
-                    item_product = if value.is_nan() {
-                        value
+                    product = product * LongDouble::from(value);
+                }
+                let item_product = nan.unwrap_or_else(|| product.to_f64());
+                if !total.is_nan() {
+                    total = if item_product.is_nan() {
+                        item_product
                     } else {
-                        item_product * value
+                        total * item_product
                     };
                 }
-                na |= is_na_real(item_product);
-                total *= item_product;
             }
-            scalar_real(if na { NA_REAL } else { total })
+            scalar_real(total)
         }
         Summary::Max | Summary::Min => {
             let is_max = function == Summary::Max;

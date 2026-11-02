@@ -4,7 +4,8 @@
 //! plain `#~~~~ <path>` file is the same on both sides. `R/` files run in the order
 //! `DESCRIPTION`'s collation field and R's file order give them, and a `data/` file is a dataset
 //! whose fingerprint is its text. A case whose files are all plain renders the plan of a fresh
-//! load instead.
+//! load instead. A reload also lists the definitions that reach a touched name through their
+//! calls, which `ry test --watch` reruns the tests of first.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use {
@@ -83,7 +84,19 @@ fn render(source: &str) -> String {
     let plan = loader
         .plan_inputs(root, after, false)
         .expect("the after side plans");
-    render_plan(&plan, &after_texts)
+    let mut output = render_plan(&plan, &after_texts);
+    if let Some(touched) = plan.touched_names() {
+        loader.commit(root);
+        let callers: Vec<String> = loader
+            .callers(root, &touched)
+            .into_iter()
+            .filter(|name| !touched.contains(name))
+            .collect();
+        if !callers.is_empty() {
+            output.push_str(&format!("affects callers {}\n", callers.join(", ")));
+        }
+    }
+    output
 }
 
 fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {

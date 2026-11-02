@@ -60,7 +60,11 @@ fn tolerance(name: &str, arguments: &[f64], expected: f64) -> (f64, f64) {
         "ptukey" => (5e-13, 1e-16),
         // GNU R 4.3 computes the Poisson density with the extended deviance ebd0; ry uses
         // Loader's bd0, which agrees to about 1e-14 at moderate arguments.
-        "dpois" | "dpois_raw" | "dgamma" | "dchisq" | "dnbinom_mu" | "dnchisq" => (2e-13, 0.0),
+        "dpois" | "dpois_raw" | "dgamma" | "dchisq" | "dnbinom_mu" => (2e-13, 0.0),
+        // GNU R stops its noncentral chi-squared density sum once a term falls below 5e-15
+        // absolute, so in the tails, where the whole density is that small, it can be off by a
+        // large factor (checked with mpmath); ry sums to rounding relative to the density.
+        "dnchisq" => (2e-13, 5e-15),
         // A probability p far below one is the exponential of an exponent near ln p, and
         // the rounding of that exponent alone moves the result by about |ln p| units in the
         // last place, in GNU R as in ry. (On the log scale of the complement, the result is
@@ -93,6 +97,12 @@ fn tolerance(name: &str, arguments: &[f64], expected: f64) -> (f64, f64) {
         // qbeta solves pbeta(x) = p by its own Newton iteration rather than GNU R's AS 109
         // based one; both converge to the root up to pbeta's rounding.
         "qbeta" => (1e-12, 0.0),
+        // Near zero the gamma distribution function grows like x^shape, so a quantile carries
+        // 1/shape times the relative error of pgamma, whose last bits differ between GNU R and
+        // ry for small shapes.
+        "qgamma" if arguments[1] > 0.0 && arguments[1] < 1.0 => {
+            (1e-13f64.max(2e-15 / arguments[1]), 0.0)
+        }
         // qf = (1/qbeta - 1) df2/df1 magnifies the last-place choice of a qbeta near one by
         // df2/df1 (1 + qf df1/df2)^2.
         "qf" => {
@@ -192,9 +202,13 @@ fn agrees(expected: f64, actual: f64, arguments: &[f64], (relative, absolute): (
 
 /// The functions whose upper tail GNU R computes as one minus a long double sum: on the log
 /// scale its rounding shows as large relative differences, so they are compared as
-/// probabilities.
+/// probabilities. GNU R's noncentral chi-squared density (and the noncentral F density with an
+/// infinite denominator, which is built on it) is only good to an absolute 5e-15, as above.
 fn compare_as_probability(name: &str) -> bool {
-    matches!(name, "pnt" | "dnt" | "pnchisq" | "pnf" | "pnbeta")
+    matches!(
+        name,
+        "pnt" | "dnt" | "pnchisq" | "pnf" | "pnbeta" | "dnchisq" | "dnf"
+    )
 }
 
 fn data_dir() -> PathBuf {
