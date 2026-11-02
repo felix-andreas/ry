@@ -7,14 +7,14 @@ alias Prices@ID@ = data.table{symbol: character[], date: Date, price: double[]}
 fetch_prices_@ID@ <- function(symbols: character[], start: Date, end: Date, source: (fn(symbols: character[], start: Date, end: Date) -> Prices@ID@) | NULL = NULL) -> Prices@ID@ {
   if (is.null(source)) {
     connection <- Rblpapi::blpConnect()
-    source <- function(symbols, start, end) Rblpapi::bdh(symbols, "PX_LAST", start, end, con = connection)
+    source <- function(symbols: character[], start: Date, end: Date) -> Prices@ID@ Rblpapi::bdh(symbols, "PX_LAST", start, end, con = connection)
   }
   source(symbols, start, end)
 }
 
 synthetic_source_@ID@ <- function(symbols: character[], start: Date, end: Date) -> Prices@ID@ {
   dates <- seq(start, end, by = "day")
-  out <- lapply(seq_along(symbols), function(i) {
+  out <- lapply(seq_along(symbols), function(i: integer) -> data.table {
     data.table::data.table(symbol = symbols[[i]], date = dates, price = 100 + i + seq_along(dates) * 0.1)
   })
   data.table::rbindlist(out)
