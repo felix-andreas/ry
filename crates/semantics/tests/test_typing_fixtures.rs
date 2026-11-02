@@ -313,7 +313,7 @@ fn top_level_fixtures() {
 fn render_with_inline_annotations_off(source: &str) -> String {
     let db = RootDatabase::default();
     install_shipped_stubs(&db);
-    AnalysisSettings::new(&db, false);
+    AnalysisSettings::new(&db, false, true);
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
     render_file(&db, file)

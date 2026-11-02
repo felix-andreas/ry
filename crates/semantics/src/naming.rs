@@ -16,6 +16,7 @@ use {
         mem,
     },
     syntax::TextRange,
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,8 +67,8 @@ pub struct ItemNaming {
     pub deferred_quiet_reads: SortedSet<ExprId>,
     /// `%op%` names read as operators; by name because the operator is a token, not a `NameRef`.
     pub quiet_operator_reads: SortedSet<Symbol>,
-    pub unused_assignments: Box<[UnusedAssignment]>,
-    pub unused_parameters: Box<[UnusedAssignment]>,
+    pub unused_assignments: ThinVec<UnusedAssignment>,
+    pub unused_parameters: ThinVec<UnusedAssignment>,
     /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
     pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
@@ -87,9 +88,9 @@ pub struct ItemNaming {
     pub super_globals: SortedSet<Symbol>,
     /// Targets R parses but refuses at run time (a computed value or a number); reads inside
     /// them are suppressed as consequences of the mistake.
-    pub invalid_assignment_targets: Box<[InvalidAssignmentTarget]>,
+    pub invalid_assignment_targets: ThinVec<InvalidAssignmentTarget>,
     /// Alternatives of a `p | q` pattern that leave out a name another alternative binds.
-    pub or_pattern_mismatches: Box<[OrPatternMismatch]>,
+    pub or_pattern_mismatches: ThinVec<OrPatternMismatch>,
     /// Call heads that resolved to a slot. R looks a called name up as a function, skipping
     /// every binding that does not hold one, so the checker may fall through to these.
     pub callee_fallbacks: SortedMap<ExprId, CalleeFallback>,
@@ -144,8 +145,8 @@ impl NamingDraft {
             quiet_reads: self.quiet_reads.into(),
             deferred_quiet_reads: self.deferred_quiet_reads.into(),
             quiet_operator_reads: self.quiet_operator_reads.into(),
-            unused_assignments: self.unused_assignments.into_boxed_slice(),
-            unused_parameters: self.unused_parameters.into_boxed_slice(),
+            unused_assignments: ThinVec::from(self.unused_assignments),
+            unused_parameters: ThinVec::from(self.unused_parameters),
             used_top_level_names: self.used_top_level_names.into(),
             captured_slots: self.captured_slots.into(),
             masked_subsets: self.masked_subsets.into(),
@@ -153,8 +154,8 @@ impl NamingDraft {
             run_time_writes: self.run_time_writes.into(),
             namespace_reads: self.namespace_reads.into(),
             super_globals: self.super_globals.into(),
-            invalid_assignment_targets: self.invalid_assignment_targets.into_boxed_slice(),
-            or_pattern_mismatches: self.or_pattern_mismatches.into_boxed_slice(),
+            invalid_assignment_targets: ThinVec::from(self.invalid_assignment_targets),
+            or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
             callee_fallbacks: self.callee_fallbacks.into(),
             native_routine_reads: self.native_routine_reads.into(),
         }

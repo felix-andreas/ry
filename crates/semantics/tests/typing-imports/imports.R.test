@@ -422,3 +422,14 @@ superclasses: <T> fn(name: T) -> character[]
 is_child: <T> fn(name: T) -> logical
 not_a_flag: Unknown
 166..179 error[type-mismatch] expected `logical`, found `character[]`
+
+#---- a_purrr_formula_lambda_is_accepted
+library(purrr)
+total <- reduce(list(1, 2, 3), ~ .x + .y)
+walk(1:3, ~ print(.x))
+safe_log <- safely(~ log(.x))
+#++++
+Any
+total: Any
+integer[]
+safe_log: fn(...: Any) -> list{result: Any, error: Any}

@@ -28,6 +28,7 @@ use {
         ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr,
         Series,
     },
+    polars_core::runtime::THREAD_POOL,
     std::{fmt, sync::Arc},
 };
 
@@ -485,6 +486,16 @@ impl Table {
         self.key = key;
         self
     }
+}
+
+/// Runs `task` once on every thread the engine computes on: each thread of Polars' pool and of
+/// rayon's global pool, which `convert` and `io` use directly. A caller hands its allocator's
+/// per-thread cleanup to this, because those threads allocate a query's columns, the R thread later
+/// frees them, and an allocator that defers a cross-thread free until the owning thread allocates
+/// again keeps that memory while the pools sit idle.
+pub fn on_every_worker(task: impl Fn() + Sync) {
+    THREAD_POOL.broadcast(|_| task());
+    rayon::broadcast(|_| task());
 }
 
 /// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for,

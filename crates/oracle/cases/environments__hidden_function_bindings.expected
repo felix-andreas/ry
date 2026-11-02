@@ -1,0 +1,23 @@
+[stdout]
+| [1] "global"
+| [1] "global"
+| [1] "global"
+| [1] "local"
+| [1] "global"
+| [1] "global"
+| [1] "global"
+| [1] "local"
+| [1] "global"
+| [1] "global"
+| [1] "global"
+| [1] "local"
+| [1] "global"
+| [1] "global"
+| [1] "global"
+| [1] "local"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -3,8 +3,8 @@
 
 use {
     crate::{
-        DataPath, Db,
-        annotations::{Annotation, NamedDefinition},
+        DataPath, Db, TypeDefinitions,
+        annotations::Annotation,
         data_file_layout,
         diagnostics::nearest_name,
         exhaustiveness::{MatchFinding, match_findings},
@@ -22,7 +22,9 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
+        sorted::{SortedMap, SortedSet},
         stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
+        top_level::super_assigned_names,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
             Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any,
@@ -38,6 +40,7 @@ use {
         sync::atomic::{AtomicUsize, Ordering},
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -309,31 +312,31 @@ pub struct ItemCheck<'db> {
     /// annotated binding, a call argument or a nominal constructor, so completion can offer
     /// the fields a literal still lacks. Nested literals record nothing: their expectation is
     /// the enclosing one's field or payload.
-    pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
+    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
     /// The element type each `for` loop binds its variable to, keyed by the loop. The
     /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
-    pub loop_variables: FxHashMap<ExprId, Ty<'db>>,
-    pub errors: Vec<TypeError<'db>>,
-    pub strict_origins: Vec<StrictOrigin>,
+    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
+    pub errors: ThinVec<TypeError<'db>>,
+    pub strict_origins: ThinVec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
     /// Index into the declared overload set; absent when no candidate matched.
-    pub selected_overloads: FxHashMap<ExprId, usize>,
+    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
-    pub masked_reads: FxHashSet<ExprId>,
+    pub masked_reads: SortedSet<ExprId>,
     /// Bare names inside a query on a frame with known columns that name no column and
     /// no lexical binding. Reported only when nothing else (a global, a builtin) defines
     /// the name, because R falls back to the enclosing scope for a non-column.
-    pub column_misses: FxHashMap<ExprId, ColumnMiss>,
+    pub column_misses: SortedMap<ExprId, ColumnMiss>,
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
-    pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+    pub top_level_bindings: ThinVec<(Symbol, TypeScheme<'db>)>,
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
-    pub match_findings: Vec<MatchFinding>,
+    pub match_findings: ThinVec<MatchFinding>,
     /// Call heads whose lookup skipped the binding naming resolved, because that binding
     /// cannot hold a function. Editor features navigate to the binding the call reaches.
-    pub callee_targets: FxHashMap<ExprId, CalleeTarget>,
+    pub callee_targets: SortedMap<ExprId, CalleeTarget>,
 }
 
 /// A DataFrame function whose result the checker computes from its arguments.
@@ -410,15 +413,68 @@ pub enum CalleeTarget {
     Library,
 }
 
-/// Settled type of every expression the checker recorded, indexed by expression id.
-/// Ids are dense within an item, so a slot per expression costs one word where a hash
-/// entry costs several.
+/// Settled type of every expression the checker recorded, indexed by expression id. Ids are
+/// dense within an item, so each expression has a slot. An item uses few distinct types, so a
+/// slot holds a narrow index into the item's palette of them rather than a pointer: this is
+/// the most numerous memoized table, and the narrow slots make it a quarter of the size.
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
-pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
+pub struct ExpressionTypes<'db> {
+    palette: ThinVec<Ty<'db>>,
+    slots: PaletteSlots,
+}
+
+/// One past the palette index, so zero is an expression with no recorded type.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+enum PaletteSlots {
+    Narrow(ThinVec<u16>),
+    /// For an item with more distinct types than a `u16` can count.
+    Wide(ThinVec<u32>),
+}
+
+impl Default for PaletteSlots {
+    fn default() -> Self {
+        PaletteSlots::Narrow(ThinVec::new())
+    }
+}
 
 impl<'db> ExpressionTypes<'db> {
     pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
-        self.0.get(id.index())?.as_ref()
+        let slot = match &self.slots {
+            PaletteSlots::Narrow(slots) => u32::from(*slots.get(id.index())?),
+            PaletteSlots::Wide(slots) => *slots.get(id.index())?,
+        };
+        self.palette
+            .get(usize::try_from(slot).ok()?.checked_sub(1)?)
+    }
+}
+
+impl<'db> FromIterator<Option<Ty<'db>>> for ExpressionTypes<'db> {
+    fn from_iter<I: IntoIterator<Item = Option<Ty<'db>>>>(types: I) -> Self {
+        let mut palette = Vec::new();
+        let mut positions: FxHashMap<Ty<'db>, u32> = FxHashMap::default();
+        let slots: Vec<u32> = types
+            .into_iter()
+            .map(|ty| {
+                ty.map_or(0, |ty| {
+                    *positions.entry(ty).or_insert_with(|| {
+                        palette.push(ty);
+                        u32::try_from(palette.len()).unwrap_or(u32::MAX)
+                    })
+                })
+            })
+            .collect();
+        let slots = match slots
+            .iter()
+            .map(|&slot| u16::try_from(slot))
+            .collect::<Result<ThinVec<u16>, _>>()
+        {
+            Ok(narrow) => PaletteSlots::Narrow(narrow),
+            Err(_) => PaletteSlots::Wide(ThinVec::from(slots)),
+        };
+        ExpressionTypes {
+            palette: ThinVec::from(palette),
+            slots,
+        }
     }
 }
 
@@ -440,7 +496,7 @@ impl<'db> RecordedTypes<'db> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
-pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
+pub struct PatternTypes<'db>(ThinVec<Option<Ty<'db>>>);
 
 impl<'db> PatternTypes<'db> {
     pub fn get(&self, id: PatId) -> Option<Ty<'db>> {
@@ -512,7 +568,7 @@ pub trait GlobalEnv<'db> {
 
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
-    fn type_definitions(&self) -> &'db FxHashMap<Name<'db>, NamedDefinition<'db>>;
+    fn type_definitions(&self) -> TypeDefinitions;
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
 
@@ -535,6 +591,7 @@ pub fn check_item_with_annotation<'db>(
     annotation: Option<&Annotation<'db>>,
     expression_annotations: &[(ExprId, Annotation<'db>)],
     globals: Option<&dyn GlobalEnv<'db>>,
+    record_strict_origins: bool,
 ) -> ItemCheck<'db> {
     CHECK_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let mut table = InferenceTable::default();
@@ -566,6 +623,7 @@ pub fn check_item_with_annotation<'db>(
         column_misses: FxHashMap::default(),
         query_depth: 0,
         errors: Vec::new(),
+        record_strict_origins,
         strict_origins: Vec::new(),
         overload_probe_depth: 0,
         return_frames: Vec::new(),
@@ -583,6 +641,7 @@ pub fn check_item_with_annotation<'db>(
         computed_slots: FxHashSet::default(),
         lookup_slots: FxHashSet::default(),
         valued_slots: FxHashSet::default(),
+        super_assigned: super_assigned_names(module),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -714,19 +773,17 @@ pub fn check_item_with_annotation<'db>(
         }
     }
     let recorded = mem::take(&mut context.recorded.0);
-    let expression_types = ExpressionTypes(
-        recorded
-            .into_iter()
-            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
-            .collect(),
-    );
+    let expression_types: ExpressionTypes = recorded
+        .into_iter()
+        .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+        .collect();
     let mut pattern_types = vec![None; module.pattern_count()];
     for (&id, &ty) in &context.recorded_patterns {
         if let Some(slot) = pattern_types.get_mut(id.index()) {
             *slot = Some(context.table.resolve(context.db, ty));
         }
     }
-    let pattern_types = PatternTypes(pattern_types.into_boxed_slice());
+    let pattern_types = PatternTypes(ThinVec::from(pattern_types));
     let literal_expectations = context
         .recorded_expectations
         .iter()
@@ -772,19 +829,19 @@ pub fn check_item_with_annotation<'db>(
     }
     let match_findings = match_findings(db, context.table.definitions, module, &expression_types);
     ItemCheck {
-        match_findings,
+        match_findings: ThinVec::from(match_findings),
         expression_types,
         pattern_types,
         literal_expectations,
         loop_variables,
-        errors,
-        strict_origins: context.strict_origins,
+        errors: ThinVec::from(errors),
+        strict_origins: ThinVec::from(context.strict_origins),
         scheme,
-        selected_overloads: context.selected_overloads,
-        callee_targets: context.callee_targets,
-        masked_reads: context.masked_reads,
-        column_misses: context.column_misses,
-        top_level_bindings,
+        selected_overloads: context.selected_overloads.into_iter().collect(),
+        callee_targets: context.callee_targets.into_iter().collect(),
+        masked_reads: context.masked_reads.into_iter().collect(),
+        column_misses: context.column_misses.into_iter().collect(),
+        top_level_bindings: ThinVec::from(top_level_bindings),
     }
 }
 
@@ -1002,6 +1059,8 @@ struct Checker<'db, 'a> {
     /// that is no column still reads its global.
     query_depth: u32,
     errors: Vec<TypeError<'db>>,
+    /// Off outside strict files, where nothing reports the origins.
+    record_strict_origins: bool,
     strict_origins: Vec<StrictOrigin>,
     /// Non-zero while probing an overload candidate: the literal-as-integer courtesy is
     /// off so it cannot decide the winner (exact matches outrank conversions).
@@ -1050,6 +1109,8 @@ struct Checker<'db, 'a> {
     /// Slots that some write so far gave a type other than `NULL`, so a `NULL` read from them
     /// is a path the code takes rather than a placeholder.
     valued_slots: FxHashSet<BindingId>,
+    /// The item's `<<-` target names, sorted.
+    super_assigned: Vec<Symbol>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -1836,6 +1897,9 @@ impl<'db> Checker<'db, '_> {
 
     /// Idempotent: loop re-walks and re-passes must not duplicate an origin.
     fn record_strict_origin(&mut self, expression: ExprId, kind: StrictOriginKind) {
+        if !self.record_strict_origins {
+            return;
+        }
         let range = self.module.range(expression);
         let origin = StrictOrigin {
             expression,
@@ -1947,7 +2011,7 @@ impl<'db> Checker<'db, '_> {
         let declared = self
             .table
             .definitions
-            .and_then(|definitions| definitions.get(name));
+            .and_then(|definitions| definitions.get(self.db, *name));
         let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
         if declared.is_some() && declared == from_stubs {
             return false;
@@ -2706,6 +2770,9 @@ impl<'db> Checker<'db, '_> {
         parameters: &[(&Formal, Option<Ty<'db>>)],
         ret: Ty<'db>,
     ) {
+        if !self.record_strict_origins {
+            return;
+        }
         let db = self.db;
         let level = self.table.level;
         let mut mentioned: FxHashMap<InferenceVar, usize> = FxHashMap::default();
@@ -2810,6 +2877,25 @@ impl<'db> Checker<'db, '_> {
             return refined;
         }
         let naming = self.naming;
+        let deferred = naming.deferred_non_locals.contains(&id);
+        // The item writes this name with `<<-`, so the binding it reads is the one it keeps
+        // updating (a Reference Class field, a closure's state), not a shipped function that
+        // happens to share the name, such as `t`.
+        if let Some(name) = naming.non_locals.get(&id)
+            && self
+                .super_assigned
+                .binary_search_by_key(&name.as_str(), |written| written.as_str())
+                .is_ok()
+            && !self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+        {
+            self.record_strict_origin(
+                id,
+                StrictOriginKind::UndeterminedReference(name.to_string()),
+            );
+            return unknown(self.db);
+        }
         if let Some(name) = naming.non_locals.get(&id)
             && let Some(scheme) = self
                 .globals
@@ -2818,7 +2904,6 @@ impl<'db> Checker<'db, '_> {
             let instantiated = self.instantiate(&scheme);
             // A project-defined name owns its `Unknown` at its defining site, so reading it
             // propagates rather than re-originating.
-            let deferred = self.naming.deferred_non_locals.contains(&id);
             if matches!(
                 self.table.resolve(self.db, instantiated).kind(self.db),
                 TyKind::Unknown
@@ -5444,12 +5529,29 @@ impl<'db> Checker<'db, '_> {
                 }
             }
             UnaryOperator::Not => self.infer_unary_not(operand),
-            UnaryOperator::Plus | UnaryOperator::Tilde | UnaryOperator::Help => {
+            UnaryOperator::Tilde => self.infer_formula(&[operand]),
+            UnaryOperator::Plus | UnaryOperator::Help => {
                 self.infer(operand);
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
             }
         }
+    }
+
+    /// A formula quotes its operands, which name model variables rather than bindings in scope,
+    /// so they infer for the IDE but nothing inside is judged.
+    fn infer_formula(&mut self, operands: &[ExprId]) -> Ty<'db> {
+        let errors_mark = self.errors.len();
+        let origins_mark = self.strict_origins.len();
+        for &operand in operands {
+            self.infer(operand);
+        }
+        self.errors.truncate(errors_mark);
+        self.strict_origins.truncate(origins_mark);
+        Ty::new(
+            self.db,
+            TyKind::Named(Name::new(self.db, "formula"), Vec::new()),
+        )
     }
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
@@ -5761,7 +5863,8 @@ impl<'db> Checker<'db, '_> {
             // discarded because nothing inside the construct is judged. Elementwise `&` and `|`
             // over logical or numeric operands are typed; any other operand (raw, a classed
             // object with its own method) leaves them opaque.
-            And | Or | Special | Pipe | Tilde | Help => {
+            Tilde => self.infer_formula(&[lhs, rhs]),
+            And | Or | Special | Pipe | Help => {
                 let errors_mark = self.errors.len();
                 let origins_mark = self.strict_origins.len();
                 let left = self.infer(lhs);
@@ -7201,11 +7304,69 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let ty = self.infer_ordinary_call(id, range, callee, arguments);
+        if let Some(sequence) = self.integer_seq(callee, arguments, ty) {
+            return self.record(id, sequence);
+        }
         if let Some(verb) = self.dataframe_verb(callee) {
             return self.refine_dataframe_call(verb, arguments).unwrap_or(ty);
         }
         let function = self.table_function(callee);
         self.refine_table_call(id, function, arguments, ty)
+    }
+
+    /// Base `seq` without `by` or a length is R's `from:to`, an integer vector whenever
+    /// `from` is a whole number, and `seq(x)` alone is `seq_len` or `seq_along`, always
+    /// integer. The stub's numeric candidates cannot tell `1` from `1.5`, so they say
+    /// `double[]`; this refines that answer from the arguments as written.
+    fn integer_seq(&self, callee: ExprId, arguments: &[Argument], ty: Ty<'db>) -> Option<Ty<'db>> {
+        let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
+            return None;
+        };
+        let deferred = self.naming.deferred_non_locals.contains(&callee);
+        if name.as_str() != "seq"
+            || self.naming.resolutions.contains_key(&callee)
+            || self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project("seq", deferred))
+        {
+            return None;
+        }
+        let resolved = self.table.resolve(self.db, ty);
+        let numeric_sequence = matches!(
+            resolved.kind(self.db),
+            TyKind::Vector(element)
+                if matches!(element.kind(self.db), TyKind::Scalar(Atomic::Double | Atomic::Integer))
+        );
+        if !numeric_sequence {
+            return None;
+        }
+        let mut from = None;
+        let mut positional = 0usize;
+        for argument in arguments {
+            match self.module.argument_name(argument).as_deref() {
+                None if positional == 0 => {
+                    from = argument.value;
+                    positional += 1;
+                }
+                None if positional == 1 => positional += 1,
+                Some("from") => from = argument.value,
+                Some("to") => {}
+                _ => return None,
+            }
+        }
+        let from = from?;
+        let whole = self.is_whole_double(from)
+            || self.recorded.get(&from).is_some_and(|&from_ty| {
+                matches!(
+                    self.table.resolve(self.db, from_ty).kind(self.db),
+                    TyKind::Scalar(Atomic::Integer)
+                )
+            });
+        let alone = arguments.len() == 1
+            && arguments
+                .first()
+                .is_some_and(|argument| argument.name.is_none());
+        (whole || alone).then(|| self.shaped(OperandShape::Vector, Atomic::Integer))
     }
 
     fn infer_ordinary_call(
@@ -7274,6 +7435,13 @@ impl<'db> Checker<'db, '_> {
         // A literal-`Any` callee is the escape hatch for stubs with no expressible
         // signature: the call is uncheckable, so findings inside its arguments are discarded.
         let resolved_callee = self.table.shallow_resolve(self.db, callee_ty);
+        // A parameter or variable the author declared `Any` is their own opt-out, so calling
+        // it opts out too; its arguments are still ordinary code and are checked.
+        if matches!(resolved_callee.kind(self.db), TyKind::Any) && self.names_declared_value(callee)
+        {
+            self.infer_call_arguments(range, arguments);
+            return any(self.db);
+        }
         if matches!(resolved_callee.kind(self.db), TyKind::Any) {
             let recorded_errors = self.errors.len();
             let recorded_origins = self.strict_origins.len();
@@ -9297,6 +9465,97 @@ impl<'db> Checker<'db, '_> {
         matches!(ty.kind(self.db), TyKind::List(_) | TyKind::NamedList(_))
     }
 
+    /// The caller variable an overload set hands back unchanged. `Filter`, `head` and
+    /// `unique` declare one candidate per shape, each returning the shape it accepted, so
+    /// on an open argument the candidates narrow it differently and no single guess is
+    /// right. When every specific fit returns exactly what it narrowed the same variable
+    /// to, the call returns that variable itself and leaves it open: the caller gets back
+    /// whatever it passes, a `data.frame` included. An all-`Any` catch-all is ignored.
+    fn preserved_caller_variable(
+        &self,
+        caller_entries: &[(InferenceVar, Entry<'db>)],
+        fits: &[(usize, bool, Vec<Ty<'db>>)],
+        fit_results: &[Ty<'db>],
+    ) -> Option<InferenceVar> {
+        if fit_results.len() != fits.len() {
+            return None;
+        }
+        let specific: Vec<(&Vec<Ty<'db>>, Ty<'db>)> = fits
+            .iter()
+            .zip(fit_results)
+            .filter(|(_, result)| !self.all_any(&[**result]))
+            .map(|((_, _, narrowing), result)| (narrowing, *result))
+            .collect();
+        let (first, _) = specific.first()?;
+        if specific.len() < 2 || specific.iter().all(|(narrowing, _)| narrowing == first) {
+            return None;
+        }
+        caller_entries
+            .iter()
+            .enumerate()
+            .find(|(position, (var, _))| {
+                specific.iter().all(|(narrowing, result)| {
+                    narrowing.get(*position).is_some_and(|narrowed| {
+                        narrowed == result
+                            && !matches!(narrowed.kind(self.db), TyKind::Var(other) if other == var)
+                    })
+                })
+            })
+            .map(|(_, (var, _))| *var)
+    }
+
+    /// A declared `<T>` passed to a shape-preserving overload set (see
+    /// `preserved_caller_variable`) fits none of its candidates, because a rigid parameter
+    /// refuses to narrow. Written back as an annotation, `<T> fn(values: T) -> T` for a
+    /// `Filter` wrapper must check the way its inferred form did, so the argument is probed
+    /// as an open variable, and the call returns `T` when the candidates preserve it.
+    fn preserved_rigid_argument(
+        &mut self,
+        callee: ExprId,
+        schemes: &[TypeScheme<'db>],
+        call_arguments: &[CallArgument<'db>],
+    ) -> Option<Ty<'db>> {
+        let position = call_arguments.iter().position(|argument| {
+            argument.ty.is_some_and(|ty| {
+                matches!(
+                    self.table.shallow_resolve(self.db, ty).kind(self.db),
+                    TyKind::Rigid(_)
+                )
+            })
+        })?;
+        let rigid = call_arguments.get(position)?.ty?;
+        let snapshot = self.table.snapshot();
+        let open = self.fresh(Constraint::Unconstrained);
+        let TyKind::Var(var) = *open.kind(self.db) else {
+            self.table.rollback(snapshot);
+            return None;
+        };
+        let mut probed = call_arguments.to_vec();
+        if let Some(argument) = probed.get_mut(position) {
+            argument.ty = Some(open);
+        }
+        let caller_entries = vec![(var, self.table.entry(var).clone())];
+        let mut fits = Vec::new();
+        let mut fit_results = Vec::new();
+        for (index, scheme) in schemes.iter().enumerate() {
+            let probe = self.table.snapshot();
+            if let Ok((_, function)) = self.probe_overload_candidate(callee, scheme, &probed, false)
+            {
+                fit_results.push(self.table.resolve(self.db, function.ret));
+                let narrowed = self.table.resolve(self.db, open);
+                fits.push((
+                    index,
+                    self.caller_variables_untouched(&caller_entries),
+                    vec![narrowed],
+                ));
+            }
+            self.table.rollback(probe);
+        }
+        let preserved = self.preserved_caller_variable(&caller_entries, &fits, &fit_results);
+        self.table.rollback(snapshot);
+        preserved.map(|_| rigid)
+    }
+
     fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
         entries
             .iter()
@@ -9465,6 +9724,8 @@ impl<'db> Checker<'db, '_> {
         let mut candidate_errors: Vec<TypeError<'db>> = Vec::new();
         // (candidate, left caller variables untouched, what it narrowed them to)
         let mut fits: Vec<(usize, bool, Vec<Ty<'db>>)> = Vec::new();
+        // Each fit's result, parallel to `fits` when the call narrows caller variables.
+        let mut fit_results: Vec<Ty<'db>> = Vec::new();
         let mut fitting_courtesy = false;
         for &courtesy in rounds {
             for (index, scheme) in schemes.iter().enumerate() {
@@ -9484,6 +9745,7 @@ impl<'db> Checker<'db, '_> {
                             return self.committed_overload_return(id, function.ret);
                         }
                         let free = self.caller_variables_untouched(&caller_entries);
+                        fit_results.push(self.table.resolve(self.db, function.ret));
                         let narrowing = caller_entries
                             .iter()
                             .map(|(var, _)| {
@@ -9509,6 +9771,11 @@ impl<'db> Checker<'db, '_> {
                 break;
             }
         }
+        if fits.is_empty()
+            && let Some(preserved) = self.preserved_rigid_argument(callee, schemes, call_arguments)
+        {
+            return preserved;
+        }
 
         // An overload set ends in a catch-all returning `Any` for calls it cannot describe, so
         // it fits every unchecked call too. A more specific fit refines it rather than
@@ -9530,16 +9797,54 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .any(|(_, _, results)| results.iter().any(|&result| !self.is_list_result(result)))
         {
+            // A declared `Any` is the author's opt-out, so the call it leaves ambiguous opts out
+            // too, as in mypy; only an argument whose type inference lost stays `Unknown`. A
+            // forwarded `...` counts as `Any`, the element type of a `...` formal.
+            if call_arguments.iter().all(|argument| {
+                argument.forwards_dots || argument.ty.is_none_or(|ty| !self.is_inferred_unknown(ty))
+            }) {
+                return any(self.db);
+            }
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
-        let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
-            let (_, _, first) = fits.first()?;
-            fits.iter()
-                .all(|(_, _, narrowing)| narrowing == first)
-                .then(|| fits.first())
-                .flatten()
-        });
+        if !unchecked_argument
+            && let Some(var) = self.preserved_caller_variable(&caller_entries, &fits, &fit_results)
+        {
+            return Ty::new(self.db, TyKind::Var(var));
+        }
+        let winner = fits
+            .iter()
+            .find(|(_, free, _)| *free)
+            .or_else(|| {
+                let (_, _, first) = fits.first()?;
+                fits.iter()
+                    .all(|(_, _, narrowing)| narrowing == first)
+                    .then(|| fits.first())
+                    .flatten()
+            })
+            .or_else(|| {
+                // A scalar narrowing wins over the same atom's vector, which accepts it:
+                // `grepl(p, x)` binds `p` to `character`, as its `character[]` candidate also
+                // takes that. Wider rules pick list shapes that later reads reject.
+                let db = self.db;
+                let scalar_of_vector = |actual: Ty<'db>, expected: Ty<'db>| {
+                    actual == expected
+                        || matches!(
+                            (actual.kind(db), expected.kind(db)),
+                            (TyKind::Scalar(atom), TyKind::Vector(element))
+                                if element.kind(db) == &TyKind::Scalar(*atom)
+                        )
+                };
+                fits.iter().find(|(_, _, narrowing)| {
+                    fits.iter().all(|(_, _, other)| {
+                        narrowing
+                            .iter()
+                            .zip(other)
+                            .all(|(&actual, &expected)| scalar_of_vector(actual, expected))
+                    })
+                })
+            });
         if winner.is_none()
             && let Some((_, _, first)) = fits.first()
         {
@@ -9650,18 +9955,30 @@ impl<'db> Checker<'db, '_> {
         unknown(self.db)
     }
 
+    /// Like `is_unchecked`, but only for `Unknown`: a type inference could not determine.
+    fn is_inferred_unknown(&mut self, ty: Ty<'db>) -> bool {
+        let element = self.unchecked_candidate(ty);
+        matches!(element.kind(self.db), TyKind::Unknown)
+    }
+
     /// `c(x, unknown)` is as unchecked as `unknown` itself: its element type fits every
     /// candidate too.
     fn is_unchecked(&mut self, ty: Ty<'db>) -> bool {
+        let element = self.unchecked_candidate(ty);
+        matches!(element.kind(self.db), TyKind::Unknown | TyKind::Any)
+    }
+
+    /// The type that decides whether `ty` is unchecked: itself, or the element of a vector or
+    /// list of it.
+    fn unchecked_candidate(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let resolved = self.table.shallow_resolve(self.db, ty);
-        let ty = match resolved.kind(self.db) {
+        match resolved.kind(self.db) {
             TyKind::Vector(element)
             | TyKind::NamedVector(element)
             | TyKind::List(element)
             | TyKind::NamedList(element) => self.table.shallow_resolve(self.db, *element),
             _ => resolved,
-        };
-        matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any)
+        }
     }
 
     /// Whether every specific fit still fits when each unchecked argument is replaced by a
@@ -11002,7 +11319,7 @@ impl<'db> Checker<'db, '_> {
         let Some(definition) = self
             .table
             .definitions
-            .and_then(|table| table.get(&name))
+            .and_then(|table| table.get(self.db, name))
             .cloned()
         else {
             return self.generalize(value_ty);
@@ -14042,7 +14359,7 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
 /// diamond is not a cycle. Nominal definitions may legitimately recurse.
 fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
-    definitions: &FxHashMap<Name<'db>, NamedDefinition<'db>>,
+    definitions: TypeDefinitions,
     ty: Ty<'db>,
     expanding: &mut FxHashSet<Name<'db>>,
 ) -> Option<String> {
@@ -14054,7 +14371,7 @@ fn alias_cycle_walk<'db>(
             {
                 return Some(found);
             }
-            let definition = definitions.get(name)?;
+            let definition = definitions.get(db, *name)?;
             if !definition.alias {
                 return None;
             }
@@ -14200,7 +14517,7 @@ mod tests {
             .expect("one top-level item");
         let module = lower_item(&item);
         let naming = resolve_item(&module, &FxHashMap::default());
-        check_item_with_annotation(db, &module, &naming, annotation.as_ref(), &[], None)
+        check_item_with_annotation(db, &module, &naming, annotation.as_ref(), &[], None, true)
     }
 
     #[test]

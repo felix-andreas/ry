@@ -87,8 +87,8 @@ f: fn() -> Any
 f <- function(x) unique(x, foo = TRUE)
 g <- function(x) head(x, n = 2, keepnums = FALSE)
 #++++
-f: <T> fn(x: T) -> Any
-g: <T> fn(x: T) -> Any
+f: <T> fn(x: T) -> T
+g: <T> fn(x: T) -> T
 
 #---- a_parameter_shadowing_an_unstubbed_base_function
 draw <- function(range, pretty = TRUE) {
@@ -386,7 +386,7 @@ flip <- function(phi, flag, m) {
   t(m)
 }
 #++++
-flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
+flip: <T, U> fn(phi: T, flag: logical, m: U) -> Any
 
 #---- a_condition_accepts_an_optional_logical
 pluck <- function(config, key) {
@@ -1572,7 +1572,7 @@ pick: fn(urls: Unknown) -> integer
 pick <- function() utils::menu(sum)
 #++++
 pick: Unknown
-31..34 error[type-mismatch] expected `character | character[] | list[character]`, found `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+31..34 error[type-mismatch] expected `character | character[] | list[Any]`, found `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
 
 #---- a_callback_called_with_the_arity_its_formals_report_is_not_an_arity_error
 new_source <- function(src, call, handler = NULL) {

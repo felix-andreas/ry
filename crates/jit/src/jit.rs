@@ -14,6 +14,7 @@
 
 mod analysis;
 mod codegen;
+mod native;
 mod runtime;
 
 use {
@@ -274,7 +275,8 @@ unsafe fn compile_in<'a>(
             slots: plan.slots.to_vec(),
             loops: plan.loops,
             speculations: plan.speculations.to_vec(),
-            epoch: Cell::new(heap().binding_epoch()),
+            // No epoch matches, so the first run checks the compiling activation's own frame.
+            epoch: Cell::new(u64::MAX),
             osr,
         });
         // Everything the machine code and the speculations point to stays reachable from the
@@ -316,7 +318,9 @@ unsafe fn compile_in<'a>(
 /// interpreter unchanged.
 unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -> Option<TierExit> {
     unsafe {
-        if !runtime::valid(compiled) {
+        // A loop entry resumes an activation whose frame may have bound a name before the
+        // compiler started watching it, which no epoch change records.
+        if !runtime::valid(compiled, machine.env, entry_pc != 0) {
             runtime::invalidate(machine.code);
             return None;
         }

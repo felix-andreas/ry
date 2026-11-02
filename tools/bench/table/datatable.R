@@ -2,10 +2,11 @@
 # `question  run  seconds  rows  cols  checksum`. Loading is not timed, as in db-benchmark, and
 # every question runs twice so the second run shows warm-cache behavior.
 #
-# Usage: Rscript datatable.R <data-dir>
+# Usage: Rscript datatable.R <data-dir> [groupby]   (`groupby` runs only the ten group-by questions)
 
 args <- commandArgs(trailingOnly = TRUE)
 dir <- args[[1]]
+groupby_only <- identical(args[2], "groupby")
 suppressMessages(library(data.table, lib.loc = Sys.getenv("RY_BENCH_RLIB", "~/R/library")))
 setDTthreads(0L)
 cat(sprintf("# data.table %s, %d threads\n", packageVersion("data.table"), getDTthreads()))
@@ -46,35 +47,37 @@ time_question("groupby q8", x[order(-v3), .(largest2_v3 = head(v3, 2L)), by = id
 time_question("groupby q9", x[, .(r2 = cor(v1, v2)^2), by = .(id2, id4)])
 time_question("groupby q10", x[, .(v3 = sum(v3), count = .N), by = id1:id6])
 
-# `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
-time_question("update full", {
-  for (step in 1:100) x[, v3 := v3 * 1.000001]
-  x[, .(v3 = sum(v3))]
-})
-time_question("update subset", {
-  for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
-  x[, .(v1 = sum(v1))]
-})
-time_question("update add", {
-  for (step in 1:100) x[, paste0("added", step) := v2 * step]
-  x[, .(added100 = sum(added100))]
-})
-rm(x)
-invisible(gc())
+if (!groupby_only) {
+  # `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
+  time_question("update full", {
+    for (step in 1:100) x[, v3 := v3 * 1.000001]
+    x[, .(v3 = sum(v3))]
+  })
+  time_question("update subset", {
+    for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
+    x[, .(v1 = sum(v1))]
+  })
+  time_question("update add", {
+    for (step in 1:100) x[, paste0("added", step) := v2 * step]
+    x[, .(added100 = sum(added100))]
+  })
+  rm(x)
+  invisible(gc())
 
-x <- read("join_x.csv")
-small <- read("join_small.csv")
-medium <- read("join_medium.csv")
-big <- read("join_big.csv")
-time_question("join q1", x[small, on = "id1", nomatch = NULL])
-time_question("join q2", x[medium, on = "id2", nomatch = NULL])
-time_question("join q3", medium[x, on = "id2"])
-time_question("join q4", x[medium, on = "id5", nomatch = NULL])
-time_question("join q5", x[big, on = "id3", nomatch = NULL])
-rm(x, small, medium, big)
-invisible(gc())
+  x <- read("join_x.csv")
+  small <- read("join_small.csv")
+  medium <- read("join_medium.csv")
+  big <- read("join_big.csv")
+  time_question("join q1", x[small, on = "id1", nomatch = NULL])
+  time_question("join q2", x[medium, on = "id2", nomatch = NULL])
+  time_question("join q3", medium[x, on = "id2"])
+  time_question("join q4", x[medium, on = "id5", nomatch = NULL])
+  time_question("join q5", x[big, on = "id3", nomatch = NULL])
+  rm(x, small, medium, big)
+  invisible(gc())
 
-prices <- fread(file.path(dir, "rolljoin_prices.csv"), showProgress = FALSE)
-trades <- fread(file.path(dir, "rolljoin_trades.csv"), showProgress = FALSE)
-setkey(prices, ticker, time)
-time_question("rolljoin keyed", prices[trades, on = .(ticker, time), roll = TRUE])
+  prices <- fread(file.path(dir, "rolljoin_prices.csv"), showProgress = FALSE)
+  trades <- fread(file.path(dir, "rolljoin_trades.csv"), showProgress = FALSE)
+  setkey(prices, ticker, time)
+  time_question("rolljoin keyed", prices[trades, on = .(ticker, time), roll = TRUE])
+}

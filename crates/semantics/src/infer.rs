@@ -4,14 +4,14 @@
 
 use {
     crate::{
-        Db,
+        Db, TypeDefinitions,
         annotations::NamedDefinition,
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
-            array_element, for_each_child_type, is_ry_value_type, map_child_types, scalar,
-            substitute_rigid, union_of, unknown,
+            array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
+            map_child_types, scalar, substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -55,7 +55,7 @@ pub struct InferenceTable<'db> {
     undo: Vec<(InferenceVar, Entry<'db>)>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
-    pub definitions: Option<&'db FxHashMap<Name<'db>, NamedDefinition<'db>>>,
+    pub definitions: Option<TypeDefinitions>,
     /// Includes project classes: operator dispatch resolves methods through the
     /// global scope, so the numeric constraint must consult the same set.
     pub arithmetic_classes: Option<&'db FxHashSet<String>>,
@@ -156,7 +156,7 @@ impl<'db> InferenceTable<'db> {
         if name.text(db) == UNCHECKED_WITNESS {
             return false;
         }
-        match self.definitions.and_then(|table| table.get(name)) {
+        match self.definitions.and_then(|table| table.get(db, *name)) {
             // Includes the bare use of a generic (`Box` for `Box<T>`).
             Some(definition) => definition.parameters.len() != arguments.len(),
             None => !stubs(db).is_some_and(|library| library.nominals.contains(name.text(db))),
@@ -221,6 +221,9 @@ impl<'db> InferenceTable<'db> {
             return resolved;
         }
 
+        if !ty.may_resolve() {
+            return (ty, true);
+        }
         if let Some(&hit) = self.resolve_cache.borrow().1.get(&ty) {
             return (hit, true);
         }
@@ -236,7 +239,7 @@ impl<'db> InferenceTable<'db> {
         let alias = match resolved.kind(db) {
             TyKind::Named(name, arguments) => self
                 .definitions
-                .and_then(|table| table.get(name))
+                .and_then(|table| table.get(db, *name))
                 .filter(|definition| definition.alias)
                 .map(|definition| (definition, arguments)),
             _ => None,
@@ -267,7 +270,7 @@ impl<'db> InferenceTable<'db> {
         name: Name<'db>,
         arguments: &[Ty<'db>],
     ) -> Option<Ty<'db>> {
-        let definition = self.definitions.and_then(|table| table.get(&name))?;
+        let definition = self.definitions.and_then(|table| table.get(db, name))?;
         if definition.alias || matches!(definition.body.kind(db), TyKind::Unknown) {
             return None;
         }
@@ -318,6 +321,9 @@ impl<'db> InferenceTable<'db> {
     /// Lowering levels keeps a generalization at an outer level from quantifying
     /// a variable still reachable from an inner one.
     pub(crate) fn adjust_levels(&mut self, db: &'db dyn Db, level: u32, ty: Ty<'db>) {
+        if !contains_inference_var(db, ty) {
+            return;
+        }
         let shallow = self.shallow_resolve(db, ty);
         if let TyKind::Var(var) = shallow.kind(db) {
             let representative = self.find(*var);
@@ -855,7 +861,7 @@ impl<'db> InferenceTable<'db> {
             {
                 let variances = self
                     .definitions
-                    .and_then(|table| table.get(actual_name))
+                    .and_then(|table| table.get(db, *actual_name))
                     .map(|definition| parameter_variances(db, definition))
                     .unwrap_or_default();
                 actual_arguments
@@ -1277,6 +1283,9 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
         visit: &mut impl FnMut(InferenceVar) -> bool,
     ) -> bool {
+        if !contains_inference_var(db, ty) {
+            return true;
+        }
         let shallow = self.shallow_resolve(db, ty);
         if let TyKind::Var(var) = shallow.kind(db) {
             return visit(*var);

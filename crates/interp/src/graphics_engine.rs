@@ -2777,7 +2777,8 @@ pub fn pretty_axis(low: &mut f64, high: &mut f64, divisions: &mut c_int) -> R<()
             crate::format::c_general(*high, 6, false)
         )));
     }
-    let rounded = crate::arith::pretty(*low, *high, *divisions, 1, 0.25, [0.8, 1.7], 2, false);
+    let rounded =
+        crate::arith::pretty(*low, *high, *divisions, 1, 0.25, [0.8, 1.7, 20.0], 2, false);
     let (mut start, mut end, unit) = (rounded.low, rounded.high, rounded.unit);
     *divisions = rounded.count;
     const ROUNDING: f64 = 1e-10;

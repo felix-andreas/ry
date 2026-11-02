@@ -151,6 +151,11 @@ on purpose.
 - **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
   the expected block, and the runner formats that output again to assert idempotence on every case.
   When the expected result is a refusal, the case renders the structured `FormatError`.
+- **`crates/format/tests/format-range`**: range formatting. The source marks the selection with
+  `$0` markers (two for a selection, one for a bare caret, none for the whole file), and the
+  expectation lists the edits by one-based position and shows the document they leave behind, with
+  each replacement between `«` and `»`. Run it with
+  `cargo test -p format --test test_format_range_fixtures`.
 - **`crates/ide/tests/ide`**: the editor features. The source carries one `$0` cursor marker, which
   is stripped before analysis, and the expectation renders each feature's answer at that position:
   the hover line with its absolute range, the definition's target range, and the reference ranges.
@@ -221,6 +226,20 @@ Comparing kinds alone would miss a miscompile: a stale or off-by-one source rang
 formatter emit the wrong bytes for an identifier, which renames a variable while preserving every
 kind. An injected bug of exactly that shape passed a kind-only comparison and fails the spelling
 comparison.
+
+Every generated input also runs the range battery, `check_range_format_invariants`, over a bounded
+spread of selections (the whole file, carets, whole lines, part-line spans, a range past the end).
+Range edits must be deterministic, refuse exactly when the whole file refuses, cover whole lines in
+order without overlapping, preserve the code, leave a document that still formats to the same
+result, be a subset of the edits formatting the whole file in place makes, reproduce that result
+when the selection is everything, and be stable when re-run on what they produced. On inputs of up
+to 24 lines it also checks additivity (a span of lines makes exactly the union of its lines' edits)
+and composition (formatting line by line until nothing changes reaches the whole-file result, and
+every step still formats to it). Composition is the strongest of these: it found whole-file
+idempotence bugs that no single-pass check sees. `crates/format/tests/test_format_range.rs` runs the
+battery over every fixture source, the program corpus, and re-indented copies of the fixtures (four
+spaces, tabs, mixed steps), and checks every byte selection of a few short sources against an
+independent line oracle.
 
 ### The editor features
 
@@ -356,6 +375,12 @@ its replay command, and `just fuzz-differential` and `just gc-torture` are the l
 `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
 allocation, which is too slow for a debug build today.
 
+`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
+uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
+invalid, requests at every stop. Every request must get exactly one response, the session must end,
+and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
@@ -365,8 +390,9 @@ tables and queries and checks the native kernels against the Polars plans
 iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
-`tools/bench/table/run.sh <dir> [rows]` runs the db-benchmark questions under data.table and the
-engine, each printing rows, columns and a checksum, so the answers compare line by line.
+`just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
+data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
+data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
 
 ### Coverage-guided fuzzing
 
@@ -556,7 +582,12 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
   builds of one package never share a session.
 - `test_headers.rs` compiles every header as C11 and C++17 with warnings as errors, checks with
   the compiler that every declared name is exported, runs BLAS and LAPACK calls through the
-  headers, and compares the graphics structs' layout with GNU R's.
+  headers, and compares the graphics structs' layout with GNU R's. It also requires every name in
+  `tests/headers/r_api_names.txt` (GNU R's public header names that its `R.dll` exports, plus the
+  internals packages link) to be declared by ry's headers and exported by `libR`. With
+  `RY_GNU_R_INCLUDE` and `RY_GNU_R_EXPORTS` pointing at a GNU R `include/` and a list of its
+  `R.dll` exports, `api_names_cover_gnu_r` checks the list against that release, and
+  `RY_UPDATE_API_NAMES=1` regenerates it.
 - `test_altrep.rs` and `test_altrep_api.rs` drive the `altreptest` package's classes of every
   kind and base R's own classes, against a report recorded from GNU R.
 - `test_serialize.rs` and `test_serialize_native.rs` read and write GNU R's recorded streams byte

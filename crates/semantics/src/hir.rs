@@ -16,6 +16,7 @@ use {
         GreenElementAt, GreenNodeAt, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{is_expression_kind, name_text},
     },
+    thin_vec::ThinVec,
 };
 
 /// An expression's index in its [`Module`]. It stores the index plus one, so an
@@ -300,17 +301,17 @@ impl fmt::Debug for Symbol {
 /// handful of allocations rather than one per list, and every kind is `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
-    kinds: Vec<ExpressionKind>,
-    ranges: Vec<TextRange>,
-    patterns: Vec<Pattern>,
-    arguments: Vec<Argument>,
-    parameters: Vec<Parameter>,
-    expression_lists: Vec<ExprId>,
-    record_fields: Vec<RecordField>,
-    arms: Vec<MatchArm>,
-    pattern_lists: Vec<PatId>,
-    pattern_fields: Vec<PatternField>,
-    name_sites: Vec<NameSite>,
+    kinds: ThinVec<ExpressionKind>,
+    ranges: ThinVec<TextRange>,
+    patterns: ThinVec<Pattern>,
+    arguments: ThinVec<Argument>,
+    parameters: ThinVec<Parameter>,
+    expression_lists: ThinVec<ExprId>,
+    record_fields: ThinVec<RecordField>,
+    arms: ThinVec<MatchArm>,
+    pattern_lists: ThinVec<PatId>,
+    pattern_fields: ThinVec<PatternField>,
+    name_sites: ThinVec<NameSite>,
     text: String,
     pub root: Option<ExprId>,
 }
@@ -985,7 +986,7 @@ struct Lowering {
 }
 
 /// Moves `stack[mark..]` to the end of `store`.
-fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut Vec<T>) -> Span<T> {
+fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut ThinVec<T>) -> Span<T> {
     let start = store.len() as u32;
     store.extend(stack.drain(mark..));
     Span {
@@ -1769,9 +1770,11 @@ fn literal_kind(node: GreenNodeAt<'_>, buffer: &mut String) -> LiteralKind {
     }
 }
 
+/// A double literal R would treat like an integer: whole, and inside R's integer range, so
+/// `1e10` stays a double (`1e10:(1e10 + 5)` is a double vector in R).
 pub fn is_whole_number_double(text: &str) -> bool {
     text.parse::<f64>()
-        .is_ok_and(|value| value.fract() == 0.0 && value.is_finite())
+        .is_ok_and(|value| value.fract() == 0.0 && value.abs() <= f64::from(i32::MAX))
 }
 
 /// 0-based. Whole-number doubles count: R indexes `x[[2]]` exactly like `x[[2L]]`.

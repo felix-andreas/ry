@@ -99,8 +99,13 @@ The analysis of a project has five inputs:
   from `DESCRIPTION`.
 - `StubSources` is a set-once singleton carrying the `.Rtypes` corpus.
 - `AnalysisSettings` is a singleton carrying the configuration that changes what analysis means
-  rather than which findings a host publishes, today only `[check] inline-annotations`. It is read
-  only where an inline annotation exists, so toggling it re-checks only the items that have one.
+  rather than which findings a host publishes: `[check] inline-annotations` and `[check] strict`.
+  The first is read only where an inline annotation exists, so toggling it re-checks only the
+  items that have one. The second is the project default behind `semantics::file_is_strict`,
+  which decides a file's mode for the check (its `# typing:` directive wins). The package loader
+  keeps its own `load_index::file_is_strict`, which reads the loaded package's default instead. A check records the
+  origins strict mode reports only for an item in a strict file, so a project that is not strict
+  never builds that table.
 
 The package loader adds a sixth, `PackageSources`, described [below](#the-package-load-index).
 
@@ -121,15 +126,23 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident
+### Syntax trees stay resident in the server, and `ry check` releases them once
 
-Every host keeps every rowan tree. Salsa's LRU would bound memory, but each read of an LRU query
-records its use under one mutex per query, and the cold check reads `item_syntax` often enough
-on all cores that the lock cost about a sixth of its wall time, for about 80 MB saved on a
-300,000-line package. Every query that reads a tree is still a memoized query whose result is
-small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
-annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
-`lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+The server keeps every rowan tree, because an edit reparses one file and every other tree stays
+valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
+has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
+off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
+zero, and salsa records nothing on a read at capacity zero. `release_trees` raises the capacity
+to one, touches every tree on one thread, evicts, and lowers it again, so the parallel passes
+never pay the per-read mutex that a nonzero capacity takes (it cost about a sixth of the cold
+check's wall time when the capacities stayed set). The released file trees come back to the
+caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
+all cores. A tree read after the release still works, by reparsing that file.
+
+Every query that reads a tree is a memoized query whose result is small: the item HIR and
+annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
+agreement candidates in `diagnostics.rs`, `item_name_range`, `item_binds_only_own_name`,
+`top_level::item_declared_pure`, and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
 joins it with the rest (a bare `setClass` call is reported only when the file does not bind
@@ -179,6 +192,46 @@ wall time. Several of them are worth knowing:
   huge pages that a short-lived process never touched. What allocation still costs is mostly
   setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
   and huge-page options measured no difference.
+
+### The check cache
+
+The cold check already uses about 3.4 of 4 cores in every pass, so more parallelism cannot bring
+it much lower. What a repeat run can skip is work whose result is already known, so `ry check`
+records each file's findings in `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`). The salsa
+memos themselves are not persisted. Salsa 0.28 exposes no dependency graph to save, and its
+persistence feature would need every memo to serialize, including the process-wide `Ty` table.
+
+The record has a key fingerprint and, for each file, four facts:
+
+- **Key**: the ry version and binary, the configuration, the project root, the data files,
+  `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
+- **Content fingerprint**: the file's text.
+- **Surface fingerprint**: two parts. The first is the text with the body of each top-level
+  function definition left out, unless the body contains `<<-`, `->>`, or a call that declares or
+  attaches something (`assign`, `library`, `setClass` and the rest of `DECLARING_CALLS`). The
+  second is the file's share of every project-wide fold, listed by
+  `diagnostics::project_fold_shares`: its definitions, conditional writers, type declarations,
+  `globalVariables` names, S3 generics and attached packages. A body can feed a fold, as a
+  `UseMethod` call or a `#: @type` inside it does, so the shares come from the queries rather
+  than from the text. A new fold over the project's files must add its share there.
+- **Dependencies**: the files whose items the check read through interface edges, transitively
+  (`semantics::file_dependency_files`), plus the files that its findings point into.
+- **Imports used**: the `NAMESPACE` imports the file's code uses, which the `NAMESPACE` findings
+  depend on.
+
+A run with no changed file replays every finding without building a tree. A run whose changed
+files all keep their surface checks the changed files and the files whose dependencies include
+one of them. Every surface then matches the record, so the attached set and, when the imports used
+are unchanged, the `NAMESPACE` findings come from the record as well. Any other change checks every
+file. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
+an edit inside a body rechecks one or two files.
+
+A partial run still parses every file, because the project-wide maps fold every file's items. So
+it warms those folds across all cores, and that parse, about 0.3 s of the 0.45 s total, is its
+floor. Removing that floor would mean persisting the item trees. When invariants are on
+(`syntax::testing::enable_invariants`), every run that reuses findings is compared with a fresh
+run and panics on any difference. The seeded edit simulation in `cli.rs`
+(`cached_checks_match_fresh_checks_across_seeded_edits`) drives that comparison.
 
 ### From item to scheme
 
@@ -320,6 +373,25 @@ Before the console or `ry load` starts R for a package, it calls the loader's `p
 the sources and derives this whole index on its own threads while base R loads. The first
 `load_all()` then waits for that to finish and only diffs.
 
+Deriving the index means parsing every file, which is most of a cold start, so the first plan of a
+package in a process caches the index across processes. The entry lives in the user's cache
+directory (`$XDG_CACHE_HOME/ry/load-index`, one file per package root), and its key hashes the
+`DESCRIPTION`, `NAMESPACE` and `R/` texts, the strict setting, and a fingerprint of the parser, the
+analysis, the shipped stubs and the loader that `crates/loader/build.rs` computes. On a hit the
+loader syncs the texts into the database without parsing them and hands the backend each file's text
+instead of its tree; ry's runtime then parses only the code it lowers, one top-level item at a time,
+which gives the same tree as the whole file would. Meanwhile a detached thread parses every file on
+a database handle of its own, so the first reload finds the parses memoized, and an edit that reaches
+the database first cancels it.
+
+A fresh load on ry's runtime may also hold back the package's S4 definitions until first use. The
+loader decides which (`DeferredS4` in `crates/loader/src/loader.rs` states the rules), and the
+methods package's class and generic lookups in `crates/interp/src/methods.rs` force them on a miss;
+[package loading](/reference/package-loading#s4-definitions) has the contract. When the definitions
+read only S4 constructors and their own names, the loader gives the unit a cache key
+(`DeferredS4::cache_key`), and `.ry_force_s4` in `runtime.R` restores the bindings a previous process
+saved instead of running the definitions.
+
 ### Diagnostics
 
 Diagnostics come in two layers over one source of truth:
@@ -328,8 +400,8 @@ Diagnostics come in two layers over one source of truth:
   refusals of malformed `#:` blocks and inline annotations, and, while inline annotations are turned
   off, a warning at each one. All of them are pure functions of the parse and `AnalysisSettings`.
 - `file_diagnostics(file)` adds the naming findings (unresolved and unused names) and the type
-  errors. The strict-mode origins are rendered separately by `strict_diagnostics(file)`, so a host
-  publishes them only under `[check] strict` or a per-file directive.
+  errors. The strict-mode findings are rendered separately by `strict_diagnostics(file)`, which is
+  empty unless `file_is_strict` holds (`[check] strict` or the file's own directive).
 
 The host, meaning the server or the CLI, then gates diagnostic classes by configuration, applies
 per-file `# typing:` overrides, escalates unresolved names to errors under strict mode, appends the

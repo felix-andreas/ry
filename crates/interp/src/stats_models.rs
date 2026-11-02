@@ -276,7 +276,17 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
             }
         }
     }
-    let rows = columns.first().map_or(0, |&column| rows_of(column));
+    // Without variables the frame keeps the data's rows, which only its row names describe,
+    // compact (`c(NA, -n)`) or not.
+    let rows = match columns.first() {
+        Some(&column) => rows_of(column),
+        None if row_names.kind() == SexpType::Integer
+            && let [NA_INTEGER, count] = *row_names.slice::<i32>() =>
+        {
+            count.unsigned_abs() as usize
+        }
+        None => length(row_names),
+    };
     for (column, name) in columns.iter().zip(&names) {
         if rows_of(*column) != rows {
             return Err(call.error(format!("variable lengths differ (found for '{name}')")));
@@ -319,10 +329,15 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("invalid result from na.action"));
     }
     for index in 0..length(result) {
-        copy_most_attributes_no_ts(
+        // An na.action that keeps every row hands back the frame's own vectors, which keep
+        // their attributes, "ts" class included.
+        let (original, column) = (
             values::list_elt(data, index),
             values::list_elt(result, index),
-        )?;
+        );
+        if original != column {
+            copy_most_attributes_no_ts(original, column)?;
+        }
     }
     Ok(result)
 }
@@ -435,6 +450,24 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
         assign.push(0);
     }
     for term in 0..term_count {
+        let mut width = 1.0;
+        for variable in 0..variable_count {
+            let code = codes[variable + term * variable_count];
+            width *= match (code, kinds[variable]) {
+                (0, _) => 1.0,
+                (_, Variable::Numeric { columns: count }) => count as f64,
+                (1, Variable::Factor { .. }) => {
+                    contrasts[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64)
+                }
+                (_, Variable::Factor { .. }) => {
+                    full_codings[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64)
+                }
+            };
+        }
+        if width > i32::MAX as f64 {
+            let width = crate::format::c_format(width, "g", 0, "", false);
+            return Err(call.error(format!("term {} would require {width} columns", term + 1)));
+        }
         let mut current: Vec<(Vec<f64>, String)> = vec![(vec![1.0; rows], String::new())];
         for variable in 0..variable_count {
             let code = codes[variable + term * variable_count];

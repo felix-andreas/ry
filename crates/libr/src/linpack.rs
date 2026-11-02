@@ -864,6 +864,122 @@ pub unsafe extern "C" fn dpofa_(a: *mut f64, lda: *const c_int, n: *const c_int,
     *info = 0;
 }
 
+/// LINPACK's `dchdc`: the Cholesky factor `R` (upper, `P'AP = R'R`) of a symmetric positive
+/// semidefinite matrix, in place, with optional diagonal pivoting. With `job` nonzero, `jpvt`
+/// constrains the pivots on entry (positive: moved to the front, negative: moved to the back,
+/// zero: free) and holds the permutation on return. `info` is the index of the last positive
+/// pivot, which is `p` for a positive definite matrix.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dchdc_(
+    a: *mut f64,
+    lda: *const c_int,
+    p: *const c_int,
+    work: *mut f64,
+    jpvt: *mut c_int,
+    job: *const c_int,
+    info: *mut c_int,
+) {
+    let a = Matrix::new(a, *lda);
+    let p = *p as isize;
+    let pivot = |index: isize| element_int(jpvt, index);
+    // Exchanges rows and columns `first < second` of the upper triangle, including the leading
+    // `first - 1` rows of the two columns.
+    let exchange = |first: isize, second: isize| {
+        dswap(first - 1, a.at(1, first), a.at(1, second));
+        let temp = a.get(first, first);
+        a.set(first, first, a.get(second, second));
+        a.set(second, second, temp);
+        for j in first + 1..=p {
+            if j < second {
+                let temp = a.get(first, j);
+                a.set(first, j, a.get(j, second));
+                a.set(j, second, temp);
+            } else if j > second {
+                let temp = a.get(first, j);
+                a.set(first, j, a.get(second, j));
+                a.set(second, j, temp);
+            }
+        }
+    };
+    let mut front = 1;
+    let mut back = 0;
+    *info = p as c_int;
+    if *job != 0 {
+        for k in 1..=p {
+            let to_front = *pivot(k) > 0;
+            let to_back = *pivot(k) < 0;
+            *pivot(k) = if to_back { -(k as c_int) } else { k as c_int };
+            if to_front {
+                if k != front {
+                    exchange(front, k);
+                    *pivot(k) = *pivot(front);
+                    *pivot(front) = k as c_int;
+                }
+                front += 1;
+            }
+        }
+        back = p;
+        for k in (front..=p).rev() {
+            if *pivot(k) < 0 {
+                *pivot(k) = -*pivot(k);
+                if back != k {
+                    exchange(k, back);
+                    std::ptr::swap(pivot(k), pivot(back));
+                }
+                back -= 1;
+            }
+        }
+    }
+    for k in 1..=p {
+        let mut largest = a.get(k, k);
+        let mut largest_at = k;
+        if k >= front && k < back {
+            for l in k + 1..=back {
+                if a.get(l, l) > largest {
+                    largest = a.get(l, l);
+                    largest_at = l;
+                }
+            }
+        }
+        // Written as LINPACK tests it (`maxdia .gt. 0`), so a NaN pivot also stops here.
+        if largest.is_nan() || largest <= 0.0 {
+            *info = (k - 1) as c_int;
+            return;
+        }
+        if k != largest_at {
+            dswap(k - 1, a.at(1, k), a.at(1, largest_at));
+            a.set(largest_at, largest_at, a.get(k, k));
+            a.set(k, k, largest);
+            std::ptr::swap(pivot(largest_at), pivot(k));
+        }
+        let diagonal = a.get(k, k).sqrt();
+        *element(work, k) = diagonal;
+        a.set(k, k, diagonal);
+        for j in k + 1..=p {
+            if k != largest_at {
+                if j < largest_at {
+                    let temp = a.get(k, j);
+                    a.set(k, j, a.get(j, largest_at));
+                    a.set(j, largest_at, temp);
+                } else if j > largest_at {
+                    let temp = a.get(k, j);
+                    a.set(k, j, a.get(largest_at, j));
+                    a.set(largest_at, j, temp);
+                }
+            }
+            let value = a.get(k, j) / diagonal;
+            a.set(k, j, value);
+            *element(work, j) = value;
+            daxpy(j - k, -value, element(work, k + 1), a.at(k + 1, j));
+        }
+    }
+}
+
+/// Element `index` (1-based) of an integer vector.
+unsafe fn element_int(vector: *mut c_int, index: isize) -> *mut c_int {
+    vector.offset(index - 1)
+}
+
 /// LINPACK's `dposl`: solves `A x = b` in place from the factor `dpofa` produced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dposl_(a: *mut f64, lda: *const c_int, n: *const c_int, b: *mut f64) {

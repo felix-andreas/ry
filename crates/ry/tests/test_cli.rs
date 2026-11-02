@@ -1151,6 +1151,47 @@ fn fmt_rewrites_in_place_and_exits_zero() {
 }
 
 #[test]
+fn fmt_range_formats_only_the_lines_it_touches() {
+    let source = "x<-1\nf<-function(a){\n  b<-a\n  c<-2\n}\nz<-3\n";
+    let directory = project(&[("part.R", source), ("other.R", "y<-1\n")]);
+    let read = || fs::read_to_string(directory.path().join("part.R")).expect("read part.R");
+
+    let output = ry(directory.path(), &["fmt", "--range", "3:3-4:1", "part.R"]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    assert_eq!(read(), "x<-1\nf<-function(a){\n  b <- a\n  c<-2\n}\nz<-3\n");
+
+    let output = ry(
+        directory.path(),
+        &["fmt", "--range", "6", "--check", "part.R"],
+    );
+    assert_eq!(output.code, 1, "stderr: {}", output.stderr);
+
+    let output = ry(directory.path(), &["fmt", "--range", "1-2"]);
+    assert_eq!(output.code, 2, "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("pass exactly one file"),
+        "stderr: {}",
+        output.stderr
+    );
+    let output = ry(directory.path(), &["fmt", "--range", "2-1", "part.R"]);
+    assert_eq!(output.code, 2, "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("ends before it starts"),
+        "{}",
+        output.stderr
+    );
+    let before = read();
+    let output = ry(directory.path(), &["fmt", "--range", "9", "part.R"]);
+    assert_ne!(output.code, 0, "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("--range starts at line 9"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(read(), before);
+}
+
+#[test]
 fn fmt_on_a_deliberately_skipped_file_exits_clean() {
     let directory = project(&[("report.Rmd", "# Title\n\n```{r}\nx<-1\n```\n")]);
     for arguments in [
@@ -1506,7 +1547,15 @@ fn root_help_lists_run_and_r_but_not_the_console_s_earlier_name() {
     assert_eq!(
         commands,
         [
-            "check", "fmt", "run", "R", "load", "server", "debug", "help"
+            "check",
+            "fmt",
+            "run",
+            "R",
+            "load",
+            "debug-adapter",
+            "server",
+            "debug",
+            "help"
         ],
         "{}",
         output.stdout

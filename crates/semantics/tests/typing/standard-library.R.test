@@ -184,6 +184,23 @@ total <- Str.walk_utf8("abc", 0L, function(s, b) s + b)
 #++++
 total: integer
 
+#---- utf16_and_utf32_round_trip
+units <- Str.to_utf16("hi")
+back <- Str.from_utf16(units)
+points <- Str.to_utf32("hi")
+lossy <- Str.from_utf32_lossy(points)
+#++++
+units: list[integer]
+back: :Ok(character) | :Err(:BadUtf16)
+points: list[integer]
+lossy: character
+
+#---- from_utf32_needs_a_list_of_integers
+s <- Str.from_utf32("hi")
+#++++
+s: Unknown
+20..24 error[type-mismatch] expected `list[integer]`, found `character`
+
 #==== num
 #---- checked_addition_keeps_the_number_type
 sum <- Num.add_checked(1L, 2L)
@@ -208,6 +225,67 @@ c: :Ok(integer) | :Err(:OutOfBounds)
 same <- Num.is_approx_eq(1, 1.05, rtol = 0.1)
 #++++
 same: logical
+
+#---- unchecked_arithmetic_keeps_the_number_type
+a <- Num.add(1L, 2L)
+b <- Num.div_trunc(7, 2)
+c <- Num.div(7L, 2L)
+d <- Num.sqrt(4L)
+total <- List.walk(list(1L, 2L), 0L, Num.add)
+#++++
+a: integer
+b: double
+c: double
+d: double
+total: integer
+
+#---- bit_operations_take_integers
+a <- Num.bitwise_and(12L, 10L)
+b <- Num.shift_left_by(1L, 4L)
+n <- Num.count_one_bits(a)
+#++++
+a: integer
+b: integer
+n: integer
+
+#---- bitwise_rejects_a_string
+a <- Num.bitwise_or("1", 2L)
+#++++
+a: Unknown
+20..23 error[type-mismatch] expected `integer`, found `character`
+
+#---- constants_are_doubles
+area <- Num.pi * 2
+#++++
+area: double
+
+#==== bool
+#---- constants_and_connectives_are_logical
+t <- Bool.true
+both <- Bool.and(t, Bool.not(Bool.false))
+either <- Bool.or(FALSE, both)
+#++++
+t: logical
+both: logical
+either: logical
+
+#---- is_eq_compares_any_values_of_one_type
+#: :Red | :Green
+light <- :Red
+same <- Bool.is_eq(list(1L), list(2L))
+red <- Bool.is_eq(light, :Red)
+other <- Bool.is_not_eq(light, :Green)
+#++++
+light: :Red | :Green
+same: logical
+red: logical
+other: logical
+
+#---- connectives_need_logicals
+x <- Bool.not(1L)
+#++++
+x: Unknown
+14..16 error[type-mismatch] expected `logical`, found `integer`
 
 #==== dict_and_set
 #---- dict_from_list_infers_key_and_value

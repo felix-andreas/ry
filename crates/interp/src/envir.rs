@@ -98,7 +98,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rapply", 5, do_rapply),
     internal("eapply", 4, do_eapply),
     internal("Filter", -1, |_| Ok(nil())),
-    internal("env.profile", 1, |_| Ok(nil())),
+    internal("env.profile", 1, do_env_profile),
     internal("emptyenv", 0, |_| Ok(empty_env())),
     builtin("...length", 0, do_dots_length),
     builtin("...elt", 1, do_dots_elt).keep_visibility(),
@@ -113,7 +113,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
     internal("args", 1, do_args),
-    internal("bodyCode", 1, do_body),
+    internal("bodyCode", 1, do_body_code),
     internal("match.call", 4, do_match_call),
     internal("sys.source", -1, |_| Ok(nil())),
 ];
@@ -1209,13 +1209,44 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             scalar_integer(length)
         }
         "max.print" | "nwarnings" => {
+            if value.kind() == SexpType::Real
+                && length(value) > 0
+                && crate::arith::real_at(value, 0).abs() > f64::from(i32::MAX)
+            {
+                crate::conditions::warning("NAs introduced by coercion to integer range")?;
+            }
             let count = values::as_integer_scalar(value);
             if count < 1 {
                 return Err(error(format!("invalid value for '{name}'")));
             }
             scalar_integer(count)
         }
-        "warn" | "scipen" | "deparse.cutoff" => {
+        "warn" => {
+            let number = if length(value) == 1
+                && matches!(
+                    value.kind(),
+                    SexpType::Logical | SexpType::Integer | SexpType::Real
+                ) {
+                crate::arith::real_at(value, 0)
+            } else {
+                f64::NAN
+            };
+            if number.is_nan() || number < f64::from(i32::MIN) || number > f64::from(i32::MAX) {
+                return Err(error("invalid value for 'warn'"));
+            }
+            scalar_integer(number as i32)
+        }
+        "OutDec" => {
+            let Some(mark) = values::first_string(value) else {
+                return Err(error("invalid value for 'OutDec'"));
+            };
+            if mark.chars().count() != 1 {
+                crate::conditions::warning("'OutDec' must be a string of one character")?;
+            }
+            crate::format::set_output_decimal(&mark);
+            Ok(value)
+        }
+        "scipen" | "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {
@@ -1736,11 +1767,31 @@ unsafe fn do_dots_names(call: &Call<'_>) -> R<Sexp> {
     string_vector(&names)
 }
 
+unsafe fn do_env_profile(call: &Call<'_>) -> R<Sexp> {
+    let env = call.arg(0);
+    if env.kind() != SexpType::Environment {
+        return Err(call.error("argument must be a hashed environment"));
+    }
+    let Some((counts, chains)) = crate::heap().frame_hash_profile(env) else {
+        return Ok(nil());
+    };
+    let counts: Vec<i32> = counts.iter().map(|&count| count as i32).collect();
+    let fields = [
+        ("size", values::scalar_integer(counts.len() as i32)?),
+        ("nchains", values::scalar_integer(chains as i32)?),
+        ("counts", values::integer_vector(&counts)?),
+    ];
+    values::named_list(&fields)
+}
+
 unsafe fn do_formals(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     if function.kind() == SexpType::Closure {
         Ok(function.car())
     } else {
+        if !values::is_function(function) {
+            crate::conditions::warning_call(call.call, "argument is not a function")?;
+        }
         Ok(nil())
     }
 }
@@ -1751,10 +1802,20 @@ unsafe fn do_body(call: &Call<'_>) -> R<Sexp> {
         Ok(crate::bytecode::closure_body(function))
     } else {
         if !values::is_function(function) {
-            crate::conditions::warning("argument is not a function")?;
+            crate::conditions::warning_call(call.call, "argument is not a function")?;
         }
         Ok(nil())
     }
+}
+
+/// A closure's body as GNU R stores it, which is byte code for every function GNU R ships. ry
+/// compiles a closure on demand here so that code inspecting the body sees the same type.
+unsafe fn do_body_code(call: &Call<'_>) -> R<Sexp> {
+    let function = call.arg(0);
+    if function.kind() != SexpType::Closure {
+        return Ok(nil());
+    }
+    crate::bytecode::compiled_body(function)
 }
 
 unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {

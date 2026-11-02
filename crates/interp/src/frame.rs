@@ -77,7 +77,21 @@ local({
   info <- new.env(hash = TRUE, parent = baseenv())
   assign(".__NAMESPACE__.", info, envir = ns)
   info$spec <- c(name = "ry", version = "0.0.0")
-  info$path <- ""
+  # `packageDescription()`, which `sessionInfo()` calls for every loaded namespace, reads a
+  # DESCRIPTION from the namespace's path. ry has no installed package directory, so the path
+  # is a directory written on first use in the session's temporary directory.
+  makeActiveBinding("path", local({
+    path <- NULL
+    function() {
+      if (is.null(path)) {
+        path <<- file.path(tempdir(), "ry")
+        dir.create(path, showWarnings = FALSE)
+        writeLines(c("Package: ry", "Version: 0.0.0", "Title: The ry runtime", "License: UPL-1.0"),
+                   file.path(path, "DESCRIPTION"))
+      }
+      path
+    }
+  }), info)
   info$imports <- list(base = TRUE)
   info$dynlibs <- character()
   info$S3methods <- matrix(NA_character_, 0L, 4L)
@@ -96,9 +110,10 @@ const ATTACH: &str = r#"
 local({
   ns <- asNamespace("ry")
   library <- as.environment("package:ry")
-  for (name in ls(library, all.names = TRUE)) assign(name, get(name, envir = library), envir = ns)
+  builtins <- ls(library, all.names = TRUE)
+  for (name in builtins) assign(name, get(name, envir = library), envir = ns)
   detach("package:ry", character.only = TRUE)
-  functions <- ls(ns)
+  functions <- union(ls(ns), builtins)
   exports <- new.env(hash = TRUE, parent = baseenv())
   for (name in functions) assign(name, name, envir = exports)
   assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
@@ -230,14 +245,45 @@ pub unsafe fn wrap(table: Table) -> R<Sexp> {
     heap.root(object);
     heap.alloc_weak_ref(object, nil(), nil(), finalize as *const () as usize, false)?;
     set_attr(object, symbols().class, scalar_string("DataFrame")?)?;
+    if is_large(&*address.cast::<Table>()) {
+        release_worker_memory();
+    }
     Ok(object)
+}
+
+/// Returns the memory the engine's worker threads hold for blocks other threads freed, and purges
+/// the pages that leaves empty. libR's allocator is mimalloc, which hands a block freed on another
+/// thread back to its owning thread's queue and processes that queue only when the owner
+/// allocates again. The engine's workers allocate a table's columns and the R thread frees them,
+/// so without this an idle pool keeps every dropped column resident: reading a 5e7-row CSV left
+/// 9 GB resident for a 1.7 GB table.
+pub fn release_worker_memory() {
+    // SAFETY: `mi_collect` only reorganizes the calling thread's own heap.
+    let collect = || unsafe { libmimalloc_sys::mi_collect(true) };
+    table::on_every_worker(collect);
+    collect();
+}
+
+/// A table at least this many cells large (32 MB of doubles) releases the workers' memory when it
+/// is made or dropped. Each release walks every worker's heap, so below this a loop that derives
+/// one frame from another would pay for two releases per iteration and get little back.
+const RELEASE_CELLS: usize = 1 << 22;
+
+fn is_large(table: &Table) -> bool {
+    let frame = table.frame();
+    frame.height().saturating_mul(frame.width()) >= RELEASE_CELLS
 }
 
 unsafe extern "C" fn finalize(object: Sexp) {
     let address = object.external_address();
     if !address.is_null() {
         object.set_external_address(std::ptr::null_mut());
-        drop(Box::from_raw(address.cast::<Table>()));
+        let table = Box::from_raw(address.cast::<Table>());
+        let large = is_large(&table);
+        drop(table);
+        if large {
+            release_worker_memory();
+        }
     }
 }
 

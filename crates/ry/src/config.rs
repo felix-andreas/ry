@@ -437,38 +437,6 @@ struct ConfigToml {
     check: CheckConfig,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ExperimentalFeatures {
-    pub range_formatting: bool,
-}
-
-/// The CLI help, the `--experimental-features` parser, and `"all"` all derive from
-/// [`ExperimentalFeatures::KNOWN`].
-pub struct ExperimentalFeature {
-    pub name: &'static str,
-    pub description: &'static str,
-    enable: fn(&mut ExperimentalFeatures),
-}
-
-impl ExperimentalFeatures {
-    pub const KNOWN: &'static [ExperimentalFeature] = &[ExperimentalFeature {
-        name: "range_formatting",
-        description: "format only the selected range in the editor instead of the whole file",
-        enable: |features| features.range_formatting = true,
-    }];
-
-    /// Returns false when the name is unknown.
-    pub fn enable(&mut self, name: &str) -> bool {
-        match Self::KNOWN.iter().find(|feature| feature.name == name) {
-            Some(feature) => {
-                (feature.enable)(self);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use {super::*, format::LineEnding, indoc::indoc, semantics::lints::LintLevel};

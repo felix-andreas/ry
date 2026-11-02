@@ -3,7 +3,7 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Handout, enter, error},
         eval::force_promise,
         runtime,
         strings::utf8_text,
@@ -206,6 +206,105 @@ pub unsafe extern "C" fn Rf_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame3(env: Sexp, symbol: Sexp, _do_get: Rboolean) -> Sexp {
     enter(|| frame_lookup(environment(env, "findVarInFrame3")?, symbol))
+}
+
+/// `R_findVar` and `R_findVarInFrame`: the names GNU R's own code uses for `Rf_findVar` and
+/// `Rf_findVarInFrame`, which some packages call directly.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_findVar(symbol: Sexp, env: Sexp) -> Sexp {
+    enter(|| find_var(symbol, env))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
+    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+}
+
+/// `R_varloc_t`: a binding cell, or null when there is no binding. It is a one-pointer struct
+/// returned by value, which the C ABIs ry targets return in a register like a pointer. The cell
+/// is reachable from its environment, so handing it out needs no root.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VarLoc {
+    cell: Option<Sexp>,
+}
+
+impl Handout for VarLoc {}
+
+impl VarLoc {
+    fn cell(self, what: &str) -> ApiResult<Sexp> {
+        self.cell
+            .ok_or_else(|| error(format!("{what}: no binding")))
+    }
+}
+
+/// `R_findVarLocInFrame`: `symbol`'s binding in `env`'s own frame.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_findVarLocInFrame(env: Sexp, symbol: Sexp) -> VarLoc {
+    enter(|| {
+        let env = environment(env, "R_findVarLocInFrame")?;
+        Ok(VarLoc {
+            cell: runtime().heap.frame_cell(env, symbol),
+        })
+    })
+}
+
+/// `R_findVarLoc`: the first binding of `symbol` from `env` outward.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_findVarLoc(symbol: Sexp, env: Sexp) -> VarLoc {
+    enter(|| {
+        let runtime = runtime();
+        let empty = runtime.heap.known().empty_env;
+        let mut env = environment(env, "R_findVarLoc")?;
+        while env != empty {
+            if let Some(cell) = runtime.heap.frame_cell(env, symbol) {
+                return Ok(VarLoc { cell: Some(cell) });
+            }
+            env = env.enclosure();
+        }
+        Ok(VarLoc { cell: None })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetVarLocValue(location: VarLoc) -> Sexp {
+    enter(|| cell_value(location.cell("R_GetVarLocValue")?))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetVarLocSymbol(location: VarLoc) -> Sexp {
+    enter(|| Ok(location.cell("R_GetVarLocSymbol")?.car()))
+}
+
+/// Whether the binding is a formal argument the call left missing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetVarLocMISSING(location: VarLoc) -> Rboolean {
+    enter(|| {
+        Ok(location
+            .cell("R_GetVarLocMISSING")?
+            .has_gp(gp::BINDING_MISSING) as Rboolean)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_SetVarLocValue(location: VarLoc, value: Sexp) {
+    enter(|| assign_cell(location.cell("R_SetVarLocValue")?, value))
+}
+
+/// `R_HasFancyBindings`: whether any binding in `rho`'s frame is active or locked, which code
+/// copying a frame binding by binding has to treat specially.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_HasFancyBindings(env: Sexp) -> Rboolean {
+    enter(|| {
+        let env = environment(env, "R_HasFancyBindings")?;
+        let runtime = runtime();
+        let fancy = runtime.heap.frame_symbols(env).into_iter().any(|symbol| {
+            runtime.heap.frame_cell(env, symbol).is_some_and(|cell| {
+                cell.has_gp(gp::ACTIVE_BINDING) || cell.has_gp(gp::BINDING_LOCKED)
+            })
+        });
+        Ok(fancy as Rboolean)
+    })
 }
 
 #[unsafe(no_mangle)]

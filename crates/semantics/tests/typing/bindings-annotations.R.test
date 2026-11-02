@@ -32,7 +32,7 @@ value: integer
 
 #---- unknown_only_annotation_on_unknown_binding
 #: @if-unknown integer
-value <- 1L ~ 2L
+value <- 1L %undeclared% 2L
 #++++
 value: integer
 

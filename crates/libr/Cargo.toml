@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 heap = { path = "../heap" }
 interp = { path = "../interp" }
+serde_json.workspace = true
 jit = { path = "../jit" }
 loader = { path = "../loader", features = ["runtime"] }
 libc = "0.2"

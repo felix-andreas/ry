@@ -52,6 +52,25 @@ struct TypeEntry {
     kind: TyKind<'static>,
     /// Nodes in the type tree, capped at [`TYPE_SIZE_CEILING`].
     size: u64,
+    /// Which [`TypeEntry::HAS_VAR`]-style kinds occur anywhere in the tree, so the walks that
+    /// only rewrite those kinds return a type without them untouched instead of rebuilding it.
+    contents: u8,
+}
+
+impl TypeEntry {
+    const HAS_VAR: u8 = 1;
+    const HAS_RIGID: u8 = 1 << 1;
+    const HAS_UNKNOWN: u8 = 1 << 2;
+    /// A `Named` application, which resolution may expand as an alias.
+    const HAS_NAMED: u8 = 1 << 3;
+}
+
+impl<'db> Ty<'db> {
+    /// Whether resolving through an inference table can change the type: only a variable or
+    /// an alias application inside it can.
+    pub(crate) fn may_resolve(self) -> bool {
+        self.entry.contents & (TypeEntry::HAS_VAR | TypeEntry::HAS_NAMED) != 0
+    }
 }
 
 /// A name as the key of a tracked function: salsa keys a one-argument query by one of its
@@ -340,15 +359,8 @@ impl<'db> TypeScheme<'db> {
 }
 
 /// Named types are not expanded: their representation is a separate declaration.
-pub fn contains_unknown(db: &dyn Db, ty: Ty<'_>) -> bool {
-    if matches!(ty.kind(db), TyKind::Unknown) {
-        return true;
-    }
-    let mut found = false;
-    for_each_child_type(db, ty, &mut |child| {
-        found = found || contains_unknown(db, child);
-    });
-    found
+pub fn contains_unknown(_db: &dyn Db, ty: Ty<'_>) -> bool {
+    ty.entry.contents & TypeEntry::HAS_UNKNOWN != 0
 }
 
 pub fn any(db: &dyn Db) -> Ty<'_> {
@@ -732,15 +744,8 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
 
 /// Variables index one table, so a type outliving it (an exported scheme, a
 /// value cached across a rollback) must contain none.
-pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
-    if matches!(ty.kind(db), TyKind::Var(_)) {
-        return true;
-    }
-    let mut found = false;
-    for_each_child_type(db, ty, &mut |child| {
-        found = found || contains_inference_var(db, child);
-    });
-    found
+pub fn contains_inference_var<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    ty.entry.contents & TypeEntry::HAS_VAR != 0
 }
 
 /// Unmapped rigid variables are left intact.
@@ -760,6 +765,9 @@ fn substitute_rigid_memo<'db>(
     substitution: &FxHashMap<Name<'db>, Ty<'db>>,
     memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
 ) -> Ty<'db> {
+    if ty.entry.contents & TypeEntry::HAS_RIGID == 0 {
+        return ty;
+    }
     if let Some(&done) = memo.get(&ty) {
         return done;
     }
@@ -776,6 +784,9 @@ fn substitute_rigid_memo<'db>(
 /// For values that must survive a table rollback, which reclaims and reuses
 /// variable ids.
 pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+    if ty.entry.contents & TypeEntry::HAS_VAR == 0 {
+        return ty;
+    }
     if matches!(ty.kind(db), TyKind::Var(_)) {
         return unknown(db);
     }
@@ -828,10 +839,22 @@ fn intern_type_shared(kind: TyKind<'static>, hash: u64) -> &'static TypeEntry {
         Some(&interned) => interned,
         None => {
             let mut size: u64 = 1;
+            let mut contents = match kind {
+                TyKind::Var(_) => TypeEntry::HAS_VAR,
+                TyKind::Rigid(_) => TypeEntry::HAS_RIGID,
+                TyKind::Unknown => TypeEntry::HAS_UNKNOWN,
+                TyKind::Named(..) => TypeEntry::HAS_NAMED,
+                _ => 0,
+            };
             for_each_child(&kind, &mut |child| {
                 size = size.saturating_add(child.entry.size).min(TYPE_SIZE_CEILING);
+                contents |= child.entry.contents;
             });
-            let interned: &'static TypeEntry = Box::leak(Box::new(TypeEntry { kind, size }));
+            let interned: &'static TypeEntry = Box::leak(Box::new(TypeEntry {
+                kind,
+                size,
+                contents,
+            }));
             shard.insert_unique(hash, interned, rehash);
             interned
         }

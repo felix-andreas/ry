@@ -1,0 +1,32 @@
+[stdout]
+| [1] ff d8 ff
+| [1] "%!PS-Adobe-3.0"
+| [1] "%%Page: 1 1" "%%Page: 2 2"
+| [1] "%%Orientation: Landscape"
+| [1] "%!PS-Adobe-3.0 EPSF-3.0"
+| [1] "%%BoundingBox: 0 0 288 216"
+| [1] "page1.ps" "page2.ps"
+| character(0)
+| [1] "%!PS-Adobe-3.0"                      "%%DocumentMedia: a4 595 841 0 () ()"
+| [3] "%%Orientation: Portrait"             "%%BoundingBox: 46 169 550 673"      
+| [1] "%!PS-Adobe-3.0"                      "%%DocumentMedia: a4 595 841 0 () ()"
+| [3] "%%Orientation: Portrait"             "%%BoundingBox: 118 241 478 601"     
+| [1] "%!PS-Adobe-3.0"                         
+| [2] "%%DocumentMedia: letter 612 792 0 () ()"
+| [3] "%%Orientation: Portrait"                
+| [4] "%%BoundingBox: 54 144 558 648"          
+| [1] "%!PS-Adobe-3.0"                          
+| [2] "%%DocumentMedia: special 288 216 0 () ()"
+| [3] "%%BoundingBox: 0 0 288 216"              
+| [1] "%!PS-Adobe-3.0"                      "%%DocumentMedia: a4 595 841 0 () ()"
+| [3] "%%Orientation: Landscape"            "%%BoundingBox: 46 169 550 673"      
+| [1] "%!PS-Adobe-3.0"                          
+| [2] "%%DocumentMedia: special 216 288 0 () ()"
+| [3] "%%BoundingBox: 0 0 216 288"              
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("%!PS-Adobe-3.0", "%%DocumentMedia: special 216 288 0 () ()", 
+| "%%BoundingBox: 0 0 216 288")

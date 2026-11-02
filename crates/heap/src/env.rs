@@ -22,9 +22,9 @@ use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 /// formals (`identical` has nine) would otherwise pay on every call.
 const INDEX_THRESHOLD: usize = 16;
 
-/// The bindings a frame holds without a second allocation: as many as keep the environment object
-/// in the 192-byte size class.
-const INLINE_BINDINGS: usize = 9;
+/// The bindings a frame holds without a second allocation: as many as keep the environment object,
+/// with its symbol filter, in the 192-byte size class.
+const INLINE_BINDINGS: usize = 8;
 
 /// A binding cell and its symbol, which is the cell's own first field.
 #[derive(Clone, Copy)]
@@ -35,6 +35,9 @@ struct Binding {
 
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
+
+/// The end of a bucket chain in `Frame::hash_chains`.
+const EMPTY_CHAIN: usize = usize::MAX;
 
 #[derive(Default)]
 pub struct Frame {
@@ -49,6 +52,17 @@ pub struct Frame {
     /// How many leading cells are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
     formals: u32,
+    /// One bit per symbol ever bound here, at [`filter_bit`]. Most lookups probe frames that do
+    /// not bind the symbol (a call to `length` from a function body asks the function's frame
+    /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
+    filter: u64,
+}
+
+/// The [`Frame::filter`] bit for `symbol`: a multiplicative hash of its address, since a
+/// symbol never moves and neighbouring symbols differ only in low bits.
+#[inline(always)]
+fn filter_bit(symbol: Sexp) -> u64 {
+    1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
 }
 
 impl Frame {
@@ -78,6 +92,9 @@ impl Frame {
     /// The binding cell for `symbol`, if the frame binds it.
     #[inline]
     pub fn find(&self, symbol: Sexp) -> Option<Sexp> {
+        if self.filter & filter_bit(symbol) == 0 {
+            return None;
+        }
         match &self.index {
             Some(index) => self
                 .bindings
@@ -121,16 +138,54 @@ impl Frame {
                 .map(|binding| binding.cell)
                 .collect();
         }
-        // Replays GNU R's chained table, measured against its output: an insert prepends to its
-        // bucket and counts one, and once the count passes 85% of the size the table grows to
-        // `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry
-        // prepended, after which the count restarts at the number of occupied buckets.
-        // Each bucket is a chain threaded through `next`, so an insert and a rehash allocate
-        // nothing per entry.
-        const EMPTY: usize = usize::MAX;
-        let mut size = self.hash_size as usize;
-        let mut heads = vec![EMPTY; size];
-        let mut next = vec![EMPTY; self.bindings.len()];
+        let (heads, next, _) = unsafe { self.hash_chains() };
+        let mut listed = Vec::with_capacity(self.bindings.len());
+        for &head in &heads {
+            let mut position = head;
+            while position != EMPTY_CHAIN {
+                listed.push(self.bindings[position].cell);
+                position = next[position];
+            }
+        }
+        listed
+    }
+
+    /// The binding count of each bucket of GNU R's hash table for a hashed frame, together with
+    /// the table's chain counter, or `None` for an unhashed frame. `env.profile` reports the
+    /// counter as `nchains`, so it can exceed the number of non-empty buckets.
+    ///
+    /// # Safety
+    /// Every cell in the frame must be live, which holds while the environment is reachable.
+    pub unsafe fn hash_profile(&self) -> Option<(Vec<usize>, usize)> {
+        if self.hash_size == 0 {
+            return None;
+        }
+        let (heads, next, count) = unsafe { self.hash_chains() };
+        let lengths = heads
+            .iter()
+            .map(|&head| {
+                let mut length = 0;
+                let mut position = head;
+                while position != EMPTY_CHAIN {
+                    length += 1;
+                    position = next[position];
+                }
+                length
+            })
+            .collect();
+        Some((lengths, count))
+    }
+
+    /// Replays GNU R's chained table, measured against its output: an insert prepends to its
+    /// bucket and counts one, and once the count passes 85% of the size the table grows to
+    /// `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry prepended,
+    /// after which the count restarts at the number of occupied buckets. Each bucket is a chain
+    /// threaded through `next`, so an insert and a rehash allocate nothing per entry. Returns the
+    /// bucket heads, the chain links and the count.
+    unsafe fn hash_chains(&self) -> (Vec<usize>, Vec<usize>, usize) {
+        let mut size = (self.hash_size as usize).max(1);
+        let mut heads = vec![EMPTY_CHAIN; size];
+        let mut next = vec![EMPTY_CHAIN; self.bindings.len()];
         let mut count = 0;
         let hashes: Vec<usize> = self
             .bindings
@@ -144,10 +199,10 @@ impl Frame {
             count += 1;
             if count as f64 > size as f64 * 0.85 {
                 size = (size as f64 * 1.2) as usize + 1;
-                let mut grown = vec![EMPTY; size];
+                let mut grown = vec![EMPTY_CHAIN; size];
                 for &head in &heads {
                     let mut moved = head;
-                    while moved != EMPTY {
+                    while moved != EMPTY_CHAIN {
                         let following = next[moved];
                         let bucket = hashes[moved] % size;
                         next[moved] = grown[bucket];
@@ -155,19 +210,11 @@ impl Frame {
                         moved = following;
                     }
                 }
-                count = grown.iter().filter(|head| **head != EMPTY).count();
+                count = grown.iter().filter(|head| **head != EMPTY_CHAIN).count();
                 heads = grown;
             }
         }
-        let mut listed = Vec::with_capacity(self.bindings.len());
-        for &head in &heads {
-            let mut position = head;
-            while position != EMPTY {
-                listed.push(self.bindings[position].cell);
-                position = next[position];
-            }
-        }
-        listed
+        (heads, next, count)
     }
 
     /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
@@ -176,6 +223,7 @@ impl Frame {
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
+        self.filter |= filter_bit(symbol);
         match &mut self.index {
             Some(index) => {
                 index.entry(symbol).or_insert(position);

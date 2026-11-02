@@ -16,7 +16,6 @@
 
 use {
     super::{CancelHandle, Job, Outbox, ServerState, Worker, WorkerSeed, run_job},
-    crate::config::ExperimentalFeatures,
     async_lsp::{
         LanguageServer, ResponseError,
         lsp_types::{self, Position, Url},
@@ -86,6 +85,13 @@ pub enum RequestKind {
     /// Asks for callers of an item placed at the position, as a client replays one it kept.
     IncomingCalls,
     OutgoingCalls,
+    /// Selects from the line start up to the position.
+    RangeFormatting,
+    /// Types a line break at the position.
+    OnTypeFormatting,
+    CodeLens,
+    /// Resolves a reference-count lens placed at the position, as a client resolves one it kept.
+    CodeLensResolve,
 }
 
 pub const REQUEST_KINDS: &[RequestKind] = &[
@@ -108,6 +114,10 @@ pub const REQUEST_KINDS: &[RequestKind] = &[
     RequestKind::CallHierarchy,
     RequestKind::IncomingCalls,
     RequestKind::OutgoingCalls,
+    RequestKind::RangeFormatting,
+    RequestKind::OnTypeFormatting,
+    RequestKind::CodeLens,
+    RequestKind::CodeLensResolve,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -134,7 +144,6 @@ impl Simulation {
         let outbox = Arc::new(Mutex::new(Vec::new()));
         let seed = WorkerSeed {
             outbox: Outbox::Recorder(outbox.clone()),
-            experimental_features: ExperimentalFeatures::default(),
             debug: false,
             cancel: cancel.clone(),
         };
@@ -277,6 +286,21 @@ impl Simulation {
                     work_done_progress_params: work,
                 }))
             }
+            RequestKind::RangeFormatting => json(self.state.range_formatting(
+                lsp_types::DocumentRangeFormattingParams {
+                    text_document: document,
+                    range: lsp_types::Range::new(Position::new(position.line, 0), position),
+                    options: lsp_types::FormattingOptions::default(),
+                    work_done_progress_params: work,
+                },
+            )),
+            RequestKind::OnTypeFormatting => json(self.state.on_type_formatting(
+                lsp_types::DocumentOnTypeFormattingParams {
+                    text_document_position: at,
+                    ch: "\n".to_owned(),
+                    options: lsp_types::FormattingOptions::default(),
+                },
+            )),
             RequestKind::InlayHint => json(self.state.inlay_hint(lsp_types::InlayHintParams {
                 work_done_progress_params: work,
                 text_document: document,
@@ -332,6 +356,18 @@ impl Simulation {
                     partial_result_params: partial,
                 },
             )),
+            RequestKind::CodeLens => json(self.state.code_lens(lsp_types::CodeLensParams {
+                text_document: document,
+                work_done_progress_params: work,
+                partial_result_params: partial,
+            })),
+            RequestKind::CodeLensResolve => {
+                json(self.state.code_lens_resolve(lsp_types::CodeLens {
+                    range: lsp_types::Range::new(position, position),
+                    command: None,
+                    data: Some(serde_json::Value::String(document.uri.to_string())),
+                }))
+            }
             RequestKind::Diagnostic => json(self.state.document_diagnostic(
                 lsp_types::DocumentDiagnosticParams {
                     text_document: document,
@@ -473,8 +509,9 @@ impl Simulation {
         writeln!(out, "data files {layouts:?}").ok();
         writeln!(
             out,
-            "inline annotations {:?}\nconfig {:?}",
+            "inline annotations {:?}\nstrict {:?}\nconfig {:?}",
             semantics::AnalysisSettings::get(db).inline_annotations(db),
+            semantics::AnalysisSettings::get(db).strict(db),
             ConfigView(&worker.config)
         )
         .ok();

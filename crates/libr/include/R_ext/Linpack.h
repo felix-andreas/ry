@@ -13,6 +13,8 @@
 extern "C" {
 #endif
 
+/* Cholesky factorization with optional diagonal pivoting. */
+extern void F77_NAME(dchdc)(double *, int *, int *, double *, int *, int *, int *);
 /* Banded positive definite: factor and solve. */
 extern void F77_NAME(dpbfa)(double *, int *, int *, int *, int *);
 extern void F77_NAME(dpbsl)(double *, int *, int *, int *, double *);

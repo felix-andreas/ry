@@ -23,6 +23,7 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 use {
+    crate::native::{self, Native},
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
@@ -58,7 +59,7 @@ unsafe impl Allocator for Arena<'_> {
 }
 
 /// What compiled code knows about a value, which decides its machine representation.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     /// No value: the register is dead or not yet written.
     Bottom,
@@ -510,6 +511,12 @@ pub enum Intrinsic {
     },
     /// `Dict.get()`.
     DictGet,
+    /// `x$name` on a record of this layout, whose field is slot `index`, as the site's shape
+    /// cache recorded it.
+    Field {
+        layout: u32,
+        index: u32,
+    },
 }
 
 /// Where a directly called closure's argument comes from.
@@ -590,6 +597,14 @@ pub enum Action<'a> {
         /// The callee's annotation checks, decided from the arguments' compile-time types.
         entry: Entry,
         dst: (usize, Ty),
+    },
+    /// Calls a native scalar function with the unboxed arguments `steps` leave in `args`, and
+    /// puts its unboxed value in `dst`. When the function fails, tier 0 runs the call instead.
+    NativeCall {
+        steps: &'a [(Action<'a>, StateId)],
+        native: &'static Native,
+        args: &'a [usize],
+        dst: usize,
     },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
@@ -819,6 +834,7 @@ impl Plan<'_> {
                     action,
                     Action::Inline { .. }
                         | Action::Call { .. }
+                        | Action::NativeCall { .. }
                         | Action::Arithmetic { .. }
                         | Action::Comparison { .. }
                         | Action::Intrinsic { .. }
@@ -1102,6 +1118,15 @@ impl<'a> Builder<'a> {
 
     fn slot(&self, symbol: Sexp) -> usize {
         self.slot_of[&symbol]
+    }
+
+    /// The layout and slot a `$` site's shape cache holds, once tier 0 has seen a record there.
+    fn cached_field(&self, shape: Sexp) -> Option<(u32, u32)> {
+        // SAFETY: the shape constant is the two-element integer vector the compiler made.
+        let &[layout, index] = (unsafe { values::ints(shape) }) else {
+            return None;
+        };
+        Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
     }
 
     fn feedback_at(&self, pc: usize) -> Ty {
@@ -1498,10 +1523,37 @@ impl<'a> Builder<'a> {
                     Action::BranchIfObject { src: operand(0) }
                 }
             }
+            Op::Field => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(4))) {
+                    // Only a boxed subject can be a record, and an unboxed register's window
+                    // slot may be stale, so the read could not even load its kind.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
+                        // A boxed field is loaded as it is, so only an unboxed scalar's type is
+                        // something the read itself checks.
+                        let feedback = if feedback.is_unboxed() {
+                            feedback
+                        } else {
+                            Ty::Boxed
+                        };
+                        state.registers[operand(0)] = feedback;
+                        state.visible = Some(true);
+                        Action::Intrinsic {
+                            intrinsic: Intrinsic::Field { layout, index },
+                            dst: operand(0),
+                            args: self.slice([operand(1)]),
+                            result: feedback,
+                        }
+                    }
+                    _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
+                }
+            }
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
-                Vec::new(),
+                &[],
                 Effect::Opaque,
             ),
             Op::DispatchSubject => self.opaque_step(
@@ -1856,9 +1908,6 @@ impl<'a> Builder<'a> {
         function: Sexp,
         dst: (usize, Ty),
     ) -> Option<Action<'a>> {
-        if !self.frame_safe(function) {
-            return None;
-        }
         let mut lowering = Lowering {
             state: state.clone(),
             steps: List::new_in(self.arena),
@@ -1890,6 +1939,36 @@ impl<'a> Builder<'a> {
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
+        }
+        let unboxed: Option<SmallVec<[(usize, Ty); 4]>> = args
+            .iter()
+            .map(|argument| match *argument {
+                Argument::Unboxed { register, ty } if ty.is_unboxed() => Some((register, ty)),
+                _ => None,
+            })
+            .collect();
+        if let Some(unboxed) = unboxed {
+            let types: SmallVec<[Ty; 4]> = unboxed.iter().map(|&(_, ty)| ty).collect();
+            if let Some(native) = native::native_for(function, &types) {
+                // The native function reads nothing of this frame, so the variables stay as
+                // they are.
+                after.visible = Some(true);
+                after.registers[dst.0] = native.result;
+                *state = after;
+                self.speculations
+                    .extend(native.speculations.iter().cloned());
+                let mut registers = List::new_in(self.arena);
+                registers.extend(unboxed.iter().map(|&(register, _)| register));
+                return Some(Action::NativeCall {
+                    steps: lowering.steps.leak(),
+                    native,
+                    args: registers.leak(),
+                    dst: dst.0,
+                });
+            }
+        }
+        if !self.frame_safe(function) {
+            return None;
         }
         // The callee may reach this frame through `parent.frame()`, so the call writes the
         // variables back and forgets them like any opaque step.
@@ -2356,7 +2435,7 @@ impl<'a> Builder<'a> {
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                Vec::new(),
+                &[],
                 Effect::PureUnlessObserved,
             ));
         }
@@ -2561,7 +2640,7 @@ unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Spe
 }
 
 /// The name of the base builtin `function`, when `symbol` names it.
-unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
+pub(crate) unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
     if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
         return None;
     }
@@ -2601,7 +2680,7 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
     None
 }
 
-unsafe fn constant_type(value: Sexp) -> Ty {
+pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
     match bytecode::value_kind(value) {
         feedback::INTEGER_SCALAR => Ty::Int,
         feedback::DOUBLE_SCALAR => Ty::Dbl,
@@ -2781,7 +2860,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate => {
+        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

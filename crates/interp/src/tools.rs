@@ -31,13 +31,19 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("ps_priority", do_ps_priority),
     ("package_dependencies_scan", do_package_dependencies_scan),
     // The help server cannot start, so `startDynamicHelp` warns and carries on without it.
-    ("startHTTPD", |_| unsafe { scalar_integer(-1) }),
+    ("startHTTPD", |call| unsafe {
+        let port = values::as_integer_scalar(call.arg(1));
+        if port != NA_INTEGER && !(0..=65535).contains(&port) {
+            return Err(error(format!(
+                "Invalid port number {port}: should be in 0:65535, typically above 1024"
+            )));
+        }
+        scalar_integer(-1)
+    }),
     ("stopHTTPD", |_| Ok(nil())),
     ("parseRd", crate::rd::parse_rd),
     ("deparseRd", crate::rd::deparse_rd),
-    ("parseLatex", |_| {
-        Err(error("parsing LaTeX is not supported in ry yet"))
-    }),
+    ("parseLatex", crate::latex::parse_latex),
 ];
 
 /// `Rmd5(files)` and `Rsha256(files)`: the digest of each file in hexadecimal, `NA` when it
