@@ -26,10 +26,10 @@ use {
     rustc_hash::FxHashMap,
     semantics::ANALYSIS_STACK_SIZE,
     std::{
-        ffi::c_void,
+        ffi::{c_int, c_void},
         path::{Path, PathBuf},
         sync::{
-            LazyLock, Mutex, PoisonError,
+            LazyLock, Mutex, OnceLock, PoisonError,
             atomic::{AtomicBool, Ordering},
         },
         thread,
@@ -43,6 +43,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderBind", 2, do_bind).invisible(),
     internal("ryLoaderRun", 3, do_run).invisible(),
     internal("ryLoaderForce", 3, do_force),
+    internal("ryLoaderAwaitVerdict", 0, do_await_verdict).invisible(),
 ];
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
@@ -105,6 +106,35 @@ static STRICT: AtomicBool = AtomicBool::new(false);
 /// Whether the project is in strict mode, which the host reads from its `ry.toml`.
 pub fn set_strict(strict: bool) {
     STRICT.store(strict, Ordering::Relaxed);
+}
+
+/// Asks the host whether the package may run: 0 lets it, and any other value is the status the
+/// process exits with, after the host has reported why. The host may block until it knows.
+pub type Verdict = extern "C" fn() -> c_int;
+
+static VERDICT: OnceLock<Verdict> = OnceLock::new();
+
+/// Lets the host check the package while it loads. Binding definitions and running the
+/// statements the plan marks effect-free never wait; any other statement, the hooks, compiled
+/// code and everything after the load wait for `verdict`, so code the host refuses never runs.
+pub fn set_verdict(verdict: Verdict) {
+    if VERDICT.set(verdict).is_err() {
+        panic!("the host sets the package verdict once per session");
+    }
+}
+
+/// Returns once the host lets the package run, and otherwise ends the process with the
+/// host's status. A session without a verdict runs everything.
+fn await_verdict() {
+    let Some(verdict) = VERDICT.get() else {
+        return;
+    };
+    let status = verdict();
+    if status != 0 {
+        use std::io::Write;
+        drop(std::io::stdout().flush());
+        std::process::exit(status);
+    }
 }
 
 /// Starts analyzing the package at or above `path` on a thread of its own and returns at once,
@@ -176,6 +206,13 @@ fn plan(root: &str, full: bool) -> RValue {
         },
     );
     value
+}
+
+/// `.Internal(ryLoaderAwaitVerdict())`, which the loader calls once the effect-free part of a
+/// load has run.
+unsafe fn do_await_verdict(_call: &Call<'_>) -> R<Sexp> {
+    await_verdict();
+    Ok(nil())
 }
 
 unsafe fn do_commit(call: &Call<'_>) -> R<Sexp> {
@@ -250,6 +287,9 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
         (code.clone(), tree.clone())
     };
+    if !code.effect_free {
+        await_verdict();
+    }
     let expression = scope(|| {
         let srcfile = debug_srcfile(&root, &code.path, &tree)?;
         lower_range(&tree, code.source_start, code.source_end, srcfile)

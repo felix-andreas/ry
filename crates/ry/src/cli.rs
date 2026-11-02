@@ -157,7 +157,7 @@ pub fn check(
     let mut n_unsafe_fixable = 0;
     let mut n_annotated = 0;
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(&root, config.clone(), &requested)?;
+        let mut analysis = analyze_project(&root, &root, config.clone(), &requested)?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -165,14 +165,14 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(&root, config.clone(), &requested)?;
+                analysis = analyze_project(&root, &root, config.clone(), &requested)?;
             }
         }
         if annotate {
             let annotated = write_inferred_annotations(&analysis)?;
             if annotated > 0 {
                 n_annotated += annotated;
-                analysis = analyze_project(&root, config.clone(), &requested)?;
+                analysis = analyze_project(&root, &root, config.clone(), &requested)?;
             }
         }
         n_failures += analysis.failures;
@@ -342,8 +342,8 @@ fn fixes_apply(file: &AnalyzedFile) -> bool {
 }
 
 /// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
-/// it. Analysis always covers the whole project root; `requested` only marks which files the
-/// caller asked about.
+/// it. Analysis always covers the whole project root, so names resolve across it, but only the
+/// files the caller asked about are checked: the others' `diagnostics` are empty.
 pub(crate) struct ProjectAnalysis {
     pub db: RootDatabase,
     pub files: Vec<AnalyzedFile>,
@@ -383,14 +383,17 @@ impl ProjectAnalysis {
     }
 }
 
+/// Analyzes the R files under `walk` as one project rooted at `root`, whose `ry.toml`, stubs,
+/// `DESCRIPTION` and `NAMESPACE` apply, and checks the files under `requested`.
 pub(crate) fn analyze_project(
     root: &Path,
+    walk: &Path,
     config: config::Config,
     requested: &[PathBuf],
 ) -> Result<ProjectAnalysis, CommandError> {
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
-    let mut paths = collect_r_files(root, exclude.as_ref())?;
+    let mut paths = collect_r_files(walk, exclude.as_ref())?;
     // `exclude` scopes the project walk; it does not veto a file named directly.
     for target in requested {
         if !target.is_dir() && !paths.contains(target) {
@@ -566,11 +569,21 @@ pub(crate) fn analyze_project(
         metadata.set_attached(&mut db).to(attached);
     }
 
+    // Only the requested files are checked: another file's items are still analyzed where a
+    // requested file's check reaches them, but its own findings would only be thrown away.
+    let checked_by_size: Vec<usize> = by_size
+        .iter()
+        .copied()
+        .filter(|&index| reported.get(index).copied().unwrap_or(false))
+        .collect();
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim.
     in_parallel(&db, workers, &by_size, |db, index| {
         if let Some(tree) = trees.get(index) {
             drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
+        if !reported.get(index).copied().unwrap_or(false) {
+            return;
         }
         let file = files[index];
         for &item in semantics::item_tree(db, file) {
@@ -578,7 +591,7 @@ pub(crate) fn analyze_project(
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    for (index, diagnostics) in in_parallel(&db, workers, &by_size, |db, index| {
+    for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
         let rendered = document_diagnostics(db, files[index], &config);
         apply_suppressions(rendered, files[index].text(db))
     }) {

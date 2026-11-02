@@ -5,7 +5,8 @@
 # applies a plan that touches only the items that changed.
 #
 # A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
-# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The host defines the
+# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The backend's
+# `.ry_await_verdict()` returns once the host lets the package's effects run. The host defines the
 # transport, `.ry_request(root, full)` (which returns the plan) and `.ry_commit(root)`, and
 # creates the session's state, `.ry_packages` (one entry per loaded package root) and
 # `.ry_timing`, since a host may cache the compiled functions across sessions and state must
@@ -244,6 +245,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       matrix(NA_character_, 0L, 4L)
     })
   }
+  # Everything above only binds names and registers classes, unless a statement the plan did
+  # not mark effect-free ran, and that one waited. Compiled code and hooks may have effects.
+  .ry_await_verdict()
   if (!is.null(plan$dynamic_libraries)) {
     .ry_load_compiled(state, plan$dynamic_libraries)
   }

@@ -1565,6 +1565,14 @@ pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
     loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
 }
 
+/// Makes the package loader wait for `verdict` before the parts of a load that may have
+/// effects, so the host can check the package while the definitions bind (see
+/// `loader::ry_runtime::set_verdict`). `ry load` calls it once, before [`ry_run`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
+    loader::ry_runtime::set_verdict(verdict);
+}
+
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0
 /// otherwise. ry's console asks before each command and reloads with `.ry_autoreload()`.
 #[unsafe(no_mangle)]

@@ -36,3 +36,20 @@ file R/value.R
 run ry load -e "print(area(2, 3))"
 expect exit 1
 expect stderr "strict mode found 2 errors, so this code does not run"
+
+# The check runs while the runtime starts, but nothing with an effect runs before its verdict, so
+# a refused package never runs a top-level call, `.onLoad`, or the user's code.
+file R/value.R
+| #: fn(x: list) -> double
+| value <- function(x) x$value
+| cat("top-level call ran\n")
+file R/zzz.R
+| #: fn(libname: character, pkgname: character) -> NULL
+| .onLoad <- function(libname, pkgname) {
+|   cat("onLoad ran\n")
+| }
+
+run ry load -e "cat('user code ran\n')"
+expect exit 1
+expect stderr "so this code does not run"
+expect stdout lacks "ran"

@@ -272,10 +272,22 @@ pub struct PackageBindings {
     /// The item that defines each lazy name, as a position in [`PackageIndex::files`] and a
     /// position among that file's items.
     pub lazy: FxHashMap<String, (u32, u32)>,
-    /// The items that run at load, in collation order, positioned as in `lazy`.
-    pub eager: Vec<(u32, u32)>,
+    /// The items that run at load, in collation order.
+    pub eager: Vec<EagerItem>,
     /// The lazy constants of strict files, in collation order, positioned as in `lazy`.
     pub constants: Vec<(u32, u32)>,
+}
+
+/// An item that runs at load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EagerItem {
+    /// Positioned as in [`PackageBindings::lazy`].
+    pub at: (u32, u32),
+    /// Running it binds names and registers classes and has no other effect: it defines a
+    /// function, or it is a statement of a strict file that strict mode accepts at top level.
+    /// A host may run such an item before the strict check of the package has finished,
+    /// because nothing it does is visible outside the session the check may still refuse.
+    pub effect_free: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,19 +564,20 @@ pub fn package_bindings(db: &dyn Db, sources: PackageSources) -> Arc<PackageBind
             at,
             item.binding.as_deref(),
             matches!(item.kind, BindKind::Constant { .. }),
+            item.effect_free,
         ));
     }
     // A binding is lazy when its name is, which only the whole package decides.
     let is_lazy = |name: Option<&str>| name.is_some_and(|name| names.get(name) == Some(&true));
     let eager = located
         .iter()
-        .filter(|(_, name, _)| !is_lazy(*name))
-        .map(|(at, _, _)| *at)
+        .filter(|(_, name, _, _)| !is_lazy(*name))
+        .map(|&(at, _, _, effect_free)| EagerItem { at, effect_free })
         .collect();
     let constants = located
         .iter()
-        .filter(|(_, name, constant)| *constant && is_lazy(*name))
-        .map(|(at, _, _)| *at)
+        .filter(|(_, name, constant, _)| *constant && is_lazy(*name))
+        .map(|(at, _, _, _)| *at)
         .collect();
     let lazy = lazy_items
         .into_iter()
@@ -594,6 +607,8 @@ struct ItemBinds {
     /// Names its `<<-` assignments write while `.onLoad` runs.
     load_writes: Vec<String>,
     kind: BindKind,
+    /// See [`EagerItem::effect_free`].
+    effect_free: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,12 +635,15 @@ pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc
                 .binding
                 .as_ref()
                 .is_some_and(|binding| binding.function);
-            let constant = strict
-                && is_constant_candidate(item)
-                && loaded
-                    .get(index)
-                    .is_some_and(|loaded| *item_top_level(db, loaded.item) == TopLevel::Constant);
+            let top_level = (strict && !function)
+                .then(|| loaded.get(index))
+                .flatten()
+                .map(|loaded| item_top_level(db, loaded.item));
+            let constant = is_constant_candidate(item) && top_level == Some(&TopLevel::Constant);
+            let effect_free =
+                function || matches!(top_level, Some(TopLevel::Definition | TopLevel::Constant));
             ItemBinds {
+                effect_free,
                 binds: item.binds.clone(),
                 binding: item.binding.as_ref().map(|binding| binding.name.clone()),
                 load_writes: item.load_writes.clone(),
@@ -653,15 +671,20 @@ pub fn file_is_strict(db: &dyn Db, sources: PackageSources, file: SourceFile) ->
     }
 }
 
-/// Classifies the items of a strict `file` that `package_index` may bind as lazy constants,
-/// so a host can derive those facts across cores before it joins them.
-pub fn classify_constants(db: &dyn Db, sources: PackageSources, file: SourceFile) {
+/// Classifies the top-level statements of a strict `file`, which decides which constants
+/// `package_index` binds lazily and which eager items are effect-free, so a host can derive
+/// those facts across cores before it joins them.
+pub fn classify_top_level(db: &dyn Db, sources: PackageSources, file: SourceFile) {
     if !file_is_strict(db, sources, file) {
         return;
     }
     let loaded = &file_load_index(db, file).items;
     for (item, loaded) in file_items(db, file).items.iter().zip(loaded) {
-        if is_constant_candidate(item) {
+        if !item
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.function)
+        {
             item_top_level(db, loaded.item);
         }
     }

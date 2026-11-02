@@ -4678,6 +4678,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `--annotate` is its own flag rather than part of `--fix`: a fix repairs a finding, while an annotation records what inference found and rewrites every signature, which `--fix` users have not asked for.
 - A formal that is optional only because the body may never read it (`[value]: T`) also falls back to `#:`: inline syntax spells optionality only as a default, so the inline form would make a caller that leaves the argument out an error.
 
+## The strict load check overlaps the runtime start
+
+- Before, `ry load` on a strict package ran the whole-project strict check, test files included, and only then started the runtime, so a cold typed load cost the check plus the load (4.8 s against 2.4 s untyped on finbench).
+- On ry's runtime the check now runs on a thread (`run_load` in `crates/ry/src/main.rs`) while the runtime starts. The loader receives a verdict callback (`ry_loader_set_verdict`) and calls it before any statement that is not effect-free, before compiled code and `.onLoad` (`.ry_await_verdict()` in `runtime.R`), and after the load returns; a refusal exits with the verdict's status. GNU R still checks before it starts, because its loader cannot call back into ry.
+- An eager item is effect-free (`EagerItem.effect_free`, `load_index.rs`) when it binds a function literal or when strict mode classifies it as a definition or constant: that classification is exactly the guarantee that running it has no effect, so it may run before the verdict. A refused package therefore never ran anything a user could observe.
+- The check walks only `R/` and computes diagnostics only for requested files (`analyze_project`'s `walk` and `requested`): a name that only a test file defines is unbound in the loaded package anyway, and the tests' diagnostics were never reported. That cut the check's CPU from 6.3 to 4.3 s on typed finbench.
+- The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a

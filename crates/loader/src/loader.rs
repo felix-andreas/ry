@@ -17,7 +17,7 @@ use {
         file_conditional_writers, file_definitions, file_typing_mode,
         load_index::{
             IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-            classify_constants, file_binds, file_items, file_load_index, fnv1a, package_index,
+            classify_top_level, file_binds, file_items, file_load_index, fnv1a, package_index,
         },
         metadata::{
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, PackageMetadata,
@@ -168,6 +168,9 @@ pub struct Code {
     pub source_end: u32,
     /// Whether the code registers S4 classes or methods, after which R refreshes its S4 caches.
     pub registers_s4: bool,
+    /// Whether running it only binds names and registers classes, so it may run before the
+    /// strict check of the package has finished (see `EagerItem::effect_free`).
+    pub effect_free: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,7 +356,7 @@ impl Loader {
                 file_conditional_writers(db, file);
             });
             let sources = self.packages[position].sources;
-            self.warm(&changed, |db, file| classify_constants(db, sources, file));
+            self.warm(&changed, |db, file| classify_top_level(db, sources, file));
         }
         let sources = self.packages[position].sources;
         self.warm(&changed, |db, file| {
@@ -820,9 +823,10 @@ pub fn diff<'text>(
             source_start: span.source_start,
             source_end: span.source_end,
             registers_s4: false,
+            effect_free: true,
         }
     };
-    let eager_code = |path: &str, item: &IndexedItem| Code {
+    let eager_code = |path: &str, item: &IndexedItem, effect_free: bool| Code {
         name: None,
         path: path.to_owned(),
         line: item.span.line,
@@ -832,6 +836,7 @@ pub fn diff<'text>(
         source_start: item.span.source_start,
         source_end: item.span.source_end,
         registers_s4: registers_s4(item),
+        effect_free,
     };
 
     // Lazy definitions are keyed by name, which only one item writes.
@@ -967,22 +972,27 @@ pub fn diff<'text>(
     // A rerun statement must also see what it saw at load: when it reads a name that it or a
     // later statement rewrites, as `f <- memoise(f)` does, the earlier writers of that name
     // rerun first. Otherwise it would read the final value and, here, memoise twice.
-    let eager: Vec<(&str, &IndexedItem, bool)> = index
+    let eager: Vec<(&str, &IndexedItem, bool, bool)> = index
         .bindings
         .eager
         .iter()
-        .filter_map(|&at| {
+        .filter_map(|eager| {
+            let at = eager.at;
             let (path, item) = index.item_at(at)?;
-            Some((path, item, fresh.contains(&(at.0 as usize, at.1 as usize))))
+            let fresh = fresh.contains(&(at.0 as usize, at.1 as usize));
+            Some((path, item, fresh, eager.effect_free))
         })
         .collect();
     let mut writers: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
-    for (position, (_, item, _)) in eager.iter().enumerate() {
+    for (position, (_, item, _, _)) in eager.iter().enumerate() {
         for name in &item.binds {
             writers.entry(name).or_default().push(position);
         }
     }
-    let mut rerun: Vec<bool> = eager.iter().map(|(_, _, fresh)| full || *fresh).collect();
+    let mut rerun: Vec<bool> = eager
+        .iter()
+        .map(|(_, _, fresh, _)| full || *fresh)
+        .collect();
     // A lazy constant holds the value its initializer computed when it was forced, so like an
     // eager statement it is bound afresh when anything its initializer reaches changed.
     let constants: Vec<(&str, &str, &IndexedItem)> = if full {
@@ -1003,7 +1013,7 @@ pub fn diff<'text>(
         if !full && !changed.is_empty() {
             let roots: Vec<&str> = eager
                 .iter()
-                .flat_map(|(_, item, _)| item.reads.iter().map(String::as_str))
+                .flat_map(|(_, item, _, _)| item.reads.iter().map(String::as_str))
                 .collect();
             let reaching: Vec<String> = reaching_changed(&roots, functions, &changed)
                 .into_iter()
@@ -1028,7 +1038,7 @@ pub fn diff<'text>(
                 grew = true;
             }
         }
-        for (position, (_, item, _)) in eager.iter().enumerate() {
+        for (position, (_, item, _, _)) in eager.iter().enumerate() {
             if !rerun[position]
                 && !changed.is_empty()
                 && item
@@ -1065,12 +1075,12 @@ pub fn diff<'text>(
         .iter()
         .zip(&rerun)
         .filter(|(_, rerun)| **rerun)
-        .map(|((path, item, _), _)| eager_code(path, item))
+        .map(|((path, item, _, effect_free), _)| eager_code(path, item, *effect_free))
         .collect();
     // Another statement may make the same registration, which then stays.
     let registered: BTreeSet<&Registration> = eager
         .iter()
-        .flat_map(|(_, item, _)| &item.registrations)
+        .flat_map(|(_, item, _, _)| &item.registrations)
         .collect();
 
     let mut remove = BTreeSet::new();
