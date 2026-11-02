@@ -57,6 +57,11 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
   new name. On ry's runtime the retired library stays mapped (`libr` `unloaded_dlls`), so a
   stale pointer into it does not crash, but every rebuild maps one more copy.
+- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
+  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
+  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
+  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
+  with a block cache and linear topic ordering").
 - **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
   `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
   after `ry load`, `ry test` and `ry document`.
