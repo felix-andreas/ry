@@ -6559,6 +6559,7 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                     (false, false) => (gap_end, from),
                 };
                 // GNU R converts radians with 180 / 3.14, not 180 / pi.
+                #[allow(clippy::approx_constant)]
                 let angle = (180.0 / 3.14) * (toward[1] - anchor[1]).atan2(toward[0] - anchor[0]);
                 push_text(
                     device,
