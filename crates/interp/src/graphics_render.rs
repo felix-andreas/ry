@@ -140,7 +140,7 @@ impl Affine {
         [a * x + c * y + e, b * x + d * y + f]
     }
 
-    fn invert(self) -> Option<Affine> {
+    pub(crate) fn invert(self) -> Option<Affine> {
         let [a, b, c, d, e, f] = self.0;
         let determinant = a * d - b * c;
         if determinant == 0.0 || !determinant.is_finite() {
@@ -389,6 +389,8 @@ pub struct Paper {
 /// How deeply definitions may nest when they are rendered: a group used inside a pattern used
 /// inside a mask, and so on. A reference cycle cannot arise from R code, which only sees a
 /// reference once its definition is complete, but the bound keeps a malformed drawing finite.
+/// It bounds depth only: the raster writer renders a definition at each use, so a chain of
+/// groups that each use the one before twice costs twice as much per link.
 const MAX_NESTING: usize = 32;
 
 /// Renders a device `size` inches across into one file for PDF and PostScript (unless it was
@@ -484,7 +486,9 @@ pub fn file_for_page(name: &str, page: usize) -> String {
         }
         match characters.next() {
             Some('d') => {
-                let width: usize = spec.parse().unwrap_or(0);
+                // GNU R formats the name into a buffer of `PATH_MAX` bytes, so no longer
+                // width can matter.
+                let width: usize = spec.parse().map_or(0, |width: usize| width.min(4096));
                 result.push_str(&format!("{page:0width$}"));
             }
             Some('%') => result.push('%'),
@@ -734,28 +738,26 @@ fn pdf_document(drawing: &Drawing, size: [f64; 2], title: &str) -> Vec<u8> {
 }
 
 /// A compressed stream object whose dictionary holds `entries` besides its length and filter.
+/// The stream stays uncompressed if compression fails, which writing into memory never does.
 fn pdf_stream(entries: &str, content: &[u8]) -> Vec<u8> {
-    let compressed = deflate(content);
-    let mut stream = format!(
-        "<< {entries} /Length {} /Filter /FlateDecode >>\nstream\n",
-        compressed.len()
-    )
-    .into_bytes();
-    stream.extend_from_slice(&compressed);
+    let (body, filter) = match deflate(content) {
+        Ok(compressed) => (compressed, " /Filter /FlateDecode"),
+        Err(_) => (content.to_vec(), ""),
+    };
+    let mut stream =
+        format!("<< {entries} /Length {}{filter} >>\nstream\n", body.len()).into_bytes();
+    stream.extend_from_slice(&body);
     stream.extend_from_slice(b"\nendstream");
     stream
 }
 
-fn deflate(bytes: &[u8]) -> Vec<u8> {
+fn deflate(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut encoder = flate2::write::ZlibEncoder::new(
         Vec::with_capacity(bytes.len() / 4),
         flate2::Compression::default(),
     );
-    // Writing into a vector cannot fail.
-    match encoder.write_all(bytes).and_then(|()| encoder.finish()) {
-        Ok(compressed) => compressed,
-        Err(_) => Vec::new(),
-    }
+    encoder.write_all(bytes)?;
+    encoder.finish()
 }
 
 /// Writes content streams, and the objects for the definitions they use, which all pages and
@@ -792,12 +794,9 @@ impl<'a> PdfWriter<'a> {
         let mut out = String::new();
         if alpha(page.background) > 0 {
             let [red, green, blue, a] = channels(page.background);
-            if a < 255 {
-                let state = self.opacity(255, a);
-                out.push_str(&format!("/GS{state} gs\n"));
-            }
+            let state = self.opacity(255, a);
             out.push_str(&format!(
-                "{} rg 0 0 10000 10000 re f\n",
+                "q /GS{state} gs {} rg 0 0 10000 10000 re f Q\n",
                 pdf_rgb(red, green, blue)
             ));
         }
@@ -903,14 +902,16 @@ impl<'a> PdfWriter<'a> {
                 }
                 current = Some((item.clip, item.mask));
             }
-            self.mark(out, &item.mark, depth);
+            self.mark(out, &item.mark, item.mask.is_some(), depth);
         }
         if current.is_some() {
             out.push_str("Q\n");
         }
     }
 
-    fn mark(&mut self, out: &mut String, mark: &Mark, depth: usize) {
+    /// Writes one mark in its own graphics state, so its opacity and colours do not reach the
+    /// marks after it. `masked` says whether the item's mask is in force.
+    fn mark(&mut self, out: &mut String, mark: &Mark, masked: bool, depth: usize) {
         match mark {
             Mark::Path {
                 outline,
@@ -929,14 +930,14 @@ impl<'a> PdfWriter<'a> {
                 };
                 let stroke_alpha = stroke.map_or(255, |stroke| alpha(stroke.colour));
                 let state = self.opacity(stroke_alpha, fill_alpha);
-                // A gradient's own opacity is a soft mask, which lasts until the graphics
-                // state is restored.
-                let soft = match fill {
-                    Some(Fill::Pattern(index)) => self.gradient_opacity(index),
-                    _ => false,
-                };
-                if soft && let Some(Fill::Pattern(index)) = fill {
-                    out.push_str(&format!("q /A{index} gs\n"));
+                out.push_str("q\n");
+                // A gradient's own opacity is a soft mask, which would replace the item's mask;
+                // GNU R's pdf device sets the item's mask last, so the item's mask wins.
+                if !masked
+                    && let Some(Fill::Pattern(index)) = fill
+                    && self.gradient_opacity(index)
+                {
+                    out.push_str(&format!("/A{index} gs\n"));
                 }
                 out.push_str(&format!("/GS{state} gs\n"));
                 match fill {
@@ -976,9 +977,7 @@ impl<'a> PdfWriter<'a> {
                     (true, false, true) => "f*\n",
                     _ => "S\n",
                 });
-                if soft {
-                    out.push_str("Q\n");
-                }
+                out.push_str("Q\n");
             }
             Mark::Text {
                 origin,
@@ -993,10 +992,8 @@ impl<'a> PdfWriter<'a> {
                 if a == 0 || text.is_empty() {
                     return;
                 }
-                if a < 255 {
-                    let state = self.opacity(255, a);
-                    out.push_str(&format!("/GS{state} gs\n"));
-                }
+                let state = self.opacity(255, a);
+                out.push_str(&format!("q /GS{state} gs\n"));
                 let face = if (1..=5).contains(font) { *font } else { 1 };
                 let width = text_width_ems(text, face) * points / POINTS_PER_INCH;
                 let (sin, cos) = rotation.to_radians().sin_cos();
@@ -1013,18 +1010,16 @@ impl<'a> PdfWriter<'a> {
                     pt(y),
                     pdf_string(text)
                 ));
-                if a < 255 {
-                    let state = self.opacity(255, 255);
-                    out.push_str(&format!("/GS{state} gs\n"));
-                }
+                out.push_str("Q\n");
             }
             Mark::Group { group, transform } => {
                 if !self.define('X', *group, depth) {
                     return;
                 }
+                let state = self.opacity(255, 255);
                 let [a, b, c, d, e, f] = transform.0;
                 out.push_str(&format!(
-                    "q {a:.4} {b:.4} {c:.4} {d:.4} {:.2} {:.2} cm /X{group} Do Q\n",
+                    "q /GS{state} gs {a:.4} {b:.4} {c:.4} {d:.4} {:.2} {:.2} cm /X{group} Do Q\n",
                     pt(e),
                     pt(f)
                 ));
@@ -1213,7 +1208,7 @@ fn pdf_outline(out: &mut String, outline: &[Segment]) {
 
 /// A gradient as a PDF shading dictionary, in RGB, or in grey levels that are the stops'
 /// opacities when `opacity`. PDF only pads or stops at a gradient's ends, so a repeating or
-/// reflecting gradient pads.
+/// reflecting gradient stops, as on GNU R's pdf device (which warns when it is defined).
 fn pdf_shading(pattern: &Pattern, opacity: bool) -> String {
     let (kind, coordinates, stops, extend) = match pattern {
         Pattern::Linear {
@@ -1280,10 +1275,10 @@ fn pdf_shading(pattern: &Pattern, opacity: bool) -> String {
         .map(|stop| format!("{:.4}", stop.offset))
         .collect();
     let encode = vec!["0 1"; pieces.len()].join(" ");
-    let extends = if extend == Extend::None {
-        "false false"
-    } else {
+    let extends = if extend == Extend::Pad {
         "true true"
+    } else {
+        "false false"
     };
     format!(
         "<< /ShadingType {kind} /ColorSpace /{} /Coords [{coordinates}] /Extend [{extends}] \
@@ -1453,6 +1448,7 @@ fn svg_document(page: &Page, definitions: &[Definition], size: [f64; 2]) -> Stri
     let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
     let mut writer = SvgWriter {
         definitions,
+        width,
         height,
         defs: String::new(),
         written: BTreeSet::new(),
@@ -1477,6 +1473,8 @@ fn svg_document(page: &Page, definitions: &[Definition], size: [f64; 2]) -> Stri
 
 struct SvgWriter<'a> {
     definitions: &'a [Definition],
+    /// The page width in points.
+    width: f64,
     /// The page height in points, which turns inches from the bottom into points from the top.
     height: f64,
     defs: String,
@@ -1699,10 +1697,14 @@ impl SvgWriter<'_> {
                 ));
                 self.items(&mut element, destination, depth + 1);
                 match svg_blend_mode(*operator) {
+                    // Each source mark blends with what is under it, as on the other devices,
+                    // rather than the source marks first combining among themselves.
                     Some(mode) => {
-                        element.push_str(&format!("<g style=\"mix-blend-mode:{mode}\">\n"));
-                        self.items(&mut element, source, depth + 1);
-                        element.push_str("</g>\n");
+                        for item in source {
+                            element.push_str(&format!("<g style=\"mix-blend-mode:{mode}\">\n"));
+                            self.items(&mut element, std::slice::from_ref(item), depth + 1);
+                            element.push_str("</g>\n");
+                        }
                     }
                     None => self.items(&mut element, source, depth + 1),
                 }
@@ -1768,19 +1770,49 @@ impl SvgWriter<'_> {
                 svg_spread(*extend),
                 stop_elements(stops, *extend)
             )),
-            Pattern::Tiling { rect, items, .. } => {
+            Pattern::Tiling {
+                rect,
+                items,
+                extend,
+            } => {
                 let [x, y] = [self.x(rect.x0), self.y(rect.y1)];
+                let [width, height] = [self.x(rect.x1 - rect.x0), self.x(rect.y1 - rect.y0)];
+                // SVG patterns only repeat. A reflected tile is a repeated block of the tile and
+                // its three mirror images, and a tile that is not repeated is spaced so that its
+                // next copy falls off the page; viewers rasterize a pattern tile, so a spacing
+                // much larger than the page would blur it. SVG cannot repeat a tile's edge
+                // pixels, so `pad` paints nothing beyond the tile either.
+                let page = self.width.max(self.height);
+                let (tile_width, tile_height) = match extend {
+                    Extend::Repeat => (width, height),
+                    Extend::Reflect => (2.0 * width, 2.0 * height),
+                    Extend::Pad | Extend::None => (
+                        width + 2.0 * (page + x.abs()),
+                        height + 2.0 * (page + y.abs()),
+                    ),
+                };
                 out.push_str(&format!(
                     "<pattern id=\"f{index}\" patternUnits=\"userSpaceOnUse\" x=\"{x:.2}\" \
-                     y=\"{y:.2}\" width=\"{:.2}\" height=\"{:.2}\">\n\
+                     y=\"{y:.2}\" width=\"{tile_width:.2}\" height=\"{tile_height:.2}\">\n\
+                     <clipPath id=\"f{index}c\"><rect width=\"{width:.2}\" \
+                     height=\"{height:.2}\"/></clipPath>\n\
+                     <g id=\"f{index}t\" clip-path=\"url(#f{index}c)\">\n\
                      <g transform=\"translate({:.2} {:.2})\">\n",
-                    self.x(rect.x1 - rect.x0),
-                    self.x(rect.y1 - rect.y0),
-                    -x,
-                    -y
+                    -x, -y
                 ));
                 self.items(out, items, depth + 1);
-                out.push_str("</g>\n</pattern>\n");
+                out.push_str("</g>\n</g>\n");
+                if *extend == Extend::Reflect {
+                    for (scale_x, scale_y) in [(-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+                        out.push_str(&format!(
+                            "<use xlink:href=\"#f{index}t\" transform=\"matrix({scale_x} 0 0 \
+                             {scale_y} {:.2} {:.2})\"/>\n",
+                            if scale_x < 0.0 { 2.0 * width } else { 0.0 },
+                            if scale_y < 0.0 { 2.0 * height } else { 0.0 }
+                        ));
+                    }
+                }
+                out.push_str("</pattern>\n");
             }
         }
     }
@@ -2054,7 +2086,13 @@ fn draw_mark(
             };
             let source = match painted(fill) {
                 Some(Fill::Colour(colour)) => Some(Source::Solid(colour)),
-                Some(Fill::Pattern(index)) => pattern_source(definitions, index, to_pixels, depth),
+                Some(Fill::Pattern(index)) => pattern_source(
+                    definitions,
+                    index,
+                    to_pixels,
+                    [canvas.width(), canvas.height()],
+                    depth,
+                ),
                 None => None,
             };
             if let Some(source) = source {
@@ -2180,13 +2218,15 @@ enum Source {
 
 /// The source a pattern definition fills with. Gradients are defined in inches, which tiny-skia
 /// maps through the path's own transform.
+/// What a pattern paints on a canvas `canvas` pixels across, as a shader in path space.
 fn pattern_source(
     definitions: &[Definition],
     index: usize,
     to_pixels: Affine,
+    canvas: [u32; 2],
     depth: usize,
 ) -> Option<Source> {
-    use tiny_skia::{GradientStop, LinearGradient, Point, RadialGradient, SpreadMode};
+    use tiny_skia::{GradientStop, LinearGradient, Point, SpreadMode};
     let Some(Definition::Pattern(pattern)) = definitions.get(index) else {
         return None;
     };
@@ -2230,23 +2270,22 @@ fn pattern_source(
             stops,
             extend,
         } => {
-            // tiny-skia's radial gradient starts from a point, so a start circle with a radius
-            // is drawn by moving each stop out to where its circle's radius falls.
-            let fraction = if *end_radius > 0.0 {
-                (start_radius / end_radius).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let remap = move |offset: f64| fraction + offset * (1.0 - fraction);
-            RadialGradient::new(
-                point(*start),
-                point(*end),
-                end_radius.max(f64::EPSILON) as f32,
-                skia_stops(stops, *extend, &remap),
-                spread(*extend),
-                tiny_skia::Transform::identity(),
-            )
-            .map(Source::Gradient)
+            // tiny-skia's radial gradient only starts from a point, so the gradient between two
+            // circles is evaluated per pixel into an image the size of the canvas.
+            let from_pixels = to_pixels.invert()?;
+            let pixmap = radial_gradient_image(
+                [*start, *end],
+                [*start_radius, *end_radius],
+                &gradient_stops(stops, Extend::Pad),
+                *extend,
+                from_pixels,
+                canvas,
+            )?;
+            Some(Source::Tile {
+                pixmap,
+                spread: SpreadMode::Pad,
+                transform: from_pixels.skia(),
+            })
         }
         Pattern::Tiling {
             rect,
@@ -2297,6 +2336,92 @@ fn pattern_source(
             })
         }
     }
+}
+
+/// The gradient between two circles as cairo and PDF define it, rendered at each pixel centre
+/// of a canvas `canvas` pixels across. A point takes the colour at the largest `t` whose circle,
+/// interpolated from the start circle to the end circle with a radius of at least zero, passes
+/// through it; `extend` decides what `t` outside `[0, 1]` paints.
+fn radial_gradient_image(
+    [start, end]: [[f64; 2]; 2],
+    [start_radius, end_radius]: [f64; 2],
+    stops: &[Stop],
+    extend: Extend,
+    from_pixels: Affine,
+    [width, height]: [u32; 2],
+) -> Option<tiny_skia::Pixmap> {
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+    let centre = [end[0] - start[0], end[1] - start[1]];
+    let growth = end_radius - start_radius;
+    let a = centre[0] * centre[0] + centre[1] * centre[1] - growth * growth;
+    let colour_at = |t: f64| -> Option<[f64; 4]> {
+        let t = match extend {
+            Extend::Pad => t.clamp(0.0, 1.0),
+            Extend::None if !(0.0..=1.0).contains(&t) => return None,
+            Extend::None => t,
+            Extend::Repeat => t - t.floor(),
+            Extend::Reflect => {
+                let period = t.rem_euclid(2.0);
+                if period > 1.0 { 2.0 - period } else { period }
+            }
+        };
+        let after = stops
+            .iter()
+            .position(|stop| stop.offset >= t)
+            .unwrap_or(stops.len().saturating_sub(1));
+        let before = after.saturating_sub(1);
+        let (low, high) = (stops.get(before)?, stops.get(after)?);
+        let span = high.offset - low.offset;
+        let weight = if span > 0.0 {
+            (t - low.offset) / span
+        } else {
+            1.0
+        };
+        let [low, high] = [channels(low.colour), channels(high.colour)];
+        Some(std::array::from_fn(|channel| {
+            f64::from(low[channel]) * (1.0 - weight) + f64::from(high[channel]) * weight
+        }))
+    };
+    let pixels = pixmap.pixels_mut();
+    for row in 0..height {
+        for column in 0..width {
+            let [x, y] = from_pixels.apply([f64::from(column) + 0.5, f64::from(row) + 0.5]);
+            let offset = [x - start[0], y - start[1]];
+            let b = offset[0] * centre[0] + offset[1] * centre[1] + start_radius * growth;
+            let c = offset[0] * offset[0] + offset[1] * offset[1] - start_radius * start_radius;
+            let radius_ok = |t: f64| t.is_finite() && start_radius + t * growth >= 0.0;
+            let t = if a.abs() < 1e-12 {
+                Some(c / (2.0 * b)).filter(|t| radius_ok(*t))
+            } else {
+                let discriminant = b * b - a * c;
+                if discriminant < 0.0 {
+                    None
+                } else {
+                    let root = discriminant.sqrt();
+                    let (larger, smaller) = if a > 0.0 {
+                        ((b + root) / a, (b - root) / a)
+                    } else {
+                        ((b - root) / a, (b + root) / a)
+                    };
+                    [larger, smaller].into_iter().find(|t| radius_ok(*t))
+                }
+            };
+            let Some([red, green, blue, alpha]) = t.and_then(colour_at) else {
+                continue;
+            };
+            let premultiply = |value: f64| (value * alpha / 255.0).round() as u8;
+            if let Some(pixel) = tiny_skia::PremultipliedColorU8::from_rgba(
+                premultiply(red),
+                premultiply(green),
+                premultiply(blue),
+                alpha.round() as u8,
+            ) && let Some(slot) = pixels.get_mut((row * width + column) as usize)
+            {
+                *slot = pixel;
+            }
+        }
+    }
+    Some(pixmap)
 }
 
 fn solid_paint(colour: Colour) -> tiny_skia::Paint<'static> {
@@ -3083,7 +3208,23 @@ unsafe fn define(dd: *mut DevDesc, definition: Definition) -> Option<Sexp> {
 
 unsafe extern "C" fn device_set_pattern(pattern: Sexp, dd: *mut DevDesc) -> Option<Sexp> {
     match read_pattern(dd, pattern) {
-        Ok(pattern) => define(dd, Definition::Pattern(pattern)),
+        Ok(pattern) => {
+            // GNU R's pdf device warns once for a gradient's colours, and once more for its
+            // opacities when it has any.
+            if let Pattern::Linear { stops, extend, .. } | Pattern::Radial { stops, extend, .. } =
+                &pattern
+                && matches!(extend, Extend::Repeat | Extend::Reflect)
+                && render_device(dd).format == Some(Format::Pdf)
+            {
+                let translucent = stops.iter().any(|stop| alpha(stop.colour) < 255);
+                for _ in 0..1 + usize::from(translucent) {
+                    warn(Some(
+                        "Repeat or reflect pattern not supported on PDF device",
+                    ));
+                }
+            }
+            define(dd, Definition::Pattern(pattern))
+        }
         Err(unwind) => {
             fail_with(unwind);
             None

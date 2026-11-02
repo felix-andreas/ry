@@ -132,7 +132,8 @@ package. Base graphics, grid and device packages such as ragg draw as they do on
 built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and `tiff` devices write their files when
 the device closes or the script ends. They draw gradients, patterns, clipping paths, masks, groups
 and even-odd fills except on `postscript`, which refuses them and drops semi-transparent colours
-with a warning, as GNU R's does. knitr and rmarkdown documents with plot chunks render. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+with a warning, as GNU R's does. Like GNU R's, `pdf` cannot repeat or reflect a gradient, and warns
+and stops it at its ends instead. knitr and rmarkdown documents with plot chunks render. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
