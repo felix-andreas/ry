@@ -12,7 +12,7 @@
 use {
     async_lsp::lsp_types::{self, Url},
     ry::server::simulation::{
-        ClientOptions, Notification, RequestKind, Simulation, position_of,
+        ClientOptions, Notification, Outgoing, RequestKind, Simulation, position_of,
         verify_against_fresh_start,
     },
     serde_json::{Value, json},
@@ -101,6 +101,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         options: ClientOptions {
             pull_diagnostics: false,
             utf8: false,
+            cold: false,
         },
         editor: None,
         open: BTreeMap::new(),
@@ -344,6 +345,7 @@ impl Journey {
                     match *option {
                         "pull" => self.options.pull_diagnostics = true,
                         "utf8" => self.options.utf8 = true,
+                        "cold" => self.options.cold = true,
                         other => return Err(format!("unknown client option `{other}`")),
                     }
                 }
@@ -464,6 +466,30 @@ impl Journey {
                         "no diagnostic mentions `{needle}`; found:\n{}",
                         diagnostics.join("\n")
                     ))
+                }
+            }
+            ["expect", "early", "diagnostics", path, needle] => {
+                let diagnostics = self.early_diagnostics(path)?;
+                if diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(needle))
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "the first publish mentions no `{needle}`; it held:\n{}",
+                        diagnostics.join("\n")
+                    ))
+                }
+            }
+            ["expect", "no", "early", "diagnostic", path, needle] => {
+                let diagnostics = self.early_diagnostics(path)?;
+                match diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.contains(needle))
+                {
+                    None => Ok(()),
+                    Some(found) => Err(format!("unexpected early diagnostic: {found}")),
                 }
             }
             ["expect", "no", "diagnostic", path, needle] => {
@@ -973,8 +999,9 @@ impl Journey {
     }
 
     fn editor(&mut self) -> &mut Simulation {
-        self.editor
-            .get_or_insert_with(|| Simulation::start(&self.root, self.options))
+        self.editor.get_or_insert_with(|| {
+            Simulation::start_as(&self.root, self.options, env!("CARGO_BIN_EXE_ry").into())
+        })
     }
 
     fn settle(&mut self) {
@@ -1114,6 +1141,36 @@ impl Journey {
                     item["code"].as_str().unwrap_or_default(),
                     item["message"].as_str().unwrap_or_default(),
                     item["range"]["start"]["line"].as_u64().unwrap_or_default() + 1
+                )
+            })
+            .collect())
+    }
+
+    /// The findings of the first diagnostics the server pushed for `path`, which a push client
+    /// shows on opening it, before the server's analysis settles.
+    fn early_diagnostics(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let uri = self.uri(path);
+        let outgoing = self.editor().outgoing();
+        let first = outgoing
+            .iter()
+            .find_map(|message| match message {
+                Outgoing::PublishDiagnostics(params) if params.uri == uri => Some(params),
+                _ => None,
+            })
+            .ok_or(format!("the server pushed no diagnostics for {path}"))?;
+        Ok(first
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let code = match &diagnostic.code {
+                    Some(lsp_types::NumberOrString::String(code)) => code.clone(),
+                    Some(lsp_types::NumberOrString::Number(code)) => code.to_string(),
+                    None => String::new(),
+                };
+                format!(
+                    "{code} {} (line {})",
+                    diagnostic.message,
+                    diagnostic.range.start.line + 1
                 )
             })
             .collect())

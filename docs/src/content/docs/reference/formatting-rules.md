@@ -346,6 +346,22 @@ fn <- function() call(
 )
 ```
 
+**A function assigned across a line break** joins the line of its name, so its body is indented like every other function's. A comment after the assignment operator keeps the break.
+
+```r
+# Before formatting
+`OHLC` <-
+function(x)
+{
+    x[, 1:4]
+}
+
+# After formatting
+`OHLC` <- function(x) {
+  x[, 1:4]
+}
+```
+
 **Anonymous functions (lambda expressions):** Anonymous functions using `\` are formatted the same way as named functions, supporting both single-line and multiline bodies.
 
 ```r
@@ -359,7 +375,7 @@ lapply(data, \(x) {
 
 ### Switch calls
 
-`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`.
+`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`. The same holds for any argument whose value is left empty, before a comma or a closing bracket: `exprs(x = , ... = )`.
 
 ```r
 result <- switch(
@@ -383,6 +399,20 @@ data[[ "name" ]]
 # After formatting
 data[row, col]
 data[["name"]]
+```
+
+**An empty index** keeps a space after every comma, so a hole between two commas cannot read as one separator. Only the space after the opening bracket goes:
+
+```r
+# Before formatting
+data[ ,1]
+data[1,]
+data[rows,,drop=FALSE]
+
+# After formatting
+data[, 1]
+data[1, ]
+data[rows, , drop = FALSE]
 ```
 
 ### Extract and namespace operators
@@ -620,7 +650,15 @@ PersonClass <- R6Class(
 
 ### Line endings and indentation
 
-The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`). The indent is `[format] indent-width` spaces, 2 by default.
+The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`), read from the first line break after the first code or comment. The indent is `[format] indent-width` spaces, 2 by default.
+
+### Formatting a selection
+
+Formatting a selection (`ry fmt --range`, or an editor's "Format Selection") lays out the lines the selection touches exactly as formatting the whole file lays them out, and leaves every other line byte for byte as it was. The selection widens to whole lines, and statements are the unit: selecting one line of a long function rewrites only that line's statement, but selecting one argument of a call rewrites the whole call, because how a call breaks depends on all of it. A comment on its own line is a unit of its own.
+
+Selected lines keep the indentation step the file already uses, read from the statements the formatter places (the commonest step wins), so tidying part of a file indented by four spaces or tabs does not move those lines out of line with their neighbours. Formatting the whole file is what re-indents it to `indent-width`. A `# fmt: off` region or `# fmt: skip` exemption inside the selection is respected, and a file that does not parse refuses exactly as whole-file formatting does.
+
+On-type formatting is the same operation on one line: a line break lays out the line it finished (never the new line under the cursor), and `}` lays out the construct it closes.
 
 ## Format Suppression
 
@@ -693,6 +731,19 @@ if (condition)
 # After formatting
 if (condition) {
   action()
+}
+```
+
+A comment that ends the header line goes after the added `{`, so the brace never sits alone on the next line:
+
+```r
+# Before formatting
+if (n == 1L) # a single date
+  exact <- TRUE
+
+# After formatting
+if (n == 1L) { # a single date
+  exact <- TRUE
 }
 ```
 

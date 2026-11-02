@@ -1118,8 +1118,7 @@ for (
 for (item in sequence) # 1
     body
 #++++
-for (item in sequence) # 1
-{
+for (item in sequence) { # 1
   body
 }
 
@@ -1431,8 +1430,7 @@ if (condition) {
 
 if (condition) {
   body
-} else # else
-{
+} else { # else
   body
 }
 
@@ -1450,8 +1448,7 @@ function() {
 if (condition) # 1
     body
 #++++
-if (condition) # 1
-{
+if (condition) { # 1
   body
 }
 
@@ -1876,9 +1873,9 @@ x[x,,]
 x[,x ]
 x[,,x]
 #++++
-x[x,, ]
+x[x, , ]
 x[, x]
-x[,, x]
+x[, , x]
 
 #---- multiline
 x[
@@ -1947,9 +1944,9 @@ x[[x,,]]
 x[[,x ]]
 x[[,,x]]
 #++++
-x[[x,, ]]
+x[[x, , ]]
 x[[, x]]
-x[[,, x]]
+x[[, , x]]
 
 #---- multiline
 x[[
@@ -2163,7 +2160,6 @@ while (
 while (condition) # 1
     body
 #++++
-while (condition) # 1
-{
+while (condition) { # 1
   body
 }

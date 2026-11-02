@@ -77,7 +77,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (16): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.is_approx_eq
+completion (18): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.count_leading_zero_bits
 
 #---- block_body_local
 wrapper <- function(x) {

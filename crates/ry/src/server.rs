@@ -9,13 +9,15 @@ pub mod simulation;
 
 use {
     crate::{
+        check_cache,
         cli::{
-            data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
+            analysable_source, collect_r_files, data_file_key, document_kind, exclude_matcher,
+            project_order, project_stub_paths, read_project_stubs, scan_data_files,
             sniff_data_file,
         },
         config::{
-            CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
-            INLINE_ANNOTATIONS_OFF, suggested_table,
+            CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, INLINE_ANNOTATIONS_OFF,
+            suggested_table,
         },
         diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
         namespace::namespace_import_problems,
@@ -41,7 +43,7 @@ use {
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{
             Applicability, Diagnostic, Severity, applicable_fixes, parse_stage_diagnostics,
-            warm_project_folds,
+            project_fold_shares, warm_project_folds,
         },
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
@@ -74,13 +76,13 @@ use {
         thread,
         time::{Duration, Instant},
     },
-    syntax::{SyntaxElement, TextRange, TextSize, is_syntactic_name},
+    syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name},
     tokio::{runtime::Handle, sync::oneshot},
     tower::ServiceBuilder,
 };
 
 #[tokio::main(flavor = "current_thread")]
-pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
+pub async fn run(debug: bool) {
     install_panic_hook();
     let runtime = Handle::current();
 
@@ -93,9 +95,9 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
                 client: client.clone(),
                 runtime: runtime.clone(),
             },
-            experimental_features,
             debug,
             cancel: cancel.clone(),
+            executable: env::current_exe().unwrap_or_default(),
         };
         thread::Builder::new()
             .name("ry-analysis".to_owned())
@@ -236,11 +238,13 @@ enum Job {
 
 struct WorkerSeed {
     outbox: Outbox,
-    experimental_features: ExperimentalFeatures,
     /// Surfaces internal analysis facts (hover debug sections). Deliberately not a
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
+    /// The ry binary whose `ry check` records the server may trust: a record is keyed by the
+    /// binary that wrote it.
+    executable: PathBuf,
 }
 
 /// Where the worker's server-to-client traffic goes. Every message the worker originates
@@ -409,7 +413,6 @@ struct Worker {
     /// cancellable checkpoint of the current job, which is how a simulated edit lands while a
     /// query is in flight. Always `None` outside a simulation.
     cancel_at_checkpoint: Option<usize>,
-    experimental_features: ExperimentalFeatures,
     debug: bool,
     encoding: PositionEncoding,
     supports_pull_diagnostics: bool,
@@ -458,6 +461,11 @@ struct Worker {
     /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
     /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
     published_fixes: HashMap<SourceFile, PublishedFixes>,
+    /// Findings restored from the last `ry check` record at startup, for files whose text and
+    /// dependencies are unchanged since. The first wave shows them until analysis catches up,
+    /// so opening a large project shows its findings at once. Any change to the inputs drops
+    /// them all: a change to one file can change another's findings.
+    recorded_diagnostics: HashMap<SourceFile, Vec<Diagnostic>>,
 }
 
 struct PublishedFixes {
@@ -548,7 +556,6 @@ impl Worker {
             cancel: seed.cancel,
             current_token,
             cancel_at_checkpoint: None,
-            experimental_features: seed.experimental_features,
             debug: seed.debug,
             encoding,
             supports_pull_diagnostics,
@@ -575,6 +582,7 @@ impl Worker {
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
             published_fixes: HashMap::new(),
+            recorded_diagnostics: HashMap::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
         // durable as its least durable input, and nearly every memo reads the stubs or the
@@ -602,8 +610,9 @@ impl Worker {
             .durability(Durability::MEDIUM)
             .new(&worker.db);
         worker.load_workspace_sources();
+        worker.recorded_diagnostics = worker.restore_recorded_diagnostics(&seed.executable);
 
-        let result = initialize_result(encoding, worker.experimental_features);
+        let result = initialize_result(encoding);
         (worker, result)
     }
 
@@ -783,6 +792,89 @@ impl Worker {
             self.prime_queue = cold;
         }
         self.rebuild_project_files();
+    }
+
+    /// The findings of the last `ry check` that still hold, by file. `ry check` and the server
+    /// key the record the same way ([`check_cache::key`]), and [`check_cache::plan`] decides
+    /// which files kept their findings. A changed file's surface is computed over the server's
+    /// own files, so the plan can be stricter than a fresh `ry check` but never reuses findings
+    /// whose file changed. Only files the server loaded are restored.
+    fn restore_recorded_diagnostics(
+        &self,
+        executable: &Path,
+    ) -> HashMap<SourceFile, Vec<Diagnostic>> {
+        let root =
+            fs::canonicalize(&self.workspace_root).unwrap_or_else(|_| self.workspace_root.clone());
+        if !check_cache::is_project(&root) {
+            return HashMap::new();
+        }
+        let Some(record) = check_cache::load(&root) else {
+            return HashMap::new();
+        };
+        let Ok(exclude) = exclude_matcher(&self.config, &root) else {
+            return HashMap::new();
+        };
+        let Ok(paths) = collect_r_files(&root, exclude.as_ref()) else {
+            return HashMap::new();
+        };
+        let Ok(stubs) = read_project_stubs(&root) else {
+            return HashMap::new();
+        };
+        let namespace = fs::read_to_string(root.join("NAMESPACE")).ok();
+        let description = fs::read_to_string(root.join("DESCRIPTION")).ok();
+        let key = check_cache::key(
+            executable,
+            &self.config,
+            &root,
+            &scan_data_files(&root),
+            namespace.as_deref(),
+            description.as_deref(),
+            stubs
+                .iter()
+                .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
+        );
+        // The server keys its files by the root as the client spelled it, which differs from
+        // the canonical root when the project is opened through a symbolic link.
+        let loaded: Vec<Option<SourceFile>> = paths
+            .iter()
+            .map(|path| {
+                let relative = path.strip_prefix(&root).unwrap_or(path);
+                self.files.get(&self.workspace_root.join(relative)).copied()
+            })
+            .collect();
+        let mut contents = Vec::with_capacity(paths.len());
+        for (path, file) in paths.iter().zip(&loaded) {
+            let content = match file {
+                Some(file) => check_cache::fingerprint(file.text(&self.db)),
+                None => match fs::read_to_string(path) {
+                    Ok(text) => check_cache::fingerprint(&analysable_source(path, text)),
+                    Err(_) => return HashMap::new(),
+                },
+            };
+            contents.push(content);
+        }
+        // A changed file the server did not load has no surface here, which plans a fresh run.
+        let surface_of = |index: usize| match loaded.get(index).copied().flatten() {
+            Some(file) => check_cache::surface(
+                file.text(&self.db),
+                &semantics::parse(&self.db, file).syntax_node(),
+                &project_fold_shares(&self.db, file),
+            ),
+            None => check_cache::Fingerprint::default(),
+        };
+        let (record, stale) =
+            match check_cache::plan(Some(record), key, &paths, &contents, surface_of) {
+                check_cache::Plan::Fresh => return HashMap::new(),
+                check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
+                check_cache::Plan::Partial { previous, stale } => (previous, stale),
+            };
+        let file_at = |index: usize| loaded.get(index).copied().flatten();
+        loaded
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| !stale.get(index).copied().unwrap_or(true))
+            .filter_map(|(index, file)| Some((((*file)?), record.diagnostics(index, file_at)?)))
+            .collect()
     }
 
     /// In the order the last-writer-wins symbol index and the CLI agree on.
@@ -1126,6 +1218,42 @@ impl Worker {
         }
     }
 
+    /// A refusal (the file does not parse) is "no edits": the editor keeps
+    /// the text as typed. One line table serves every edit.
+    fn format_edits(
+        &self,
+        text: &str,
+        edits: Result<Vec<format::TextEdit>, format::FormatError>,
+    ) -> Option<Vec<lsp_types::TextEdit>> {
+        let edits = match edits {
+            Ok(edits) => edits,
+            Err(error) => {
+                tracing::info!("formatting refused: {error}");
+                return None;
+            }
+        };
+        let index = LineIndex::new(text);
+        let position = |offset: TextSize| {
+            let column = match self.encoding {
+                PositionEncoding::Utf8 => index.line_column(offset),
+                PositionEncoding::Utf16 => index.line_column_utf16(offset, text),
+            };
+            lsp_types::Position::new(column.line, column.column)
+        };
+        Some(
+            edits
+                .into_iter()
+                .map(|edit| lsp_types::TextEdit {
+                    range: lsp_types::Range {
+                        start: position(edit.range.start()),
+                        end: position(edit.range.end()),
+                    },
+                    new_text: edit.new_text,
+                })
+                .collect(),
+        )
+    }
+
     fn to_range_in(&self, file: SourceFile, range: TextRange) -> lsp_types::Range {
         let text = self.text(file);
         self.to_range(&text, range)
@@ -1304,12 +1432,16 @@ impl Worker {
                 if *file.text(&self.db) == params.text_document.text && self.unwarmed.is_empty() {
                     self.pending_lowering.push(path.clone());
                 } else {
+                    if *file.text(&self.db) != params.text_document.text {
+                        self.recorded_diagnostics.clear();
+                    }
                     file.set_text(&mut self.db)
                         .with_durability(Durability::LOW)
                         .to(params.text_document.text);
                 }
             }
             None => {
+                self.recorded_diagnostics.clear();
                 let file = SourceFile::new(&self.db, params.text_document.text, kind);
                 self.files.insert(path.clone(), file);
                 self.rebuild_project_files();
@@ -1323,6 +1455,7 @@ impl Worker {
     }
 
     fn did_change(&mut self, params: lsp_types::DidChangeTextDocumentParams) {
+        self.recorded_diagnostics.clear();
         let Some(path) = self.document_path(&params.text_document.uri) else {
             tracing::warn!("unusable URI in didChange: {}", params.text_document.uri);
             return;
@@ -1365,6 +1498,7 @@ impl Worker {
 
     /// Stubs and NAMESPACE are tracked as text, outside the analyzed project.
     fn sync_stub_document(&mut self, path: PathBuf, text: String, version: i32) {
+        self.recorded_diagnostics.clear();
         if !self.supports_pull_diagnostics {
             let diagnostics = self.stub_diagnostics(&text);
             let uri = self.document_uri(&path);
@@ -1374,6 +1508,7 @@ impl Worker {
     }
 
     fn sync_namespace_document(&mut self, path: PathBuf, text: String, version: i32) {
+        self.recorded_diagnostics.clear();
         self.namespace_documents.insert(path.clone(), text.clone());
         self.refresh_metadata();
         if !self.supports_pull_diagnostics {
@@ -1442,6 +1577,9 @@ impl Worker {
             match fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
+                        if *file.text(&self.db) != text {
+                            self.recorded_diagnostics.clear();
+                        }
                         file.set_text(&mut self.db)
                             .with_durability(Durability::MEDIUM)
                             .to(text);
@@ -1455,6 +1593,7 @@ impl Worker {
                 }
             }
         }
+        self.recorded_diagnostics.clear();
         self.files.remove(&path);
         self.virtual_document_uris.remove(&path);
         self.rebuild_project_files();
@@ -1462,6 +1601,7 @@ impl Worker {
     }
 
     fn did_change_watched_files(&mut self, params: lsp_types::DidChangeWatchedFilesParams) {
+        self.recorded_diagnostics.clear();
         let mut config_changed = false;
         let mut metadata_changed = false;
         let mut reloaded_documents: Vec<PathBuf> = Vec::new();
@@ -1687,10 +1827,13 @@ impl Worker {
         self.defer_semantic_publish(path);
     }
 
-    /// Before the startup warm-up ends, only the parse diagnostics: the lints read the
+    /// A file's findings restored from the last `ry check` while they still hold. Otherwise,
+    /// before the startup warm-up ends, only the parse diagnostics: the lints read the
     /// project-wide maps, which one thread would take seconds to derive.
     fn fast_diagnostics(&self, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
-        if self.unwarmed.is_empty() {
+        if let Some(recorded) = self.recorded_diagnostics.get(&file) {
+            recorded.clone()
+        } else if self.unwarmed.is_empty() {
             first_wave_diagnostics(&self.db, file, config)
         } else {
             parse_stage_diagnostics(&self.db, file)
@@ -1957,10 +2100,7 @@ fn config_message(error: &ConfigError) -> String {
     }
 }
 
-fn initialize_result(
-    encoding: PositionEncoding,
-    experimental: ExperimentalFeatures,
-) -> lsp_types::InitializeResult {
+fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult {
     lsp_types::InitializeResult {
         capabilities: lsp_types::ServerCapabilities {
             position_encoding: Some(match encoding {
@@ -1993,9 +2133,13 @@ fn initialize_result(
                 },
             )),
             document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
-            document_range_formatting_provider: Some(lsp_types::OneOf::Left(
-                experimental.range_formatting,
-            )),
+            document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+            document_on_type_formatting_provider: Some(
+                lsp_types::DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_owned(),
+                    more_trigger_character: Some(vec!["}".to_owned()]),
+                },
+            ),
             document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
             hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
             inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
@@ -2593,6 +2737,9 @@ impl LanguageServer for ServerState {
         })
     }
 
+    /// The minimal edits, not one whole-document replacement, so an editor
+    /// keeps the cursor, folds and scroll position on the lines that do not
+    /// change.
     fn formatting(
         &mut self,
         params: lsp_types::DocumentFormattingParams,
@@ -2601,31 +2748,12 @@ impl LanguageServer for ServerState {
             let Some((_, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            match format::format(&text, worker.config.format) {
-                Ok(formatted) => {
-                    // The negotiated encoding counts the last line's columns, so a final line
-                    // with non-ASCII text and no newline ends where the client thinks it does.
-                    let end = worker.to_position(&text, TextSize::of(text.as_str()));
-                    Ok(Some(vec![lsp_types::TextEdit {
-                        range: lsp_types::Range {
-                            start: lsp_types::Position::new(0, 0),
-                            end,
-                        },
-                        new_text: formatted,
-                    }]))
-                }
-                // A refusal (syntax errors) surfaces as "no edits".
-                Err(error) => {
-                    tracing::error!("formatting failed: {error:?}");
-                    Ok(None)
-                }
-            }
+            Ok(worker.format_edits(&text, format::format_edits(&text, worker.config.format)))
         })
     }
 
-    /// Snapped outwards to whole top-level statements and lines. R's top-level
-    /// statements are laid out independently, so formatting the slice alone matches
-    /// formatting the whole file.
+    /// The selection is cut out of the whole file's layout, so formatting a
+    /// selection and formatting the file never disagree about a line.
     fn range_formatting(
         &mut self,
         params: lsp_types::DocumentRangeFormattingParams,
@@ -2635,61 +2763,80 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let selection = worker.to_text_range(&text, params.range);
+            Ok(worker.format_edits(
+                &text,
+                format::format_range(&text, worker.config.format, selection),
+            ))
+        })
+    }
 
-            let root = syntax::parse(&text).syntax_node();
-            let mut covered: Option<TextRange> = None;
-            for node in root.children() {
-                let node_range = node.text_range();
-                // An empty selection (a bare cursor) still picks the statement it sits in.
-                let intersects = node_range.start() < selection.end()
-                    && selection.start() < node_range.end()
-                    || node_range.contains(selection.start());
-                if !intersects {
-                    continue;
-                }
-                covered = Some(match covered {
-                    Some(current) => current.cover(node_range),
-                    None => node_range,
-                });
-            }
-            let Some(covered) = covered else {
+    /// Typing a line break lays out the line it finished, and typing `}` lays
+    /// out the line it closes. Both are range formatting over that one line.
+    fn on_type_formatting(
+        &mut self,
+        params: lsp_types::DocumentOnTypeFormattingParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
+        self.read(move |worker| {
+            let position = params.text_document_position;
+            let Some((_, text)) = worker.document(&position.text_document.uri) else {
                 return Ok(None);
             };
-
-            let start = text[..usize::from(covered.start())]
+            let caret = worker.to_offset(&text, position.position);
+            let cursor_line_start = text[..usize::from(caret)]
                 .rfind('\n')
-                .map_or(0, |index| index + 1);
-            let end = text[usize::from(covered.end())..]
-                .find('\n')
-                .map_or(text.len(), |index| usize::from(covered.end()) + index);
-            let slice = &text[start..end];
-
-            match format::format(slice, worker.config.format) {
-                Ok(formatted) => {
-                    // The replaced span stops before the line terminator, so
-                    // the formatter's trailing newline would add a blank line.
-                    let formatted = formatted.trim_end_matches('\n').to_owned();
-                    if formatted == slice {
-                        return Ok(Some(Vec::new()));
-                    }
-                    let range = worker.to_range(
-                        &text,
-                        TextRange::new(
-                            TextSize::try_from(start).unwrap_or_default(),
-                            TextSize::try_from(end).unwrap_or_default(),
-                        ),
-                    );
-                    Ok(Some(vec![lsp_types::TextEdit {
-                        range,
-                        new_text: formatted,
-                    }]))
-                }
-                // A refusal (syntax errors) surfaces as "no edits".
-                Err(error) => {
-                    tracing::error!("range formatting failed: {error:?}");
-                    Ok(None)
-                }
+                .map_or(0, |at| at + 1);
+            let line = match params.ch.as_str() {
+                "\n" if cursor_line_start == 0 => return Ok(None),
+                "\n" => cursor_line_start - 1,
+                _ => usize::from(caret),
+            };
+            let line = TextSize::try_from(line).unwrap_or_default();
+            if params.ch != "\n" {
+                // A `}` finishes the construct it closes, so the selection
+                // runs from where that statement starts.
+                let root = syntax::parse(&text).syntax_node();
+                let start = root
+                    .token_at_offset(caret)
+                    .left_biased()
+                    .filter(|token| token.kind() == SyntaxKind::R_BRACE)
+                    .and_then(|token| {
+                        token.parent_ancestors().find(|node| {
+                            node.parent().is_some_and(|parent| {
+                                matches!(
+                                    parent.kind(),
+                                    SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+                                )
+                            })
+                        })
+                    })
+                    .map_or(line, |statement| statement.text_range().start());
+                let edits = format::format_range(
+                    &text,
+                    worker.config.format,
+                    TextRange::new(start.min(caret), caret),
+                );
+                return Ok(worker.format_edits(&text, edits));
             }
+            // The editor has already indented the new line for the user to
+            // type on, and a blank line before a `}` is one the formatter
+            // deletes. Either edit would fight the user under the cursor, so
+            // a blank cursor line is laid out as if it were not there yet,
+            // and no edit may reach it. Offsets before it are the same in
+            // both texts.
+            let cursor_line_end = text[cursor_line_start..]
+                .find('\n')
+                .map_or(text.len(), |at| cursor_line_start + at + 1);
+            let probe = match text[cursor_line_start..cursor_line_end].trim().is_empty() {
+                true => [&text[..cursor_line_start], &text[cursor_line_end..]].concat(),
+                false => text.clone(),
+            };
+            let cursor_line_start = TextSize::try_from(cursor_line_start).unwrap_or_default();
+            let edits = format::format_range(&probe, worker.config.format, TextRange::empty(line))
+                .map(|mut edits| {
+                    edits.retain(|edit| edit.range.end() <= cursor_line_start);
+                    edits
+                });
+            Ok(worker.format_edits(&text, edits))
         })
     }
 

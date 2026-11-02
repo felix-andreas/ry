@@ -60,8 +60,15 @@ typedef jmp_buf RyJumpBuffer;
 #endif
 
 /* Implemented in Rust (crates/libr/src/boundary.rs). */
-extern void ry_state_save(size_t *protect, size_t *vmax);
-extern void ry_state_restore(size_t protect, size_t vmax);
+typedef struct RyState {
+    size_t protect;
+    size_t vmax;
+    size_t api_depth;
+    size_t handout_base;
+} RyState;
+
+extern void ry_state_save(RyState *state);
+extern void ry_state_restore(const RyState *state);
 extern void ry_record_error(SEXP call, const char *message);
 extern void ry_record_warning(SEXP call, const char *message, int immediate);
 extern void ry_write_console(const char *text, size_t length, int is_error);
@@ -77,15 +84,14 @@ extern void ry_fatal_without_context(void) __attribute__((noreturn));
 typedef struct RyContext {
     RyJumpBuffer buffer;
     struct RyContext *previous;
-    size_t protect;
-    size_t vmax;
+    RyState state;
 } RyContext;
 
 static RyContext *ry_top_context = NULL;
 
 static void ry_context_push(RyContext *context)
 {
-    ry_state_save(&context->protect, &context->vmax);
+    ry_state_save(&context->state);
     context->previous = ry_top_context;
     ry_top_context = context;
 }
@@ -99,7 +105,7 @@ static void ry_context_pop(RyContext *context)
 static void ry_context_land(RyContext *context)
 {
     ry_top_context = context->previous;
-    ry_state_restore(context->protect, context->vmax);
+    ry_state_restore(&context->state);
 }
 
 /* Transfers control to the innermost context. The pending unwind is already recorded in Rust. */

@@ -240,6 +240,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       character()
     }
   }
+  if (!is.null(plan$data)) {
+    .ry_load_data(state, plan$data)
+  }
   if (isNamespaceLoaded("methods") && (plan$full || isTRUE(plan$registers_s4)) &&
       .ry_has_s4_metadata(ns, state$s4_deferred$names)) {
     methods::cacheMetaData(ns, TRUE, ns)
@@ -272,6 +275,26 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   .ry_phase("exports")
   if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
     get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
+  }
+}
+
+# Reads the datasets of `data/` into the namespace's lazy data the way `data()` reads them, as
+# pkgload does: `::` finds them there, and attaching copies them onto the search path.
+.ry_load_data <- function(state, files) {
+  lazydata <- getNamespaceInfo(state$ns, "lazydata")
+  rm(list = ls(lazydata, all.names = TRUE), envir = lazydata)
+  for (path in files) {
+    file <- file.path(state$root, path)
+    name <- sub("\\.[^.]*$", "", basename(path))
+    table <- function(...) {
+      assign(name, utils::read.table(file, header = TRUE, as.is = FALSE, ...), envir = lazydata)
+    }
+    switch(tolower(sub("^.*\\.", "", path)),
+      r = sys.source(file, envir = lazydata, chdir = TRUE),
+      rda = , rdata = load(file, envir = lazydata),
+      csv = table(sep = ";"),
+      tab = , txt = table()
+    )
   }
 }
 
@@ -317,16 +340,34 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     options(previous)
     .Internal(ryLoaderUndefer(state$root))
   }, add = TRUE)
-  for (k in seq_along(held$position)) {
-    if (loading && held$position[[k]] >= state$s4_cursor) {
-      break
-    }
+  # Only a run of all the definitions at once is the same in every process, so only that one
+  # is saved or restored.
+  cache <- if (!loading && !is.null(deferred$cache_key)) {
+    .ry_s4_cache(ns, deferred$cache_key, held$cache)
+  }
+  if (!.ry_restore_s4(ns, cache)) {
+    before <- names(ns)
+    signalled <- FALSE
     withCallingHandlers(
-      .Internal(ryLoaderRunDeferred(state$root, ns, k)),
-      error = function(error) {
-        message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
-      }
+      for (k in seq_along(held$position)) {
+        if (loading && held$position[[k]] >= state$s4_cursor) {
+          break
+        }
+        withCallingHandlers(
+          .Internal(ryLoaderRunDeferred(state$root, ns, k)),
+          error = function(error) {
+            message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
+          }
+        )
+      },
+      message = function(condition) signalled <<- TRUE,
+      warning = function(condition) signalled <<- TRUE
     )
+    # A message or warning must show again in the next process, so a run that signalled one
+    # is not saved.
+    if (!is.null(cache) && !signalled) {
+      .ry_save_s4(ns, cache, setdiff(names(ns), before))
+    }
   }
   if (!loading) {
     methods::cacheMetaData(ns, TRUE, ns)
@@ -335,6 +376,55 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       .ry_sync_package_env(state)
     }
   }
+  invisible()
+}
+
+# Where the held-back definitions' bindings are saved, and what must match for a later process
+# to restore them: the definitions' own text (`key`), the version of R, which fixes the methods
+# package, and the versions of the packages the namespace imports, whose classes and generics
+# the definitions may extend.
+.ry_s4_cache <- function(ns, key, path) {
+  if (is.null(path)) {
+    return(NULL)
+  }
+  imports <- setdiff(unique(names(getNamespaceImports(ns))), "base")
+  versions <- vapply(imports, function(package) {
+    as.character(getNamespaceVersion(asNamespace(package)))
+  }, "")
+  list(path = path, key = key, r = R.version.string, imports = versions)
+}
+
+# Binds what an earlier process saved for exactly these definitions, which then need not run,
+# and reports whether it did. A saved file that is missing, stale or unreadable means running
+# them, as it does on the first load.
+.ry_restore_s4 <- function(ns, cache) {
+  if (is.null(cache) || !file.exists(cache$path)) {
+    return(FALSE)
+  }
+  saved <- tryCatch(readRDS(cache$path), error = function(error) NULL)
+  if (!identical(saved[c("key", "r", "imports")], cache[c("key", "r", "imports")])) {
+    return(FALSE)
+  }
+  list2env(saved$values, envir = ns)
+  TRUE
+}
+
+# Saves the bindings the held-back definitions made, replacing the file atomically so that a
+# concurrent load reads either the old file or the new one. Failing to save only costs the
+# next process the run, so a failure is reported as a warning and the load goes on.
+.ry_save_s4 <- function(ns, cache, names) {
+  saved <- c(cache[c("key", "r", "imports")], list(values = mget(names, envir = ns)))
+  directory <- dirname(cache$path)
+  temporary <- paste0(cache$path, ".", Sys.getpid())
+  tryCatch({
+    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
+    saveRDS(saved, temporary)
+    file.rename(temporary, cache$path)
+  }, error = function(error) {
+    unlink(temporary)
+    warning(sprintf("could not save the S4 metadata cache: %s", conditionMessage(error)),
+      call. = FALSE)
+  })
   invisible()
 }
 
@@ -558,6 +648,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 # whichever environment forces it first, both see the value. Stale names always go, since
 # running or undoing code (S4 registrations, `assign()`) changes names no plan lists; `touched`
 # limits the copying to the bindings a plan changed, and without it everything is copied.
+# Datasets come last and win over an export of the same name, as in R's attachNamespace(). A
+# plan that reloads them lists no `touched`, so only a full copy needs them.
 .ry_sync_package_env <- function(state, touched = NULL, keeps_names = FALSE) {
   environment <- state$package_env
   ns <- state$ns
@@ -571,8 +663,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   exported <- names(exports)
   imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
+  lazydata <- getNamespaceInfo(ns, "lazydata")
+  datasets <- names(lazydata)
   present <- names(environment)
-  stale <- present[!(present %in% exported) & !(present %in% imported)]
+  stale <- present[!(present %in% exported) & !(present %in% imported) &
+                     !(present %in% datasets)]
   if (length(stale)) rm(list = stale, envir = environment)
   if (!is.null(touched)) {
     names <- c(touched[touched %in% exported], exported[!(exported %in% present)])
@@ -585,6 +680,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   if (length(exported)) {
     .ry_internal("importIntoEnv", environment, exported, ns, exported)
+  }
+  if (length(datasets)) {
+    .ry_internal("importIntoEnv", environment, datasets, lazydata, datasets)
   }
 }
 
@@ -610,6 +708,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       count(length(plan$unregister), "registration undone", "registrations undone")
     },
     if (!is.null(plan$imports)) "imports rebuilt",
+    if (!is.null(plan$data)) "datasets reloaded",
     if (length(plan$s3_register) || length(plan$s3_unregister)) {
       count(length(plan$s3_register) + length(plan$s3_unregister), "S3 method re-registered",
             "S3 methods re-registered")

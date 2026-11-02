@@ -17,10 +17,22 @@ This page is the exact behavior.
   writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
   gives what a load would have computed
   ([lazy constants](/reference/type-system#lazy-constants)).
-- **Every other top-level statement** runs at load time, in `Collate` order, with the files that
-  `Collate` leaves out following in C-locale order.
+- **Every other top-level statement** runs at load time, in collation order. The code files are
+  those of `R/` and then those of `R/unix/` (`R/windows/` on Windows), as R CMD INSTALL finds them:
+  names that start with a letter or digit and end in `.R`, `.r`, `.S`, `.s` or `.q`. Collation
+  follows `Collate.unix` (`Collate.windows`) when `DESCRIPTION` has it, else `Collate`, whose entries
+  name subdirectory files as `unix/a.R`. Files the field leaves out follow, `R/` before `R/unix/` and
+  each in C-locale order; R CMD INSTALL would refuse such a package, but `load_all()` appends them
+  too.
 - **`NAMESPACE`** works as in an installed package: imports, `S3method()` registrations, and exports.
   With `export_all = TRUE` every object in the namespace is attached as `package:<name>`, as with
+  `load_all()`.
+- **Datasets in `data/`** are read into the namespace's lazy data the way `data()` reads them:
+  `.rda` and `.RData` files with `load()`, `.R` files with `sys.source(chdir = TRUE)`, and tables
+  with `read.table(header = TRUE, as.is = FALSE)`, which splits `.csv` files on `;` and `.tab` and
+  `.txt` files on whitespace. `pkg::name` finds a dataset there when no export has that name, and
+  the attached `package:<name>` holds a copy of each, which wins over an export of the same name.
+  Unlike an installed package, every dataset is read at load time whatever `LazyData` says, as with
   `load_all()`.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled with
   [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
@@ -64,6 +76,22 @@ back, as in `Loaded shapes: 1 definition bound lazily, 1 top-level statement run
 back until first use, in 5 ms.` A reload that changes one of them, or a name they bind, runs them all
 first.
 
+When the held-back definitions run after the load, ry saves what they bound (the classes, generics
+and method tables) to `$XDG_CACHE_HOME/ry/s4` (`~/.cache/ry/s4` by default), and a later process
+restores them instead of running them, much as GNU R restores an installed package's S4 metadata. On
+the 326,000-line bench package, this cuts the first S4 use from about 330 ms to about 100 ms. A saved
+entry is used only when all of these match the process that saved it:
+
+- the text of every held-back definition, the package's name and version, and the build of ry;
+- the R version, and the version of every package the namespace imports.
+
+The definitions are saved only when they read nothing but the names they bind themselves and the
+`methods` and base functions that build S4 objects, such as `setClass()`, `representation()`, `c()`
+and `function`, so no other code in the package can change what they produce. A definition that
+reads a package constant, as in `prototype(side = ZERO)`, still runs in every process. Nothing is
+saved when running them signalled a message or a warning, so a later process shows it again. The
+directory is safe to delete.
+
 ### Source references
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
@@ -94,16 +122,22 @@ A reload works out which top-level items changed and touches only those:
   statement like `f <- memoise(f)` sees `f` as it was at load time rather than wrapping it twice.
 - A `NAMESPACE` change rebuilds the imports or resyncs the exports, `.onLoad` runs again when you
   changed it, and a deleted S4 method or class is removed.
+- When a dataset file was added, changed or deleted, judged by the names, sizes and modification
+  times of the files in `data/`, every dataset is read again, and a deleted one is gone.
+  `R/sysdata.rda` is loaded again when its content changed.
 
 A console reloads before a command when the names, sizes or modification times of `DESCRIPTION`,
-`NAMESPACE` or the files in `R/` changed since the last load, so it never reads a file to find out.
+`NAMESPACE`, the code files in `R/` and `R/unix/`, `R/sysdata.rda` or the datasets in `data/`
+changed since the last load, so it never reads a file to find out.
 An edit under `src/` is not noticed, and neither is anything in a package whose first load failed:
 call `load_all()` after either.
 
 ## Limits
 
-- `system.file()` does not map a source package's `inst/` directory, and datasets in `data/` are not
-  loaded; `load_all()` does both.
+- `system.file()` does not map a source package's `inst/` directory; `load_all()` does.
+- Compressed dataset tables (`.csv.gz`, `.tab.bz2`, `.txt.xz` and so on) are not read. When one
+  dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
+  order, where `data()` reads only one.
 - `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that

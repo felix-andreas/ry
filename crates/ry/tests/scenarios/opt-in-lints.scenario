@@ -1,0 +1,38 @@
+# A user coming from lintr turns on the style lints they relied on and lets `ry check --fix` apply them.
+
+file DESCRIPTION
+| Package: survey
+| Version: 0.1.0
+file R/survey.R
+| summarise_answers <- function(answers) {
+|   if (any(is.na(answers))) stop(paste0("missing answers: ", sum(is.na(answers))))
+|   if (!(length(answers) > 0)) return(NULL)
+|   which(grepl("yes", answers))
+| }
+
+# With no configuration, none of these style lints report.
+run ry check
+expect exit 0
+
+file ry.toml
+| [lint]
+| any-is-na = "warn"
+| condition-message = "warn"
+| comparison-negation = "warn"
+| which-grepl = "warn"
+| fixed-regex = "warn"
+
+run ry check
+expect exit 1
+expect stdout "3 fixable with `ry check --fix` (1 more with `--unsafe-fixes`)"
+
+run ry check --fix
+expect exit 1
+expect file R/survey.R "if (anyNA(answers))"
+expect file R/survey.R "if (length(answers) <= 0) return(NULL)"
+expect file R/survey.R "grep(\"yes\", answers)"
+
+run ry check --fix --unsafe-fixes
+expect exit 0
+expect file R/survey.R "stop(\"missing answers: \", sum(is.na(answers)))"
+expect file R/survey.R "grep(\"yes\", answers, fixed = TRUE)"

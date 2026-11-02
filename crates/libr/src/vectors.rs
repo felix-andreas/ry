@@ -45,6 +45,19 @@ unsafe fn plain_length(object: Sexp) -> Option<R_xlen_t> {
     }
 }
 
+/// Whether `object` is a vector of `kind` whose elements are stored inline, so an accessor can
+/// read them without entering the API. `Rinternals.h` inlines the same checks.
+#[inline]
+unsafe fn is_plain(object: Sexp, kind: SexpType) -> bool {
+    object.kind() == kind && !object.is_altrep()
+}
+
+/// `INTEGER` also accepts a logical vector, whose elements are C `int`s too.
+#[inline]
+unsafe fn is_plain_integer(object: Sexp) -> bool {
+    matches!(object.kind(), SexpType::Integer | SexpType::Logical) && !object.is_altrep()
+}
+
 /// The length of a vector, `LENGTH`'s and `XLENGTH`'s answer.
 pub unsafe fn xlength(object: Sexp) -> ApiResult<R_xlen_t> {
     refuse_native(object)?;
@@ -1030,7 +1043,7 @@ pub unsafe extern "C" fn Rf_xlength(object: Sexp) -> R_xlen_t {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LOGICAL(object: Sexp) -> *mut c_int {
-    if object.kind() == SexpType::Logical && !object.is_altrep() {
+    if is_plain(object, SexpType::Logical) {
         return object.data() as *mut c_int;
     }
     enter(|| {
@@ -1040,7 +1053,7 @@ pub unsafe extern "C" fn LOGICAL(object: Sexp) -> *mut c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn INTEGER(object: Sexp) -> *mut c_int {
-    if matches!(object.kind(), SexpType::Integer | SexpType::Logical) && !object.is_altrep() {
+    if is_plain_integer(object) {
         return object.data() as *mut c_int;
     }
     enter(|| Ok(typed_data(object, INTEGER_TYPES, "INTEGER", "integer", true)? as *mut c_int))
@@ -1048,12 +1061,15 @@ pub unsafe extern "C" fn INTEGER(object: Sexp) -> *mut c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn RAW(object: Sexp) -> *mut u8 {
+    if is_plain(object, SexpType::Raw) {
+        return object.data();
+    }
     enter(|| typed_data(object, &[SexpType::Raw], "RAW", "raw", true))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn REAL(object: Sexp) -> *mut f64 {
-    if object.kind() == SexpType::Real && !object.is_altrep() {
+    if is_plain(object, SexpType::Real) {
         return object.data() as *mut f64;
     }
     enter(|| Ok(typed_data(object, &[SexpType::Real], "REAL", "numeric", true)? as *mut f64))
@@ -1061,6 +1077,9 @@ pub unsafe extern "C" fn REAL(object: Sexp) -> *mut f64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn COMPLEX(object: Sexp) -> *mut Rcomplex {
+    if is_plain(object, SexpType::Complex) {
+        return object.data() as *mut Rcomplex;
+    }
     enter(|| {
         Ok(typed_data(object, &[SexpType::Complex], "COMPLEX", "complex", true)? as *mut Rcomplex)
     })
@@ -1068,6 +1087,9 @@ pub unsafe extern "C" fn COMPLEX(object: Sexp) -> *mut Rcomplex {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LOGICAL_RO(object: Sexp) -> *const c_int {
+    if is_plain(object, SexpType::Logical) {
+        return object.data() as *const c_int;
+    }
     enter(|| {
         Ok(typed_data(object, &[SexpType::Logical], "LOGICAL", "logical", false)? as *const c_int)
     })
@@ -1075,21 +1097,33 @@ pub unsafe extern "C" fn LOGICAL_RO(object: Sexp) -> *const c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn INTEGER_RO(object: Sexp) -> *const c_int {
+    if is_plain_integer(object) {
+        return object.data() as *const c_int;
+    }
     enter(|| Ok(typed_data(object, INTEGER_TYPES, "INTEGER", "integer", false)? as *const c_int))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn RAW_RO(object: Sexp) -> *const u8 {
+    if is_plain(object, SexpType::Raw) {
+        return object.data();
+    }
     enter(|| Ok(typed_data(object, &[SexpType::Raw], "RAW", "raw", false)? as *const u8))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn REAL_RO(object: Sexp) -> *const f64 {
+    if is_plain(object, SexpType::Real) {
+        return object.data() as *const f64;
+    }
     enter(|| Ok(typed_data(object, &[SexpType::Real], "REAL", "numeric", false)? as *const f64))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn COMPLEX_RO(object: Sexp) -> *const Rcomplex {
+    if is_plain(object, SexpType::Complex) {
+        return object.data() as *const Rcomplex;
+    }
     enter(|| {
         Ok(
             typed_data(object, &[SexpType::Complex], "COMPLEX", "complex", false)?
@@ -1100,6 +1134,11 @@ pub unsafe extern "C" fn COMPLEX_RO(object: Sexp) -> *const Rcomplex {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DATAPTR(object: Sexp) -> *mut c_void {
+    // A writable pointer into a list or character vector makes the vector escape, which only the
+    // boundary does, so only atomic vectors skip it.
+    if object.kind().is_atomic() && object.kind() != SexpType::String && !object.is_altrep() {
+        return object.data() as *mut c_void;
+    }
     enter(|| Ok(data_pointer(object, true)? as *mut c_void))
 }
 
@@ -1332,6 +1371,12 @@ macro_rules! element_api {
     ($get:ident, $set:ident, $type:ty, $accepted:expr, $wanted:literal) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $get(object: Sexp, index: R_xlen_t) -> $type {
+            if $accepted.contains(&object.kind())
+                && !object.is_altrep()
+                && (0..object.length()).contains(&index)
+            {
+                return *(object.data() as *const $type).add(index as usize);
+            }
             enter(|| {
                 if !$accepted.contains(&object.kind()) {
                     return Err(error(format!(

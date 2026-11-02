@@ -22,9 +22,9 @@ use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 /// formals (`identical` has nine) would otherwise pay on every call.
 const INDEX_THRESHOLD: usize = 16;
 
-/// The bindings a frame holds without a second allocation: as many as keep the environment object
-/// in the 192-byte size class.
-const INLINE_BINDINGS: usize = 9;
+/// The bindings a frame holds without a second allocation: as many as keep the environment object,
+/// with its symbol filter, in the 192-byte size class.
+const INLINE_BINDINGS: usize = 8;
 
 /// A binding cell and its symbol, which is the cell's own first field.
 #[derive(Clone, Copy)]
@@ -52,6 +52,17 @@ pub struct Frame {
     /// How many leading cells are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
     formals: u32,
+    /// One bit per symbol ever bound here, at [`filter_bit`]. Most lookups probe frames that do
+    /// not bind the symbol (a call to `length` from a function body asks the function's frame
+    /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
+    filter: u64,
+}
+
+/// The [`Frame::filter`] bit for `symbol`: a multiplicative hash of its address, since a
+/// symbol never moves and neighbouring symbols differ only in low bits.
+#[inline(always)]
+fn filter_bit(symbol: Sexp) -> u64 {
+    1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
 }
 
 impl Frame {
@@ -81,6 +92,9 @@ impl Frame {
     /// The binding cell for `symbol`, if the frame binds it.
     #[inline]
     pub fn find(&self, symbol: Sexp) -> Option<Sexp> {
+        if self.filter & filter_bit(symbol) == 0 {
+            return None;
+        }
         match &self.index {
             Some(index) => self
                 .bindings
@@ -209,6 +223,7 @@ impl Frame {
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
+        self.filter |= filter_bit(symbol);
         match &mut self.index {
             Some(index) => {
                 index.entry(symbol).or_insert(position);

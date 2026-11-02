@@ -23,6 +23,14 @@ that runtime runs.
   `--unsafe-fixes` also applies spelling suggestions. The editor gets the same quick fixes plus a
   fix-all action, a call hierarchy, an outline with sections, folding, selection ranges, semantic
   highlighting and parameter-name hints.
+- **Eight lints on by default.** `equals-na`, `vector-logic`, `length-sequence` and `class-equals`
+  join the existing four, each with an unsafe fix, and `redundant-return` and `commented-code` are
+  available when you turn them on ([diagnostic codes](/reference/diagnostic-codes)).
+- **`ry fmt --range`** formats only the lines you name, the editor formats a selection or the line you
+  just finished, and `ry fmt` runs in parallel ([Formatting](/guides/formatting#formatting-part-of-a-file)).
+- **Faster recursion and more of base R.** A function that only does scalar arithmetic, such as
+  recursive `fib`, compiles to frameless machine code (`fib(30)` takes 0.005 s against 0.9 s on GNU
+  R), and sockets work, so `parallel`'s PSOCK clusters run.
 - **A debugger and a console in VS Code.** `F5` runs the current script under a debugger with
   breakpoints, stepping and variable inspection, "Debug test" does the same for one `test_that()`
   block, and `Ctrl+Enter` sends the selection to a ry console. Other editors can use the same
