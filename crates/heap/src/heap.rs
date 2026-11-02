@@ -49,7 +49,7 @@ pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
 
 pub struct Heap {
     space: Space,
-    /// The largest single allocation the heap attempts: the machine's memory plus swap.
+    /// The largest single allocation the heap attempts (`memory_ceiling`).
     allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
@@ -2235,12 +2235,19 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 
-/// Physical memory plus swap. The allocator reserves address space without committing it, so a
-/// vector far larger than the machine would be handed out and fail only when touched; GNU R gets
-/// its "cannot allocate vector" error from the kernel refusing such a request, and this bound
-/// gives the same answer before asking.
+/// Physical memory plus swap on Linux, where the allocator reserves address space without
+/// committing it, so a vector far larger than the machine would be handed out and fail only when
+/// touched. GNU R gets its "cannot allocate vector" error from the kernel's overcommit heuristic
+/// refusing such a request, and this bound gives the same answer before asking. With
+/// `vm.overcommit_memory` set to 1 the kernel grants any request, and so does GNU R, so there is
+/// no bound; macOS and Windows also grant oversized requests to GNU R, so they have none either.
 #[cfg(target_os = "linux")]
 fn memory_ceiling() -> usize {
+    let always_overcommit =
+        std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1");
+    if always_overcommit {
+        return usize::MAX;
+    }
     // SAFETY: `sysinfo` only writes the struct it is given.
     let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
     if unsafe { libc::sysinfo(&mut info) } != 0 {
@@ -2252,22 +2259,7 @@ fn memory_ceiling() -> usize {
         .saturating_mul(unit)
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn memory_ceiling() -> usize {
-    // SAFETY: `sysconf` has no preconditions.
-    let (pages, page_size) = unsafe {
-        (
-            libc::sysconf(libc::_SC_PHYS_PAGES),
-            libc::sysconf(libc::_SC_PAGESIZE),
-        )
-    };
-    if pages <= 0 || page_size <= 0 {
-        return usize::MAX;
-    }
-    (pages as usize).saturating_mul(page_size as usize)
-}
-
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn memory_ceiling() -> usize {
     usize::MAX
 }

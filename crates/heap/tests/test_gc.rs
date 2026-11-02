@@ -552,8 +552,12 @@ fn every_byte_position_is_scanned_at_every_length() {
 
 /// The allocator reserves address space lazily, so without a bound a petabyte vector would be
 /// handed out and fail only when touched. GNU R reports it as an allocation failure up front.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_vector_larger_than_the_machine_is_refused() {
+    if std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1") {
+        return;
+    }
     let mut heap = Heap::new();
     unsafe {
         let length = 1isize << 47;
