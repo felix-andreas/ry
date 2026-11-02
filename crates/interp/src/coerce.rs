@@ -9,7 +9,10 @@ use {
             self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
         },
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        strings::Encoding,
+    },
 };
 
 /// Warnings a coercion raises, collected so each is reported once per call.
@@ -555,6 +558,10 @@ pub unsafe fn coerce_atomic(
                     values::set_mkchar(result, index, &real_as_text(value, scipen))?;
                 }
             }
+        }
+        SexpType::String if source == SexpType::Integer => {
+            let object = values::materialize(object)?;
+            integers_as_strings(values::ints(object), result)?;
         }
         SexpType::String => {
             for index in 0..count {
@@ -1152,4 +1159,70 @@ pub unsafe fn type_name(object: Sexp) -> &'static str {
         SexpType::Record => crate::records::native_kind(object).type_name(),
         kind => kind.name(),
     }
+}
+
+/// `as.character` on integers into the string vector `result`. Integer data usually repeats a
+/// few values (codes, ids, years), so when the values span a range no wider than the vector, each
+/// distinct value is formatted and interned once; interning is most of the cost per element.
+unsafe fn integers_as_strings(source: &[i32], result: Sexp) -> R<()> {
+    let mut low = i32::MAX;
+    let mut high = i32::MIN;
+    for &value in source {
+        if value != NA_INTEGER {
+            low = low.min(value);
+            high = high.max(value);
+        }
+    }
+    let span = if low <= high {
+        i64::from(high) - i64::from(low) + 1
+    } else {
+        0
+    };
+    let mut cache: Vec<Option<Sexp>> = if span <= source.len() as i64 {
+        vec![None; span as usize]
+    } else {
+        Vec::new()
+    };
+    let heap = crate::heap();
+    let mut buffer = [0_u8; 11];
+    for (index, &value) in source.iter().enumerate() {
+        let charsxp = if value == NA_INTEGER {
+            na_string()
+        } else {
+            let slot = cache.get_mut((i64::from(value) - i64::from(low)) as usize);
+            match slot {
+                Some(Some(charsxp)) => *charsxp,
+                slot => {
+                    let charsxp = heap.mk_char(integer_digits(value, &mut buffer), Encoding::Native)?;
+                    if let Some(slot) = slot {
+                        *slot = Some(charsxp);
+                    }
+                    charsxp
+                }
+            }
+        };
+        // Storing at once keeps the string reachable, and the collector does not move objects,
+        // so the cached handle stays valid for the rest of the loop.
+        heap.set_element(result, index, charsxp);
+    }
+    Ok(())
+}
+
+/// The decimal digits of `value`, written at the end of `buffer`, which fits any `i32`.
+fn integer_digits(value: i32, buffer: &mut [u8; 11]) -> &[u8] {
+    let mut magnitude = value.unsigned_abs();
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        start -= 1;
+        buffer[start] = b'-';
+    }
+    &buffer[start..]
 }

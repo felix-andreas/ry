@@ -901,100 +901,168 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let flag = values::require_string(call.arg(5), "flag")?;
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
+    // Two buffers serve every element, so a million numbers cost no per-element allocation.
+    let mut text = String::new();
+    let mut padded = String::new();
     for index in 0..count {
-        let text = if mode == "character" {
-            values::string_at(vector, index)
-                .unwrap_or_default()
-                .into_owned()
+        text.clear();
+        if mode == "character" {
+            text.push_str(&values::string_at(vector, index).unwrap_or_default());
         } else {
             let value = crate::subset::numeric_element(vector, index);
-            c_format(value, &format, digits, &flag, mode == "integer")
-        };
+            write_c_format(&mut text, value, &format, digits, &flag, mode == "integer")
+                .map_err(|_| error("formatC could not format a number"))?;
+        }
         // GNU R writes an `fg` zero as a bare "0", whatever the width.
-        let text = if format == "fg" && text == "0" {
-            text
+        if format == "fg" && text == "0" {
+            values::set_mkchar(result, index, &text)?;
         } else {
-            apply_width(&text, width, &flag)
-        };
-        values::set_mkchar(result, index, &text)?;
+            write_width(&mut padded, &text, width, &flag);
+            values::set_mkchar(result, index, &padded)?;
+        }
     }
     Ok(result)
 }
 
-fn apply_width(text: &str, width: i32, flag: &str) -> String {
+/// `text` padded to `width` into `out`: on the right for a `-` flag or a negative width, with
+/// zeros after the sign for a `0` flag on a number, and on the left otherwise.
+fn write_width(out: &mut String, text: &str, width: i32, flag: &str) {
+    out.clear();
+    let left_justify = width < 0 || flag.contains('-');
     let width = width.unsigned_abs() as usize;
-    if display_width(text) >= width {
-        return text.to_owned();
-    }
-    if flag.contains('-') {
-        pad(text, width, false)
+    let current = display_width(text);
+    if current >= width {
+        out.push_str(text);
+    } else if left_justify {
+        out.push_str(text);
+        out.extend(std::iter::repeat_n(' ', width - current));
     } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
         let (sign, digits) = match text.strip_prefix('-') {
             Some(rest) => ("-", rest),
             None => ("", text),
         };
-        format!("{sign}{}{digits}", "0".repeat(width - display_width(text)))
+        out.push_str(sign);
+        out.extend(std::iter::repeat_n('0', width - current));
+        out.push_str(digits);
     } else {
-        pad(text, width, true)
+        out.extend(std::iter::repeat_n(' ', width - current));
+        out.push_str(text);
     }
 }
 
 /// One number in C `printf` style: `d`, `f`, `e`, `E`, `g`, `G`, `fg`.
 pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool) -> String {
+    let mut text = String::new();
+    match write_c_format(&mut text, value, format, digits, flag, integer) {
+        Ok(()) => text,
+        // Writing into a `String` cannot fail; an empty result would show the impossible case.
+        Err(std::fmt::Error) => String::new(),
+    }
+}
+
+/// [`c_format`] appended to `out`.
+fn write_c_format(
+    out: &mut String,
+    value: f64,
+    format: &str,
+    digits: i32,
+    flag: &str,
+    integer: bool,
+) -> std::fmt::Result {
     if is_na_real(value) {
-        return "NA".into();
+        out.push_str("NA");
+        return Ok(());
     }
     if value.is_nan() {
-        return "NaN".into();
+        out.push_str("NaN");
+        return Ok(());
     }
     if value.is_infinite() {
-        return if value < 0.0 {
-            "-Inf".into()
-        } else {
-            "Inf".into()
-        };
+        out.push_str(if value < 0.0 { "-Inf" } else { "Inf" });
+        return Ok(());
     }
-    let plus = if flag.contains('+') && value >= 0.0 {
-        "+"
+    if flag.contains('+') && value >= 0.0 {
+        out.push('+');
     } else if flag.contains(' ') && value >= 0.0 {
-        " "
-    } else {
-        ""
-    };
+        out.push(' ');
+    }
     let precision = if digits < 0 {
         None
     } else {
         Some(digits as usize)
     };
-    let text = match format {
-        "d" => format!("{}", value.round() as i64),
-        "f" => format!("{:.*}", precision.unwrap_or(6), value),
-        "e" => scientific_text(value, precision.unwrap_or(6)),
-        "E" => scientific_text(value, precision.unwrap_or(6)).to_uppercase(),
+    match format {
+        "d" => write!(out, "{}", value.round() as i64)?,
+        "f" => {
+            let decimals = precision.unwrap_or(6);
+            if !write_fixed_fast(out, value, decimals) {
+                write!(out, "{:.*}", decimals, value)?;
+            }
+        }
+        "e" => out.push_str(&scientific_text(value, precision.unwrap_or(6))),
+        "E" => out.push_str(&scientific_text(value, precision.unwrap_or(6)).to_uppercase()),
         // formatC passes a negative `digits` to ask `fg` to keep trailing zeros.
-        "fg" => fixed_significant(
+        "fg" => out.push_str(&fixed_significant(
             value,
             digits.unsigned_abs().max(1) as usize,
             digits < 0 || flag.contains('#'),
-        ),
+        )),
         "g" | "G" => {
             let significant = precision.unwrap_or(6).max(1);
             let text = c_general(value, significant, flag.contains('#'));
             if format == "G" {
-                text.to_uppercase()
+                out.push_str(&text.to_uppercase());
             } else {
-                text
+                out.push_str(&text);
             }
         }
         _ => {
             if integer {
-                format!("{}", value as i64)
+                write!(out, "{}", value as i64)?;
             } else {
-                c_general(value, precision.unwrap_or(6).max(1), false)
+                out.push_str(&c_general(value, precision.unwrap_or(6).max(1), false));
             }
         }
+    }
+    Ok(())
+}
+
+/// C's `%.{decimals}f` of `value` from its scaled, rounded integer, which is several times faster
+/// than exact decimal conversion. Below 2^40 the product `value * 10^decimals` is within 2^-13 of
+/// the exact one, so its rounding is the exact rounding unless the fraction lies within 2^-10 of a
+/// half; then, or out of range, this writes nothing and returns false.
+fn write_fixed_fast(out: &mut String, value: f64, decimals: usize) -> bool {
+    const POWERS: [f64; 10] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
+    let Some(&power) = POWERS.get(decimals) else {
+        return false;
     };
-    format!("{plus}{text}")
+    let scaled = value.abs() * power;
+    if !(scaled < (1_u64 << 40) as f64) {
+        return false;
+    }
+    let floor = scaled.floor();
+    if ((scaled - floor) - 0.5).abs() < 1.0 / 1024.0 {
+        return false;
+    }
+    // Below 2^40 with at most nine decimals, the digits fit in 23 places, a whole part included.
+    let mut buffer = [b'0'; 24];
+    let mut rounded = scaled.round() as u64;
+    let mut start = buffer.len();
+    while rounded > 0 || buffer.len() - start <= decimals {
+        start -= 1;
+        buffer[start] = b'0' + (rounded % 10) as u8;
+        rounded /= 10;
+    }
+    if value.is_sign_negative() {
+        out.push('-');
+    }
+    let point = buffer.len() - decimals;
+    out.extend(buffer[start..point].iter().map(|&digit| digit as char));
+    if decimals > 0 {
+        out.push('.');
+        out.extend(buffer[point..].iter().map(|&digit| digit as char));
+    }
+    true
 }
 
 /// C's `%g`: the shorter of `%e` and `%f` at `significant` digits, without trailing zeros.

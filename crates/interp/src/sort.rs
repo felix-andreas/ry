@@ -659,6 +659,9 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let x = values::materialize(coerce_vector(x, kind)?)?;
     let table = values::materialize(coerce_vector(table, kind)?)?;
     let incomparables = incomparable_keys(call.arg(3), kind)?;
+    if matches!(kind, SexpType::Logical | SexpType::Integer) && incomparables.is_none() {
+        return match_integers(x, table, nomatch);
+    }
     if kind == SexpType::String && incomparables.is_none() && all_ascii(table) && all_ascii(x) {
         // Interning makes equal ASCII strings one object, `NA` included, so the pointer is the
         // key and no text is hashed. GNU R's `match` relies on the same property.
@@ -691,6 +694,64 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
         })
         .collect();
     values::integer_vector(&result)
+}
+
+/// `match` on integer (or logical) vectors. When the table's values span a range no wider than a
+/// small multiple of the work, each value indexes a dense array of first positions directly, which
+/// is several times faster than hashing; wider ranges hash the plain `i32`.
+unsafe fn match_integers(x: Sexp, table: Sexp, nomatch: i32) -> R<Sexp> {
+    let result = values::alloc_uninit(SexpType::Integer, length(x))?;
+    let keys = values::ints(x);
+    let entries = values::ints(table);
+    let output = values::ints_mut(result);
+    let mut na_position = nomatch;
+    let mut low = i32::MAX;
+    let mut high = i32::MIN;
+    for (index, &value) in entries.iter().enumerate() {
+        if value == NA_INTEGER {
+            if na_position == nomatch {
+                na_position = index as i32 + 1;
+            }
+        } else {
+            low = low.min(value);
+            high = high.max(value);
+        }
+    }
+    let span = if low <= high {
+        i64::from(high) - i64::from(low) + 1
+    } else {
+        0
+    };
+    let budget = 2 * (keys.len() + entries.len()) as i64 + 4096;
+    if span <= budget {
+        let mut first = vec![0_i32; span as usize];
+        for (index, &value) in entries.iter().enumerate().rev() {
+            if value != NA_INTEGER {
+                first[(i64::from(value) - i64::from(low)) as usize] = index as i32 + 1;
+            }
+        }
+        for (slot, &key) in output.iter_mut().zip(keys) {
+            *slot = if key == NA_INTEGER {
+                na_position
+            } else {
+                let offset = i64::from(key) - i64::from(low);
+                match usize::try_from(offset).ok().and_then(|offset| first.get(offset)) {
+                    Some(&position) if position != 0 => position,
+                    _ => nomatch,
+                }
+            };
+        }
+    } else {
+        let mut positions: FxHashMap<i32, i32> = FxHashMap::default();
+        positions.reserve(entries.len());
+        for (index, &value) in entries.iter().enumerate() {
+            positions.entry(value).or_insert(index as i32 + 1);
+        }
+        for (slot, key) in output.iter_mut().zip(keys) {
+            *slot = positions.get(key).copied().unwrap_or(nomatch);
+        }
+    }
+    Ok(result)
 }
 
 /// `rowsum_matrix(x, group, ugroup, na.rm, snames)`: the column sums of `x` within each group,
@@ -874,7 +935,8 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
     if !codes.is_empty() && !observations.is_multiple_of(codes.len()) {
         warning("data length is not a multiple of split variable")?;
     }
-    let mut members: Vec<Vec<usize>> = vec![Vec::new(); level_count];
+    // Counting first sizes every piece exactly, so the second pass writes each element once.
+    let mut counts = vec![0_usize; level_count];
     for index in 0..observations {
         let code = codes[index % codes.len()];
         if code == NA_INTEGER {
@@ -883,25 +945,68 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
         if code < 1 || code as usize > level_count {
             return Err(error("factor has bad level"));
         }
-        members[code as usize - 1].push(index);
+        counts[code as usize - 1] += 1;
     }
     let names = values::names(x);
     let result = alloc(SexpType::List, level_count)?;
-    for (level, indices) in members.iter().enumerate() {
-        let piece = alloc(x.kind(), indices.len())?;
-        for (position, &index) in indices.iter().enumerate() {
-            crate::subset::copy_element(x, index, piece, position)?;
-        }
-        if names != nil() {
-            let piece_names = select_elements(names, indices)?;
-            values::set_attr(piece, symbols().names, piece_names)?;
-        }
+    let mut pieces = Vec::with_capacity(level_count);
+    let mut name_pieces = Vec::new();
+    for (level, &count) in counts.iter().enumerate() {
+        let piece = alloc(x.kind(), count)?;
         values::set_elt(result, level, piece);
+        pieces.push(piece);
+        if names != nil() {
+            let piece_names = alloc(SexpType::String, count)?;
+            values::set_attr(piece, symbols().names, piece_names)?;
+            name_pieces.push(piece_names);
+        }
+    }
+    match x.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            scatter(values::ints(x), codes, &pieces);
+        }
+        SexpType::Real => scatter(values::reals(x), codes, &pieces),
+        SexpType::Complex => scatter(values::complexes(x), codes, &pieces),
+        SexpType::Raw => scatter(values::raws(x), codes, &pieces),
+        _ => scatter_elements(x, observations, codes, &pieces),
+    }
+    if names != nil() {
+        scatter_elements(names, observations, codes, &name_pieces);
     }
     if levels.kind() == SexpType::String {
         values::set_attr(result, symbols().names, levels)?;
     }
     Ok(result)
+}
+
+/// Appends each element of `source` to the piece its recycled factor code names, skipping NA
+/// codes. The codes were validated and the pieces sized by counting them.
+unsafe fn scatter<T: Copy>(source: &[T], codes: &[i32], pieces: &[Sexp]) {
+    let mut targets: Vec<&mut [T]> = pieces.iter().map(|piece| piece.slice_mut::<T>()).collect();
+    let mut cursors = vec![0_usize; pieces.len()];
+    for (index, &value) in source.iter().enumerate() {
+        let code = codes[index % codes.len()];
+        if code == NA_INTEGER {
+            continue;
+        }
+        let level = code as usize - 1;
+        targets[level][cursors[level]] = value;
+        cursors[level] += 1;
+    }
+}
+
+/// [`scatter`] for vectors of objects, which go through the write barrier.
+unsafe fn scatter_elements(source: Sexp, observations: usize, codes: &[i32], pieces: &[Sexp]) {
+    let mut cursors = vec![0_usize; pieces.len()];
+    for index in 0..observations {
+        let code = codes[index % codes.len()];
+        if code == NA_INTEGER {
+            continue;
+        }
+        let level = code as usize - 1;
+        values::set_elt(pieces[level], cursors[level], source.element(index));
+        cursors[level] += 1;
+    }
 }
 
 unsafe fn do_identical(call: &Call<'_>) -> R<Sexp> {
