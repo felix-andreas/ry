@@ -27,7 +27,7 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree, TreeEvent,
+        NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
         ast::{is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
@@ -444,39 +444,47 @@ impl SyntaxSites {
 
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
+    let parse = parse(db, file);
+    let root = parse.tree().root();
     let mut sites = Vec::new();
-    syntax::walk_tree(parse(db, file).tree().root(), |event| {
-        let TreeEvent::Enter {
-            node,
-            parent,
-            range,
-        } = event
-        else {
-            return;
-        };
+    // Every node of the file passes through here, and almost none is a site, so each role is
+    // tested only on the few kinds that can carry it.
+    for node in root.descendants() {
         let kind = node.kind();
         let mut roles = 0;
-        if annotations::is_inline_site_ref(node) {
-            roles |= SiteRole::InlineSite.bit();
-        }
-        if syntax::is_inline_annotation_kind(kind, parent.map(NodeRef::kind)) {
+        let site = match kind {
+            SyntaxKind::TYPE_DEFINITION
+            | SyntaxKind::NEW_EXPR
+            | SyntaxKind::BINARY_EXPR
+            | SyntaxKind::FUNCTION_DEF
+                if annotations::is_inline_site_ref(node) =>
+            {
+                roles |= SiteRole::InlineSite.bit();
+                true
+            }
+            SyntaxKind::CALL_EXPR if metadata::is_attach_call_ref(node) => {
+                roles |= SiteRole::AttachCall.bit();
+                true
+            }
+            SyntaxKind::ANNOTATION => true,
+            _ => is_ry_syntax(kind),
+        };
+        if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
         }
-        if (parent.is_none() || kind == SyntaxKind::BRACE_EXPR)
+        if (node == root || kind == SyntaxKind::BRACE_EXPR)
             && node.has_child(SyntaxKind::ANNOTATION)
         {
             roles |= SiteRole::AnnotatedSequence.bit();
         }
-        if metadata::is_attach_call_ref(node) {
-            roles |= SiteRole::AttachCall.bit();
+        if site || roles != 0 {
+            sites.push(SyntaxSite {
+                kind,
+                range: node.range(),
+                roles,
+            });
         }
-        if roles != 0
-            || matches!(kind, SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION)
-            || is_ry_syntax(kind)
-        {
-            sites.push(SyntaxSite { kind, range, roles });
-        }
-    });
+    }
     SyntaxSites(sites)
 }
 

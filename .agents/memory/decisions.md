@@ -3348,7 +3348,7 @@ first lines R had already read, leaving R mid-command.
 ## The cold check searches green trees and caches globals per item check
 
 - **Before.** Every whole-file tree reader (parse-stage diagnostics, annotation sites, attached namespaces, used tokens) walked the red tree with `descendants()`, building a red node per element, about 8 ns each. One item check read `frame_definition` and `package_name` through salsa for every reference, and each read interned a key tuple and verified a memo. `map_child_types` re-interned every type it visited, even when nothing changed.
-- **Shape.** `syntax::matching_nodes` filters with borrowed `NodeRef` cursors and makes owned `SyntaxNode`s only for matches; `syntax::for_each_token` reads token text with no owned cursors. `testing::check_parse_invariants` pins both to the owned-cursor walks. (With the flat tree an owned cursor is only a refcount bump, so the gap is now small.) `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
+- **Shape.** `syntax::matching_nodes` filters with borrowed `NodeRef` cursors and makes owned `SyntaxNode`s only for matches; `NodeRef::tokens` reads token text with no owned cursors. `testing::check_parse_invariants` pins both to the owned-cursor walks. (With the flat tree an owned cursor is only a refcount bump, so the gap is now small.) `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
 - **Why it is safe for salsa.** The first read inside a query records the dependency edge, and repeats only dedupe, so caching a read within one query execution changes no edge set. The cache lives as long as one `item_check` execution and is never shared.
 - **Allocator.** mimalloc's eager arena commit made the kernel zero transparent huge pages the process never used. `crates/ry/src/main.rs` turns it off from an `.init_array` constructor, before the first allocation. It cut peak RSS on the benchmark code bases from about 790 MiB to about 520 MiB.
 - **Counters.** `infer::RESOLVE_CALLS` is thread-local: a shared atomic bumped on every resolve step was a contended cache line across the worker threads.
@@ -3525,8 +3525,8 @@ first lines R had already read, leaving R mid-command.
   atomics shared across cores on every type intern, and a deep verification of every syntax-pass
   memo once the attached namespaces were set.
 - **Target shape.**
-  - `file_syntax_sites` collects every per-file site in one `syntax::walk_tree` pass, and
-    `lints::syntax_lints` walks the tree with borrowed cursors, making an owned node only where
+  - `file_syntax_sites` collects every per-file site in one pass over the nodes, and
+    `lints::syntax_lints` scans the elements in preorder with borrowed cursors, making an owned node only where
     `may_lint` says a lint can fire.
   - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
     binders in one query, cached in `SalsaGlobals`.
@@ -6364,7 +6364,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Cursors.** `SyntaxNode` and `SyntaxToken` are an `Arc<Tree>` plus an index, so making one is a
   refcount bump; their API mirrors rowan's so the typed AST, the formatter and the IDE did not
   change shape. `NodeRef` and `TokenRef` are borrowed `Copy` cursors for hot walks, and
-  `walk_tree` is a flat index scan. The one cursor model replaced `GreenRef` and `walk_green`.
+  `NodeRef::descendants_with_tokens` is a flat index scan. `TokenRef` is a tree and an index that
+  reads kind, range and text lazily: eager reads cost about 1 G instructions per cold check. The one cursor model replaced `GreenRef` and `walk_green`.
 - **Items.** A `Tree` is a window over shared columns: an `Arc` of the file's columns plus the
   window's first index, its length and its base offset. An item's syntax is `Tree::subtree`, which
   bumps the refcount and records the window, so every accessor reports indices and offsets

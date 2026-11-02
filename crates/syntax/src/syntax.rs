@@ -22,7 +22,7 @@ pub use {
     tree::{
         ChildrenRef, Direction, ElementRef, NodeOrToken, NodeRef, Preorder, PreorderWithTokens,
         SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
-        TokenAtOffset, TokenRef, Tree, TreeEvent, WalkEvent, is_walked_token, walk_tree,
+        TokenAtOffset, TokenRef, Tree, WalkEvent,
     },
 };
 

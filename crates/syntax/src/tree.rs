@@ -1465,6 +1465,22 @@ impl<'a> NodeRef<'a> {
             .map(|index| NodeRef { tree, index })
     }
 
+    /// Every element under this one, this one included, in preorder, tokens included.
+    pub fn descendants_with_tokens(self) -> impl Iterator<Item = ElementRef<'a>> + use<'a> {
+        let tree = self.tree;
+        (self.index..tree.end(self.index)).map(move |index| element_ref(tree, index))
+    }
+
+    /// Whether `element` is this node or lies under it, from the elements' positions in the
+    /// tree, so an empty element on this node's boundary is placed exactly.
+    pub fn encloses(self, element: ElementRef<'_>) -> bool {
+        let (tree, index) = match element {
+            NodeOrToken::Node(node) => (node.tree, node.index),
+            NodeOrToken::Token(token) => (token.tree, token.index),
+        };
+        std::ptr::eq(tree, self.tree) && (self.index..self.tree.end(self.index)).contains(&index)
+    }
+
     /// Every token under this node, in source order.
     pub fn tokens(self) -> impl Iterator<Item = TokenRef<'a>> + use<'a> {
         let tree = self.tree;
@@ -1472,76 +1488,6 @@ impl<'a> NodeRef<'a> {
             .filter(move |&index| !tree.is_node(index))
             .map(move |index| token_ref(tree, index))
     }
-}
-
-/// One step of [`walk_tree`].
-#[derive(Clone, Copy)]
-pub enum TreeEvent<'a> {
-    /// A node, with its parent (`None` for the root) and its range.
-    Enter {
-        node: NodeRef<'a>,
-        parent: Option<NodeRef<'a>>,
-        range: TextRange,
-    },
-    /// The end of a node, after its last child.
-    Leave(NodeRef<'a>),
-    /// A comment or literal token, the only tokens a whole-file pass reads.
-    Token {
-        kind: SyntaxKind,
-        text: &'a str,
-        range: TextRange,
-    },
-}
-
-/// The nodes under `root`, `root` included, in preorder, as borrowed cursors. Tokens other
-/// than comments and literals are skipped: most elements of a tree are tokens, and the
-/// whole-file passes read only nodes, comments and literals.
-#[inline]
-pub fn walk_tree(root: NodeRef<'_>, mut visit: impl FnMut(TreeEvent<'_>)) {
-    let tree = root.tree;
-    let mut open: Vec<u32> = Vec::new();
-    for index in root.index..tree.end(root.index) {
-        while let Some(&top) = open.last()
-            && tree.end(top) <= index
-        {
-            visit(TreeEvent::Leave(NodeRef { tree, index: top }));
-            open.pop();
-        }
-        let kind = tree.kind(index);
-        if kind.is_node() {
-            visit(TreeEvent::Enter {
-                node: NodeRef { tree, index },
-                parent: open.last().map(|&parent| NodeRef {
-                    tree,
-                    index: parent,
-                }),
-                range: tree.range(index),
-            });
-            open.push(index);
-        } else if is_walked_token(kind) {
-            let range = tree.range(index);
-            visit(TreeEvent::Token {
-                kind,
-                text: tree.slice(range),
-                range,
-            });
-        }
-    }
-    while let Some(top) = open.pop() {
-        visit(TreeEvent::Leave(NodeRef { tree, index: top }));
-    }
-}
-
-/// Whether [`walk_tree`] reports a token of this kind; every other token is skipped.
-pub fn is_walked_token(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::COMMENT
-            | SyntaxKind::STRING
-            | SyntaxKind::DOUBLE
-            | SyntaxKind::INTEGER
-            | SyntaxKind::COMPLEX
-    )
 }
 
 impl PartialEq for NodeRef<'_> {

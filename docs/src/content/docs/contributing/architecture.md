@@ -198,8 +198,11 @@ and that a one-shot cold check memoizes no tree.
 Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
 over a node and its parent and makes owned nodes only for the matches. The per-file site collectors
-share one walk, `file_syntax_sites`, and the syntax lints walk the tree with `syntax::walk_tree`,
-making an owned node (`syntax::node_at`) only where a cheap test says a lint may fire.
+share one pass over the nodes, `file_syntax_sites`, which tests each role only on the kinds that
+can carry it. The syntax lints scan every element in preorder (`NodeRef::descendants_with_tokens`),
+track the enclosing annotation region by position (`NodeRef::encloses`), and make an owned node
+(`syntax::node_at`) only where a cheap test says a lint may fire. A borrowed `TokenRef` reads its
+kind, range and text only when asked, because a child walk mostly checks kinds.
 
 The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file constant costs set its
 wall time. Several of them are worth knowing:
