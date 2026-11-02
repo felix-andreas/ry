@@ -7,9 +7,10 @@ use {
         globals::{R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_RowNamesSymbol},
         runtime,
         strings::c_bytes,
-        vectors::{coerce_vector, generic_length, integers, set_sexp_elt, sexp_elt, xlength},
+        vectors::{coerce_vector, generic_length, integers, sexp_elt, xlength},
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
+    interp::subset::set_dimnames,
     std::ffi::{c_char, c_int},
 };
 
@@ -302,46 +303,18 @@ pub unsafe fn dim_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
     Ok(dim)
 }
 
+/// `dimnamesgets` shares the interpreter's `dimnames<-`, so C code gets the same coercions
+/// (a zero-length component becomes `NULL`, factors become their labels) and the same errors.
 pub unsafe fn dimnames_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
-    let dim = raw_attribute(object, R_DimSymbol.get());
-    if dim.kind() != SexpType::Integer {
-        return Err(error("'dimnames' applied to non-array"));
-    }
+    crate::vectors::refuse_native(object)?;
     let list = match value.kind() {
-        SexpType::List => value,
         SexpType::Pairlist => crate::lists::pairlist_to_vector(value)?,
-        _ => return Err(error("'dimnames' must be a list")),
+        _ => value,
     };
     runtime.heap.root(list);
-    let extents = integers(dim)?;
-    let list_length = xlength(list)?;
-    if list_length as usize != extents.len() {
-        return Err(error(format!(
-            "length of 'dimnames' [{list_length}] must match that of 'dims' [{}]",
-            extents.len()
-        )));
-    }
-    for (index, &extent) in extents.iter().enumerate() {
-        let names = sexp_elt(list, index)?;
-        if names == runtime.nil() {
-            continue;
-        }
-        let names = if names.kind() == SexpType::String {
-            names
-        } else {
-            coerce_vector(names, SexpType::String)?
-        };
-        if xlength(names)? != extent as isize {
-            return Err(error(format!(
-                "length of 'dimnames' [{}] not equal to array extent",
-                index + 1
-            )));
-        }
-        set_sexp_elt(list, index, names)?;
-    }
-    install_attribute(object, R_DimNamesSymbol.get(), list)?;
-    Ok(list)
+    set_dimnames(object, list, runtime.nil())?;
+    Ok(raw_attribute(object, R_DimNamesSymbol.get()))
 }
 
 pub unsafe fn class_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {

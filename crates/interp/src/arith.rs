@@ -2839,15 +2839,28 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
 }
 
 unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
-    let mut args: Vec<Arg> = Vec::new();
+    let mut items: Vec<Arg> = Vec::new();
+    let mut na_rm = None;
     let mut finite = false;
     for arg in call.args {
         if arg.tag != nil() && values::symbol_name(arg.tag) == "finite" {
             finite = values::as_logical_scalar(arg.value) == 1;
+        } else if arg.tag == symbols().na_rm {
+            na_rm = Some(*arg);
         } else {
-            args.push(*arg);
+            items.push(*arg);
         }
     }
+    // `range.default` starts from `c(..., recursive = TRUE)`, so lists are flattened.
+    let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
+        vec![Arg {
+            tag: nil(),
+            value: crate::subset::combine_args(&items, true, false)?,
+        }]
+    } else {
+        items
+    };
+    args.extend(na_rm);
     if finite {
         let mut filtered = Vec::new();
         for arg in &args {

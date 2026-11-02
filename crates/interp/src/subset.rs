@@ -2198,7 +2198,7 @@ pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
     combine_args(&args, false, true)
 }
 
-unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp> {
+pub unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp> {
     let mut flattener = Flattener {
         kind: SexpType::Nil,
         values: Vec::new(),
@@ -2853,13 +2853,15 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let attributes = call.arg(1);
-    if object == nil() {
+    // NULL cannot carry attributes, so GNU R gives them to an empty list instead.
+    let object = if object == nil() {
         if attributes == nil() {
             return Ok(nil());
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
-    }
-    let object = modifiable(object)?;
+        alloc(SexpType::List, 0)?
+    } else {
+        modifiable(object)?
+    };
     let was_s4 = object.has_gp(gp::S4_OBJECT);
     values::clear_attributes(object);
     if attributes == nil() {
@@ -2881,7 +2883,7 @@ unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     for pass in 0..2 {
         for index in 0..length(attributes) {
             let name = names.element(index);
-            if name == values::na_string() || name.bytes().is_empty() {
+            if name != values::na_string() && name.bytes().is_empty() {
                 return Err(call.error(format!(
                     "all attributes must have names [{} does not]",
                     index + 1

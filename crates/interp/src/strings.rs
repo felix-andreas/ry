@@ -2155,7 +2155,7 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         }
         None
     } else {
-        let text = translate_regex(&String::from_utf8_lossy(&needle), true);
+        let text = translate_byte_regex(&String::from_utf8_lossy(&needle));
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
         let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
             call.error(format!(
@@ -2810,9 +2810,25 @@ pub(crate) fn translate(pattern: &str, syntax: Syntax) -> Translation {
         syntax,
         unicode: syntax == Syntax::Extended || declares_ucp(&chars),
     };
+    translate_dialect(&chars, dialect)
+}
+
+/// A POSIX pattern for `grepRaw`, which GNU R compiles with TRE's byte interface, so its
+/// classes cover ASCII only.
+pub fn translate_byte_regex(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let dialect = Dialect {
+        syntax: Syntax::Extended,
+        unicode: false,
+    };
+    translate_dialect(&chars, dialect).pattern
+}
+
+fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
+    let syntax = dialect.syntax;
     let mut problem = None;
     let mut minimal = false;
-    let mut output = String::with_capacity(pattern.len() + 8);
+    let mut output = String::with_capacity(chars.len() + 8);
     if syntax == Syntax::Extended {
         // In POSIX syntax `.` matches a newline too.
         output.push_str("(?s)");
@@ -2902,6 +2918,13 @@ pub(crate) fn translate(pattern: &str, syntax: Syntax) -> Translation {
                 groups.push((start, false));
                 output.push('(');
                 atom = None;
+                quantified = false;
+            }
+            // TRE reads a `)` that closes no group as a literal.
+            ')' if groups.is_empty() && syntax == Syntax::Extended => {
+                output.push_str(r"\)");
+                atom = Some(start);
+                assertion = None;
                 quantified = false;
             }
             ')' => {
@@ -3125,7 +3148,8 @@ fn translate_escape(
             output.push_str(&format!(r"\x{{{point:X}}}"));
             end
         }
-        (Syntax::Perl, 'Q') => {
+        // TRE quotes \Q...\E as PCRE does.
+        (_, 'Q') => {
             let mut cursor = next;
             while cursor < chars.len() {
                 if chars[cursor] == '\\' && chars.get(cursor + 1) == Some(&'E') {
@@ -3181,7 +3205,8 @@ fn escape_class(escaped: char, dialect: Dialect) -> Option<String> {
         ('d', Syntax::Perl, true) => r"\p{Nd}",
         ('w', _, true) => UNICODE_WORD,
         ('w', _, false) => PERL_WORD,
-        ('s', Syntax::Extended, _) => POSIX_SPACE,
+        ('s', Syntax::Extended, true) => POSIX_SPACE,
+        ('s', Syntax::Extended, false) => PERL_SPACE,
         ('s', Syntax::Perl, true) => r"\s",
         ('s', Syntax::Perl, false) => PERL_SPACE,
         ('h', Syntax::Perl, _) => PERL_HORIZONTAL_SPACE,

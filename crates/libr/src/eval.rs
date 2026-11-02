@@ -590,7 +590,7 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
         dot_c(call, RoutineKind::Fortran)
     }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
-    internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
+    internal("dyn.unload", 1, |_| Ok(runtime().nil())),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
     internal("getRegisteredRoutines", 1, |call| unsafe {
         registered_routines(call.arg(0))

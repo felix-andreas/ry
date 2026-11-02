@@ -130,12 +130,24 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("dirname", 1, |call| unsafe {
+        // GNU R's `R_dirname`: expand `~`, drop one trailing separator unless it is the whole
+        // path (its loop never shortens the string, so only one goes), then cut at the last
+        // separator along with the separators just before it.
         map_strings(call, |path| {
-            let trimmed = path.trim_end_matches('/');
+            if path.is_empty() {
+                return String::new();
+            }
+            let expanded = crate::connections::expand_path(path);
+            let trimmed = match expanded.strip_suffix('/') {
+                Some(rest) if !rest.is_empty() => rest,
+                _ => expanded.as_str(),
+            };
             match trimmed.rfind('/') {
-                Some(0) => "/".to_owned(),
-                Some(position) => trimmed[..position].to_owned(),
                 None => ".".to_owned(),
+                Some(position) => {
+                    let head = trimmed[..position].trim_end_matches('/');
+                    if head.is_empty() { "/" } else { head }.to_owned()
+                }
             }
         })
     }),
