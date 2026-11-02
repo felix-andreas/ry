@@ -5653,7 +5653,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `outer <- function(H) weigh(2, H)` pinned `H` to `double` (ks `mise.mixt`, the shape pins
   through call chains).
 - **Shape.** `widen_numeric_binding` extends the existing `f(1L, 0.5)` rebind: a `matrix` absorbs a
-  numeric binding (and is absorbed by one already bound to a matrix), and an open variable or a
-  numeric rigid argument takes over a variable a literal bound, so the caller's parameter stays
-  `<T: numeric>`. The cost is precision on integers: `outer(1L)` claims `integer` though R gives
-  `double`, which is compatible everywhere `double` is expected except an `integer`-only parameter.
+  numeric binding (and is absorbed by one already bound to a matrix; the element type is not
+  tracked, so a character matrix passes). An open variable or numeric rigid argument meeting a
+  variable bound to `double` is only constrained numeric and accepted, leaving the binding at
+  `double`, so the caller's parameter stays `<T: numeric>` and the result keeps R's promotion.
+- **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
+  `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
+  them, so an outer function's variable was generalized by an inner one.

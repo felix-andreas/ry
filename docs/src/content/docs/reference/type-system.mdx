@@ -1801,13 +1801,15 @@ A `logical` argument satisfies the numeric requirement, because R promotes it, s
 `cost <- function(price, rate) price * rate` accepts `cost(TRUE, 0.5)` and `cost(1L, 0.5)`. Mixed
 arguments widen in R's order, `logical` to `integer` to `double`, so both calls are `double`. A
 union of numbers widens to its widest member, so `cost(1L, if (fine) 0.5 else 1L)` is `double` too.
-A `matrix` absorbs any number or numeric vector the same way, because R's arithmetic gives a matrix:
-with `weigh <- function(a, H) a * H + 1`, both `weigh(2, m)` and `weigh(m, 2)` are accepted.
+A `matrix` absorbs any number, logical or numeric vector the same way, because R's arithmetic gives a
+matrix: with `weigh <- function(a, H) a * H`, both `weigh(2, m)` and `weigh(m, 2)` are `matrix`. A
+matrix's element type is not tracked, so a character matrix is absorbed too.
 
 An argument that is itself still generic, such as the parameter `H` in
-`outer <- function(H) weigh(2, H)`, takes the variable over instead of being pinned to the literal's
-`double`, so `outer` is `<T: numeric> fn(H: T) -> double` and accepts a vector or a matrix. A
-declared numeric type parameter does the same.
+`outer <- function(H) weigh(2, H)`, is constrained to be numeric rather than pinned to the literal's
+`double`, so `outer` is `<T: numeric> fn(H: T) -> double` and accepts a vector or a matrix. The result
+keeps the literal's `double`, which is exact for a scalar argument and approximate for a vector or
+matrix one. A declared numeric type parameter is accepted the same way.
 
 ### Operator methods on a class
 
@@ -2368,7 +2370,7 @@ a local variable or parameter, the recognized guards are:
   matches. The true branch keeps every member, because the field itself may hold `NULL`. So
   `url <- list()`, a loop that fills `url`, and then `if (is.null(url$scheme)) stop(...)` leave
   `url` as the filled record.
-- `length(x)` as a condition, or `length(x)` compared with a number, removes `NULL` from `x`'s union
+- `length(x)` as a condition, or `length(x)` compared with a numeric literal, removes `NULL` from `x`'s union
   in whichever branch a length of zero cannot reach. So after
   `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
   `if (0 < length(range))` drops it in the true branch. `length(range) < 3` admits zero and refines
@@ -3312,7 +3314,8 @@ When the columns are not known, a local whose value is `NULL` reads as a column 
 Packages write `time <- nTest <- NULL` before `dt[nTest > 0][order(-time)]` only to silence
 R CMD check's "no visible binding" note, so the `NULL` is never the value the query reads. The same
 holds inside `[` on a value of no known shape (an unannotated parameter, an `Unknown` result), which
-may be a data.table. On a vector, `values[order(-time)]` still reports the `NULL`. `.N`, `.GRP`, and `.NGRP` are
+may be a data.table, and it covers everything inside the brackets, nested calls and functions
+included. On a vector, `values[order(-time)]` still reports the `NULL`. `.N`, `.GRP`, and `.NGRP` are
 `integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns, or the
 columns `.SDcols` selects (see [Every column at once](#every-column-at-once)). A called
 name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A

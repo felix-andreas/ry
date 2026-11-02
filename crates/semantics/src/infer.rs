@@ -662,37 +662,32 @@ impl<'db> InferenceTable<'db> {
         // variable tied by `a * H` takes `f(2, m)` and `f(m, 2)` alike and binds the matrix.
         let is_matrix = |ty: Ty<'db>| matches!(ty.kind(db), TyKind::Named(name, _) if name.text(db) == "matrix");
         // An open argument meeting a variable a literal bound (`f(2, x)` inside a function of
-        // `x`) takes the variable over instead of pinning `x` to the literal's type, so the
-        // caller's parameter stays numeric-generic.
-        if let TyKind::Var(actual_var) = actual.kind(db)
-            && numeric_rank(db, bound).is_some_and(|(_, rank)| rank > 0)
-        {
-            let actual_representative = self.find(*actual_var);
-            if actual_representative != representative
-                && let Entry::Unbound {
-                    constraint: Constraint::Unconstrained | Constraint::Numeric,
-                    ..
-                } = *self.entry(actual_representative)
-                && self
-                    .constrain(db, actual_representative, Constraint::Numeric)
-                    .is_ok()
-            {
-                self.set(representative, Entry::Redirect(actual_representative));
-                return true;
-            }
-        }
-        // A declared numeric type parameter takes it over the same way.
-        if let TyKind::Rigid(name) = actual.kind(db)
-            && self.rigid_constraints.get(name) == Some(&Constraint::Numeric)
-            && numeric_rank(db, bound).is_some_and(|(_, rank)| rank > 0)
-        {
-            self.set(
-                representative,
-                Entry::Bound {
-                    ty: actual,
-                    numeric: true,
-                },
-            );
+        // `x`) is constrained numeric instead of pinned to the literal's type, so the caller's
+        // parameter stays generic. The binding keeps the literal's type, which R's arithmetic
+        // promotes every narrower argument to, and no variable moves between levels.
+        let promotes = numeric_rank(db, bound).is_some_and(|(_, rank)| rank == 2);
+        let open_numeric = promotes
+            && match actual.kind(db) {
+                TyKind::Var(actual_var) => {
+                    let actual_representative = self.find(*actual_var);
+                    actual_representative != representative
+                        && matches!(
+                            *self.entry(actual_representative),
+                            Entry::Unbound {
+                                constraint: Constraint::Unconstrained | Constraint::Numeric,
+                                ..
+                            }
+                        )
+                        && self
+                            .constrain(db, actual_representative, Constraint::Numeric)
+                            .is_ok()
+                }
+                TyKind::Rigid(name) => {
+                    self.rigid_constraints.get(name) == Some(&Constraint::Numeric)
+                }
+                _ => false,
+            };
+        if open_numeric {
             return true;
         }
         if is_matrix(bound) && numeric_rank(db, actual).is_some() {
