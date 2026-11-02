@@ -399,10 +399,12 @@ protects construction but nothing after it.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- A function that takes a callback (`List.map`, `List.walk`, `Dict.update` and the rest) calls
-  the closure through `eval::apply` once per element, and compiled code treats the whole call as
-  opaque. Compiling such a call with a closure known at the call site into a loop over the
-  elements, with the closure inlined, is the fast path these functions still lack.
+- Compiled loops cover `List.walk`, `List.map`, `List.keep_if`, `List.drop_if`, `List.any`,
+  `List.all` and `List.count_if` (`decisions.md`, "Library traversals compile to loops").
+  `List.find_first` (returns a `Result`), `Dict.walk` (two-element callback over keys and
+  values), `List.walk_until` and `Dict.update` still run each callback through
+  `standard_library::invoke`. A callback that reads a defaulted formal of the caller that has not
+  been forced yet, or returns a non-scalar, also stays on that path.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.

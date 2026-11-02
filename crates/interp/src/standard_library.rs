@@ -19,6 +19,7 @@
 
 use {
     crate::{
+        annotations::Entry,
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval,
@@ -36,6 +37,7 @@ use {
         records::{Fields, Layout, NativeKind},
     },
     rustc_hash::{FxHashSet, FxHasher},
+    smallvec::SmallVec,
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
@@ -582,21 +584,73 @@ unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
     })
 }
 
-unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Sexp> {
+unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Callback> {
     if !values::is_function(value) {
         return Err(wrong(call, parameter, "a function", value));
     }
-    Ok(value)
+    Callback::new(value)
 }
 
-/// Calls `function` with positional `arguments`, through the interpreter's ordinary call path.
-unsafe fn invoke(call: &Call<'_>, function: Sexp, arguments: &[Sexp]) -> R<Sexp> {
-    let arguments: Vec<Arg> = arguments
+/// A function the library calls back, prepared once per library call. A closure whose formals
+/// have no `...` gets the call its frames record built here, once, as `(f)(a, b)` with its own
+/// formals as the arguments, which is what GNU R's `lapply` does with `FUN(X[[i]], ...)`: the
+/// call names the arguments instead of quoting their values, so building it costs nothing per
+/// item, and evaluating it in the frame still gives the same values.
+#[derive(Clone, Copy)]
+struct Callback {
+    function: Sexp,
+    /// The prepared call and the number of formals, for a closure without `...`.
+    form: Option<(Sexp, usize)>,
+}
+
+impl Callback {
+    unsafe fn new(function: Sexp) -> R<Callback> {
+        if function.kind() != SexpType::Closure {
+            return Ok(Callback {
+                function,
+                form: None,
+            });
+        }
+        let mut items = vec![(nil(), function)];
+        let mut formal = function.car();
+        while formal.kind() == SexpType::Pairlist {
+            if formal.tag() == values::symbols().dots {
+                return Ok(Callback {
+                    function,
+                    form: None,
+                });
+            }
+            items.push((nil(), formal.tag()));
+            formal = formal.cdr();
+        }
+        let form = values::pairlist(&items, SexpType::Language)?;
+        crate::heap().root(form);
+        Ok(Callback {
+            function,
+            form: Some((form, items.len() - 1)),
+        })
+    }
+}
+
+/// Calls `callback` with positional `arguments`. A closure given an argument for each formal
+/// takes the prepared call; anything else takes the interpreter's ordinary call path.
+unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<Sexp> {
+    let arguments: SmallVec<[Arg; 4]> = arguments
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    crate::moves::calling_back(function)?;
-    eval::apply(nil(), function, &arguments, call.env)
+    match callback.form {
+        Some((form, formals)) if formals == arguments.len() => {
+            let function = callback.function;
+            let env = eval::bind_arguments(form, function, &arguments, None)?;
+            let promargs = eval::args_pairlist(&arguments)?;
+            eval::run_closure(form, function, env, call.env, promargs, Entry::Unchecked)
+        }
+        _ => {
+            crate::moves::calling_back(callback.function)?;
+            eval::apply(nil(), callback.function, &arguments, call.env)
+        }
+    }
 }
 
 /// A predicate's answer, which must be `TRUE` or `FALSE`.

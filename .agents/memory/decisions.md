@@ -4359,6 +4359,42 @@ check` releases its trees once, and memoized records are compact" below).
   unchanged (pinned in `test_standard_library.rs`, including compiled-loop error cases), and the
   analysis is unaffected.
 
+## Library traversals compile to loops
+
+- **Before.** `List.walk`, `List.map` and the other callback-taking library functions called the
+  callback through `eval::apply` once per element, which built a call, matched arguments, made a
+  promise per argument and entered the callee's compiled body: about 5,000 instructions per
+  element under callgrind, of which the callback's own `a + x` was about 1,000. Compiled code
+  treated the whole library call as one opaque step.
+- **Interpreter.** `standard_library::Callback` prepares a closure callback once per library
+  call: when the closure has no `...` and takes exactly the arguments the library passes, it
+  builds the call `(f)(formal1, formal2)` once and binds each element positionally with
+  `bind_arguments` and `run_closure`, skipping argument matching and the per-call `LANGSXP`.
+  This mirrors GNU R's `lapply`, whose callback sees `FUN(X[[i]], ...)` as its call, so
+  `sys.call()` inside a callback shows the formals rather than the values. Any other callback
+  goes through `eval::apply` as before.
+- **JIT.** `call_builtin` turns `List.walk`, `List.map`, `List.keep_if`, `List.drop_if`,
+  `List.any`, `List.all` and `List.count_if` into `Action::Traverse` when the callback inlines:
+  a closure literal at the call site (`Ty::Closure`), a function constant (`Ty::Fun`), or a name
+  whose variable lookup from the enclosure finds a closure now. The element's type is the join
+  of the feedback of the callback's own reads of its last formal (or a declared scalar
+  annotation), and the callback body lowers through `lower_expression`, the same inliner direct
+  calls use, so it must be scalar arithmetic, comparisons and intrinsics over its formals and
+  loaded variables.
+- **Guards.** The loop hands the whole call back to tier 0, which reruns it from the start,
+  whenever the list is not a plain `VECSXP` (an ALTREP or array list), an element is not the
+  expected unboxed scalar, a predicate returns `NA`, or the arithmetic overflows. A named
+  callback adds an identity check of the register against the inlined closure, plus a
+  speculation on its binding that keeps the closure alive (so a recycled address cannot pass
+  the check) and recompiles once the binding changes. A hand-off before the loop has written
+  anything visible is invisible; `map` and `keep_if` build their result in the destination
+  register, which tier 0 overwrites.
+- **Measured.** See the pull request that introduced the loops; numbers land here once measured on the profiling build.
+- **Impact.** Values, errors and warnings are unchanged (`traversals_agree_across_tiers` in
+  `crates/jit/tests/test_tiers.rs` runs each shape in both tiers, including the hand-off cases),
+  and analysis is unaffected. `List.find_first`, `Dict.walk` and the `walk_until` functions are
+  not looped yet (`backlog.md`).
+
 ## Moving a collection into a helper's parameter
 
 - **Before.** `d <- helper(d, k)` shared the dictionary between the caller's `d` and the
