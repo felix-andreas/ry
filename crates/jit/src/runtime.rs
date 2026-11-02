@@ -809,6 +809,76 @@ pub unsafe extern "C" fn jit_list_prefix(activation: *mut Activation, dst: i64, 
     }
 }
 
+/// Puts the keys vector of the dictionary (`dict` nonzero) or set `object` in register `keys`,
+/// and a dictionary's values list in register `stored`, and returns its length. Returns -1,
+/// handing the traversal to tier 0, when `object` is not one, or when it has keys and their
+/// vector is not of type `key` (a negative `key` accepts any type).
+pub unsafe extern "C" fn jit_collection_parts(
+    activation: *mut Activation,
+    object: i64,
+    dict: i32,
+    key: i32,
+    keys: i64,
+    stored: i64,
+) -> i64 {
+    unsafe {
+        checked(activation, -1, |activation| {
+            let Some(object) = Sexp::from_raw(object as *mut Header) else {
+                return -1;
+            };
+            let kind = if dict != 0 {
+                NativeKind::Dict
+            } else {
+                NativeKind::Set
+            };
+            match scoped(|| standard_library::collection_parts(object, kind)) {
+                Ok(Some((vector, values, count))) => {
+                    if count > 0 && key >= 0 && vector.kind() as i32 != key {
+                        return -1;
+                    }
+                    *activation.registers.add(keys as usize) = vector;
+                    *activation.registers.add(stored as usize) = values;
+                    count as i64
+                }
+                Ok(None) => -1,
+                Err(unwind) => {
+                    park(activation, unwind);
+                    -1
+                }
+            }
+        })
+    }
+}
+
+/// Puts what `List.find_first` and its kin answer in register `dst`: the element of the list
+/// in register `list` at 0-based `position`, or its position when `index` is nonzero, or
+/// `:Err(:NotFound)` for a negative `position`. Returns 0 when building it fails, with the
+/// error parked.
+pub unsafe extern "C" fn jit_found(
+    activation: *mut Activation,
+    dst: i64,
+    list: i64,
+    position: i64,
+    index: i32,
+) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let list = *activation.registers.add(list as usize);
+            let position = usize::try_from(position).ok();
+            match scoped(|| standard_library::found(list, position, index != 0)) {
+                Ok(answer) => {
+                    *activation.registers.add(dst as usize) = answer;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
 /// Key kinds [`jit_collection_position`] takes.
 pub mod key {
     pub const INTEGER: i32 = 0;

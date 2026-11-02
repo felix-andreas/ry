@@ -512,7 +512,10 @@ fn traversals_agree_across_tiers() {
     // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
     // tier 0, which must then give the same value or error.
     let definitions = "xs <- List.from_vector(1:50 + 0)\nys <- List.from_vector(1:50)\nflip <- 0L\n\
-                       add <- function(acc, x) acc + x\nstep <- add";
+                       add <- function(acc, x) acc + x\nstep <- add\n\
+                       ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
+                       sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
+                       st <- Set.from_list(List.from_vector(1:20 + 0.5))";
     let cases = [
         ("List.walk(xs, 0, function(acc, x) acc + x * b)", false),
         ("List.walk(ys, 0L, function(acc, x) acc + x)", false),
@@ -560,6 +563,75 @@ fn traversals_agree_across_tiers() {
             "List.walk(xs, 0, function(acc: double, x: double) -> double acc + x)",
             false,
         ),
+        ("List.find_first(xs, function(x) x > 20)", false),
+        ("List.find_last(ys, function(x) x %% 7L == 0L)", false),
+        ("List.find_first_index(xs, function(x) x > 20)", false),
+        ("List.find_last_index(xs, function(x) x < 0)", false),
+        ("List.find_first(list(), function(x) x > 0)", false),
+        ("List.find_first(list(1, NA, 3), function(x) x > 2)", true),
+        (
+            "List.walk_backwards(xs, 0, function(acc, x) acc * 0.5 + x)",
+            false,
+        ),
+        (
+            "List.walk_with_index(xs, 0, function(acc, x, i) acc + x * i)",
+            false,
+        ),
+        (
+            "List.walk_from(ys, 10L, 0L, function(acc, x) acc + x)",
+            false,
+        ),
+        (
+            "List.walk_from(ys, 60, 0L, function(acc, x) acc + x)",
+            false,
+        ),
+        (
+            "List.walk_from(ys, 2.5, 0L, function(acc, x) acc + x)",
+            true,
+        ),
+        ("List.walk_from(ys, 0L, 0L, function(acc, x) acc + x)", true),
+        (
+            "List.walk_until(xs, 0, function(acc, x) if (acc > 100) :Break(acc) else :Continue(acc + x))",
+            false,
+        ),
+        (
+            "List.walk_backwards_until(ys, 0L, function(acc, x) if (x < 10L) :Break(acc) else :Continue(acc + x))",
+            false,
+        ),
+        (
+            "List.walk_with_index_until(xs, 0, function(acc, x, i) { if (i > 5L) :Break(acc) else :Continue(acc + x) })",
+            false,
+        ),
+        (
+            "List.walk_from_until(ys, 3L, 0L, function(acc, x) :Continue(acc + x))",
+            false,
+        ),
+        (
+            "List.walk_until(list(1, NA, 3), 0, function(acc, x) if (x > 1) :Break(acc) else :Continue(acc + x))",
+            true,
+        ),
+        (
+            "List.walk_until(xs, 0, function(acc, x) if (acc > 10) :Stop(acc) else :Continue(acc + x))",
+            true,
+        ),
+        ("List.map_with_index(xs, function(x, i) x * i)", false),
+        ("List.map(xs, function(x) if (x > 25) x else -1)", false),
+        ("Dict.walk(ds, 0, function(acc, k, v) acc + k * v)", false),
+        ("Dict.walk(sd, 0, function(acc, k, v) acc + v)", false),
+        (
+            "Dict.walk(Dict.empty(), 0, function(acc, k, v) acc + v)",
+            false,
+        ),
+        (
+            "Dict.walk_until(ds, 0L, function(acc, k, v) if (k > 1L) :Break(acc) else :Continue(acc + k))",
+            false,
+        ),
+        ("Set.walk(st, 0, function(acc, x) acc + x)", false),
+        (
+            "Set.walk_until(st, 0, function(acc, x) if (acc > 20) :Break(acc) else :Continue(acc + x))",
+            false,
+        ),
+        ("Dict.walk(xs, 0, function(acc, k, v) acc + v)", true),
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.

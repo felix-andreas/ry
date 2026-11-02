@@ -1569,6 +1569,31 @@ unsafe fn found_index(call: &Call<'_>, from_end: bool) -> R<Sexp> {
     }
 }
 
+/// What `List.find_first` and its kin answer for the element of `list` at `position`, or for
+/// none: `:Ok` of the element, or of its 1-based position when `index`, else `:Err(:NotFound)`.
+/// Compiled loops that find the position themselves build their answer here.
+pub unsafe fn found(list: Sexp, position: Option<usize>, index: bool) -> R<Sexp> {
+    match position {
+        Some(at) if index => ok(scalar_integer(at as i32 + 1)?),
+        Some(at) => ok(list.element(at)),
+        None => err("NotFound"),
+    }
+}
+
+/// The keys vector, the values list (`NULL` for a set) and the length of a dictionary or set
+/// of `kind`, or `None` for any other value. Compiled loops walk the two vectors directly.
+pub unsafe fn collection_parts(object: Sexp, kind: NativeKind) -> R<Option<(Sexp, Sexp, usize)>> {
+    if object.kind() != SexpType::Record || records::native_kind(object) != kind {
+        return Ok(None);
+    }
+    let keys = records::slot_value(object, 0)?;
+    let stored = match kind {
+        NativeKind::Dict => records::slot_value(object, 1)?,
+        _ => nil(),
+    };
+    Ok(Some((keys, stored, length(keys))))
+}
+
 unsafe fn list_find_first(call: &Call<'_>) -> R<Sexp> {
     found_element(call, false)
 }
