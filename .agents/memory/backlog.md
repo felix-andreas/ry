@@ -2216,9 +2216,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - sessioninfo crashes in `external_info()`: GNU R's own `tcltk.so` is built with R's internals
-    and reads `SEXPREC` fields directly, so it segfaults on ry's layout. ry's R home needs a tcltk
-    built against ry, or a `tclVersion()` that errors cleanly when Tcl is unavailable.
+  - `R` without `--no-echo` does not echo its input. GNU R prints each line it reads after the
+    `> ` or `+ ` prompt (and a last `> ` at the end of input), so `R --silent -e 'expr'` output
+    starts with `> expr`; sys's "Jobs can be nested" reads the second line of that output.
+  - tcltk is unavailable: `dyn.load` refuses GNU R's own `tcltk.so` (`decisions.md`, "Package-test
+    compatibility details"), so code that needs Tcl/Tk gets an error. A tcltk built against ry
+    would bring it back.
+  - Parse errors name the token GNU R's parser stops on, but ry's parser recovers differently in
+    a few places: `x <- function( {` reports the end of the input, where GNU R reports the `{`, and
+    `a ;; b` parses where GNU R rejects the second `;`.
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
@@ -2251,10 +2257,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - `iconv(sub = , "ASCII//TRANSLIT")`.
   - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
     `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
-    0.036 between `besselI` results), data.table's `S4.Rraw` test 2, an F value in nlme's
-    `anova`, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's
-    error message for `hashfile(NA)`, openssl's bignum "not valid integer", jose's `grepRaw`,
-    Rdpack's bibliography, and a long-path error in rprojroot.
+    0.036 between `besselI` results), an F value in nlme's `anova`, gmp's `factorialZ` and
+    `asNumeric` precision, the C symbols of commonmark, and openssl's bignum "not valid integer".
   - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
@@ -2263,12 +2267,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     "logical subscript too long" from `.subscript.2ary`: a method sees a `j`, so the one-index
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
-  - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
-    the timeout, though a lone `callr::r_session` works.
   - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
     `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
     `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
     algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+  - data.table: `S4`, `autoprint`, `knitr`, `other` and `types` pass. `main.Rraw` reports about
+    700 failing tests (among them `-xtfrm(col)` on a character column, `scan()` reading
+    `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
+    of i is -10" warning), froll misses the warnings of 6000.114 and 6000.115, nafill fails
+    3.07, and `programming.Rraw` stops on "invalid type/length (symbol/0) in vector allocation".
   - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
     subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
     group, order, runs, split, expand and slice-chop files also fail; run them with

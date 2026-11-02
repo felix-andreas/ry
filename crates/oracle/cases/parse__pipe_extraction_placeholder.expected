@@ -1,0 +1,17 @@
+[stdout]
+| a b 
+| 1 2 
+| [1] 2
+| [1] 3
+| [1] 1 2 3
+| x$a[[b]]
+| pipe placeholder may only appear once (<input>:1:6)
+| function '$' not supported in RHS call of a pipe (<input>:1:6)
+| The pipe operator requires a function call as RHS (<input>:1:6)
+| function '$' not supported in RHS call of a pipe (<input>:1:6)
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

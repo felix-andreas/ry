@@ -1,0 +1,32 @@
+[stdout]
+| [1] FALSE
+| [1] TRUE
+| warning: 'ROOT' already exists 
+| [1] FALSE
+| warning: 'ROOT' already exists 
+| [1] FALSE
+| warning: cannot create dir 'ROOT/a/b', reason 'No such file or directory' 
+| [1] FALSE
+| [1] TRUE
+| [1] "a/y.md" "x.md"  
+| [1] "a"
+| [1] ""    "a"   "a/b"
+| [1] 0
+|  list()
+|  - attr(*, "a")= num 1
+| NULL
+| [1] "attempt to set an attribute on NULL"
+| [1] 1 5
+| [1] "1" "a"
+| [1] "invalid 'type' (list) of argument"
+| [1] "file(\"\") only supports open = \"w+\" and open = \"w+b\": using the former"
+| [1] 5
+| [1] "kept"
+| [1] 1
+| [1] 61 62 63
+[messages]
+[warnings]
+[errors]
+[value]
+raw
+| as.raw(c(0x61, 0x62, 0x63))

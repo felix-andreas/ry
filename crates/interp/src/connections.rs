@@ -88,7 +88,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool((*resolve_con(call.arg(0))?.1).canseek != 0)
     }),
     internal("stdin", 0, |_| unsafe { connection_object(0) }),
-    internal("stdout", 0, |_| unsafe { connection_object(1) }),
+    // GNU R's `stdout()` is the connection output currently goes to, so a call inside a `sink`
+    // names the sink, while a `stdout()` kept from before writes past it to the console.
+    internal("stdout", 0, |_| unsafe {
+        connection_object(
+            interp()
+                .connections
+                .sinks
+                .last()
+                .map_or(1, |sink| sink.slot),
+        )
+    }),
     internal("stderr", 0, |_| unsafe { connection_object(2) }),
     internal("readLines", 6, do_read_lines),
     internal("readDCF", 3, do_read_dcf),
@@ -374,7 +384,10 @@ unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
         .and_then(entry)
         .ok_or_else(invalid)?;
     let id = values::get_attr(object, values::install("conn_id")?);
-    if id.kind() == SexpType::ExternalPtr && id.external_address() != entry.con.cast() {
+    // Closing clears the `conn_id` address, so an object kept past `close()` stays invalid even
+    // once a new connection takes its slot. Any other address is accepted, because curl stores
+    // its own handle there, and GNU R never looks at it.
+    if id.kind() == SexpType::ExternalPtr && id.external_address().is_null() {
         return Err(invalid());
     }
     Ok((slot as usize, entry.con))
@@ -594,7 +607,17 @@ pub unsafe fn is_text_mode(file: Sexp) -> R<bool> {
 
 /// Writes text to a connection the way `cat` and `write.table` do.
 pub unsafe fn print(file: Sexp, text: &[u8]) -> R<()> {
-    let con = resolve_con(file)?.1;
+    let (slot, con) = resolve_con(file)?;
+    // Writing to the current sink is ordinary output, which a split sink also shows.
+    if interp()
+        .connections
+        .sinks
+        .last()
+        .is_some_and(|sink| sink.slot == slot)
+    {
+        write_output(text);
+        return Ok(());
+    }
     with_open(con, "wt", || {
         if (*con).canwrite == 0 {
             return Err(error("cannot write to this connection"));
@@ -673,10 +696,15 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let (path, temporary, open) = if description.is_empty() {
-        let open = if open.is_empty() {
-            "w+".to_owned()
-        } else {
-            open
+        let open = match open.as_str() {
+            "" => "w+".to_owned(),
+            "w+" | "w+b" => open,
+            _ => {
+                crate::conditions::warning(
+                    "file(\"\") only supports open = \"w+\" and open = \"w+b\": using the former",
+                )?;
+                "w+".to_owned()
+            }
         };
         (temporary_path(), true, open)
     } else if description == "stdin" {
@@ -697,10 +725,12 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         None
     };
+    // A sniffed file is a compressed file connection from then on, so a later `open(con, "rb")`
+    // reads it decompressed too, as in GNU R.
     let device = Device::File(FileDevice {
         path,
         temporary,
-        encoding: None,
+        encoding: compression,
         text_encoding,
         invalid_input: false,
         raw: raw || description == "stdin",
@@ -4209,12 +4239,12 @@ fn flush_writes(plain: &mut PlainFile) -> std::io::Result<()> {
 }
 
 /// Writes bytes, or printed text when `printing`, which is the only way into a text output
-/// connection, as in GNU R. Standard output goes where `sink` diverts it, as GNU R's does.
+/// connection, as in GNU R. Standard output is the console itself, past any `sink`, as in GNU R.
 unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usize> {
     match device(con)? {
         Device::Standard(Standard::Input) => Err(error("cannot write to this connection")),
         Device::Standard(Standard::Output) => {
-            crate::write_console(bytes, false);
+            crate::write_terminal(bytes, false);
             Ok(bytes.len())
         }
         Device::Standard(Standard::Error) => {

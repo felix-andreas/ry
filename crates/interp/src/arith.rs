@@ -3039,6 +3039,14 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     for arg in call.args {
         if arg.tag != nil() && values::symbol_name(arg.tag) == "finite" {
             finite = values::as_logical_scalar(arg.value) == 1;
+        } else if arg.value.kind() == SexpType::List && arg.tag != symbols().na_rm {
+            // GNU R's `range.default` flattens its arguments with `c(..., recursive = TRUE)`,
+            // so a list of numbers has a range where `min` and `max` refuse it.
+            let unlist = values::call(values::install("unlist")?, &[arg.value])?;
+            args.push(Arg {
+                tag: arg.tag,
+                value: crate::eval::eval(unlist, values::base_namespace())?,
+            });
         } else {
             args.push(*arg);
         }
@@ -3722,6 +3730,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .unwrap_or(1)
         .max(0) as usize;
     let object = values::materialize(object)?;
+    if !replicable(object) && object.kind() != SexpType::Pairlist {
+        return Err(call.error(&format!(
+            "attempt to replicate an object of type '{}'",
+            object.kind().name()
+        )));
+    }
     let count = length(object);
     // An empty `x` returns before `times` is checked, as in GNU R, so `rep(NULL, c(1, 1))` is
     // NULL; only `length.out` can lengthen a non-NULL empty vector, with NAs.
@@ -3807,6 +3821,12 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
         return Ok(value);
     }
     let object = values::materialize(call.arg(0))?;
+    if !replicable(object) {
+        return Err(call.error(&format!(
+            "attempt to replicate an object of type '{}'",
+            object.kind().name()
+        )));
+    }
     let times = coerce_vector(call.arg(1), SexpType::Real)?;
     let count = length(object);
     let mut indices = Vec::new();
@@ -3835,6 +3855,9 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
         return Ok(value);
     }
     let object = values::materialize(call.arg(0))?;
+    if !replicable(object) {
+        return Err(call.error("attempt to replicate non-vector"));
+    }
     let out = values::as_integer_scalar(call.arg(1));
     if out == NA_INTEGER || out < 0 {
         return Err(call.error("invalid 'length.out' value"));
@@ -3850,6 +3873,14 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
         })
         .collect();
     keep_factor(object, crate::subset::select_elements(object, &indices)?)
+}
+
+/// Whether `rep` can repeat `object`: GNU R's vectors and `NULL`, so a function or an S4
+/// object is refused rather than given a vector allocation of its type.
+unsafe fn replicable(object: Sexp) -> bool {
+    object == nil()
+        || object.kind().is_atomic()
+        || matches!(object.kind(), SexpType::List | SexpType::Expression)
 }
 
 // Two-argument math.

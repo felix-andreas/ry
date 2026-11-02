@@ -246,7 +246,9 @@ impl Parser<'_> {
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
-        error.incomplete = self.peek_significant(self.pos, true).is_none();
+        let found = self.peek_significant(self.pos, true);
+        error.incomplete = found.is_none();
+        error.found = found.map(|(_, pos)| self.token_range(pos));
         self.errors.push(error);
     }
 

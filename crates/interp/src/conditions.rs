@@ -112,6 +112,46 @@ pub unsafe fn signal_error(failure: RError) -> Unwind {
     default_error(call, &message)
 }
 
+/// Signals a user interrupt as GNU R's `onintr` does: the condition of class
+/// `c("interrupt", "condition")` goes through the handler stack first, so a calling handler
+/// runs and an exiting one (`tryCatch(interrupt = )`) catches it. Only an unhandled interrupt
+/// unwinds to top level. The result is the unwind to propagate.
+pub unsafe fn signal_interrupt() -> Unwind {
+    let condition = match values::named_list(&[]).and_then(|condition| {
+        values::set_attr(
+            condition,
+            symbols().class,
+            values::string_vector(&["interrupt", "condition"])?,
+        )?;
+        Ok(condition)
+    }) {
+        Ok(condition) => condition,
+        Err(unwind) => return unwind,
+    };
+    let saved = interp().handlers.clone();
+    let classes: [&[u8]; 2] = [b"interrupt", b"condition"];
+    while let Some(entry) = find_handler(&interp().handlers, &classes) {
+        interp().handlers = entry.next.clone();
+        if entry.calling {
+            let handled = values::call(entry.handler, &[condition])
+                .and_then(|handler_call| eval::eval(handler_call, global_env()));
+            if let Err(unwind) = handled {
+                return unwind;
+            }
+        } else {
+            return match exiting_result(condition, nil(), entry.handler) {
+                Ok(result) => jump(Jump::Return {
+                    env: entry.target,
+                    value: result,
+                }),
+                Err(unwind) => unwind,
+            };
+        }
+    }
+    interp().handlers = saved;
+    Unwind::Interrupt
+}
+
 unsafe fn call_simple_error_handler(handler: Sexp, message: &str, call: Sexp) -> R<()> {
     let hook = values::install(".handleSimpleError")?;
     let quoted_call = base_quote(call)?;
