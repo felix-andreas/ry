@@ -798,7 +798,7 @@ guarded <- function(expr, ..., finally) {
 run <- function() guarded(1 + 1)
 #++++
 reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
-total: <T, U> fn(values: list[T] | T[]) -> U
+total: <T> fn(values: list[T] | T[]) -> Unknown
 guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> T
 run: fn() -> double
 
