@@ -1578,7 +1578,7 @@ impl Heap {
 
     #[inline]
     unsafe fn mark(&mut self, object: Sexp) {
-        if self.space.mark(object) {
+        if self.space.mark(object) && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
         }
     }
@@ -2052,14 +2052,35 @@ impl WellKnown {
     }
 }
 
+/// Whether tracing `object` would mark nothing: a CHARSXP or an atomic vector (logical, integer,
+/// double, complex or raw) that has no attributes and is not ALTREP.
+/// Such an object is marked without a trip through the mark stack, which a string vector with a
+/// million distinct elements would otherwise grow by a million entries, and the stack keeps its
+/// capacity for the rest of the session.
+#[inline]
+unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
+    matches!(
+        object.kind(),
+        SexpType::Char
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw
+    ) && !object.is_altrep()
+        && object.attrib() == nil
+}
+
 impl Default for GcPolicy {
     fn default() -> Self {
         GcPolicy {
             // A larger nursery collects less often but touches more fresh memory before its
             // first collection, and first touches are what a short-lived process pays for most.
             young_limit: 8 * 1024 * 1024,
-            // GNU R's initial vector heap trigger, `R_VSIZE`.
-            young_large_limit: 64 * 1024 * 1024,
+            // Counts only large vectors allocated since the last collection, unlike GNU R's
+            // 64 MB `R_VSIZE`, which also counts live data. A 64 MB budget let dead temporaries
+            // of vectorized kernels pile up to about 50 MB above GNU R's peak at a million rows.
+            young_large_limit: 16 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: match gc_stress_requested() {

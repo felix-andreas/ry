@@ -1829,6 +1829,28 @@ an empty script took over 300 s in a debug build. It now takes about 7 s, with t
 `opt-level = 2` in the dev profile. Under stress, every eighth collection is major while the heap
 is small, and past that one per sixteenth of the live objects, which keeps the total linear.
 
+**Peak memory comes from what the heap keeps alive, not from the allocator.** At 1e6 rows the base
+kernels' peak RSS was 1.1 to 1.6 times GNU R's (`format` was the 1.6), and three causes accounted for it:
+- **Leaves skip the mark stack.** `Heap::mark` sets a leaf's mark bit without pushing it, where a
+  leaf is a CHARSXP or atomic vector with no attributes that is not ALTREP. Otherwise a
+  million-element character vector pushes every CHARSXP, which grows the mark stack to 8 MB, and
+  the stack keeps its capacity. Every non-leaf object's attrib slot is still traced, which the
+  interpreter's compiled promises depend on.
+- **The young budget for large vectors is 16 MB, not 64 MB.** It counts only large vectors
+  allocated since the last collection, so 64 MB let dead temporaries pile up about 50 MB above
+  GNU R's peak, whose 64 MB `R_VSIZE` also counts live data. The setup of
+  `tools/bench/base/kernels.R` went from 166 MB to 148 MB (GNU R 134 MB) with no slower kernel.
+- **Builtins write into the result vector.** `sample.int` and the random deviates built Rust
+  vectors and copied them, holding about 10 MB of scratch at the peak.
+- **Rejected:** mapping large vector bodies with `mmap` and unmapping them once a collection leaves
+  them unused did not lower any peak (rowSums rose from 168 to 173 MB), and
+  `MIMALLOC_PURGE_DELAY=0` lowered the setup peak by only 4 MB. The same peaks with glibc
+  `malloc` in libR confirm that the allocator's retention is not the gap.
+- **Not heap:** ry starts about 13 MB above GNU R, and smaps puts all of it in clean, file-backed
+  code pages (about 18 MB of `libR.so` and 9 MB of the `ry` binary faulted in, against 3 MB of
+  GNU R's `libR.so`); anonymous memory is at parity. RELR relocations would cut `.rela.dyn` but
+  need glibc 2.36.
+
 **Removing a binding is O(1) amortized** (`crates/heap/src/env.rs`). The slot stays in place with a
 sentinel symbol, the hash index drops its key, and the frame compacts once half its slots are
 removed. Removing by shifting kept insertion order but rewrote every later index entry, so `rm()`
@@ -3591,10 +3613,10 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** All of it lives in `crates/heap/src/heap.rs`:
   - `Heap::young_parent` caches the last store target the barrier found unmarked. Marks change only inside a collection, which clears the cache, so a repeated store into the same young vector costs one compare.
   - `Heap::copy_elements` copies a range between vectors with one barrier decision for the whole range, and `Rf_duplicate` uses it.
-  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 64 MB, GNU R's initial `R_VSIZE`, or half the old generation if that is larger.
+  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 16 MB, or half the old generation if that is larger ("Peak memory comes from what the heap keeps alive" says why not GNU R's 64 MB).
   - The major-collection limit falls back towards twice the survivors by an eighth per collection instead of at once, as GNU R shrinks its trigger.
 - **Kernels.** `duplicated`/`unique` without incomparables hash a plain key per type, and for an all-ASCII character vector they hash the CHARSXP pointer, because interning makes equal ASCII text one object (`crates/interp/src/sort.rs`). `strsplit` with `fixed = TRUE` builds its `memchr::memmem` finder once per pattern and collects byte ranges instead of `String`s (`crates/interp/src/strings.rs`). `char_str` validates ASCII-flagged strings strictly, which runs a word at a time, but only as a hint: native code can set any gp bit through `SETLEVELS`, so the flag never licenses `from_utf8_unchecked`.
-- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. The cost is memory: up to 64 MB of dead large vectors, the same slack GNU R allows, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
+- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. These timings were taken with a 64 MB large-vector budget; at 16 MB `fread` at 1e6 rows measured the same, and 1e7 rows is not re-measured. The cost is memory: up to the budget in dead large vectors, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
 
 ## What keeps a dropped object alive: registers, handles, caches and dying finalizers
 
