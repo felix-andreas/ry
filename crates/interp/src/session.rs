@@ -374,8 +374,7 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
                 write_console(b"Execution halted\n", true);
                 return Outcome::Failed;
             }
-            let message =
-                crate::lower::syntax_failure_message(rest, &failure, source_name, line_offset);
+            let message = crate::lower::script_syntax_failure_message(&script, &failure);
             write_console(
                 format!("Error: {message}\nExecution halted\n").as_bytes(),
                 true,
@@ -416,36 +415,41 @@ pub unsafe fn run_console(
         }
         let text = std::mem::take(&mut buffer);
         let mark = crate::heap().handle_mark();
-        match crate::lower::parse_script(&text, "<text>", "<input>") {
-            Ok(script) => {
-                for node in &script.expressions {
-                    let succeeded =
-                        match crate::lower::lower_script_expression(&script, node, keep_source()) {
-                            Ok(expression) => run_toplevel(expression),
-                            Err(unwind) => {
-                                report_toplevel(unwind);
-                                false
-                            }
-                        };
-                    if !succeeded {
-                        if halt_on_error && crate::envir::get_option("error") == nil() {
-                            crate::heap().release_handles(mark);
-                            write_console(b"Execution halted\n", true);
-                            return Outcome::Failed;
-                        }
-                        break;
-                    }
+        let (script, failure) = crate::lower::parse_script_prefix(&text);
+        let mut succeeded = true;
+        for node in &script.expressions {
+            succeeded = match crate::lower::lower_script_expression(&script, node, keep_source()) {
+                Ok(expression) => run_toplevel(expression),
+                Err(unwind) => {
+                    report_toplevel(unwind);
+                    false
                 }
+            };
+            if !succeeded {
+                break;
             }
-            Err(Unwind::Error(failure)) => {
-                write_console(format!("Error: {}\n", failure.message).as_bytes(), true);
-                if halt_on_error {
-                    crate::heap().release_handles(mark);
-                    write_console(b"Execution halted\n", true);
-                    return Outcome::Failed;
-                }
+        }
+        if succeeded && let Some(failure) = failure {
+            if failure.condition.is_some() {
+                report_toplevel(crate::lower::syntax_failure_unwind(
+                    &text, &failure, "<text>", "<input>", 0,
+                ));
+            } else {
+                let message = crate::lower::script_syntax_failure_message(&script, &failure);
+                write_console(format!("Error: {message}\n").as_bytes(), true);
             }
-            Err(_) => {}
+            // GNU R's non-interactive console halts on a syntax error even with an error
+            // handler, which only runs for evaluation errors.
+            if halt_on_error {
+                crate::heap().release_handles(mark);
+                write_console(b"Execution halted\n", true);
+                return Outcome::Failed;
+            }
+        }
+        if !succeeded && halt_on_error && crate::envir::get_option("error") == nil() {
+            crate::heap().release_handles(mark);
+            write_console(b"Execution halted\n", true);
+            return Outcome::Failed;
         }
         crate::heap().release_handles(mark);
     }

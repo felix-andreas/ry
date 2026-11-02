@@ -46,11 +46,18 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
-  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
-  or `src/` does not trigger a rerun.
+- **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
+  the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
+- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
+  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
+  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
+  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
+  with a block cache and linear topic ordering").
+- **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
+  `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
+  after `ry load`, `ry test` and `ry document`.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
-  3 ms and preparing 4 to 5 ms. One `stat` per file (about 2 ms) finds the edit, and the diff still
+  3 ms and preparing 4 to 5 ms. A file notification finds the edit (without one, a `stat` per file takes about 2 ms), and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for
   building the salsa inputs once. A strict reload spends about 100 ms of its 0.1 s re-verifying
   diagnostics, plus a fingerprint of about 16 ms taken twice (before and after the check).
@@ -2216,9 +2223,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - sessioninfo crashes in `external_info()`: GNU R's own `tcltk.so` is built with R's internals
-    and reads `SEXPREC` fields directly, so it segfaults on ry's layout. ry's R home needs a tcltk
-    built against ry, or a `tclVersion()` that errors cleanly when Tcl is unavailable.
+  - `R` without `--no-echo` does not echo its input. GNU R prints each line it reads after the
+    `> ` or `+ ` prompt (and a last `> ` at the end of input), so `R --silent -e 'expr'` output
+    starts with `> expr`; sys's "Jobs can be nested" reads the second line of that output.
+  - tcltk is unavailable: `dyn.load` refuses GNU R's own `tcltk.so` (`decisions.md`, "Package-test
+    compatibility details"), so code that needs Tcl/Tk gets an error. A tcltk built against ry
+    would bring it back.
+  - Parse errors name the token GNU R's parser stops on, but ry's parser recovers differently in
+    a few places: `x <- function( {` reports the end of the input, where GNU R reports the `{`, and
+    `a ;; b` parses where GNU R rejects the second `;`.
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
@@ -2251,10 +2264,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - `iconv(sub = , "ASCII//TRANSLIT")`.
   - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
     `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
-    0.036 between `besselI` results), data.table's `S4.Rraw` test 2, an F value in nlme's
-    `anova`, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's
-    error message for `hashfile(NA)`, openssl's bignum "not valid integer", jose's `grepRaw`,
-    Rdpack's bibliography, and a long-path error in rprojroot.
+    0.036 between `besselI` results), an F value in nlme's `anova`, gmp's `factorialZ` and
+    `asNumeric` precision, the C symbols of commonmark, and openssl's bignum "not valid integer".
   - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
@@ -2263,12 +2274,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     "logical subscript too long" from `.subscript.2ary`: a method sees a `j`, so the one-index
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
-  - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
-    the timeout, though a lone `callr::r_session` works.
   - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
     `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
     `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
     algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+  - data.table: `S4`, `autoprint`, `knitr`, `other` and `types` pass. `main.Rraw` reports about
+    700 failing tests (among them `-xtfrm(col)` on a character column, `scan()` reading
+    `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
+    of i is -10" warning), froll misses the warnings of 6000.114 and 6000.115, nafill fails
+    3.07, and `programming.Rraw` stops on "invalid type/length (symbol/0) in vector allocation".
   - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
     subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
     group, order, runs, split, expand and slice-chop files also fail; run them with

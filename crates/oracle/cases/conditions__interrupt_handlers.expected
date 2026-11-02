@@ -1,0 +1,9 @@
+[stdout]
+| [1] "interrupt" "condition"
+| [1] "calling" "exiting"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("calling", "exiting")
