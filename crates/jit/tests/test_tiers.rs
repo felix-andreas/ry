@@ -506,9 +506,9 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 None,
             ),
             (
-                "fv <- function(v: double[], k: integer) -> double sum(v) * k",
+                "fv <- function(v: double[], k: integer) -> double v[2L] * k",
                 "fv(c(1, 2.5), 2L)",
-                "7",
+                "5",
                 Some(true),
             ),
             (
