@@ -41,7 +41,7 @@ use {
     crate::{
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch,
-        eval::{self, as_condition},
+        eval::{self, SwitchSelector, as_condition},
         interp,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
@@ -949,8 +949,9 @@ unsafe fn switch_default(tag: Sexp) -> bool {
 const SWITCH_NAMES: usize = 0;
 /// Where it keeps, for each name, the arm that name runs (0 for none).
 const SWITCH_NAME_ARMS: usize = 1;
-/// Where it keeps the default's arm (first) and then, for each position, the arm a numeric
-/// selector runs (-1 for an empty alternative, which is an error).
+/// Where it keeps the default's arm (first; 0 for none, -1 for an empty default, which is an
+/// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
+/// alternative, which is an error).
 const SWITCH_POSITION_ARMS: usize = 2;
 /// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
 const SWITCH_NUMBERS: usize = 3;
@@ -967,6 +968,9 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
     for (tag, value) in alternatives {
         if *value == missing {
             position_arms.push(-1);
+            if switch_default(*tag) {
+                position_arms[0] = -1;
+            }
         } else {
             arms.push(*value);
             position_arms.push(arms.len() as i32);
@@ -1009,30 +1013,20 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
 unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
     let numbers = table.element(SWITCH_NUMBERS);
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
-    if length(selector) != 1 {
-        return Err(error_in(
-            table.element(SWITCH_CALL),
-            "EXPR must be a length 1 vector",
-        ));
-    }
-    let arm = if selector.kind() == SexpType::String {
-        let text = selector.element(0);
-        let names = table.element(SWITCH_NAMES);
-        let matched = if text == values::na_string() {
-            None
-        } else {
-            (0..length(names)).find(|&index| {
+    let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
+        SwitchSelector::Name(text) => {
+            let names = table.element(SWITCH_NAMES);
+            let matched = (0..length(names)).find(|&index| {
                 let name = names.element(index);
                 name == text || name.bytes() == text.bytes()
-            })
-        };
-        match matched {
-            Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
-            None => position_arms[0],
+            });
+            match matched {
+                Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
+                None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
+                None => position_arms[0],
+            }
         }
-    } else {
-        let index = values::as_integer_scalar(selector);
-        match position_arms.get(index.max(0) as usize) {
+        SwitchSelector::Position(index) => match position_arms.get(index.max(0) as usize) {
             Some(&arm) if index >= 1 => {
                 if arm < 0 {
                     return Err(error("empty alternative in numeric switch"));
@@ -1040,7 +1034,7 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
                 arm
             }
             _ => 0,
-        }
+        },
     };
     Ok(numbers.element(arm as usize))
 }

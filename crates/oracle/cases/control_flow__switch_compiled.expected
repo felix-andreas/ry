@@ -43,8 +43,90 @@
 | [1] 10
 | [1] 0
 | [1] "duplicate 'switch' defaults: '2' and '3'"
+| [1] "duplicate 'switch' defaults: '2' and '3'"
+| $value
+| [1] 5
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| [1] 6
+| 
+| $visible
+| [1] TRUE
+| 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] "x"
+| [1] "empty alternative in numeric switch"
+| [1] "z"
+| [1] "q"
+| [1] "na-arm"
+| [1] "na-arm"
+| [1] "ap"
+| [1] "a?"
+| [1] "b"
+| [1] "A" "B" "?"
+| [1] 1
+| [1] 4
+| [1] "one"
+| [1] "one"
+| [1] "one"
+| [1] "duplicate 'switch' defaults: '\"one\"' and '\"two\"'"
+| [1] "duplicate 'switch' defaults: '\"one\"' and '\"two\"'"
+| [1] "duplicate 'switch' defaults: '\"one\"' and '\"two\"'"
+| [1] "W: 'switch' with no alternatives"
+| [1] "W: 'switch' with no alternatives"
+| [1] "W: 'switch' with no alternatives"
+| W: EXPR is a "factor", treated as integer.
+|  Consider using 'switch(as.character( * ), ...)' instead. | call: switch(x, "one", "two") 
+| [1] "two"
+| W: EXPR is a "factor", treated as integer.
+|  Consider using 'switch(as.character( * ), ...)' instead. | call: switch(x, "one", "two") 
+| [1] "two"
+| W: EXPR is a "factor", treated as integer.
+|  Consider using 'switch(as.character( * ), ...)' instead. | call: switch(x, "one", "two") 
+| [1] "two"
+| [1] "E: EXPR must be a length 1 vector | call: switch(x, \"one\", \"two\")"
+| [1] "E: EXPR must be a length 1 vector | call: switch(x, \"one\", \"two\")"
+| [1] "E: EXPR must be a length 1 vector | call: switch(x, \"one\", \"two\")"
+| [1] "E: EXPR must be a length 1 vector | call: switch(x, \"one\", \"two\")"
+| [1] "E: EXPR must be a length 1 vector | call: switch(x, \"one\", \"two\")"
+| [1] "E: EXPR must be a length 1 vector | call: switch(x, \"one\", \"two\")"
+| W: NAs introduced by coercion to integer range | call: big(1e+10) 
+| NULL
+| W: NAs introduced by coercion to integer range | call: big(1e+10) 
+| NULL
+| W: NAs introduced by coercion to integer range | call: big(1e+10) 
+| NULL
+| [1] "E: argument is missing, with no default | call: ed(\"z\")"
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
 [messages]
 [warnings]
+- EXPR is a "factor", treated as integer.\n Consider using 'switch(as.character( * ), ...)' instead. (in switch(x, "p", "q"))
 [errors]
-- duplicate 'switch' defaults: '2' and '3' (in dd("a"))
 [value]
+NULL
+| NULL

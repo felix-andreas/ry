@@ -8,7 +8,9 @@ use {
         Frame,
         annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
-        bytecode, conditions, deparse, dispatch, interp, moves, scope,
+        bytecode,
+        coerce::{CoercionWarnings, real_to_int},
+        conditions, deparse, dispatch, interp, moves, scope,
         unwind::{Jump, R, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
@@ -2131,65 +2133,111 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let alternatives = &alternatives[..];
-    if length(selector) != 1 {
-        return Err(call.error("EXPR must be a length 1 vector"));
-    }
+    let selector = switch_selector(selector, call.call)?;
     if alternatives.is_empty() {
         crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
     }
-    if selector.kind() == SexpType::String {
-        let text = values::string_at(selector, 0);
-        let missing = missing_arg();
-        // GNU R rejects a second default before it looks for a match, naming the calling
-        // function rather than the `switch`.
-        let defaults: Vec<&Arg> = alternatives
-            .iter()
-            .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
-            .collect();
-        if defaults.len() > 1 {
-            return Err(error(
-                "duplicate 'switch' defaults: '".to_string()
-                    + &deparse::deparse_one_line(defaults[0].value)
-                    + "' and '"
-                    + &deparse::deparse_one_line(defaults[1].value)
-                    + "'",
-            ));
+    let missing = missing_arg();
+    let text = match selector {
+        SwitchSelector::Name(text) => text,
+        SwitchSelector::Position(index) => {
+            if index >= 1 && (index as usize) <= alternatives.len() {
+                let arg = alternatives[index as usize - 1];
+                if arg.value == missing {
+                    return Err(error("empty alternative in numeric switch"));
+                }
+                return eval(arg.value, call.env);
+            }
+            interp().visible = false;
+            return Ok(nil());
         }
-        if let Some(text) = text {
-            for (position, arg) in alternatives.iter().enumerate() {
-                if arg.tag.kind() == SexpType::Symbol && symbol_name(arg.tag) == text.as_ref() {
-                    // Fall through empty alternatives to the next non-empty one, and to an
-                    // invisible NULL when every later one is empty.
-                    for later in &alternatives[position..] {
-                        if later.value != missing {
-                            return eval(later.value, call.env);
-                        }
-                    }
-                    interp().visible = false;
-                    return Ok(nil());
+    };
+    // GNU R rejects a second default before it looks for a match, naming the calling function
+    // rather than the `switch`.
+    let defaults: Vec<&Arg> = alternatives
+        .iter()
+        .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
+        .collect();
+    if defaults.len() > 1 {
+        return Err(error(
+            "duplicate 'switch' defaults: '".to_string()
+                + &deparse::deparse_one_line(defaults[0].value)
+                + "' and '"
+                + &deparse::deparse_one_line(defaults[1].value)
+                + "'",
+        ));
+    }
+    for (position, arg) in alternatives.iter().enumerate() {
+        if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
+            // Fall through empty alternatives to the next non-empty one, and to an invisible
+            // NULL when every later one is empty.
+            for later in &alternatives[position..] {
+                if later.value != missing {
+                    return eval(later.value, call.env);
                 }
             }
+            interp().visible = false;
+            return Ok(nil());
         }
-        if let Some(default) = defaults.first() {
-            if default.value == missing {
-                interp().visible = false;
-                return Ok(nil());
-            }
-            return eval(default.value, call.env);
-        }
-        interp().visible = false;
-        return Ok(nil());
     }
-    let index = values::as_integer_scalar(selector);
-    if index >= 1 && (index as usize) <= alternatives.len() {
-        let arg = alternatives[index as usize - 1];
-        if arg.value == missing_arg() {
-            return Err(error("empty alternative in numeric switch"));
+    match defaults.first() {
+        Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
+        Some(default) => eval(default.value, call.env),
+        None => {
+            interp().visible = false;
+            Ok(nil())
         }
-        return eval(arg.value, call.env);
     }
-    interp().visible = false;
-    Ok(nil())
+}
+
+/// What a `switch` selector chooses by.
+pub(crate) enum SwitchSelector {
+    /// The string's `CHARSXP`. `NA` selects an alternative named `NA`, since GNU R compares
+    /// the translated text.
+    Name(Sexp),
+    /// The 1-based position of a numeric selector, or a value outside the alternatives.
+    Position(i32),
+}
+
+/// The error GNU R's AST `switch` raises when no name matches and the default is empty, from
+/// evaluating the empty argument. Its byte compiler returns an invisible `NULL` instead; code
+/// that relies on that already fails on a closure's first, uncompiled call.
+pub(crate) const SWITCH_EMPTY_DEFAULT: &str = "argument is missing, with no default";
+
+/// Checks a `switch` selector and reads it, with GNU R's warnings for a factor and for a
+/// number that does not fit an integer. Errors and the factor warning name `call`, the
+/// `switch`; the coercion warnings name the calling function, as in GNU R.
+pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSelector> {
+    if !selector.kind().is_vector() || length(selector) != 1 {
+        return Err(error_in(call, "EXPR must be a length 1 vector"));
+    }
+    if selector.kind() == SexpType::String {
+        return Ok(SwitchSelector::Name(selector.element(0)));
+    }
+    if values::inherits(selector, "factor") {
+        crate::conditions::warning_call(
+            call,
+            "EXPR is a \"factor\", treated as integer.\n Consider using 'switch(as.character( * ), ...)' instead.",
+        )?;
+    }
+    let mut warnings = CoercionWarnings::default();
+    let position = match selector.kind() {
+        SexpType::Real => {
+            let (position, out_of_range) = real_to_int(values::reals(selector)[0]);
+            warnings.integer_range = out_of_range;
+            position
+        }
+        SexpType::Complex => {
+            let value = values::complexes(selector)[0];
+            let (position, out_of_range) = real_to_int(value.r);
+            warnings.integer_range = out_of_range;
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            position
+        }
+        _ => values::as_integer_scalar(selector),
+    };
+    warnings.report()?;
+    Ok(SwitchSelector::Position(position))
 }
 
 unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
