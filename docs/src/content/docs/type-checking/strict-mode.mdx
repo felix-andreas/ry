@@ -74,6 +74,25 @@ ry reports it on `df$amount`, and again on the `sum()` call that receives it.
 
 An unresolved name, normally a warning, becomes an error.
 
+A DataFrame query that names a column of a frame whose columns are unknown is reported, because
+nothing checks those names and types. A chain of verbs is reported once, at its first step:
+
+```r
+#: fn(path: character) -> DataFrame
+load_sales <- function(path) {
+  sales <- DataFrame.read_csv(path)
+  sales |> DataFrame.filter(col("units") > 1L)
+}
+```
+
+```text
+strict
+
+  x strict mode: the columns of `sales` are unknown, so the column names and types this query uses are not checked. Give `sales` a type that lists its columns, as in `sales: DataFrame{units: TYPE}`
+```
+
+Annotating `sales` with its columns, or reading a file the project has with a literal path, fixes it.
+
 ## Package files only define things
 
 In strict mode, the top level of a file in `R/` may only define things: functions, types, imports,

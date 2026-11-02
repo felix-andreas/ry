@@ -5438,6 +5438,29 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** No new state: the checks run inside the existing refinement of a verb call, which is
   per item, so incremental analysis is unchanged.
 
+## Strict mode reports a DataFrame query over unknown columns
+
+- **Previous shape.** A `DataFrame` whose columns are unknown (a computed `read_csv` path, a bare
+  `DataFrame` parameter, a verb argument the checker cannot read) is a known type, not `Unknown`,
+  so strict mode let every `col("x")` on it through unchecked, and "a clean strict run checks
+  every column" did not hold.
+- **Target shape.** `note_unchecked_columns` in `check.rs` records a strict origin
+  (`StrictOriginKind::UnknownColumns`) on the subject of a verb that names a column, through a
+  string argument or a `col("x")` anywhere inside one, when the subject's columns are unknown. A
+  subject that is itself a verb over unknown columns is skipped, so a chain is reported once, at
+  its first step. The message suggests the annotation with the first column the query names.
+- **Why at the query, not at the read.** The unknown schema has many origins (readers,
+  parameters, pivots, unreadable arguments), and a frame nobody queries by column needs no schema.
+  Reporting the first unchecked query is precise and always actionable; an annotation on the
+  binding gives the frame columns, so the origin disappears rather than needing to be cleared.
+- **`read_csv` has its own reader typing.** `read_csv_type` matches `read_csv`'s own formals
+  (`path`, `strings_as_factors`) instead of borrowing `fread_type`, whose argument whitelist made
+  `strings_as_factors = TRUE` fall back to unknown columns. Both share `sniffed_columns`, and the
+  file read goes through the per-path `data_file_layout` query, so a data-file edit re-checks only
+  the reads of that file (`a_data_file_edit_rechecks_only_the_reads_of_that_file`).
+- **Impact.** No new state; the check reads recorded types inside the existing per-item
+  refinement.
+
 ## The data-table lint is opt-in and marks only constructors
 
 - **Shape.** `[lint] data-table` (off by default, `data_table_lint` in `lints.rs`) flags

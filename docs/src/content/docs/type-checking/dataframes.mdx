@@ -35,6 +35,12 @@ is checked as closely as an eager one.
 In the editor, completion inside `col("...")` or any column string of a verb offers the columns of
 the DataFrame at that step, and hovering such a string shows the column's type.
 
+A query can start from a file too. `DataFrame.read_csv("data/sales.csv")` and
+`LazyFrame.scan_csv(...)` with a literal path to a `.csv` file in the project have that file's
+columns, sniffed from its first rows (see [Columns from files](/guides/dataframes/#columns-from-files)).
+A path computed at run time gives a `DataFrame` whose columns are unknown, so annotate the variable
+with its columns instead, as for any other value.
+
 ## Mistakes in a query
 
 A column that does not exist is reported on the string that names it, with the nearest column:

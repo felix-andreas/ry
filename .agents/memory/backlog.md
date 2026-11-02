@@ -2137,6 +2137,10 @@ The end-to-end guard rests on the corpus suites.
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
   and the numeric aggregations.
+- **Checker, file schemas:** only `.csv`/`.tsv` files are sniffed, so `DataFrame.read_parquet` and
+  `LazyFrame.scan_parquet` always have unknown columns (a Parquet footer holds the schema and is
+  cheap to read on the host). An annotation that disagrees with the sniffed file reports the
+  generic `expected ..., found ...` mismatch without naming the file or the differing column.
 - **Building a DataFrame copies every column** into the engine, where `data.table()` keeps R's
   vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
   and `enrol` (`contributing/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric

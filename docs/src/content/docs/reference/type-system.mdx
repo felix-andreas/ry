@@ -3255,7 +3255,7 @@ expression built from `col("x")`:
 | `DataFrame.join(df, other, on, how)` | `df`'s columns, then `other`'s non-key columns, with `suffix` added to a name `df` already has; `"semi"` and `"anti"` keep `df`'s columns only |
 | `DataFrame.join_asof(df, other, on, by)` | as a left join on the `by` columns and then `on` |
 | `DataFrame.lazy(df)`, `LazyFrame.collect(plan)` | the same columns, as a `LazyFrame` or a `DataFrame` |
-| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)) |
+| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)); with `strings_as_factors = TRUE`, text columns are `factor` |
 
 Every `LazyFrame.` verb types like its `DataFrame.` namesake and returns a `LazyFrame`.
 
@@ -3319,7 +3319,10 @@ type-mismatch
 The engine compares an `integer` with a string by formatting the number, as R does, so that
 comparison runs, but it is still an error here: a schema that puts text against a number almost
 always means the wrong column. The rules check only operands of known type, so an expression over
-a frame whose columns are unknown is never an error.
+a frame whose columns are unknown is never an error. In strict mode, a verb that names a column of
+such a frame, with a string or `col("x")`, is an error on the verb's subject. A verb whose subject
+is another verb over unknown columns is not reported again, so a chain is reported once, at its
+first step.
 
 #### data.table queries
 
@@ -3617,7 +3620,8 @@ cheap <- prices[prce < 10]           # warning: the frame `prices` has no column
 `select`, `col.names` and `stringsAsFactors = TRUE` are applied to the sniffed columns. A computed
 path, a file the project does not have, and any other argument that changes the columns (such as
 `colClasses` or `skip`) give a `data.table` with unknown columns. `DataFrame.read_csv` and
-`LazyFrame.scan_csv` sniff their file the same way.
+`LazyFrame.scan_csv` sniff their file the same way and give a `DataFrame` or `LazyFrame`, and
+`read_csv`'s `strings_as_factors` must be a literal `TRUE` or `FALSE` for the columns to be known.
 
 The other functions follow data.table's rules:
 

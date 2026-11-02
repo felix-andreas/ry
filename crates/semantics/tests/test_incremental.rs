@@ -685,6 +685,8 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         "library(data.table)\n",
         "prices <- fread(\"prices.csv\")\n",
         "trades <- fread(\"trades.csv\")\n",
+        "frame <- DataFrame.read_csv(\"prices.csv\")\n",
+        "quotes <- DataFrame.read_csv(\"trades.csv\")\n",
     ]);
     let attached = attached_union(&db, files.iter().copied());
     PackageMetadata::new(
@@ -715,7 +717,7 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         .set_layouts(&mut db)
         .to(layouts("id,price,ticker\n1,2.5,a\n"));
     settle(&db, &files);
-    assert_eq!(db.checked_since(), ["prices"]);
+    assert_eq!(db.checked_since(), ["frame", "prices"]);
     let scheme = global_scheme(&db, definition(&db, "prices"));
     assert_eq!(
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),

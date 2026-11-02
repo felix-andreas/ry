@@ -107,7 +107,9 @@ Key: <g>
   for one.
 - `DataFrame.read_csv(path)` and `DataFrame.read_parquet(path)` read a file.
   `strings_as_factors = TRUE` reads text columns as factors, and a whole-number column becomes
-  `integer` when every value fits, as `fread` does.
+  `integer` when every value fits, as `fread` does. When the path is a literal naming a `.csv`
+  file in the project, the checker reads the file's header and knows its columns
+  ([Columns from files](#columns-from-files)).
 - `DataFrame.write_csv(df, path)` and `DataFrame.write_parquet(df, path)` write one.
 - `DataFrame.schema(df)`, `DataFrame.columns(df)`, `DataFrame.height(df)` and
   `DataFrame.width(df)` describe it:
@@ -120,6 +122,40 @@ DataFrame.schema(sales)
        region         units         price
 "character[]"   "integer[]"    "double[]"
 ```
+
+### Columns from files
+
+`DataFrame.read_csv("data/sales.csv")` types with the columns the file has, sniffed from its first
+rows with the same rules as the reader, so the checker follows a query on a file from its first
+step. The path is relative to the project root, and with `strings_as_factors = TRUE` the text
+columns are factors. With a `data/sales.csv` of `region,units,price` rows, a typo is reported
+before the script runs:
+
+```r
+sales <- DataFrame.read_csv("data/sales.csv")
+by_region <- sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = col("prcie") |> Expr.sum())
+```
+
+```text
+type-mismatch
+
+  x this frame has no column `prcie`. Did you mean `price`?
+   --[report.R:5:27]
+ 4 |   DataFrame.group_by("region") |>
+ 5 |   GroupBy.agg(total = col("prcie") |> Expr.sum())
+   |                           ^^^^^^^
+```
+
+The editor completes `col("...")` and every column string of a verb with the columns at that step,
+and hovering one shows its type. A path computed at run time, or a file the project does not have,
+gives a `DataFrame` whose columns are unknown, so nothing about them is checked. Annotate the
+variable to give it its columns, as in
+`sales: DataFrame{region: character, units: integer, price: double} <- DataFrame.read_csv(path)`.
+In [strict mode](/type-checking/strict-mode/), a query that names a column of a frame whose columns
+are unknown is an error.
 
 ## Expressions
 
