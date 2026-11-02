@@ -860,9 +860,7 @@ fn check_item_in<'db>(
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
     });
-    // Only editor features read the per-expression facts, and resolving every recorded type is a
-    // large share of a check's cost, so a one-shot host skips them.
-    let editor_facts = !db.one_shot();
+    let editor_facts = db.editor_facts();
     let mut expression_types = ExpressionTypes::default();
     let mut pattern_types = PatternTypes::default();
     let mut literal_expectations = SortedMap::default();

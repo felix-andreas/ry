@@ -46,11 +46,17 @@ pub trait Db: salsa::Database {
     /// Whether the host analyses once and never edits, such as `ry check`. Such a host needs no
     /// firewall between an edit and the queries it would invalidate, so the queries that exist
     /// only to narrow dependencies read the project-wide facts directly instead. Every read
-    /// still goes through salsa, so the answers are the same either way. Such a host also serves
-    /// no editor feature, so an item's check leaves out the per-expression facts that only
-    /// editor features read (expression and pattern types, chosen overloads, callee targets).
+    /// still goes through salsa, so the answers are the same either way.
     fn one_shot(&self) -> bool {
         false
+    }
+
+    /// Whether an item's check keeps the per-expression facts that only editor features and
+    /// rewrites read (expression and pattern types, chosen overloads, callee targets). A host
+    /// that only reports diagnostics leaves them out, because resolving every recorded type is a
+    /// large share of a check's cost.
+    fn editor_facts(&self) -> bool {
+        !self.one_shot()
     }
 }
 
@@ -61,17 +67,29 @@ pub struct RootDatabase {
     /// Shared across storage-handle clones so fresh handles keep the warm entries.
     splice_cache: Arc<SpliceCache>,
     one_shot: bool,
+    editor_facts: bool,
 }
 
 impl RootDatabase {
     /// For a single cold pass, such as `ry check`. No file is parsed twice from an edit, so
     /// splice caching would only hold a second copy of every text and of recent trees, and no
     /// query needs a firewall ([`Db::one_shot`]).
+    /// It reports diagnostics only, so it leaves out the editor facts ([`Db::editor_facts`]).
     pub fn one_shot() -> RootDatabase {
         RootDatabase {
             storage: salsa::Storage::default(),
             splice_cache: Arc::new(SpliceCache::disabled()),
             one_shot: true,
+            editor_facts: false,
+        }
+    }
+
+    /// A one-shot database for a command that reads editor facts, such as `ry migrate`, whose
+    /// rewrites read expression types.
+    pub fn one_shot_with_editor_facts() -> RootDatabase {
+        RootDatabase {
+            editor_facts: true,
+            ..RootDatabase::one_shot()
         }
     }
 }
@@ -87,6 +105,10 @@ impl Db for RootDatabase {
 
     fn one_shot(&self) -> bool {
         self.one_shot
+    }
+
+    fn editor_facts(&self) -> bool {
+        self.editor_facts || !self.one_shot
     }
 }
 

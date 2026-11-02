@@ -380,7 +380,7 @@ items that read its name. `crates/semantics/tests/test_incremental.rs` pins thes
 
 `ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
 cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
-`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape and drops the per-expression facts only editor features read.
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
 A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
 answers each name with a hash probe, instead of interning a name and going through `package_name`
 or `test_name`. A frame binder that `item_frame_binders` does not list comes from the file's
@@ -389,7 +389,7 @@ binders, read once per reader, instead of a `frame_binder` memo per item and nam
 instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. The item check of a one-shot host leaves out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, because only editor features read them. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls and the editor facts.
+per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions

@@ -6378,8 +6378,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     firewalls `test_incremental.rs` pins.
   - `file_item_annotations` stores detached subtrees (`syntax::Tree::detach`), so an annotation
     memo never pins its file's tree on any host.
-  - A one-shot item check leaves the editor-only facts (expression and pattern types, literal
-    expectations, loop variables, selected overloads, callee targets) empty. `match_findings`
+  - `Db::editor_facts` (false on `RootDatabase::one_shot`) makes an item check leave the
+    editor-only facts (expression and pattern types, literal expectations, loop variables,
+    selected overloads, callee targets) empty. It is separate from `Db::one_shot` because
+    `ry migrate` is one-shot but its rewrites read expression types
+    (`RootDatabase::one_shot_with_editor_facts`, chosen by `cli::Purpose`). `match_findings`
     reads types straight from the inference table, so exhaustiveness does not need them.
   - `sourced_definition` returns early for a file that sources nothing; the tracked part is
     `sourced_name_definition`.

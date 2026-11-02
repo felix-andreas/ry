@@ -140,7 +140,14 @@ pub fn check(
     let mut n_unsafe_fixable = 0;
     let mut n_annotated = 0;
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+        let mut analysis = analyze_project(
+            &root,
+            &root,
+            config.clone(),
+            &requested,
+            cache,
+            Purpose::Diagnostics,
+        )?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -148,14 +155,28 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+                analysis = analyze_project(
+                    &root,
+                    &root,
+                    config.clone(),
+                    &requested,
+                    cache,
+                    Purpose::Diagnostics,
+                )?;
             }
         }
         if annotate {
             let annotated = write_inferred_annotations(&analysis)?;
             if annotated > 0 {
                 n_annotated += annotated;
-                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+                analysis = analyze_project(
+                    &root,
+                    &root,
+                    config.clone(),
+                    &requested,
+                    cache,
+                    Purpose::Diagnostics,
+                )?;
             }
         }
         n_failures += analysis.failures;
@@ -262,7 +283,14 @@ pub fn migrate_data_table(
     let mut n_rewrites = 0;
     let mut n_files = 0;
     for (root, config, requested) in project_groups(maybe_files)? {
-        let analysis = analyze_project(&root, &root, config, &requested, CacheUse::Off)?;
+        let analysis = analyze_project(
+            &root,
+            &root,
+            config,
+            &requested,
+            CacheUse::Off,
+            Purpose::Rewrites,
+        )?;
         if analysis.failures > 0 {
             return Err(CommandError);
         }
@@ -464,6 +492,14 @@ impl ProjectAnalysis {
     }
 }
 
+/// What a project analysis is for, which decides whether its item checks keep the facts only
+/// editor features and rewrites read ([`semantics::Db::editor_facts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Diagnostics,
+    Rewrites,
+}
+
 /// Analyzes the R files under `walk` as one project rooted at `root`, whose `ry.toml`, stubs,
 /// `DESCRIPTION` and `NAMESPACE` apply, and checks the files under `requested`.
 pub(crate) fn analyze_project(
@@ -472,15 +508,17 @@ pub(crate) fn analyze_project(
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
+    purpose: Purpose,
 ) -> Result<ProjectAnalysis, CommandError> {
     let cache = match check_cache::is_project(root) {
         true => cache,
         false => CacheUse::Off,
     };
-    let (analysis, reused) = analyze_project_with(root, walk, config.clone(), requested, cache)?;
+    let (analysis, reused) =
+        analyze_project_with(root, walk, config.clone(), requested, cache, purpose)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
-        let fresh = analyze_project_with(root, walk, config, requested, CacheUse::Off)?.0;
+        let fresh = analyze_project_with(root, walk, config, requested, CacheUse::Off, purpose)?.0;
         let source_files = |analysis: &ProjectAnalysis| -> Vec<SourceFile> {
             analysis.files.iter().map(|file| file.file).collect()
         };
@@ -527,6 +565,7 @@ fn analyze_project_with(
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
+    purpose: Purpose,
 ) -> Result<(ProjectAnalysis, bool), CommandError> {
     // Hashing the ry binary for the record's key takes as long as reading the sources, so the
     // two overlap.
@@ -543,7 +582,10 @@ fn analyze_project_with(
         }
     }
 
-    let mut db = RootDatabase::one_shot();
+    let mut db = match purpose {
+        Purpose::Diagnostics => RootDatabase::one_shot(),
+        Purpose::Rewrites => RootDatabase::one_shot_with_editor_facts(),
+    };
     let ProjectEnvironment {
         metadata,
         namespace_source,
@@ -2966,6 +3008,7 @@ mod tests {
                 config,
                 std::slice::from_ref(&requested),
                 CacheUse::ReadWrite,
+                Purpose::Diagnostics,
             );
             assert!(
                 analysis.is_ok(),

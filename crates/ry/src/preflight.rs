@@ -6,8 +6,8 @@ use {
     crate::{
         check_cache::CacheUse,
         cli::{
-            CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis, RelatedNote,
-            analyze_project, check_package_code, render_findings, report, warn_config,
+            CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis, Purpose,
+            RelatedNote, analyze_project, check_package_code, render_findings, report, warn_config,
         },
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
@@ -198,6 +198,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
                         config.clone(),
                         std::slice::from_ref(&sources),
                         CacheUse::ReadWrite,
+                        Purpose::Diagnostics,
                     )?;
                     let errors = strict_errors(&analysis);
                     Ok::<_, CommandError>(Checked::Recorded(analysis, errors))
