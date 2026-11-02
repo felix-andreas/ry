@@ -1090,3 +1090,71 @@ fn ry_test_runs_testthat_against_the_loaded_package_on_both_runtimes() {
         assert!(!printed.contains("broken"), "{runtime}: {printed}");
     }
 }
+
+/// A package whose `src/` registers one `.Call` routine, `C_twice` under `.fixes = "C_"`.
+const COMPILED: &[(&str, &str)] = &[
+    ("DESCRIPTION", "Package: cpkg\nVersion: 1.0\n"),
+    (
+        "NAMESPACE",
+        "useDynLib(cpkg, .registration = TRUE, .fixes = \"C_\")\nexport(twice)\n",
+    ),
+    ("R/twice.R", "twice <- function(x) .Call(C_twice, x)\n"),
+    (
+        "src/init.c",
+        "#include <R.h>\n#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+         SEXP twice(SEXP x) { return Rf_ScalarReal(2 * Rf_asReal(x)); }\n\
+         static const R_CallMethodDef calls[] = {{\"twice\", (DL_FUNC) &twice, 1}, {NULL, NULL, 0}};\n\
+         void R_init_cpkg(DllInfo *dll) { R_registerRoutines(dll, NULL, calls, NULL, NULL); \
+         R_useDynamicSymbols(dll, FALSE); }\n",
+    ),
+];
+
+#[test]
+fn compiled_code_builds_with_rys_toolchain_and_a_rebuild_reloads_it() {
+    if !r_available() {
+        return;
+    }
+    // `ry load` compiles with the `ry-rcmd` beside ry's runtime, and cargo test does not build
+    // another package's binary.
+    let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
+        .parent()
+        .expect("the ry binary has a directory");
+    let mut build = Command::new(env!("CARGO"));
+    build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
+    if profile_directory
+        .file_name()
+        .is_some_and(|name| name == "release")
+    {
+        build.arg("--release");
+    }
+    assert!(
+        build.status().expect("run cargo build").success(),
+        "building ry-rcmd failed"
+    );
+
+    let root = package(COMPILED);
+    let cache = tempfile::tempdir().expect("temp dir");
+    let source = root.path().join("src/init.c");
+    let edited =
+        fs::read_to_string(&source)
+            .expect("read")
+            .replacen("2 * Rf_asReal", "3 * Rf_asReal", 1);
+    let reload = format!(
+        "cat('before:', twice(21), '\\n'); writeLines({edited:?}, {source:?}); \
+         load_all({root:?}); cat('after:', twice(21), '\\n')",
+        source = source.display().to_string(),
+        root = root.path().display().to_string(),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("load")
+        .arg(root.path())
+        .arg("-e")
+        .arg(&reload)
+        .env("XDG_CACHE_HOME", cache.path())
+        .output()
+        .expect("run ry load");
+    let printed = text(&output);
+    assert!(output.status.success(), "{printed}");
+    assert!(printed.contains("before: 42"), "{printed}");
+    assert!(printed.contains("after: 63"), "{printed}");
+}

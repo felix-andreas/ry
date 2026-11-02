@@ -42,8 +42,12 @@ This page is the exact behavior.
   the attached `package:<name>` holds a copy of each, which wins over an export of the same name.
   Unlike an installed package, every dataset is read at load time whatever `LazyData` says, as with
   `load_all()`.
-- `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled with
-  [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
+- `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled and loaded,
+  and `.onLoad` and `.onAttach` run. On ry's runtime, `src/` is compiled by ry itself, against
+  ry's own headers and `libR`, with the `ry-rcmd` that sits beside ry's runtime; GNU R and
+  pkgbuild are not involved. The R home this needs is created once per build of ry in ry's cache
+  directory (`~/.cache/ry/home` on Linux). On GNU R, `src/` is compiled with
+  [pkgbuild](https://pkgbuild.r-lib.org), as `load_all()` does.
 - **`system.file()`** finds a source package's files the way `load_all()` maps them: a path under
   `inst/` is found as if the package were installed, so `system.file("extdata", "a.txt", package =
   "mypkg")` returns `inst/extdata/a.txt`, and other paths are looked up in the package root. Code
@@ -72,7 +76,10 @@ This page is the exact behavior.
   Every later load checks too: `load_all()`, a reload, and the load a console makes at start, on
   either runtime. When the check refuses one of them, the load raises
   `<package> was not loaded, because strict mode refused it` before anything runs, so the session
-  keeps the code it had. A load that changes nothing skips the check. A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
+  keeps the code it had. A load that changes nothing skips the check. A reload's check keeps
+  the analysis of the previous load and redoes only what the edit affects, so after a one-file
+  edit to the 326,000-line bench package it takes about 0.1 s rather than the 2 s of a first
+  check. A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
   so loading it again without changing its files, configuration, stubs, data files or the ry
   binary skips the check.
 
@@ -187,9 +194,10 @@ importer keeps its old imports with a warning until you reload it.
   could define the function. Then the refusal comes after they ran, and the namespace holds the
   new code.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
-  still points into it must not be used afterwards.
-- Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
-  GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
-  ry's own `libR.so` already provides.
+  still points into it must not be used afterwards. On ry's runtime the old library stays mapped, and
+  the rebuilt one loads from a fresh copy of the file, because the system loader would otherwise
+  hand back the mapping it already has.
+- A registered routine whose R name (after `.fixes`) is already defined in the namespace is not
+  bound, and the load warns, as GNU R's `loadNamespace` does.
 - A top-level statement that reads a name before the statement defining it runs sees, on a reload,
   the value from the previous load. A fresh load would fail on such code anyway.

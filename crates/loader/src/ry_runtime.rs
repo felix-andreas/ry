@@ -11,7 +11,7 @@
 
 use {
     crate::{
-        Code, Loader, Source, find_package_root,
+        Code, Loader, Source, cache_directory, find_package_root,
         r::{RUNTIME_RY, RValue, error_value, plan_value},
         s4_cache_path,
     },
@@ -53,6 +53,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
     internal("ryLoaderChanged", 0, do_changed),
     internal("ryLoaderCallers", 2, do_callers),
+    internal("ryLoaderCompile", 2, do_compile).invisible(),
 ];
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
@@ -476,6 +477,50 @@ unsafe fn do_callers(call: &Call<'_>) -> R<Sexp> {
     let root = find_package_root(Path::new(&root)).map_err(|failure| error(failure.to_string()))?;
     let callers = session().loader.callers(&root, &changed);
     values::string_vector(&callers)
+}
+
+/// `.Internal(ryLoaderCompile(root, libraries))`: builds the compiled code of the package at
+/// `root` with ry's own toolchain, against ry's R home, so the shared object links ry's `libR`
+/// and its `Makevars` runs ry's `bin/R`. `libraries` are the session's library paths, searched
+/// for the headers of the packages in `LinkingTo`.
+unsafe fn do_compile(call: &Call<'_>) -> R<Sexp> {
+    let root = values::require_string(call.arg(0), "root")?;
+    let libraries: Vec<PathBuf> = values::strings(call.arg(1))
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .collect();
+    let home = ry_home().map_err(error)?;
+    rcmd::compile(&home, Path::new(&root), &libraries)
+        .map_err(|failure| error(format!("compiling src/ failed\n{failure}")))?;
+    Ok(nil())
+}
+
+/// ry's R home for this runtime, assembled in the user's cache on first use (`rcmd::cached_home`)
+/// from this `libR`, the `ry-rcmd` front end beside it, and the base R the session runs.
+fn ry_home() -> Result<PathBuf, String> {
+    let libr = interp::platform::library_path(do_compile as *const c_void)
+        .map(PathBuf::from)
+        .ok_or("cannot tell which file ry's runtime was loaded from")?;
+    let rcmd = libr.with_file_name(if cfg!(windows) {
+        "ry-rcmd.exe"
+    } else {
+        "ry-rcmd"
+    });
+    if !rcmd.is_file() {
+        return Err(format!(
+            "compiling src/ needs ry's R front end {}, which is missing",
+            rcmd.display()
+        ));
+    }
+    let cache = cache_directory()
+        .ok_or(
+            "compiling src/ needs a cache directory, and neither XDG_CACHE_HOME nor HOME is set",
+        )?
+        .join("ry")
+        .join("home");
+    let gnu_r_home = PathBuf::from(interp::system::r_home());
+    rcmd::cached_home(&cache, &libr, &rcmd, &gnu_r_home).map_err(|failure| failure.to_string())
 }
 
 /// `.Internal(ryLoaderDeferred(root))`: `list(position, path, line)` of the statements held

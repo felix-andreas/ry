@@ -86,3 +86,15 @@
 # GNU R's methods package looks classes and generics up in C that offers no hook to run held
 # back definitions from, so they always run at load.
 .ry_may_defer_s4 <- function(state, deferred) FALSE
+
+# GNU R builds compiled code with its own toolchain, through pkgbuild as `devtools::load_all`
+# does.
+.ry_compile <- function(root) {
+  if (!requireNamespace("pkgbuild", quietly = TRUE)) {
+    stop("compiling src/ needs the pkgbuild package, which is not installed", call. = FALSE)
+  }
+  pkgbuild::compile_dll(root, quiet = TRUE)
+}
+
+# `dyn.unload` closed the library a reload rebuilt, so it loads again from where it was built.
+.ry_loadable <- function(path, reload) path

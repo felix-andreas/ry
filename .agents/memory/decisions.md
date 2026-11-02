@@ -5486,3 +5486,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
 - **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
 - **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger` and data-science `readings` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
+
+## A strict reload re-checks through a persistent salsa database
+
+- **Previous shape.** Every strict check of a changed package ran `analyze_project` from scratch over all of `R/`, about 2 s on the 326,000-line bench package, and `package_index` re-joined every file's names on each reload (about 28 ms) before a 10 ms diff.
+- **Shape.** `preflight::PACKAGE_CHECKS` keeps one `cli::PackageCheck` (a salsa database plus its file inputs) per canonical package root for the life of the process, and `check_package_code` updates only the inputs whose text changed, so salsa re-derives what the edit affects. The database lives in the ry binary, not the loader, because the loader runs inside libR on ry's runtime and cannot link the analysis.
+- **Loader side.** `namespace_spec` is a tracked query in `load_index.rs`, the spec is shared as `Arc<NamespaceSpec>`, and the reload fingerprint is taken from the read stamps the plan already holds, so a one-file reload plans in about 3 ms and prepares in 4 to 5 ms.
+- **Impact.** A one-file strict reload takes about 0.1 s. The remaining costs are listed in `backlog.md`, "Open: the package loader".
+
+## Compiled code under `ry load` builds with ry's own R home
+
+- **Previous shape.** `src/` was compiled by pkgbuild through `callr`, so `R CMD SHLIB` ran GNU R's `bin/R` and linked GNU R's `libR`; the result loaded only because ry's `libR.so` shares the soname, and a package without pkgbuild installed could not load at all.
+- **Shape.** On ry's runtime, `.ry_compile` calls `.Internal(ryLoaderCompile(root, .libPaths()))`, which runs `rcmd::compile` in process against an R home from `rcmd::cached_home`. That home lives under the user cache (`ry/home/<hash>`), keyed by ry's version, libR's and `ry-rcmd`'s stamps and GNU R's home, and is built from headers embedded in `rcmd` at build time (`crates/ry/build.rs`, `embed_headers`), so an installed ry needs no source tree. libR is hard-linked into the home (copied only across file systems), and a new home prunes older homes made from the same libR. `ry-rcmd` must sit beside libR, which is why the release archives and the Nix package ship it there.
+- **Unload.** `dyn.unload` is real on ry's runtime (`libr::dynload::unload_library`): it calls `R_unload_<pkg>` and moves the library to `unloaded_dlls`, which keeps it mapped, because R objects may still hold pointers into it. Since `dlopen` returns the existing mapping for a path already open, a reload copies the rebuilt library into a fresh temp directory under its own file name (which names `R_init_<pkg>`) before loading it.
+- **Symbols.** A registered routine whose R name is already bound in the namespace is skipped with GNU R's `loadNamespace` warning, and on reload only the symbols the previous load bound (and that are still `identical`) are removed, so a user function with a routine's name survives.
+- **GNU R runtime** keeps pkgbuild, matching `load_all()`.

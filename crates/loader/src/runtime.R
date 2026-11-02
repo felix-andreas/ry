@@ -821,33 +821,52 @@ View <- function(x, title) {
 }
 
 .ry_load_compiled <- function(state, libraries) {
+  reload <- length(state$dlls) > 0L
   for (dll in state$dlls) {
     try(dyn.unload(dll[["path"]]), silent = TRUE)
   }
   state$dlls <- list()
+  ns <- state$ns
+  # The symbols the last load bound go with the libraries they point into. A name the package's
+  # R code has bound since is the code's, and a check of it forces at most that one definition.
+  for (name in names(state$native_symbols)) {
+    if (exists(name, envir = ns, inherits = FALSE) &&
+        identical(get(name, envir = ns, inherits = FALSE), state$native_symbols[[name]])) {
+      rm(list = name, envir = ns)
+    }
+  }
+  state$native_symbols <- list()
   if (!length(libraries)) {
     return(invisible())
   }
-  if (!requireNamespace("pkgbuild", quietly = TRUE)) {
-    stop("compiling src/ needs the pkgbuild package, which is not installed", call. = FALSE)
+  .ry_compile(state$root)
+  # As in `loadNamespace`, a symbol never replaces a name the namespace already defines.
+  bind <- function(name, symbol) {
+    if (exists(name, envir = ns, inherits = FALSE)) {
+      warning(sprintf(
+        "failed to assign RegisteredNativeSymbol for %s to %s since %s is already defined in the %s namespace",
+        symbol$name, name, name, sQuote(state$name)
+      ), call. = FALSE)
+    } else {
+      assign(name, symbol, envir = ns)
+      state$native_symbols[[name]] <- symbol
+    }
   }
-  pkgbuild::compile_dll(state$root, quiet = TRUE)
-  ns <- state$ns
   for (library in libraries) {
     path <- file.path(state$root, "src", paste0(library$library, .Platform$dynlib.ext))
-    dll <- dyn.load(path)
+    dll <- dyn.load(.ry_loadable(path, reload))
     state$dlls[[library$library]] <- dll
     if (isTRUE(library$registration)) {
       routines <- getDLLRegisteredRoutines(dll)
       for (kind in routines) {
         for (routine in names(kind)) {
-          assign(paste0(library$fixes, routine), kind[[routine]], envir = ns)
+          bind(paste0(library$fixes, routine), kind[[routine]])
         }
       }
     }
     for (i in seq_along(library$symbol_names)) {
-      assign(paste0(library$fixes, library$symbol_names[[i]]),
-             getNativeSymbolInfo(library$symbols[[i]], dll), envir = ns)
+      bind(paste0(library$fixes, library$symbol_names[[i]]),
+           getNativeSymbolInfo(library$symbols[[i]], dll))
     }
   }
   setNamespaceInfo(ns, "DLLs", state$dlls)

@@ -1991,7 +1991,7 @@ pub fn s4_cache_path(root: &Path) -> Option<PathBuf> {
     Some(cache_directory()?.join("ry").join("s4").join(name))
 }
 
-fn cache_directory() -> Option<PathBuf> {
+pub(crate) fn cache_directory() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .filter(|directory| !directory.is_empty())
         .map(PathBuf::from)
