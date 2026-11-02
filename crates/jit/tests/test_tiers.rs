@@ -9,10 +9,14 @@
 
 use {
     heap::{Heap, object::Sexp},
-    interp::{deparse, eval, lower, unwind::Unwind, values},
+    interp::{
+        deparse, eval, lower,
+        unwind::{Jump, Unwind},
+        values,
+    },
     jit::Mode,
     std::sync::Once,
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 static INSTALL: Once = Once::new();
@@ -56,17 +60,17 @@ const VECTORS: &[&str] = &[
     "1:6",
     "c(TRUE, NA, FALSE)",
     "c(0.5, NA, 2)",
-    "numeric(0)",
+    // The test interpreter has no `numeric`, and this is the same empty double vector.
+    "0[0L]",
     "c(-2L, 5L, NA)",
 ];
 
 #[test]
 fn fuzz_jit_agrees_with_tier_zero() {
     with_interpreter(|| {
-        let mut rng = SplitMix64(0x7135_0f75);
-        let iterations = fuzz_iterations(200);
-        let mut errors = 0;
-        for case in 0..iterations {
+        let (mut runs, mut errors) = (0, 0);
+        for_each_seed(300, |seed| {
+            let mut rng = SplitMix64(seed);
             let body = program(&mut rng);
             let call = format!(
                 "(a = {}, b = {}, v = {})",
@@ -75,22 +79,24 @@ fn fuzz_jit_agrees_with_tier_zero() {
                 VECTORS[rng.below(VECTORS.len())]
             );
             // SAFETY: the interpreter is installed.
-            let (reference, compiled) = unsafe { outcomes(case, &body, &call) };
-            errors += usize::from(reference == "error");
+            let (reference, compiled) = unsafe { outcomes(seed as usize, &body, &call) };
+            runs += 1;
+            errors += usize::from(reference.starts_with("error"));
             for (run, outcome) in compiled.iter().enumerate() {
                 assert_eq!(
                     &reference,
                     outcome,
-                    "case {case}, call {}: f{call} with body\n{body}",
+                    "seed {seed}, call {}: f{call} with body\n{body}",
                     run + 1
                 );
             }
-        }
-        // Programs that fail early compare nothing, so most must run to a value.
-        eprintln!("{errors} of {iterations} programs failed");
+        });
+        // Programs that fail early compare nothing, so most must run to a value. A replay of one
+        // seed says nothing about the share.
+        eprintln!("{errors} of {runs} programs failed");
         assert!(
-            errors * 2 < iterations,
-            "{errors} of {iterations} programs failed"
+            runs < 50 || errors * 2 < runs,
+            "{errors} of {runs} programs failed"
         );
     });
 }
@@ -347,6 +353,12 @@ fn seeds_agree_across_tiers() {
             "(n = 40L)",
             false,
         ),
+        // A modulus too large to be accurate warns, which compiled code leaves to tier 0.
+        (
+            "s <- 0\nfor (i in 1:n) { x <- if (i == 20L) 1e308 else i + 0.5; s <- s + x %% 7 }\ns",
+            "(n = 40L)",
+            false,
+        ),
         // A promise forced by a load whose type guard then fails keeps the visibility it set.
         (
             "wv <- function(x) .Internal(withVisible(x))\nseen <- 0L\nfor (i in 1:n) if (wv(if (i < 400L) i else y <- 2.5)$visible) seen <- seen + 1L\nseen",
@@ -358,7 +370,11 @@ fn seeds_agree_across_tiers() {
         for (case, (body, call, fails)) in seeds.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled) = unsafe { outcomes(1_000_000 + case, body, call) };
-            assert_eq!(reference == "error", *fails, "seed {case} gave {reference}");
+            assert_eq!(
+                reference.starts_with("error"),
+                *fails,
+                "seed {case} gave {reference}"
+            );
             for (run, outcome) in compiled.iter().enumerate() {
                 assert_eq!(
                     &reference,
@@ -480,6 +496,12 @@ fn native_functions_agree_across_tiers() {
             false,
         ),
         (
+            "md <- function(x) if (x > 0) x %% 7 else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + md(if (i == 400L) 1e300 else i + 0.5)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
             "m <- function(x, y) if (x > y) x %/% y + x %% y + 0.5 else floor(y / 3) + abs(x) - !x",
             "s <- 0\nfor (i in 1:n) s <- s + m(i, 7L) + m(-i, 1000L)\ns",
             "(n = 600L)",
@@ -493,7 +515,11 @@ fn native_functions_agree_across_tiers() {
                 run(definitions);
                 outcomes(2_000_000 + case, body, call)
             };
-            assert_eq!(reference == "error", *fails, "case {case} gave {reference}");
+            assert_eq!(
+                reference.starts_with("error"),
+                *fails,
+                "case {case} gave {reference}"
+            );
             for (run, outcome) in compiled.iter().enumerate() {
                 assert_eq!(
                     &reference,
@@ -601,18 +627,18 @@ fn fully_typed_closure_compiles_at_its_first_call() {
             run(definition);
             let outcome = run(call);
             let name = format!("f{}", ["t", "i", "v", "e", "u"][index]);
-            let function = lower::parse_text(&name, "<test>")
-                .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
-            let compiled = function.is_ok_and(|function| {
-                function.cdr().kind() == heap::object::SexpType::Bytecode
-                    && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
-            });
+            let compiled = has_compiled_code(&name);
             outcomes.push((outcome, compiled));
         }
         jit::install_mode(Mode::Off);
         for ((definition, call, expected, eager), (outcome, compiled)) in cases.iter().zip(outcomes)
         {
-            assert_eq!(outcome, *expected, "{definition}; {call}");
+            let agrees = if *expected == "error" {
+                outcome.starts_with("error: ")
+            } else {
+                outcome == *expected
+            };
+            assert!(agrees, "{definition}; {call} gave {outcome}");
             // A call the seeds mispredict deoptimizes and discards the code, so only the others
             // say whether the first call compiled.
             if let Some(eager) = eager {
@@ -620,6 +646,244 @@ fn fully_typed_closure_compiles_at_its_first_call() {
             }
         }
     });
+}
+
+/// A type a random typed closure may declare for a formal: its annotation, expressions over the
+/// formal (written `@`) that give a number, arguments that pass its check, and arguments that
+/// fail it.
+struct Formal {
+    annotation: &'static str,
+    uses: &'static [&'static str],
+    passing: &'static [&'static str],
+    failing: &'static [&'static str],
+}
+
+const FORMALS: &[Formal] = &[
+    Formal {
+        annotation: "double",
+        uses: &["@", "@ * 2", "@ + 1L", "-@"],
+        // An integer and a logical pass a `double` check; a length-two double passes the
+        // storage check, though the compiled code expects a scalar.
+        passing: &["2.5", "-1", "3L", "TRUE", "NA_real_", "c(1, 2)", "1e308"],
+        failing: &["\"a\"", "list(1)", "NULL"],
+    },
+    Formal {
+        annotation: "integer",
+        uses: &["@", "@ * 2L", "@ %/% 2L", "@ + 0.5"],
+        // A whole-number double passes an `integer` check.
+        passing: &[
+            "3L",
+            "NA_integer_",
+            "TRUE",
+            "4",
+            "-7L",
+            "c(1L, 2L)",
+            "2147483647L",
+        ],
+        failing: &["2.5", "\"a\"", "NA_real_"],
+    },
+    Formal {
+        annotation: "logical",
+        uses: &["(if (@) 1L else 2.5)", "@ + 1L", "!@"],
+        passing: &["TRUE", "FALSE", "NA", "c(TRUE, FALSE)"],
+        failing: &["1L", "0.5", "\"TRUE\""],
+    },
+    Formal {
+        annotation: "character",
+        uses: &["(@ == \"a\")", "(if (@ == \"b\") 1 else 0L)"],
+        passing: &["\"a\"", "\"b\"", "NA_character_"],
+        failing: &["1", "TRUE"],
+    },
+    Formal {
+        annotation: "double[]",
+        uses: &["@[1L]", "@[[2L]]", "length(@)", "@[2] * 2"],
+        passing: &["c(1, 2.5, 3)", "numeric(0)", "1:3", "c(NA, 1)", "5"],
+        failing: &["c(\"a\", \"b\")", "list(1, 2)"],
+    },
+    Formal {
+        annotation: "integer[]",
+        uses: &["@[1L]", "@[[2L]] + 1L", "length(@)"],
+        passing: &["1:4", "c(NA, 2L)", "c(1, 2)", "integer(0)"],
+        failing: &["c(1.5, 2)", "\"a\""],
+    },
+    Formal {
+        annotation: "list[double]",
+        uses: &["@[[1L]]", "@[[2]] * 2", "length(@)"],
+        passing: &[
+            "list(1, 2.5)",
+            "list(1L, 2)",
+            "list(\"a\", 1)",
+            "list(c(1, 2), 3)",
+        ],
+        failing: &["c(1, 2)", "(1, 2)"],
+    },
+    Formal {
+        annotation: "Record{a: double, b: integer}",
+        uses: &["@$a", "@$b * 2L", "@$a + @$b"],
+        passing: &[
+            "(a = 1.5, b = 2L)",
+            "(b = 2L, a = 1.5)",
+            "(a = 1L, b = 2L)",
+            "(a = c(1, 2), b = NA_integer_)",
+        ],
+        failing: &["list(a = 1, b = 2L)", "1"],
+    },
+    Formal {
+        annotation: "Tuple{double, integer}",
+        uses: &["@[[1L]]", "@[[2L]] + 1L", "@[[1]] * @[[2]]"],
+        passing: &["(1.5, 2L)", "(1L, 2L)", "(NA_real_, 3L)", "(\"s\", 1L)"],
+        failing: &["list(1, 2L)", "c(1, 2)"],
+    },
+];
+
+/// A return annotation and how the body's number becomes a value of that type (written `@`),
+/// which the number's own type may still violate.
+const RETURNS: &[(&str, &str)] = &[
+    ("double", "@"),
+    ("integer", "@"),
+    ("logical", "@ > 0"),
+    ("double[]", "c(@, 1)"),
+    ("list[double]", "list(@)"),
+    ("Record{v: double}", "(v = @,)"),
+    ("Tuple{double, double}", "(@, 2)"),
+    ("", "@"),
+];
+
+/// Random fully typed closures, which compile at their first call, called with arguments that
+/// pass and fail their checks, too many and too few, and returning values that may fail the
+/// return check, against the same calls with the JIT off. The calls repeat, so compiled code
+/// that deoptimizes after its first call is exercised too.
+#[test]
+fn fuzz_typed_closures_agree_with_tier_zero() {
+    with_interpreter(|| {
+        let (mut runs, mut eager) = (0, 0);
+        for_each_seed(400, |seed| {
+            let mut rng = SplitMix64(seed);
+            let names = ["x", "y", "z"];
+            let formals: Vec<&Formal> = (0..rng.below(3) + 1)
+                .map(|_| &FORMALS[rng.below(FORMALS.len())])
+                .collect();
+            let uses = |rng: &mut SplitMix64| {
+                let index = rng.below(formals.len());
+                let template = formals[index].uses[rng.below(formals[index].uses.len())];
+                format!("({})", template.replace('@', names[index]))
+            };
+            let mut number = uses(&mut rng);
+            for _ in 0..rng.below(3) {
+                let operator = ["+", "-", "*", "/"][rng.below(4)];
+                number = format!("{number} {operator} {}", uses(&mut rng));
+            }
+            let number = match rng.below(4) {
+                0 => format!(
+                    "{{ acc <- 0L; for (i in 1:{}) acc <- acc + {number}; acc }}",
+                    rng.below(4) + 1
+                ),
+                1 => format!(
+                    "if ({} > 0) {number} else {}",
+                    uses(&mut rng),
+                    uses(&mut rng)
+                ),
+                _ => number,
+            };
+            let (returned, wrap) = RETURNS[rng.below(RETURNS.len())];
+            let body = wrap.replace('@', &format!("({number})"));
+            let signature = formals
+                .iter()
+                .zip(names)
+                .map(|(formal, name)| format!("{name}: {}", formal.annotation))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let arrow = if returned.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {returned}")
+            };
+            let definition = format!("function({signature}){arrow} {{ {body} }}");
+            let calls: Vec<String> = (0..6)
+                .map(|_| {
+                    let mut arguments: Vec<String> = formals
+                        .iter()
+                        .map(|formal| {
+                            let values = if rng.chance(1, 4) {
+                                formal.failing
+                            } else {
+                                formal.passing
+                            };
+                            values[rng.below(values.len())].to_owned()
+                        })
+                        .collect();
+                    match rng.below(10) {
+                        0 => {
+                            arguments.pop();
+                        }
+                        1 => arguments.push("1".to_owned()),
+                        2 => {
+                            // By name, in reverse order.
+                            arguments = arguments
+                                .into_iter()
+                                .zip(names)
+                                .map(|(argument, name)| format!("{name} = {argument}"))
+                                .rev()
+                                .collect();
+                        }
+                        _ => {}
+                    }
+                    format!("({})", arguments.join(", "))
+                })
+                .collect();
+            let mode = if rng.chance(1, 4) {
+                Mode::Force
+            } else {
+                Mode::On
+            };
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled, compiled_at_first_call) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let first = run(&format!("{name}{}", calls[0]));
+                    let compiled = has_compiled_code(name);
+                    let mut outcomes = vec![first];
+                    outcomes.extend(calls[1..].iter().map(|call| run(&format!("{name}{call}"))));
+                    jit::install_mode(Mode::Off);
+                    (outcomes, compiled)
+                };
+                let (reference, _) = run_all(&format!("typed_reference_{seed}"), Mode::Off);
+                let (compiled, eager) = run_all(&format!("typed_compiled_{seed}"), mode);
+                (reference, compiled, eager)
+            };
+            runs += 1;
+            eager += usize::from(compiled_at_first_call);
+            for (index, (expected, outcome)) in reference.iter().zip(&compiled).enumerate() {
+                assert_eq!(
+                    expected,
+                    outcome,
+                    "seed {seed}, call {}: f{} with\nf <- {definition}",
+                    index + 1,
+                    calls[index]
+                );
+            }
+        });
+        // The harness is about first-call compilation, so it must reach it.
+        eprintln!("{eager} of {runs} closures compiled at their first call");
+        assert!(
+            runs < 50 || eager * 5 > runs,
+            "only {eager} of {runs} closures compiled at their first call"
+        );
+    });
+}
+
+/// Whether the global closure `name` holds compiled code right now.
+unsafe fn has_compiled_code(name: &str) -> bool {
+    unsafe {
+        let function = lower::parse_text(name, "<test>")
+            .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+        function.is_ok_and(|function| {
+            function.kind() == heap::object::SexpType::Closure
+                && function.cdr().kind() == heap::object::SexpType::Bytecode
+                && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
+        })
+    }
 }
 
 /// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
@@ -665,29 +929,64 @@ unsafe fn run(text: &str) -> String {
             }
             Ok(value)
         })();
-        let rendered = match outcome {
+        // A message names no call, because the tiers run closures of different names.
+        let mut rendered = match outcome {
             Ok(value) => {
                 deparse::deparse_lines(value, 60, deparse::options::KEEP_INTEGER).join("\n")
             }
-            Err(_) => "error".to_owned(),
+            Err(Unwind::Error(error)) => format!("error: {}", error.message),
+            // An error no handler caught ran the default handler, which recorded the message
+            // after a head that names the call.
+            Err(Unwind::Jump(jump)) if matches!(*jump, Jump::TopLevel) => {
+                let text = &interp::interp().error_message;
+                // The head breaks the line when the call is long, so the break moves with the
+                // closure's name and is normalized away.
+                let message = match text.strip_prefix("Error: ") {
+                    Some(message) => message,
+                    None => text
+                        .split_once(" :")
+                        .map_or(text.as_str(), |(_, message)| message),
+                };
+                let message: Vec<&str> = message.split_whitespace().collect();
+                format!("error: {}", message.join(" "))
+            }
+            Err(_) => "error: a jump to the top level".to_owned(),
         };
+        for (_, message) in std::mem::take(&mut interp::interp().warnings) {
+            rendered.push_str(&format!("\nwarning: {message}"));
+        }
         interp::interp().frames.clear();
         interp::heap().release_handles(mark);
         rendered
     }
 }
 
-/// A random body over the formals `a`, `b`, `v`, `n`, `k` and `d`: a setup, one or two loops or
-/// branches, and a final expression.
+/// A random body over the formals `a`, `b`, `v`, `n`, `k` and `d`: a setup that also builds a
+/// record `r`, a tuple `u`, a list `l` and a tag `g`, one or two loops or branches, and a final
+/// expression.
 fn program(rng: &mut SplitMix64) -> String {
     let mut statements = vec![
         "total <- 0L".to_owned(),
         "i <- 1L".to_owned(),
         "s <- 1L".to_owned(),
+        // The generated setup may read any of these before it assigns it.
+        "r <- (x = 1, y = 2L)".to_owned(),
+        "u <- (1L, 2)".to_owned(),
+        "l <- list(1, 2L, 3)".to_owned(),
+        "g <- :None".to_owned(),
         format!("s <- {}", expression(rng, 2)),
+        format!("r <- {}", record(rng)),
+        format!("u <- {}", tuple(rng)),
+        format!(
+            "l <- list({}, {}, {})",
+            expression(rng, 1),
+            expression(rng, 1),
+            expression(rng, 1)
+        ),
+        format!("g <- {}", tag(rng)),
     ];
     for _ in 0..rng.below(2) + 1 {
-        statements.push(match rng.below(7) {
+        statements.push(match rng.below(10) {
             0 => format!(
                 "for (i in 1:{}) {{ s <- s + {}; if ({}) next; if ({}) break }}",
                 rng.below(6) + 1,
@@ -711,6 +1010,47 @@ fn program(rng: &mut SplitMix64) -> String {
                 ["i", "1L", "2147483000L"][rng.below(3)],
                 ["k", "s", "d"][rng.below(3)]
             ),
+            // Values rebuilt every iteration, sometimes in another layout or as a plain list,
+            // and read back through `$`, `[[` and `match`.
+            6 | 7 => {
+                let mut body = Vec::new();
+                for _ in 0..rng.below(3) + 1 {
+                    body.push(match rng.below(5) {
+                        0 => format!("r <- {}", record(rng)),
+                        1 => format!("u <- {}", tuple(rng)),
+                        2 => format!(
+                            "g <- if (i %% {}L == 0L) :Some({}) else {}",
+                            rng.below(3) + 1,
+                            expression(rng, 1),
+                            tag(rng)
+                        ),
+                        3 => format!(
+                            "l[[{}L]] <- {}",
+                            rng.below(3) + 1,
+                            if rng.chance(1, 6) {
+                                "c(1, 2)".to_owned()
+                            } else {
+                                expression(rng, 1)
+                            }
+                        ),
+                        _ => format!("s <- s + {}", structured(rng, 1)),
+                    });
+                }
+                body.push(format!("s <- s + {}", structured(rng, 1)));
+                format!(
+                    "for (i in 1:{}) {{ {} }}",
+                    rng.below(6) + 1,
+                    body.join("; ")
+                )
+            }
+            // A loop-carried variable that alternates between integer and double.
+            8 => format!(
+                "m <- {}\nfor (i in 1:{}) m <- if (i %% 2L == 0L) m + {} else m * {}\ns <- s + m",
+                ["0L", "1", "a", "b"][rng.below(4)],
+                rng.below(8) + 1,
+                ["1L", "i", "a", "0.5"][rng.below(4)],
+                ["1.5", "2L", "b", "i"][rng.below(4)]
+            ),
             _ => format!(
                 "s <- if ({}) {} else {}",
                 condition(rng),
@@ -726,7 +1066,8 @@ fn program(rng: &mut SplitMix64) -> String {
             "list(s, v, total)",
             "c(s, total)",
             "c(.Internal(typeof(s)), .Internal(typeof(total)))",
-        ][rng.below(5)]
+            "list(s, r, u, l, g)",
+        ][rng.below(6)]
         .to_owned(),
     );
     statements.join("\n")
@@ -736,7 +1077,7 @@ fn expression(rng: &mut SplitMix64, depth: usize) -> String {
     if depth == 0 || rng.below(3) == 0 {
         return leaf(rng);
     }
-    match rng.below(6) {
+    match rng.below(8) {
         0 => format!("-({})", expression(rng, depth - 1)),
         1 => format!(
             "(if ({}) {} else {})",
@@ -745,6 +1086,7 @@ fn expression(rng: &mut SplitMix64, depth: usize) -> String {
             expression(rng, depth - 1)
         ),
         2 => format!("v[{}]", ["1L", "2", "i", "length(v)"][rng.below(4)]),
+        3 => structured(rng, depth - 1),
         _ => {
             let operators = ["+", "-", "*", "/", "^", "%/%", "%%", "==", "<", ">=", "!="];
             format!(
@@ -754,6 +1096,108 @@ fn expression(rng: &mut SplitMix64, depth: usize) -> String {
                 expression(rng, depth - 1)
             )
         }
+    }
+}
+
+/// A read of `r`, `u`, `l` or `g`: a field, an item, or a `match` over them or over a number.
+fn structured(rng: &mut SplitMix64, depth: usize) -> String {
+    match rng.below(9) {
+        0 => format!("r${}", ["x", "y"][rng.below(2)]),
+        1 => format!("u[[{}]]", ["1L", "2L", "2"][rng.below(3)]),
+        2 => format!("l[[{}]]", ["1L", "3L", "(i %% 3L) + 1L", "2"][rng.below(4)]),
+        3 | 4 => {
+            let mut arms = vec![
+                format!("  :Some(z) if (z > {}) => z", leaf(rng)),
+                "  :Some(z) => -z".to_owned(),
+                "  :Pt(x = px, y = py) => px * py".to_owned(),
+                "  :None => 0.5".to_owned(),
+                "  :Pt(..) => 2L".to_owned(),
+            ];
+            shuffle(rng, &mut arms);
+            arms.truncate(rng.below(arms.len()) + 1);
+            if rng.below(4) != 0 {
+                arms.push("  _ => 1L".to_owned());
+            }
+            format!("(match (g) {{\n{}\n}})", arms.join(",\n"))
+        }
+        5 => {
+            let mut arms = vec![
+                "  (z, 1L) => z".to_owned(),
+                format!("  (z, w) if (w < {}) => w", leaf(rng)),
+                "  (z, w) => z + w".to_owned(),
+                "  (x = z, y = w) => z - w".to_owned(),
+            ];
+            shuffle(rng, &mut arms);
+            arms.push("  _ => 3".to_owned());
+            format!(
+                "(match ({}) {{\n{}\n}})",
+                ["u", "r"][rng.below(2)],
+                arms.join(",\n")
+            )
+        }
+        6 => {
+            let mut arms = vec![
+                "  1 => 10".to_owned(),
+                "  2L => 20L".to_owned(),
+                "  TRUE => 30".to_owned(),
+                "  0 | 3 => 0.25".to_owned(),
+                format!("  z if (z > {}) => z", leaf(rng)),
+            ];
+            shuffle(rng, &mut arms);
+            arms.push("  _ => 0.5".to_owned());
+            format!(
+                "(match ({}) {{\n{}\n}})",
+                expression(rng, depth),
+                arms.join(",\n")
+            )
+        }
+        7 => format!(
+            "(match ({}) {{ (x = z, y = w) => z * w, _ => 0 }})",
+            record(rng)
+        ),
+        _ => format!(
+            "(match ({}) {{ :Pt(x = z, y = w) => z + w, :Some(z) => z, _ => -1L }})",
+            tag(rng)
+        ),
+    }
+}
+
+/// A record with fields `x` and `y`, in either order, or sometimes a list with those names.
+fn record(rng: &mut SplitMix64) -> String {
+    let (x, y) = (expression(rng, 1), expression(rng, 1));
+    match rng.below(6) {
+        0 => format!("(y = {y}, x = {x})"),
+        1 => format!("list(x = {x}, y = {y})"),
+        2 => format!("(x = {x}, y = {y}, z = v)"),
+        _ => format!("(x = {x}, y = {y})"),
+    }
+}
+
+/// A pair, sometimes as a plain list.
+fn tuple(rng: &mut SplitMix64) -> String {
+    let (first, second) = (expression(rng, 1), expression(rng, 1));
+    if rng.chance(1, 6) {
+        format!("list({first}, {second})")
+    } else {
+        format!("({first}, {second})")
+    }
+}
+
+fn tag(rng: &mut SplitMix64) -> String {
+    match rng.below(3) {
+        0 => format!(":Some({})", expression(rng, 1)),
+        1 => ":None".to_owned(),
+        _ => format!(
+            ":Pt(x = {}, y = {})",
+            expression(rng, 1),
+            expression(rng, 1)
+        ),
+    }
+}
+
+fn shuffle<T>(rng: &mut SplitMix64, items: &mut [T]) {
+    for index in (1..items.len()).rev() {
+        items.swap(index, rng.below(index + 1));
     }
 }
 
