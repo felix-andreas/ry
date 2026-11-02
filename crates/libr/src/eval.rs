@@ -89,7 +89,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
                 crate::altrep::compact_realseq(length, first, increment)?
             }))
         },
-        altrep_dataptr: |object| unsafe { Ok(crate::altrep::readable_dataptr(object)?) },
+        altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {

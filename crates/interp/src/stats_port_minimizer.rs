@@ -19,6 +19,17 @@
 //! the same reason. Index arithmetic inside a routine stays 1-based where the reference's
 //! packed-triangle offsets are easier to check that way.
 
+// Line-by-line fidelity to the reference outranks these lints: a negated comparison keeps
+// PORT's handling of NaN, and the other forms keep each statement checkable against its
+// Fortran.
+#![allow(
+    clippy::assign_op_pattern,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::neg_multiply,
+    clippy::needless_range_loop,
+    clippy::needless_late_init
+)]
+
 use crate::{format::c_general, write_console};
 
 /// What a minimizer evaluates besides the objective.
