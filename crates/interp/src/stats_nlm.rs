@@ -466,7 +466,10 @@ pub unsafe fn minimize(
                 }
             } else if settings.analytic_hessian {
                 problem.hessian(&xpls, a)?;
-            } else if kind == GradientKind::Analytic {
+            } else if kind != GradientKind::Forward {
+                // After the switch to central differences GNU R differences the gradient
+                // callback here, as if the gradient were analytic, and so must a C caller that
+                // supplies one.
                 hessian_from_gradient(problem, a, &xpls, &gpls, &sx, rnf)?;
             } else {
                 second_order_hessian(problem, a, &xpls, fpls, &sx, rnf)?;
@@ -1196,9 +1199,26 @@ unsafe fn trust_region_update(
         }
     }
     let predicted = slope + predicted / 2.0;
+    if let Ok(mut debug) = std::fs::OpenOptions::new().append(true).open("/tmp/claude-0/-home-user-ry/05f36392-06b4-560e-9355-f87e5eff3d37/scratchpad/op/tregup.log") {
+        use std::io::Write;
+        let mut upper = 0.0;
+        let mut full = 0.0;
+        for i in 0..n {
+            let mut term = 0.0;
+            for j in i..n {
+                term += a.get(i, j) * sc[j];
+            }
+            upper += term * term;
+            for j in 0..n {
+                let h = if i == j { udiag.get(i).copied().unwrap_or(f64::NAN) } else if i < j { a.get(i, j) } else { a.get(j, i) };
+                full += sc[i] * h * sc[j];
+            }
+        }
+        writeln!(debug, "TREGUP m{method} iretcd={} change={change:e} slope={slope:e} pred={predicted:e} upper={:e} full={:e} newton={newton_taken} dlt={:e} stepmx={stepmx:e}", attempt.iretcd, slope + upper / 2.0, if udiag.is_empty() { f64::NAN } else { slope + full / 2.0 }, *dlt).ok();
+    }
     if attempt.iretcd != 2
         && ((predicted - change).abs() <= change.abs() * 0.1 || change <= slope)
-        && !newton_taken
+        && newton_taken
         && *dlt <= stepmx * 0.99
     {
         attempt.iretcd = 3;
