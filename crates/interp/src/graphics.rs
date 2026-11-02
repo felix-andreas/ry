@@ -115,9 +115,9 @@ pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     ("C_box", do_box),
     ("C_clip", do_clip),
     ("C_contour", do_contour),
-    ("C_dend", do_draw),
+    ("C_dend", do_dend),
     ("C_erase", do_erase),
-    ("C_filledcontour", do_draw),
+    ("C_filledcontour", do_filled_contour),
     ("C_image", do_image),
     ("C_mtext", do_mtext),
     ("C_path", do_path),
@@ -174,7 +174,11 @@ struct Pars {
     ann: bool,
     bg: Colour,
     bty: char,
+    /// `par("cex")`, GNU R's `cexbase`: the scale every text and symbol size starts from.
     cex: f64,
+    /// An inline `cex` argument, GNU R's current `cex`. Most routines size text from `cex`
+    /// and their own argument instead, so this scales only the dendrogram's labels.
+    inline_cex: f64,
     cex_axis: f64,
     cex_lab: f64,
     cex_main: f64,
@@ -339,11 +343,12 @@ const WHITE: Colour = 0xFFFF_FFFF;
 /// The line type codes: four bits per dash length, the first dash in the low bits.
 const LTY_BLANK: u32 = u32::MAX;
 const LTY_SOLID: u32 = 0;
+const LTY_DOTTED: u32 = 0x31;
 const LINE_TYPES: [(&str, u32); 7] = [
     ("blank", LTY_BLANK),
     ("solid", LTY_SOLID),
     ("dashed", 0x44),
-    ("dotted", 0x31),
+    ("dotted", LTY_DOTTED),
     ("dotdash", 0x3431),
     ("longdash", 0x37),
     ("twodash", 0x2262),
@@ -357,6 +362,7 @@ impl Pars {
             bg,
             bty: 'o',
             cex: 1.0,
+            inline_cex: 1.0,
             cex_axis: 1.0,
             cex_lab: 1.0,
             cex_main: 1.2,
@@ -1437,12 +1443,6 @@ unsafe fn do_use_group(call: &NativeCall<'_>) -> R<Sexp> {
 
 unsafe fn no_events(_: &NativeCall<'_>) -> R<Sexp> {
     Err(error("graphics device does not support graphics events"))
-}
-
-/// The routines that only draw: they need a started plot and return `NULL`.
-unsafe fn do_draw(_: &NativeCall<'_>) -> R<Sexp> {
-    with_plot(|_| Ok(()))?;
-    Ok(nil())
 }
 
 /// The routines that change a device's state without drawing: they need a device.
@@ -2927,9 +2927,6 @@ const HELVETICA_BOLD_KERNING: [(u8, u8, i16); 203] = [
     (122, 101, 10),
 ];
 
-/// The height of a capital letter in Helvetica, in thousandths of the font size.
-const HELVETICA_CAP_HEIGHT: f64 = 718.0;
-
 /// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
 /// are bold).
 pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
@@ -3023,10 +3020,6 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
             } else {
                 1.0
             };
-        let unrounded = f64::from(pars.ps) * cex;
-        // Fonts come in whole point sizes, so the glyphs are measured at the nearest one.
-        let points = unrounded.round().max(1.0);
-        let line_inches = 1.2 * unrounded / 72.0 * pars.lheight;
         let (plot_inches, figure_inches, user_range) = if height {
             (
                 device.plot_size()[1],
@@ -3042,9 +3035,10 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
         };
         let mut sizes = Vec::with_capacity(labels.len());
         for lines in &labels {
-            let inches = if height {
-                let extra = lines.len().saturating_sub(1) as f64 * line_inches;
-                extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
+            let inches = if lines.is_empty() {
+                0.0
+            } else if height {
+                text_height_inches(device, &lines.join("\n"), cex, font)?
             } else {
                 let mut widest: f64 = 0.0;
                 for line in lines {
@@ -3242,36 +3236,104 @@ fn rotation(degrees: f64, about_y: bool) -> Matrix4 {
     matrix
 }
 
-/// `persp(x, y, z, xlim, ylim, zlim, theta, phi, r, d, scale, expand, ...)`: the viewing
-/// transformation `persp` documents, which maps the box of the limits, scaled to a cube about
-/// the origin, through the rotations and the perspective projection. The plot window fits the
-/// projected box at aspect ratio 1.
+/// `C_persp(x, y, z, xlim, ylim, zlim, theta, phi, r, d, scale, expand, col, border, ltheta,
+/// lphi, shade, box, axes, nticks, ticktype, xlab, ylab, zlab, ...)`: draws the surface `z`
+/// over the grid `x` by `y` as GNU R does. The limits' box, scaled to a cube about the origin,
+/// goes through the rotations and the perspective projection; the plot window fits the
+/// projected box at aspect ratio 1. The facets are drawn back to front, so nearer ones cover
+/// farther ones, between the box's hidden edges and its visible ones. Returns the viewing
+/// transformation.
 unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
-    let limits = |index: usize| -> R<[f64; 2]> {
-        let reals = coerce_vector(call.arg(index), SexpType::Real)?;
-        let reals = values::reals(reals);
-        if reals.len() != 2 || reals.iter().any(|limit| !limit.is_finite()) {
-            return Err(error("invalid 'x', 'y' or 'z' limits"));
-        }
-        Ok([reals[0], reals[1]])
+    let reals = |index: usize| -> R<Vec<f64>> {
+        Ok(values::reals(coerce_vector(call.arg(index), SexpType::Real)?).to_vec())
     };
-    let boxes = [limits(3)?, limits(4)?, limits(5)?];
+    let x = reals(0)?;
+    if x.len() < 2 {
+        return Err(error("invalid 'x' argument"));
+    }
+    let y = reals(1)?;
+    if y.len() < 2 {
+        return Err(error("invalid 'y' argument"));
+    }
+    let z = reals(2)?;
+    if values::dims(call.arg(2)).as_deref() != Some(&[x.len(), y.len()][..]) {
+        return Err(error("invalid 'z' argument"));
+    }
+    let mut boxes = [[0.0; 2]; 3];
+    for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+        let limits = reals(3 + axis)?;
+        let [low, high] = limits[..] else {
+            return Err(error(format!("invalid '{name}lim' argument")));
+        };
+        boxes[axis] = [low, high];
+    }
+    let mut centre = [0.0; 3];
+    let mut half = [0.0; 3];
+    for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+        let [low, high] = boxes[axis];
+        if !low.is_finite() || !high.is_finite() || low >= high {
+            return Err(error(format!("invalid '{name}' limits")));
+        }
+        centre[axis] = (low + high) / 2.0;
+        half[axis] = (high - low) / 2.0;
+    }
     let scalar = |index: usize| values::as_real_scalar(call.arg(index));
     let (theta, phi, distance, viewing) = (scalar(6), scalar(7), scalar(8), scalar(9));
-    let scale = values::as_logical_scalar(call.arg(10)) == 1;
+    let scale = values::as_logical_scalar(call.arg(10));
     let expand = scalar(11);
-    if !(viewing > 0.0) || !(distance.is_finite()) || !expand.is_finite() {
-        return Err(error("invalid viewing parameters"));
+    let (col, border) = (call.arg(12), call.arg(13));
+    let (light_theta, light_phi) = (scalar(14), scalar(15));
+    let mut shade = scalar(16);
+    let draw_box = values::as_logical_scalar(call.arg(17)) == 1;
+    let draw_axes = values::as_logical_scalar(call.arg(18)) == 1;
+    let ticks = values::as_integer_scalar(call.arg(19));
+    let tick_type = values::as_integer_scalar(call.arg(20));
+    let mut labels = Vec::with_capacity(3);
+    for (index, name) in ["xlab", "ylab", "zlab"].into_iter().enumerate() {
+        let label = call.arg(21 + index);
+        if label.kind() != SexpType::String || length(label) < 1 {
+            return Err(error(format!(
+                "'{name}' must be a character vector of length 1"
+            )));
+        }
+        labels
+            .push(values::string_at(label, 0).map_or_else(String::new, |label| label.into_owned()));
     }
-    let centre = boxes.map(|limits| (limits[0] + limits[1]) / 2.0);
-    let mut half = boxes.map(|limits| (limits[1] - limits[0]) / 2.0);
-    if !scale {
-        let largest = half.iter().copied().fold(0.0, f64::max);
+    if shade.is_finite() && shade <= 0.0 {
+        shade = 1.0;
+    }
+    let mut lighting = light_theta.is_finite() && light_phi.is_finite() && shade.is_finite();
+    if scale != 1 {
+        let largest = half.iter().copied().fold(f64::MIN, f64::max);
         half = [largest; 3];
     }
-    if half.contains(&0.0) {
-        return Err(error("invalid 'x', 'y' or 'z' limits"));
+    if !theta.is_finite()
+        || !phi.is_finite()
+        || !distance.is_finite()
+        || !viewing.is_finite()
+        || viewing < 0.0
+        || distance < 0.0
+    {
+        return Err(error("invalid viewing parameters"));
     }
+    if !expand.is_finite() || expand < 0.0 {
+        return Err(error("invalid 'expand' value"));
+    }
+    if ticks == i32::MIN || ticks < 0 {
+        return Err(error("invalid 'nticks' value"));
+    }
+    if tick_type == i32::MIN || !(1..=2).contains(&tick_type) {
+        return Err(error("invalid 'ticktype' value"));
+    }
+    let light = if lighting {
+        let steps = [rotation(-light_phi, false), z_rotation(light_theta)];
+        let transform = steps
+            .iter()
+            .fold(identity(), |product, step| multiply(&product, step));
+        transform_point([0.0, -1.0, 0.0, 1.0], &transform)
+    } else {
+        [0.0; 4]
+    };
     let mut perspective = identity();
     perspective[2][3] = -1.0 / viewing;
     let steps = [
@@ -3286,28 +3348,156 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
     let transform = steps
         .iter()
         .fold(identity(), |product, step| multiply(&product, step));
-    let mut projected_x = [f64::INFINITY, f64::NEG_INFINITY];
-    let mut projected_y = [f64::INFINITY, f64::NEG_INFINITY];
-    for corner in 0..8 {
-        let point = [
-            boxes[0][corner & 1],
-            boxes[1][(corner >> 1) & 1],
-            boxes[2][(corner >> 2) & 1],
-            1.0,
-        ];
-        let image: Vec<f64> = (0..4)
-            .map(|column| (0..4).map(|row| point[row] * transform[row][column]).sum())
-            .collect();
-        let (x, y) = (image[0] / image[3], image[1] / image[3]);
-        projected_x = [projected_x[0].min(x), projected_x[1].max(x)];
-        projected_y = [projected_y[0].min(y), projected_y[1].max(y)];
-    }
-    with_device(|device| {
-        if !device.started {
-            return Err(error("plot.new has not been called yet"));
+    let project = |point: [f64; 3]| {
+        let image = transform_point([point[0], point[1], point[2], 1.0], &transform);
+        [image[0] / image[3], image[1] / image[3]]
+    };
+    let window = with_inline_pars(call, 24, |device| {
+        let background = device.pars.bg;
+        let colours = if length(col) == 0 {
+            vec![background]
+        } else {
+            (0..length(col))
+                .map(|index| colour_at(col, index, background, background))
+                .collect::<R<Vec<Colour>>>()?
+        };
+        if colours[0] >> 24 != 0xFF {
+            lighting = false;
         }
-        set_window(device, projected_x, projected_y, 1.0);
-        device.pars.new = false;
+        let edge = colour_at(border, 0, device.pars.fg, background)?;
+        if length(border) > 1 {
+            device.pars.fg = edge;
+        }
+        device.pars.xlog = false;
+        device.pars.ylog = false;
+        // The window is symmetric about the projected origin and holds every corner of the box.
+        let mut extent = [[0.0f64; 2]; 2];
+        for corner in 0..8 {
+            let point = project([
+                boxes[0][corner >> 2 & 1],
+                boxes[1][corner >> 1 & 1],
+                boxes[2][corner & 1],
+            ]);
+            for axis in 0..2 {
+                extent[axis] = [
+                    extent[axis][0].min(point[axis]),
+                    extent[axis][1].max(point[axis]),
+                ];
+            }
+        }
+        let pin = device.plot_size();
+        let delta = extent.map(|range| (range[1] - range[0]).abs());
+        let fit = (pin[0] / delta[0]).min(pin[1] / delta[1]);
+        let pars = &mut device.pars;
+        let pad = [0, 1].map(|axis| 0.5 * (pin[axis] / fit - delta[axis]));
+        let (x_window, xaxp) = scale_axis(
+            [extent[0][0] - pad[0], extent[0][1] + pad[0]],
+            pars.xaxs,
+            false,
+            pars.lab[0],
+        );
+        let (y_window, yaxp) = scale_axis(
+            [extent[1][0] - pad[1], extent[1][1] + pad[1]],
+            pars.yaxs,
+            false,
+            pars.lab[1],
+        );
+        pars.usr = [x_window[0], x_window[1], y_window[0], y_window[1]];
+        pars.xaxp = xaxp;
+        pars.yaxp = yaxp;
+        let window = (pars.usr, xaxp, yaxp);
+        let pars = device.pars.clone();
+        let [x_axis, y_axis] = user_axes(device);
+        let inches = |point: [f64; 2]| [x_axis.inches(point[0]), y_axis.inches(point[1])];
+        let clip = clip_rect(device);
+        let mut edges_done = [false; 12];
+        if draw_box {
+            persp_box(device, clip, &boxes, &project, false, &mut edges_done)?;
+            if draw_axes {
+                let figure = region_rect(device, 8);
+                let axes = PerspAxes {
+                    boxes: &boxes,
+                    project: &project,
+                    ticks,
+                    detailed: tick_type == 2,
+                    clip: figure,
+                };
+                draw_persp_axes(device, &axes, &labels)?;
+            }
+        }
+        let rows = x.len();
+        let columns = y.len();
+        let mut order: Vec<(f64, usize)> = Vec::with_capacity((rows - 1) * (columns - 1));
+        for j in 0..columns - 1 {
+            for i in 0..rows - 1 {
+                // The depth ignores z, which would make facets of steep surfaces flicker
+                // in front of their neighbours.
+                let mut farthest = f64::MIN;
+                for (di, dj) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    let point = [x[i + di], y[j + dj], 0.0, 1.0];
+                    if point[0].is_finite() && point[1].is_finite() {
+                        farthest = farthest.max(transform_point(point, &transform)[3]);
+                    }
+                }
+                order.push((-farthest, i + j * (rows - 1)));
+            }
+        }
+        order.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let stroke = par_stroke(&pars, edge);
+        let scales = [1.0 / half[0], 1.0 / half[1], expand / half[2]];
+        for (_, facet) in order {
+            let i = facet % (rows - 1);
+            let j = facet / (rows - 1);
+            let at = |di: usize, dj: usize| z[i + di + (j + dj) * rows];
+            let mut fill = colours[facet % colours.len()];
+            if lighting {
+                let u = [
+                    scales[0] * (x[i + 1] - x[i]),
+                    scales[1] * (y[j] - y[j + 1]),
+                    scales[2] * (at(1, 0) - at(0, 1)),
+                ];
+                let v = [
+                    scales[0] * (x[i + 1] - x[i]),
+                    scales[1] * (y[j + 1] - y[j]),
+                    scales[2] * (at(1, 1) - at(0, 0)),
+                ];
+                let factor = facet_shade(u, v, light, shade);
+                if !factor.is_finite() {
+                    continue;
+                }
+                let channel =
+                    |shift: u32| ((factor * f64::from(fill >> shift & 0xFF)) as u32) & 0xFF;
+                fill = channel(0) | channel(8) << 8 | channel(16) << 16 | 0xFF00_0000;
+            }
+            let corners: Vec<[f64; 2]> = [(0, 0), (1, 0), (1, 1), (0, 1)]
+                .into_iter()
+                .map(|(di, dj)| [x[i + di], y[j + dj], at(di, dj)])
+                .filter(|point| point.iter().all(|value| value.is_finite()))
+                .map(|point| inches(project(point)))
+                .collect();
+            if corners.len() > 2 {
+                push_shape(
+                    device,
+                    clip,
+                    Shape::Path {
+                        points: corners,
+                        closed: true,
+                        fill,
+                        stroke: Some(stroke),
+                    },
+                )?;
+            }
+        }
+        if draw_box {
+            persp_box(device, clip, &boxes, &project, true, &mut edges_done)?;
+        }
+        Ok(window)
+    })?;
+    with_device(|device| {
+        let pars = &mut device.pars;
+        (pars.usr, pars.xaxp, pars.yaxp) = window;
+        pars.xlog = false;
+        pars.ylog = false;
         Ok(())
     })?;
     let result = alloc(SexpType::Real, 16)?;
@@ -3322,54 +3512,365 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The plot window over linear limits with aspect ratio `asp` and the current axis styles.
-fn set_window(device: &mut Device, xlim: [f64; 2], ylim: [f64; 2], asp: f64) {
-    let pin = device.plot_size();
-    let (x_range, y_range) = ((xlim[1] - xlim[0]).abs(), (ylim[1] - ylim[0]).abs());
-    let x_needed = pin[0] * y_range / (asp * pin[1]);
-    let (x_range, y_range) = if x_needed >= x_range {
-        (x_needed, y_range)
-    } else {
-        (x_range, x_range * asp * pin[1] / pin[0])
+/// A row vector times a transformation.
+fn transform_point(point: [f64; 4], transform: &Matrix4) -> [f64; 4] {
+    let mut image = [0.0; 4];
+    for (column, cell) in image.iter_mut().enumerate() {
+        *cell = (0..4).map(|row| point[row] * transform[row][column]).sum();
+    }
+    image
+}
+
+/// A rotation of row vectors by `degrees` about the z axis.
+fn z_rotation(degrees: f64) -> Matrix4 {
+    let (sine, cosine) = degrees.to_radians().sin_cos();
+    let mut matrix = identity();
+    matrix[0][0] = cosine;
+    matrix[1][0] = -sine;
+    matrix[1][1] = cosine;
+    matrix[0][1] = sine;
+    matrix
+}
+
+/// How brightly the facet spanned by the diagonals `u` and `v` reflects the light from
+/// direction `light`, between 0 and 1, sharpened by the power `shade`.
+fn facet_shade(u: [f64; 3], v: [f64; 3], light: [f64; 4], shade: f64) -> f64 {
+    let mut normal = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let mut size = normal.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if size == 0.0 {
+        size = 1.0;
+    }
+    for value in &mut normal {
+        *value /= size;
+    }
+    let lit = 0.5 * (normal[0] * light[0] + normal[1] * light[1] + normal[2] * light[2] + 1.0);
+    lit.powf(shade)
+}
+
+/// The corners of the box, as which end of the x, y and z limits each takes.
+const BOX_VERTICES: [[usize; 3]; 8] = [
+    [0, 0, 0],
+    [0, 0, 1],
+    [0, 1, 0],
+    [0, 1, 1],
+    [1, 0, 0],
+    [1, 0, 1],
+    [1, 1, 0],
+    [1, 1, 1],
+];
+
+/// The box's faces, as the corners met tracing each one.
+const BOX_FACES: [[usize; 4]; 6] = [
+    [0, 1, 5, 4],
+    [2, 6, 7, 3],
+    [0, 2, 3, 1],
+    [4, 5, 7, 6],
+    [0, 4, 6, 2],
+    [1, 3, 7, 5],
+];
+
+/// The box's edges, numbered so that an edge two faces share is drawn only once, in the order
+/// tracing each face meets them.
+const BOX_EDGES: [[usize; 4]; 6] = [
+    [0, 1, 2, 3],
+    [4, 5, 6, 7],
+    [8, 7, 9, 0],
+    [2, 10, 5, 11],
+    [3, 11, 4, 8],
+    [9, 6, 10, 1],
+];
+
+/// Draws the edges of the box's faces that face away from the eye, solid, or with `front`
+/// the remaining edges of the faces toward it, dotted. Drawing the far ones before the
+/// surface and the near ones after hides the edges behind it.
+fn persp_box(
+    device: &mut Device,
+    clip: Rect,
+    boxes: &[[f64; 2]; 3],
+    project: &dyn Fn([f64; 3]) -> [f64; 2],
+    front: bool,
+    edges_done: &mut [bool; 12],
+) -> R<()> {
+    let pars = device.pars.clone();
+    let stroke = stroke_with(
+        &pars,
+        pars.col,
+        if front { LTY_DOTTED } else { LTY_SOLID },
+        pars.lwd,
+    );
+    let [x_axis, y_axis] = user_axes(device);
+    for (face, edges) in BOX_FACES.iter().zip(BOX_EDGES) {
+        let corners = face.map(|vertex| {
+            let [i, j, k] = BOX_VERTICES[vertex];
+            project([boxes[0][i], boxes[1][j], boxes[2][k]])
+        });
+        let d = [corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]];
+        let e = [corners[2][0] - corners[1][0], corners[2][1] - corners[1][1]];
+        let nearby = d[0] * e[1] - d[1] * e[0] < 0.0;
+        if nearby != front {
+            continue;
+        }
+        for (side, edge) in edges.into_iter().enumerate() {
+            if std::mem::replace(&mut edges_done[edge], true) {
+                continue;
+            }
+            let ends = [corners[side], corners[(side + 1) % 4]]
+                .map(|point| [x_axis.inches(point[0]), y_axis.inches(point[1])]);
+            push_line(device, clip, ends.to_vec(), stroke)?;
+        }
+    }
+    Ok(())
+}
+
+/// What the axes of a perspective plot are drawn from.
+struct PerspAxes<'a> {
+    boxes: &'a [[f64; 2]; 3],
+    project: &'a dyn Fn([f64; 3]) -> [f64; 2],
+    ticks: i32,
+    detailed: bool,
+    clip: Rect,
+}
+
+/// The corner each candidate axis starts from: axes 0 to 3 run along the bottom of the box,
+/// 4 to 7 up its vertical edges.
+const AXIS_STARTS: [usize; 8] = [0, 0, 2, 4, 0, 4, 2, 6];
+
+/// The direction each candidate axis's ticks point, away from the box.
+const AXIS_TICKS: [[f64; 3]; 8] = [
+    [0.0, -1.0, -1.0],
+    [-1.0, 0.0, -1.0],
+    [0.0, 1.0, -1.0],
+    [1.0, 0.0, -1.0],
+    [-1.0, -1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0],
+];
+
+/// Labels the x and y axes along the bottom edges that meet at the lowest projected corner
+/// of the box's floor, and the z axis up the edge at its leftmost corner.
+unsafe fn draw_persp_axes(device: &mut Device, axes: &PerspAxes<'_>, labels: &[String]) -> R<()> {
+    let boxes = axes.boxes;
+    let floor = [
+        (axes.project)([boxes[0][0], boxes[1][0], boxes[2][0]]),
+        (axes.project)([boxes[0][1], boxes[1][0], boxes[2][0]]),
+        (axes.project)([boxes[0][0], boxes[1][1], boxes[2][0]]),
+        (axes.project)([boxes[0][1], boxes[1][1], boxes[2][0]]),
+    ];
+    let lowest = |coordinate: usize| {
+        (0..4).find(|&corner| {
+            (0..4).all(|other| floor[corner][coordinate] <= floor[other][coordinate])
+        })
     };
-    let pars = &mut device.pars;
-    let (x, xaxp) = scale_axis(centred(xlim, x_range), pars.xaxs, false, pars.lab[0]);
-    let (y, yaxp) = scale_axis(centred(ylim, y_range), pars.yaxs, false, pars.lab[1]);
-    pars.xlog = false;
-    pars.ylog = false;
-    pars.usr = [x[0], x[1], y[0], y[1]];
-    pars.xaxp = xaxp;
-    pars.yaxp = yaxp;
+    let (x_axis, y_axis) = match lowest(1) {
+        Some(0) => (0, 1),
+        Some(1) => (0, 3),
+        Some(2) => (2, 1),
+        Some(3) => (2, 3),
+        _ => {
+            crate::conditions::warning("Axis orientation not calculated".to_owned())?;
+            (0, 0)
+        }
+    };
+    draw_persp_axis(device, axes, x_axis, 0, &labels[0])?;
+    draw_persp_axis(device, axes, y_axis, 1, &labels[1])?;
+    let z_axis = match lowest(0) {
+        Some(corner) => corner + 4,
+        None => {
+            crate::conditions::warning("Axis orientation not calculated".to_owned())?;
+            0
+        }
+    };
+    draw_persp_axis(device, axes, z_axis, 2, &labels[2])
+}
+
+/// Draws one axis of a perspective plot: candidate `axis` along dimension `dimension`, its
+/// label beside its middle, and either an arrow showing which way values grow or ticks with
+/// labels at pretty values.
+unsafe fn draw_persp_axis(
+    device: &mut Device,
+    axes: &PerspAxes<'_>,
+    axis: usize,
+    dimension: usize,
+    label: &str,
+) -> R<()> {
+    const TICK_LENGTH: f64 = 0.03;
+    let boxes = axes.boxes;
+    let range = boxes[dimension];
+    let (mut low, mut high) = (range[0], range[1]);
+    let slack = 0.1 * (high - low);
+    let mut intervals = (axes.ticks - 1).max(1);
+    let mut tries = intervals;
+    graphics_engine::pretty_axis(&mut low, &mut high, &mut intervals)?;
+    // A pretty range rarely reaches far past the limits; when it does, ask for more steps.
+    while (low < range[0] - slack || range[1] + slack < high) && tries < 20 {
+        tries += 1;
+        intervals = tries;
+        low = range[0];
+        high = range[1];
+        graphics_engine::pretty_axis(&mut low, &mut high, &mut intervals)?;
+    }
+    let start = BOX_VERTICES[AXIS_STARTS[axis]];
+    let along = |value: f64| {
+        let mut point = [0, 1, 2].map(|dimension| boxes[dimension][start[dimension]]);
+        point[dimension] = value;
+        point
+    };
+    let outward = |point: [f64; 3], steps: f64| {
+        [0, 1, 2].map(|dimension| {
+            point[dimension]
+                + steps
+                    * TICK_LENGTH
+                    * (boxes[dimension][1] - boxes[dimension][0])
+                    * AXIS_TICKS[axis][dimension]
+        })
+    };
+    let first = outward(along(low), 1.0);
+    let mut last = first;
+    last[dimension] = high;
+    let mut middle = outward(first, if axes.detailed { 2.5 } else { 1.0 });
+    middle[dimension] = (low + high) / 2.0;
+    let pars = device.pars.clone();
+    let [x_axis, y_axis] = user_axes(device);
+    let inches = |point: [f64; 3]| {
+        let projected = (axes.project)(point);
+        [x_axis.inches(projected[0]), y_axis.inches(projected[1])]
+    };
+    let (from, to) = ((axes.project)(first), (axes.project)(last));
+    let across = (to[0] - from[0]).abs();
+    let rise = if to[0] > from[0] {
+        to[1] - from[1]
+    } else {
+        from[1] - to[1]
+    };
+    let angle = if across == 0.0 {
+        if rise > 0.0 { 90.0 } else { 270.0 }
+    } else {
+        rise.atan2(across).to_degrees()
+    };
+    push_text(
+        device,
+        axes.clip,
+        inches(middle),
+        &[label.to_owned()],
+        angle,
+        0.5,
+        0.5,
+        pars.cex * pars.cex_lab,
+        pars.font_lab,
+        pars.col,
+    )?;
+    let stroke = par_stroke(&pars, pars.col);
+    let cex = pars.cex * pars.cex_axis;
+    if !axes.detailed {
+        let (tail, tip) = (inches(first), inches(last));
+        push_line(device, axes.clip, vec![tail, tip], stroke)?;
+        let direction = (tip[1] - tail[1]).atan2(tip[0] - tail[0]);
+        let back = direction + std::f64::consts::PI;
+        let spread = 10f64.to_radians();
+        let barb = |turn: f64| {
+            [
+                tip[0] + 0.1 * (back + turn).cos(),
+                tip[1] + 0.1 * (back + turn).sin(),
+            ]
+        };
+        if (tip[0] - tail[0]).hypot(tip[1] - tail[1]) >= 1e-3 {
+            push_line(
+                device,
+                axes.clip,
+                vec![barb(spread), tip, barb(-spread)],
+                stroke,
+            )?;
+        }
+        return Ok(());
+    }
+    let at = at_vector([low, high, f64::from(intervals)], range, 7, false);
+    let tick_labels = axis_labels(nil(), &at)?.unwrap_or_default();
+    for (value, text) in at.iter().zip(tick_labels) {
+        let base = along(*value);
+        let tick = outward(base, 1.0);
+        push_line(device, axes.clip, vec![inches(base), inches(tick)], stroke)?;
+        push_text(
+            device,
+            axes.clip,
+            inches(outward(base, 2.0)),
+            &text,
+            0.0,
+            0.5,
+            0.5,
+            cex,
+            pars.font_axis,
+            pars.col,
+        )?;
+    }
+    Ok(())
 }
 
 /// `C_dendwindow(n, merge, height, hang, labels, ...)`: the plot window of a dendrogram of
 /// `n` merges, its leaves at 1 to `n + 1` and its heights from the lowest hanging leaf to the
 /// root. GNU R also leaves room below for the leaf labels, which ry does not measure.
 unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
-    let leaves = values::as_integer_scalar(call.arg(0)).max(0) + 1;
-    let heights = coerce_vector(call.arg(2), SexpType::Real)?;
-    let heights: Vec<f64> = values::reals(heights)
-        .iter()
-        .copied()
-        .filter(|height| height.is_finite())
-        .collect();
-    let hang = values::as_real_scalar(call.arg(3));
-    let top = heights.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let bottom = heights.iter().copied().fold(f64::INFINITY, f64::min);
-    let (bottom, top) = if top.is_finite() {
-        (bottom, top)
-    } else {
-        (0.0, 1.0)
-    };
-    let bottom = if hang.is_finite() && hang >= 0.0 {
-        bottom - hang * (top - bottom)
-    } else {
-        0.0_f64.min(bottom)
-    };
+    let tree = dendrogram_arguments(call, false)?;
+    let merges = tree.heights.len();
+    let ymin = with_inline_pars(call, 5, |device| {
+        let cex = device.pars.cex * device.pars.inline_cex;
+        let font = device.pars.font;
+        let offset = text_inches(device, "m", cex, font)?;
+        let label_inches = (0..=merges)
+            .map(|leaf| match values::string_at(tree.labels, leaf) {
+                Some(label) => Ok(text_inches(device, &label, cex, font)? + offset),
+                None => Ok(0.0),
+            })
+            .collect::<R<Vec<f64>>>()?;
+        let plot = region_rect(device, 17);
+        let pin = plot.y1 - plot.y0;
+        let ymax = tree.heights.iter().copied().fold(tree.heights[0], f64::max);
+        let mut ymin = tree.heights.iter().copied().fold(tree.heights[0], f64::min);
+        // The scale leaves room below the tree for the label that reaches lowest, assuming
+        // the tree itself fills the plot region.
+        let yrange;
+        let mut deepest = 0usize;
+        let mut depth = f64::MIN;
+        if tree.hang >= 0.0 {
+            ymin = ymax - (1.0 + tree.hang) * (ymax - ymin);
+            yrange = ymax - ymin;
+            let mut leaf_heights = vec![0.0; merges + 1];
+            for (merge, height) in tree.heights.iter().enumerate() {
+                for child in [tree.left[merge], tree.right[merge]] {
+                    if child < 0
+                        && let Some(slot) = leaf_heights.get_mut((-child - 1) as usize)
+                    {
+                        *slot = *height;
+                    }
+                }
+            }
+            for (leaf, height) in leaf_heights.iter().enumerate() {
+                let reach = (ymax - height) / yrange * pin + label_inches[leaf];
+                if reach > depth {
+                    depth = reach;
+                    deepest = leaf;
+                }
+            }
+        } else {
+            yrange = ymax;
+            for (leaf, inches) in label_inches.iter().enumerate() {
+                if pin + inches > depth {
+                    depth = pin + inches;
+                    deepest = leaf;
+                }
+            }
+        }
+        Ok(ymax - pin / (pin - label_inches[deepest]) * yrange)
+    })?;
+    let ymax = tree.heights.iter().copied().fold(tree.heights[0], f64::max);
     with_started_plot(|device| {
         let pars = &mut device.pars;
-        let (x, xaxp) = scale_axis([1.0, f64::from(leaves)], pars.xaxs, false, pars.lab[0]);
-        let (y, yaxp) = scale_axis([bottom, top], pars.yaxs, false, pars.lab[1]);
+        let (x, xaxp) = scale_axis([1.0, (merges + 1) as f64], pars.xaxs, false, pars.lab[0]);
+        let (y, yaxp) = scale_axis([ymin, ymax], pars.yaxs, false, pars.lab[1]);
         pars.xlog = false;
         pars.ylog = false;
         pars.usr = [x[0], x[1], y[0], y[1]];
@@ -3378,6 +3879,154 @@ unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
         Ok(())
     })?;
     Ok(nil())
+}
+
+/// The tree `plot.hclust` hands `C_dend` and `C_dendwindow`: for each merge its two children
+/// (a leaf as minus its number, a cluster as its merge's number) and height, the leaves'
+/// labels, and `hang`. `C_dend` also takes the leaves' positions along the axis.
+struct DendrogramTree {
+    left: Vec<i32>,
+    right: Vec<i32>,
+    heights: Vec<f64>,
+    positions: Vec<f64>,
+    hang: f64,
+    labels: Sexp,
+}
+
+unsafe fn dendrogram_arguments(call: &NativeCall<'_>, positioned: bool) -> R<DendrogramTree> {
+    let invalid = || error("invalid dendrogram input");
+    let merges = values::as_integer_scalar(call.arg(0));
+    if merges == NA_INTEGER || merges < 2 {
+        return Err(invalid());
+    }
+    let merges = merges as usize;
+    let merge = call.arg(1);
+    let heights = call.arg(2);
+    if merge.kind() != SexpType::Integer || length(merge) != 2 * merges {
+        return Err(invalid());
+    }
+    if heights.kind() != SexpType::Real || length(heights) != merges {
+        return Err(invalid());
+    }
+    let merge = values::ints(merge);
+    let mut next = 3;
+    let positions = if positioned {
+        let order = call.arg(next);
+        next += 1;
+        if length(order) != merges + 1 {
+            return Err(invalid());
+        }
+        reals_of(order)?
+    } else {
+        Vec::new()
+    };
+    let hang = values::as_real_scalar(call.arg(next));
+    let labels = call.arg(next + 1);
+    if !hang.is_finite() || labels.kind() != SexpType::String || length(labels) != merges + 1 {
+        return Err(invalid());
+    }
+    Ok(DendrogramTree {
+        left: merge[..merges].to_vec(),
+        right: merge[merges..].to_vec(),
+        heights: values::reals(heights).to_vec(),
+        positions,
+        hang,
+        labels,
+    })
+}
+
+/// `C_dend(n, merge, height, order, hang, labels, ...)`: draws a vertical dendrogram, each
+/// leaf's label hanging below it, as `plot.hclust` asks.
+unsafe fn do_dend(call: &NativeCall<'_>) -> R<Sexp> {
+    let mut tree = dendrogram_arguments(call, true)?;
+    let merges = tree.heights.len();
+    tree.hang *= tree.heights[merges - 1] - tree.heights[0];
+    with_inline_pars(call, 6, |device| {
+        let pars = device.pars.clone();
+        let cex = pars.cex * pars.inline_cex;
+        let [x_axis, y_axis] = user_axes(device);
+        let offset = text_inches(device, "m", cex, pars.font)? / y_axis.scale;
+        // Like titles, the tree may draw into the figure region but not beyond it.
+        let clip = if pars.xpd == 2 {
+            device_rect(device)
+        } else {
+            region_rect(device, 8)
+        };
+        let style = DendrogramStyle {
+            x_axis,
+            y_axis,
+            offset,
+            clip,
+            cex,
+            stroke: par_stroke(&pars, pars.col),
+        };
+        draw_dendrogram(device, &tree, &style, merges)?;
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+struct DendrogramStyle {
+    x_axis: UserAxis,
+    y_axis: UserAxis,
+    offset: f64,
+    clip: Rect,
+    cex: f64,
+    stroke: Stroke,
+}
+
+/// Draws the subtree under merge `node` (numbered from 1) and returns where its stem meets
+/// the merge above, in user coordinates.
+unsafe fn draw_dendrogram(
+    device: &mut Device,
+    tree: &DendrogramTree,
+    style: &DendrogramStyle,
+    node: usize,
+) -> R<[f64; 2]> {
+    let invalid = || error("invalid dendrogram input");
+    let height = *tree.heights.get(node - 1).ok_or_else(invalid)?;
+    let mut ends = [[0.0; 2]; 2];
+    for (end, child) in ends
+        .iter_mut()
+        .zip([tree.left[node - 1], tree.right[node - 1]])
+    {
+        *end = if child > 0 {
+            draw_dendrogram(device, tree, style, child as usize)?
+        } else {
+            let leaf = (-child - 1) as usize;
+            let x = *tree.positions.get(leaf).ok_or_else(invalid)?;
+            let y = if tree.hang >= 0.0 {
+                height - tree.hang
+            } else {
+                0.0
+            };
+            if let Some(label) = values::string_at(tree.labels, leaf) {
+                let anchor = [
+                    style.x_axis.inches(x),
+                    style.y_axis.inches(y - style.offset),
+                ];
+                let (font, colour) = (device.pars.font, device.pars.col);
+                push_text(
+                    device,
+                    style.clip,
+                    anchor,
+                    &[label.into_owned()],
+                    90.0,
+                    1.0,
+                    0.3,
+                    style.cex,
+                    font,
+                    colour,
+                )?;
+            }
+            [x, y]
+        };
+    }
+    let [[xl, yl], [xr, yr]] = ends;
+    let points = [[xl, yl], [xl, height], [xr, height], [xr, yr]]
+        .map(|[x, y]| [style.x_axis.inches(x), style.y_axis.inches(y)]);
+    push_line(device, style.clip, points.to_vec(), style.stroke)?;
+    Ok([0.5 * (xl + xr), height])
 }
 
 /// `xspline(x, y, shape, open, repEnds, draw, col, border, ...)`: draws the X-spline, or
@@ -3497,6 +4146,18 @@ unsafe fn with_inline_pars<T>(
                 continue;
             }
             if READ_ONLY_PARS.contains(&name.as_ref()) {
+                continue;
+            }
+            // GNU R's inline `cex` sets the current scale but not `par("cex")`, which titles,
+            // axes and text size from.
+            if name == "cex" {
+                match par_positive(arg.value, "cex") {
+                    Ok(cex) => device.pars.inline_cex = cex,
+                    Err(failure) => {
+                        outcome = Err(failure);
+                        break;
+                    }
+                }
                 continue;
             }
             if let Err(failure) = set_par(device, &name, arg.value, &mut warnings) {
@@ -3692,14 +4353,14 @@ fn push_rect(
     clip: Rect,
     [x0, y0, x1, y1]: [f64; 4],
     fill: Colour,
-    stroke: &Stroke,
+    stroke: Option<&Stroke>,
 ) -> R<()> {
     let dd = device.dd;
     let [clip_x0, clip_y0] = device.to_device([clip.x0, clip.y0]);
     let [clip_x1, clip_y1] = device.to_device([clip.x1, clip.y1]);
     let [x0, y0] = device.to_device([x0, y0]);
     let [x1, y1] = device.to_device([x1, y1]);
-    let mut gc = shape_context(device, Some(stroke), fill);
+    let mut gc = shape_context(device, stroke, fill);
     // SAFETY: base graphics' state lives as long as its device.
     unsafe {
         graphics_engine::set_clip(clip_x0, clip_y0, clip_x1, clip_y1, dd)?;
@@ -3759,12 +4420,6 @@ fn push_line(device: &mut Device, clip: Rect, points: Vec<[f64; 2]>, stroke: Str
     Ok(())
 }
 
-/// The size of text at character expansion `cex` in points, rounded to a whole point as the
-/// fonts are.
-fn text_points(pars: &Pars, cex: f64) -> f64 {
-    (f64::from(pars.ps) * cex).round().max(1.0)
-}
-
 /// Records the lines of a label anchored at `anchor`. `hadj` places the anchor along each
 /// line, 0 at its start and 1 at its end; `yadj` places it across the block of lines, 0 on
 /// the last line's baseline and 1 at the top of the first line's capitals, and when it is
@@ -3787,7 +4442,8 @@ fn push_text(
     let [x1, y1] = device.to_device([clip.x1, clip.y1]);
     let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
     gc.col = colour as c_int;
-    gc.ps = text_points(&device.pars, cex);
+    gc.ps = f64::from(device.pars.ps);
+    gc.cex = cex;
     gc.fontface = font;
     gc.lineheight = device.pars.lheight;
     let [x, y] = device.to_device(anchor);
@@ -3801,9 +4457,7 @@ fn push_text(
 /// The width of a line of text in inches, measured by the device as GNU R's `GStrWidth` does,
 /// so a device with its own fonts (ragg) lays labels out by the glyphs it will draw.
 fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
-    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
-    gc.ps = text_points(&device.pars, cex);
-    gc.fontface = font;
+    let gc = text_context(device, cex, font);
     // SAFETY: base graphics' state lives as long as its device.
     unsafe {
         let width = graphics_engine::str_width(line, &gc, device.dd)?;
@@ -3813,6 +4467,31 @@ fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
             device.dd,
         ))
     }
+}
+
+/// The height of `line` in inches, as `strheight` measures it: the ascent of a capital plus
+/// a line for each line break.
+fn text_height_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
+    let gc = text_context(device, cex, font);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        let height = graphics_engine::str_height(line, &gc, device.dd)?;
+        Ok(graphics_engine::from_device_height(
+            height,
+            Unit::Inches,
+            device.dd,
+        ))
+    }
+}
+
+/// The context text at expansion `cex` is measured in. Like GNU R, the point size and the
+/// expansion stay separate, so a device that rounds the size to whole points does so itself.
+fn text_context(device: &Device, cex: f64, font: i32) -> GEContext {
+    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
+    gc.ps = f64::from(device.pars.ps);
+    gc.cex = cex;
+    gc.fontface = font;
+    gc
 }
 
 /// Places a label in a margin as `mtext` and `axis` do: on line `line` of side `side` at
@@ -4001,22 +4680,28 @@ fn push_symbol(
 ) -> R<()> {
     let code = match pch {
         Pch::Text(text) if text == "." => {
-            let half = 0.005 * cex;
-            let square = vec![
-                [centre[0] - half, centre[1] - half],
-                [centre[0] + half, centre[1] - half],
-                [centre[0] + half, centre[1] + half],
-                [centre[0] - half, centre[1] + half],
-            ];
-            push_shape(
+            // A 0.01 inch square, but at least a device unit across, so that a dot stays
+            // visible on a raster device.
+            let scaled = 0.005 * cex * device.pars.cex;
+            // SAFETY: base graphics' state lives as long as its device.
+            let least = unsafe {
+                [
+                    graphics_engine::from_device_width(0.5, Unit::Inches, device.dd).abs(),
+                    graphics_engine::from_device_height(0.5, Unit::Inches, device.dd).abs(),
+                ]
+            };
+            let (half_x, half_y) = if scaled > 0.0 {
+                (scaled.max(least[0]), scaled.max(least[1]))
+            } else {
+                (scaled, scaled)
+            };
+            let [x, y] = centre;
+            push_rect(
                 device,
                 clip,
-                Shape::Path {
-                    points: square,
-                    closed: true,
-                    fill: colour,
-                    stroke: None,
-                },
+                [x - half_x, y - half_y, x + half_x, y + half_y],
+                colour,
+                None,
             )?;
             return Ok(());
         }
@@ -4958,7 +5643,7 @@ unsafe fn do_rect(call: &NativeCall<'_>) -> R<Sexp> {
                 line_type_at(lty, index, pars.lty)?,
                 real_at(lwd, index, pars.lwd),
             );
-            push_rect(device, clip, [x0, y0, x1, y1], fill, &stroke)?;
+            push_rect(device, clip, [x0, y0, x1, y1], fill, Some(&stroke))?;
         }
         Ok(())
     })?;
@@ -5224,6 +5909,138 @@ unsafe fn do_abline(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// `.filled.contour(x, y, z, levels, col)`: fills the band between each pair of adjacent
+/// levels in every grid cell with that band's colour, clipped to the plot region.
+unsafe fn do_filled_contour(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = reals_of(call.arg(0))?;
+    let y = reals_of(call.arg(1))?;
+    if x.len() < 2 || y.len() < 2 {
+        return Err(error("insufficient 'x' or 'y' values"));
+    }
+    let matrix = call.arg(2);
+    if values::dims(matrix).as_deref() != Some(&[x.len(), y.len()][..]) {
+        return Err(error("dimension mismatch"));
+    }
+    let z = reals_of(matrix)?;
+    let levels = reals_of(call.arg(3))?;
+    if levels.is_empty() {
+        return Err(error("no contour values"));
+    }
+    let col = call.arg(4);
+    let ascending = |values: &[f64]| {
+        values[0].is_finite()
+            && values
+                .windows(2)
+                .all(|pair| pair[1].is_finite() && pair[1] > pair[0])
+    };
+    if !ascending(&x) || !ascending(&y) {
+        return Err(error("invalid x / y values or limits"));
+    }
+    if !ascending(&levels) {
+        return Err(error("invalid contour levels: must be strictly increasing"));
+    }
+    let colours: Vec<Colour> = (0..length(col).max(1))
+        .map(|index| colour_at(col, index, TRANSPARENT_WHITE, TRANSPARENT_WHITE))
+        .collect::<R<_>>()?;
+    with_plot(|device| {
+        let saved_xpd = device.pars.xpd;
+        device.pars.xpd = 0;
+        let clip = clip_rect(device);
+        device.pars.xpd = saved_xpd;
+        let [x_axis, y_axis] = user_axes(device);
+        let rows = x.len();
+        let mut corners = Vec::with_capacity(8);
+        for j in 1..y.len() {
+            for i in 1..rows {
+                let cell = [
+                    z[i - 1 + (j - 1) * rows],
+                    z[i + (j - 1) * rows],
+                    z[i - 1 + j * rows],
+                    z[i + j * rows],
+                ];
+                for band in 1..levels.len() {
+                    let (low, high) = (levels[band - 1], levels[band]);
+                    corners.clear();
+                    let [z11, z21, z12, z22] = cell;
+                    let (x1, x2, y1, y2) = (x[i - 1], x[i], y[j - 1], y[j]);
+                    band_cut_points(low, high, [x1, y1, z11], [x2, z21], false, &mut corners);
+                    band_cut_points(low, high, [y1, x2, z21], [y2, z22], true, &mut corners);
+                    band_cut_points(low, high, [x2, y2, z22], [x1, z12], false, &mut corners);
+                    band_cut_points(low, high, [y2, x1, z12], [y1, z11], true, &mut corners);
+                    if corners.len() > 2 {
+                        let points = corners
+                            .iter()
+                            .map(|[x, y]| [x_axis.inches(*x), y_axis.inches(*y)])
+                            .collect();
+                        push_shape(
+                            device,
+                            clip,
+                            Shape::Path {
+                                points,
+                                closed: true,
+                                fill: colours[(band - 1) % colours.len()],
+                                stroke: None,
+                            },
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+/// The corners of one band's polygon along one side of a grid cell, from `[a1, b, z1]` to
+/// `[a2, z2]` where `a` varies along the side and `b` is fixed: the side's start when it lies
+/// in the band and the points where the side crosses the band's edges. `swapped` sides run
+/// along y. Infinite values put the crossing at the far corner. GNU R's `FindCutPoints`.
+fn band_cut_points(
+    low: f64,
+    high: f64,
+    [a1, b, z1]: [f64; 3],
+    [a2, z2]: [f64; 2],
+    swapped: bool,
+    corners: &mut Vec<[f64; 2]>,
+) {
+    let mut push = |a: f64| corners.push(if swapped { [b, a] } else { [a, b] });
+    if z1 > z2 {
+        if z2 > high || z1 < low {
+            return;
+        }
+        if z1 < high {
+            push(a1);
+        } else if z1 == f64::INFINITY {
+            push(a2);
+        } else {
+            push(a1 + (z1 - high) / (z1 - z2) * (a2 - a1));
+        }
+        if z2 == f64::NEG_INFINITY {
+            push(a1);
+        } else if z2 <= low {
+            push(a2 - (z2 - low) / (z2 - z1) * (a2 - a1));
+        }
+    } else if z1 < z2 {
+        if z2 < low || z1 > high {
+            return;
+        }
+        if z1 > low {
+            push(a1);
+        } else if z1 == f64::NEG_INFINITY {
+            push(a2);
+        } else {
+            push(a1 + (z1 - low) / (z1 - z2) * (a2 - a1));
+        }
+        if z2 == f64::INFINITY {
+            push(a1);
+        } else if z2 >= high {
+            push(a2 - (z2 - high) / (z2 - z1) * (a2 - a1));
+        }
+    } else if low <= z1 && z1 <= high {
+        push(a1);
+    }
+}
+
 /// `image(x, y, zi, col)`: the cells between the `x` and `y` breaks filled with the colours
 /// `zi` indexes from 0; missing indices leave a cell empty.
 unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
@@ -5434,7 +6251,7 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                     continue;
                 };
                 let width = text_inches(device, label, labcex, 1)?;
-                let height = HELVETICA_CAP_HEIGHT / 1000.0 * text_points(&pars, labcex) / 72.0;
+                let height = text_height_inches(device, label, labcex, 1)?;
                 match flattest_window(&points, width, height, &placed) {
                     Some(window) => {
                         placed.push(window.bounds);
