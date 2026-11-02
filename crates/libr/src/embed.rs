@@ -136,20 +136,12 @@ unsafe extern "C" {
 }
 
 /// Sets the front-end data native code reads (`R_Home`, `R_TempDir`, the console streams).
-/// `R_Home` comes from `R_HOME`; the session's temporary directory is created here, as GNU R
-/// creates its `Rtmp` directory at startup.
+/// `R_Home` comes from `R_HOME`, and `R_TempDir` is the interpreter's session directory.
 pub(crate) fn start_frontend() {
     let home = std::env::var("R_HOME").ok();
-    let temp_root = ["TMPDIR", "TMP", "TEMP"]
-        .iter()
-        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
-        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-    let temp_dir = temp_root.join(format!("Rtmp{}", std::process::id()));
     // Without a temporary directory the variable stays null, which is what code testing it
     // expects of a session that has none.
-    let temp_dir = std::fs::create_dir_all(&temp_dir)
-        .ok()
-        .map(|()| temp_dir.to_string_lossy().into_owned());
+    let temp_dir = interp::system::session_temp_dir().ok().map(str::to_owned);
     let to_c = |text: Option<String>| text.and_then(|text| std::ffi::CString::new(text).ok());
     let home = to_c(home);
     let temp_dir = to_c(temp_dir);

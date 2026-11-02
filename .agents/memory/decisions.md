@@ -4891,3 +4891,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `Rprof` raises intervals below 10 ms to 10 ms with GNU R's warning, since GNU R's timer cannot
   sample faster.
 - `system(intern = FALSE)` and `system2` return invisibly, as in GNU R.
+
+## One session temporary directory, removed at exit
+
+- **Previous shape.** The interpreter's `tempdir()` made `RtmpRy<pid>` and libR's front end
+  made a second `Rtmp<pid>` for native code's `R_TempDir`. Neither was ever removed, so every
+  run leaked two directories into `/tmp`.
+- **Target shape.** `interp::system::session_temp_dir` is the only one: a `mkdtemp`
+  `RtmpXXXXXX` under the first writable `R_TMPDIR`, `TMPDIR`, `TMP` or `TEMP`, as in GNU R.
+  libR passes it to native code. `session::finish` removes it, but only in the process that
+  created it, so a forked `mcparallel` child that ends never deletes its parent's directory.
