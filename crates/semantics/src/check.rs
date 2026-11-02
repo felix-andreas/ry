@@ -5820,6 +5820,16 @@ impl<'db> Checker<'db, '_> {
                     return None;
                 }
                 let value = argument.value?;
+                // `is.integer(limit <- check_limit(limit))` tests the value it just stored, so
+                // the guard narrows the assigned local.
+                let value = match self.module.kind(value) {
+                    ExpressionKind::Assign {
+                        spelling: AssignSpelling::Local | AssignSpelling::Equals,
+                        target,
+                        ..
+                    } if matches!(self.module.kind(*target), ExpressionKind::NameRef(_)) => *target,
+                    _ => value,
+                };
                 if name == "is.null"
                     && let ExpressionKind::Field {
                         at: false,

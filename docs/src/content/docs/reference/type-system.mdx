@@ -2404,7 +2404,8 @@ type along each edge of the `if`. Inside each branch, the variable keeps the ref
 write replaces it, and the refinements merge back at the join exactly as branch writes do. A
 branch the guard does not refine holds the value from before the test, so `if (!is.null(x)) ...` on
 an untyped `x` leaves `x` untyped after the `if`, not `NULL`. With `x`
-a local variable or parameter, the recognized guards are:
+a local variable or parameter, or an assignment to a local written inside the test
+(`is.integer(limit <- check_limit(limit))`, which narrows `limit`), the recognized guards are:
 
 - `is.null(x)` makes `x` a `NULL` in the true branch, and removes `NULL` from its union in the false
   branch.

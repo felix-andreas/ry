@@ -911,3 +911,14 @@ check <- function(flag) if (isTRUE(flag)) "on" else "off"
 fit: <T> fn(a: T) -> logical | list[Any]
 use: <T> fn(a: T) -> Any
 check: <T> fn(flag: T) -> character
+
+#---- a_guard_on_an_assignment_narrows_the_assigned_local
+# diffobj stores a checked value and tests it in one expression.
+check_limit <- function(x) if (x > 0) as.integer(x) else "bad limit"
+use <- function(limit) {
+  if (!is.integer(out <- check_limit(limit))) stop(sprintf(out, "limit"))
+  out + 1L
+}
+#++++
+check_limit: <T> fn(x: T) -> integer | character
+use: <T> fn(limit: T) -> integer
