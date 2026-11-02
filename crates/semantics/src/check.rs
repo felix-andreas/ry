@@ -3222,6 +3222,14 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
                 self.note_captured_write(slot, value_ty);
+            } else if spelling == AssignSpelling::Super
+                && let Some(&name) = self.naming.non_locals.get(&target)
+            {
+                // `<<-` to a variable no enclosing function binds writes the global one, and
+                // the rest of this flow reads what it wrote, not the top-level binding.
+                let written = self.table.resolve(self.db, value_ty);
+                let slot = self.non_local_slot(name);
+                self.environment.set(slot, EnvEntry::Mono(written));
             }
             self.recorded.insert(target, value_ty);
         } else {
@@ -6179,7 +6187,7 @@ impl<'db> Checker<'db, '_> {
             TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
             _ => None,
         };
-        let classes: Vec<String> = [class_of(left), class_of(right)]
+        let mut classes: Vec<String> = [class_of(left), class_of(right)]
             .into_iter()
             .flatten()
             .collect();
@@ -6196,9 +6204,23 @@ impl<'db> Checker<'db, '_> {
             })
             .filter(|(_, ty)| matches!(ty.kind(self.db), TyKind::Var(_)))
             .collect();
+        // An untyped operand may itself be of another class whose method takes the typed one:
+        // `start + days(1)` is a `Date` when `start` is, through `+.Date`, not only the
+        // `Period` that `+.Period` gives. So every class with arithmetic methods is a fit.
+        let own_classes = classes.len();
+        if !flexible.is_empty() && !classes.is_empty() {
+            let mut others: Vec<&String> = globals
+                .arithmetic_classes()
+                .iter()
+                .filter(|class| !classes.contains(class))
+                .collect();
+            others.sort();
+            classes.extend(others.into_iter().cloned());
+        }
         let mut fitting_returns: Vec<Ty<'db>> = Vec::new();
+        let mut fits_another_class = false;
         let mut declared_any = false;
-        for class in &classes {
+        for (class_index, class) in classes.iter().enumerate() {
             for method in [
                 format!("{spelling}.{class}"),
                 format!("{group}.{class}"),
@@ -6220,6 +6242,24 @@ impl<'db> Checker<'db, '_> {
                         self.table.rollback(snapshot);
                         continue;
                     };
+                    // A method of another class that takes anything at all, like
+                    // `Arith.data.frame`, says nothing about what the untyped operand is.
+                    if class_index >= own_classes
+                        && function
+                            .positional
+                            .iter()
+                            .copied()
+                            .chain(function.named.iter().map(|parameter| parameter.ty))
+                            .any(|ty| {
+                                matches!(
+                                    self.table.shallow_resolve(self.db, ty).kind(self.db),
+                                    TyKind::Any
+                                )
+                            })
+                    {
+                        self.table.rollback(snapshot);
+                        continue;
+                    }
                     if self.match_arguments(range, function, &arguments).is_empty() {
                         if flexible.is_empty() {
                             return Some(function.ret);
@@ -6227,6 +6267,7 @@ impl<'db> Checker<'db, '_> {
                         let ret = self.table.resolve(self.db, function.ret);
                         self.table.rollback(snapshot);
                         fitting_returns.push(ret);
+                        fits_another_class |= class_index >= own_classes;
                         continue;
                     }
                     self.table.rollback(snapshot);
@@ -6234,8 +6275,11 @@ impl<'db> Checker<'db, '_> {
             }
         }
         if let Some(&first) = fitting_returns.first() {
-            for (operand_range, ty) in flexible {
-                self.constrain_numeric_flexible(operand_range, ty);
+            // An operand that may be of another class is not narrowed to a number.
+            if !fits_another_class {
+                for (operand_range, ty) in flexible {
+                    self.constrain_numeric_flexible(operand_range, ty);
+                }
             }
             return Some(if fitting_returns.iter().all(|&ret| ret == first) {
                 first
@@ -10949,6 +10993,15 @@ impl<'db> Checker<'db, '_> {
             return Some(named);
         }
         let ty = argument.ty?;
+        // An overload probe would take the leniency as a fit and pick `sum`'s `difftime`
+        // candidate for `sum(w * mu)`.
+        if self.overload_probe_depth == 0
+            && argument
+                .value
+                .is_some_and(|value| self.arithmetic_on_open_operand_fits(expected, value))
+        {
+            return Some(expected);
+        }
         if inferred_signature && self.fits_inferred_scalar(expected, ty) {
             return Some(expected);
         }
@@ -10959,6 +11012,41 @@ impl<'db> Checker<'db, '_> {
             }
             _ => Some(ty),
         }
+    }
+
+    /// Arithmetic on a value whose type is still open types as `double`, but it gives a
+    /// `matrix` when that value is one (`Arith.matrix`), so `solve.QP(Dmat = 2 * sigma)`
+    /// on a parameter `sigma` passes. Any class with arithmetic methods takes such a value.
+    fn arithmetic_on_open_operand_fits(&self, expected: Ty<'db>, value: ExprId) -> bool {
+        let mut value = value;
+        while let ExpressionKind::Paren(inner) = self.module.kind(value) {
+            value = *inner;
+        }
+        let ExpressionKind::Binary {
+            operator, lhs, rhs, ..
+        } = self.module.kind(value)
+        else {
+            return false;
+        };
+        if !ARITHMETIC_OPERATORS.contains(operator) {
+            return false;
+        }
+        let TyKind::Named(class, _) = self.table.shallow_resolve(self.db, expected).kind(self.db)
+        else {
+            return false;
+        };
+        let Some(globals) = self.globals else {
+            return false;
+        };
+        globals.arithmetic_classes().contains(class.text(self.db))
+            && [*lhs, *rhs].into_iter().any(|operand| {
+                self.recorded.get(&operand).is_some_and(|&ty| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, ty).kind(self.db),
+                        TyKind::Var(_)
+                    )
+                })
+            })
     }
 
     /// A name bound by a declaration rather than by inference: a parameter, whose `NULL` the
