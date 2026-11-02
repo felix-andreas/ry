@@ -685,11 +685,17 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
         }
         values::set_attr(result, symbols().names, new_names)?;
     }
-    // A one-dimensional array stays one when indexed.
-    if let Some(dims) = dims
-        && dims.len() == 1
-        && index != missing_arg()
-    {
+    // A one-dimensional array stays one when indexed, unless `drop` leaves at most one element,
+    // which GNU R returns as a vector named by the dimnames.
+    let one_dimensional =
+        dims.as_ref().is_some_and(|dims| dims.len() == 1) && index != missing_arg();
+    if one_dimensional && drop && indices.len() <= 1 {
+        let dimnames = get_attr(object, symbols().dimnames);
+        if names == nil() && dimnames != nil() && dimnames.element(0) != nil() {
+            let selected = select_elements(dimnames.element(0), &indices)?;
+            values::set_attr(result, symbols().names, selected)?;
+        }
+    } else if one_dimensional {
         let dim = values::integer_vector(&[indices.len() as i32])?;
         let dim_names = values::names(get_attr(object, symbols().dim));
         if dim_names != nil() {

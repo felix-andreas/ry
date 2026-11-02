@@ -19,7 +19,7 @@ use {
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
         Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
         LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
-        SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
+        SortMultipleOptions, UnionArgs, by_name, col, concat, len, lit, pearson_corr, when,
     },
     std::{collections::HashSet, fmt},
 };
@@ -537,8 +537,15 @@ fn grouped_integer_sums(
 /// The columns of `j` that are a `min` or `max` with `na.rm = TRUE`, whose `NA` result means a
 /// group had no values left.
 fn dropped_extremes(query: &Query) -> Vec<PlSmallStr> {
-    let Select::Columns(columns) = &query.select else {
-        return Vec::new();
+    let value;
+    let columns = match &query.select {
+        Select::Columns(columns) => columns.as_slice(),
+        // A grouped bare `j` is the column `V1`.
+        Select::Value(expr) if !query.by.is_empty() => {
+            value = [(PlSmallStr::from_static("V1"), expr.clone())];
+            value.as_slice()
+        }
+        _ => return Vec::new(),
     };
     columns
         .iter()
@@ -1735,27 +1742,35 @@ fn join_plan(
     };
     // `mult = "first"` or `"last"` keeps one match per row of `i`, and the matches of a row are
     // adjacent in the join's output, so a numbered `i` tells where each row's matches start and end.
-    let i = if join.mult == Mult::All || rolling.is_some() {
+    let i = if join.mult == Mult::All && rolling.is_none() {
         i
     } else {
         i.with_row_index(I_ROW, None)
     };
-    let joined = match rolling {
-        // data.table matches an `NA` key to an `NA` key, which Polars does only when asked.
-        None => i
-            .join_builder()
-            .with(x)
-            .left_on(left_on)
-            .right_on(right_on)
-            .how(if join.drop_unmatched {
-                JoinType::Inner
-            } else {
-                JoinType::Left
-            })
+    // data.table matches an `NA` key to an `NA` key, which Polars does only when asked.
+    let exact = |i: LazyFrame, how: JoinType| {
+        i.join_builder()
+            .with(x.clone())
+            .left_on(left_on.clone())
+            .right_on(right_on.clone())
+            .how(how)
             .join_nulls(true)
             .maintain_order(MaintainOrderJoin::LeftRight)
             .suffix(CLASH_SUFFIX)
-            .finish(),
+            .finish()
+    };
+    let joined = match rolling {
+        None => keep_mult(
+            exact(
+                i,
+                if join.drop_unmatched {
+                    JoinType::Inner
+                } else {
+                    JoinType::Left
+                },
+            ),
+            join.mult,
+        ),
         Some((strategy, tolerance)) => {
             let rolled = on
                 .last()
@@ -1773,10 +1788,22 @@ fn join_plan(
                 allow_eq: true,
                 check_sortedness: false,
             };
+            // A row of `i` with an exact match gets every match, as an equi-join does, and only
+            // the others roll, each to a single row: the last of the rolled-to value's rows when
+            // rolling forward and the first when rolling backward, which is the row an as-of join
+            // picks.
+            let matched = keep_mult(exact(i.clone(), JoinType::Inner), join.mult);
+            let unmatched = i
+                .join_builder()
+                .with(x.clone().select(right_on.clone()))
+                .left_on(left_on.clone())
+                .right_on(right_on.clone())
+                .how(JoinType::Anti)
+                .join_nulls(true)
+                .finish();
             // An as-of join walks both sides in order of the rolling column within each group, so
             // `i` is sorted first and restored to its own order afterwards. `x` is sorted the same
             // way, which is free when it is keyed on these columns.
-            const ROW: &str = "\u{1}row";
             let mut sort_i: Vec<PolarsExpr> = groups
                 .iter()
                 .map(|condition| col(condition.i.clone()))
@@ -1793,31 +1820,34 @@ fn join_plan(
             // Marks the rows of `x` so that an unmatched row of `i` is told apart from a match
             // whose values are `NA`.
             const MATCHED: &str = "\u{1}matched";
-            let i = i
-                .with_row_index(ROW, None)
-                .sort_by_exprs(sort_i, options_sort.clone());
             let x = x
+                .clone()
                 .with_column(lit(true).alias(MATCHED))
-                .sort_by_exprs(sort_x, options_sort);
-            let mut matched = i
+                .sort_by_exprs(sort_x, options_sort.clone());
+            let mut rolled = unmatched
+                .sort_by_exprs(sort_i, options_sort)
                 .join_builder()
                 .with(x)
                 .left_on([col(i_roll.clone())])
                 .right_on([col(x_roll.clone())])
                 .how(JoinType::AsOf(Box::new(options)))
                 .suffix(CLASH_SUFFIX)
-                .finish()
-                .sort([ROW], Default::default())
-                .drop(by_name([ROW], true, false));
+                .finish();
             if join.drop_unmatched {
-                matched = matched.filter(col(MATCHED).is_not_null());
+                rolled = rolled.filter(col(MATCHED).is_not_null());
             }
-            matched
+            concat(
+                [matched, rolled.drop(by_name([MATCHED], true, false))],
+                UnionArgs {
+                    diagonal: true,
+                    ..Default::default()
+                },
+            )?
+            .sort(
+                [I_ROW],
+                SortMultipleOptions::default().with_maintain_order(true),
+            )
         }
-    };
-    let joined = match rolling {
-        Some(_) => joined,
-        None => keep_mult(joined, join.mult),
     };
     Ok(joined.select(layout_exprs(x_schema, i_schema, on, &restore)))
 }
@@ -3018,7 +3048,7 @@ impl Lowering<'_> {
                 }
                 // `na.rm = TRUE` drops `NaN` as well as `NA`. Polars' reductions skip nulls on
                 // their own, but `first` and `last` do not.
-                if *na_rm && kind == ColumnType::Double {
+                if *na_rm && kind == ColumnType::Double && *function != Aggregate::Length {
                     value = value.clone().filter(value.is_not_nan());
                 } else if *na_rm && matches!(function, Aggregate::First | Aggregate::Last) {
                     value = value.drop_nulls();

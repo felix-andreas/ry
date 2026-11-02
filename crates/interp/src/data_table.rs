@@ -45,7 +45,7 @@ use {
         ColumnType, Schema, Table,
         convert::{self, RVector},
         polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
-        query::{self, Output, Query, Rows, Select},
+        query::{self, Comparison, Output, Query, Rows, Select},
     },
 };
 
@@ -188,6 +188,12 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let mut parts = frame::parse_parts(call, env, true)?;
+    // `by = .EACHI` without `i` is an error only data.table words, and so is a non-equi join on
+    // a table with the column data.table reserves for it.
+    if (parts.each_i && parts.i.is_none()) || columns.iter().any(|column| column.name == "_nqgrp_")
+    {
+        return Ok(None);
+    }
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
     {
@@ -213,8 +219,9 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     if grouped && height == 0 {
         return Ok(None);
     }
-    // `keyby` with `:=` sets the key on `x` afterwards, or is an error when `i` is given.
-    if assigning && parts.keyed {
+    // `keyby` with `:=` sets the key on `x` afterwards, or is an error when `i` is given, and
+    // data.table warns that it ignores `nomatch` with `:=`.
+    if assigning && (parts.keyed || parts.nomatch.is_some()) {
         return Ok(None);
     }
     // Inside data.table, only grouped aggregations are worth the engine (`dcast` aggregates this
@@ -239,6 +246,22 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     };
     // Without `on =`, data.table joins on the key, and a keyed subject declines.
     if matches!(rows, Rows::Join(_)) && parts.on.is_none() {
+        return Ok(None);
+    }
+    // data.table's `.EACHI` over a non-equi join reports the bounds of `i` in the join columns,
+    // and a join column read in its `j` is not the matched rows' values; both differ from the
+    // engine's answer.
+    if let Rows::Join(join) = &rows
+        && join.each_i
+        && (join.on.iter().any(|on| on.op != Comparison::Equal) || {
+            let read = Query {
+                select: select.clone(),
+                ..Query::default()
+            };
+            query::referenced_columns(&read)
+                .is_none_or(|read| join.on.iter().any(|on| read.contains(&on.x)))
+        })
+    {
         return Ok(None);
     }
     let query = Query {
@@ -313,8 +336,23 @@ unsafe fn grouping_conflicts(call: Sexp, columns: &[SubjectColumn]) -> bool {
     const SPECIAL: [&str; 7] = [".N", ".I", ".SD", ".BY", ".GRP", ".NGRP", ".EACHI"];
     let mut by = None;
     let mut keyby = None;
-    for (tag, value) in values::pairlist_items(call.cdr().cdr()) {
+    let items = values::pairlist_items(call.cdr().cdr());
+    // `x[i, j, by]` passes the grouping as the positional argument after `i` and `j`, so its
+    // position depends on how many of those two are named.
+    let named_before = items
+        .iter()
+        .filter(|(tag, _)| {
+            tag.kind() == SexpType::Symbol
+                && matches!(values::symbol_name(*tag).as_ref(), "i" | "j")
+        })
+        .count();
+    let mut position = 0;
+    for (tag, value) in items {
         if tag.kind() != SexpType::Symbol {
+            position += 1;
+            if position + named_before == 3 {
+                by = Some(value);
+            }
             continue;
         }
         match values::symbol_name(tag).as_ref() {
@@ -386,6 +424,7 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
     let term_agrees = |function: &str, column: ColumnType, extra: bool| match function {
         "median" | "var" | "sd" | "prod" => false,
         "mean" => !(extra && column == ColumnType::Double),
+        "min" | "max" => column != ColumnType::Factor,
         _ => true,
     };
     if gforce && let Some(terms) = gforce_terms(j, schema) {
@@ -557,6 +596,19 @@ unsafe fn reduces(expression: Sexp, schema: &Schema) -> bool {
     match frame::call_head(expression).as_deref() {
         Some("sum") if sums_exactly(expression, schema) => return false,
         Some("sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply") => return true,
+        // data.table orders an ordered factor by its levels and rejects an unordered one,
+        // and the engine keeps no such distinction.
+        Some("min" | "max")
+            if values::pairlist_items(expression.cdr())
+                .first()
+                .is_some_and(|(_, argument)| {
+                    argument.kind() == SexpType::Symbol
+                        && schema.column(&values::symbol_name(*argument))
+                            == Some(ColumnType::Factor)
+                }) =>
+        {
+            return true;
+        }
         _ => {}
     }
     reduces(expression.car(), schema)

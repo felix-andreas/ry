@@ -1943,13 +1943,16 @@ impl Lowering<'_> {
                 .position(|(column, _)| column == name)
         };
         let (from, to) = (position(&symbol_name(from))?, position(&symbol_name(to))?);
-        let (from, to) = if from <= to { (from, to) } else { (to, from) };
-        Some(
-            self.schema.columns[from..=to]
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
-        )
+        let (low, high) = (from.min(to), from.max(to));
+        let mut range: Vec<PlSmallStr> = self.schema.columns[low..=high]
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        // `c:a` runs backwards, as `3:1` does.
+        if from > to {
+            range.reverse();
+        }
+        Some(range)
     }
 
     unsafe fn assignments(&self, expression: Sexp) -> R<Option<Select>> {

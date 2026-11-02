@@ -3751,6 +3751,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         }
         return Ok(nil());
     }
+    if !object.kind().is_vector() && object.kind() != SexpType::Pairlist {
+        return Err(call.error(format!(
+            "attempt to replicate an object of type '{}'",
+            crate::coerce::type_name(object)
+        )));
+    }
     if count == 0 && length_out.is_none() {
         return values::duplicate(object);
     }
