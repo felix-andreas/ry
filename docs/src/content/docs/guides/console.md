@@ -29,9 +29,34 @@ owner    character
 
 ## Debugging and viewing data
 
+`browser()` stops the console at a `Browse[1]>` prompt, as in R. A line you type there runs in the
+stopped function and prints its value, `n` runs the next statement, `s` steps into a call, `f`
+finishes the current function, `c` continues, `Q` abandons the command, and `where` shows the
+call stack:
+
+```
+> f <- function(x) {
++   y <- x + 1
++   browser()
++   y * 2
++ }
+> f(1)
+debug at #3: browser()
+Browse[1]> y
+[1] 2
+Browse[1]> n
+debug at #4: y * 2
+Browse[1]> c
+[1] 4
+```
+
+An editor can take over a stopped program: run "ry: Attach to Console" in VS Code while the
+prompt waits, and the editor shows the stop with its variables and steps from there.
+
 `debug(f)` and `debugonce(f)` stop in `f` the next time it is called, and `trace()` works as in R.
-Stopping needs a debugger attached from your editor: in VS Code, run "ry: Attach to Console" (see
-[editors](/guides/editors#running-and-debugging)); without one, `f` runs as usual. The same connection lets `View(df)` open the
+These stops need a debugger attached from your editor (see
+[editors](/guides/editors#running-and-debugging)); without one, `f` runs as usual. In a script
+that `ry run file.R` runs, `browser()` does nothing, as in a non-interactive R session. The editor's connection also lets `View(df)` open the
 editor's data viewer and gives hover and completion the console's live values. Without an editor,
 `View()` stops with an error that says how to connect one.
 
@@ -53,6 +78,12 @@ ry run script.R a b  # on ry's runtime
 ```
 
 `-i script.R` runs the script and then opens the console instead of exiting.
+
+## Help
+
+`?mean`, `help("mean")` and `help(package = "stats")` print R's help pages as in GNU R. With
+`help_type = "html"` or `help.start()`, ry's runtime starts R's help server and opens the page in
+your browser; the server answers while the console waits for input, as GNU R's does.
 
 ## Typed code at the console
 

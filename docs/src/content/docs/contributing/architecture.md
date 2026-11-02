@@ -183,6 +183,11 @@ wall time. Several of them are worth knowing:
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
+  borrows the item's checks and the stub schemes instead of cloning them. The parser's green
+  builder shares tokens through a thread-local table but not nodes (`TreeBuilder`): hashing every
+  node to find a twin cost more time than allocating it, at the price of about 70 MiB more peak
+  memory on the finance benchmark.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
   only before a line that opens a call and follows a line that is exactly one complete top-level
   call, so no directive straddles a boundary.

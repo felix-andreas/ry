@@ -43,7 +43,11 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("octsize", do_octal_size),
     ("charClass", do_char_class),
     ("flushconsole", do_flush_console),
-    ("processevents", |_| Ok(nil())),
+    ("processevents", |_| {
+        // SAFETY: `process.events()` is a point where GNU R's event loop runs R handlers.
+        unsafe { crate::help_server::serve_pending()? };
+        Ok(nil())
+    }),
     ("tzcode_type", |_| unsafe { scalar_string("internal") }),
     // GNU R for Windows' console routines, for a session without its GUI: `Rterm`'s answers.
     ("winver", |_| unsafe {

@@ -9,9 +9,9 @@ references: 0..5*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `sales`
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (9): sales, sample, sample.int, sapply, save, save.image, savehistory, savePlot
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -25,7 +25,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -42,7 +42,7 @@ parameters: [x: character] | [as.factor]: logical
 signature: fn(x: Any, [as.factor]: logical) -> Any
 parameters: [x: Any] | [as.factor]: logical
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -56,7 +56,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (18): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -70,10 +70,10 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `u`
-  edit 62..62 -> "#: integer[]\n"
+  edit 63..63 -> ": integer[]"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
-  edit 62..62 -> "#: integer[]\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
+  edit 63..63 -> ": integer[]"
 completion (1): units
 hint @5: DataFrame{region: character[], units: integer[]}
 hint @63: integer[]
@@ -91,10 +91,10 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `v`
-  edit 18..18 -> "#: double\n"
+  edit 19..19 -> ": double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{x: double, y: double}\n"
-  edit 18..18 -> "#: double\n"
+  edit 1..1 -> ": Record{x: double, y: double}"
+  edit 19..19 -> ": double"
 completion (1): x
 hint @1: Record{x: double, y: double}
 hint @19: double
@@ -116,9 +116,9 @@ calls helper: in r [R/b.R:5..11], s [R/c.R:5..11] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `r`
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 completion (6): help, helper, help.request, help.search, help.start, .__C__MethodSelectionReport
 hint @1: integer
 
@@ -131,9 +131,13 @@ references: 14..19*, 26..31
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T> fn([alpha]: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 25..25 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn([alpha]: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 25..25 -> " -> T"
 completion (22): alpha, alarm, alias, alist, all, all.equal, all.equal.character, all.equal.default
 hint @1: <T> fn([alpha]: T) -> T
 
@@ -172,7 +176,10 @@ rename: none
 signature: <T, U> fn(first: T, second: U = 2L) -> T
 parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
+  edit 18..18 -> "<T, U>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 38..38 -> " -> T"
 completion (82): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 hint @52first =
@@ -200,9 +207,13 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 completion (128+): result, value, f, break, else, FALSE, for, function
 hint @1: <T> fn(value: T) -> T
 
@@ -217,7 +228,11 @@ rename: none
 signature: fn(first: integer, second: integer = 2L, third: integer = 3L) -> integer
 parameters: first: integer | [second: integer = 2L] | third: integer = 3L
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
+  edit 18..18 -> "<T, U, V>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 44..44 -> ": V"
+  edit 50..50 -> " -> T"
 completion (128+): second = , third = , helper, break, else, FALSE, for, function
 hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
 
@@ -232,7 +247,11 @@ rename: none
 signature: <T, U, V> fn(first: T, second: U = 2L, third: V = 3L) -> T
 parameters: [first: T] | second: U = 2L | third: V = 3L
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
+  edit 18..18 -> "<T, U, V>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 44..44 -> ": V"
+  edit 50..50 -> " -> T"
 completion (128+): first = , second = , helper, break, else, FALSE, for, function
 hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
 
@@ -247,7 +266,10 @@ rename: none
 signature: <T, U> fn(first: T, second: U = 2L) -> T
 parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
+  edit 18..18 -> "<T, U>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 38..38 -> " -> T"
 completion (128+): helper, break, else, FALSE, for, function, if, in
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 
@@ -262,9 +284,9 @@ rename: 1 edit(s)
 type-definition: stub source base at `data.frame`
 signature: none
 action: Add inferred type annotation for `frame`
-  edit 0..0 -> "#: data.frame\n"
+  edit 5..5 -> ": data.frame"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: data.frame\n"
+  edit 5..5 -> ": data.frame"
 completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head
 hint @5: data.frame
 
@@ -279,8 +301,8 @@ rename: 1 edit(s)
 type-definition: stub source base at `matrix`
 signature: none
 action: Add inferred type annotation for `grid`
-  edit 0..0 -> "#: matrix\n"
+  edit 4..4 -> ": matrix"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: matrix\n"
+  edit 4..4 -> ": matrix"
 completion (17): grid, graphics.off, gray, gray.colors, grconvertX, grconvertY, gregexec, gregexpr
 hint @4: matrix

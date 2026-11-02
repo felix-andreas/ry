@@ -66,8 +66,11 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 - **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
   read bundled files at load time (`.onLoad`) fail until this exists.
-- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` sources them itself,
-  but `load_all()` followed by interactive use of a helper does not see it.
+- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` (and so `ry test`)
+  sources them itself, but `load_all()` followed by interactive use of a helper does not see it.
+- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
+  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
+  or `src/` does not trigger a rerun.
 - **Importers of a development package keep stale copies** of its changed bindings; only one
   development package reloads at a time. r-runtime.md section 6 describes the targeted update.
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
@@ -156,8 +159,30 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is back down to 98. About 20 of the rest are true bugs in the packages; most of the
-others are false reports on correct R. The classes:
+lifecycle, and is down to 75. About 22 of the rest are true bugs in the packages (NlcOptim calls the
+matrices `indall` and `A` as functions); the other 53
+or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
+packages (`tools/bench/generate.py`) report nothing. The classes:
+
+- **A parameter passed as `FUN` to a `match.fun` caller is inferred as a function** (kernlab
+  `apply(x, 2, var)` beside a formal `var = 1`, diffobj `lapply(hunk[nm], op, n)` with `op` one
+  of `"head"` and `"tail"`). `match.fun` takes a string, and looks a non-function binding's
+  symbol up with `mode = "function"`, so the later `var < 10^-3` or `op == "tail"` is reported.
+  Leaving the parameter open there would lose `function(xs, f) lapply(xs, f)`'s inferred
+  `f: fn(T) -> U`, so the fix needs a union-shaped inference (`fn(T) -> U | character`).
+- **A return chosen by a flag default keeps both branches** (DistributionUtils `pDist(...,
+  valueOnly = TRUE)` ends in `if (valueOnly) prob else list(value = prob, error = err)`, 3
+  reports). A call that omits the flag gets the default's branch in R, but the signature has one
+  return type; specializing needs the interface to keep the per-branch returns.
+- **An inferred callback's `logical` parameter rejects a number** (gmp `lapply(0:(n-1L),
+  Eulerian, n = n)`). A direct call passes `integer` to an inferred `logical` parameter
+  (`fits_inferred_scalar`), but the callback check in `function_compatible` has no such leniency.
+- **A string passed to an inferred condition parameter is reported** (renv `not(check)` with
+  `check <- Sys.getenv(..., unset = "TRUE")`). `if` reads `"TRUE"` through `as.logical`, but
+  `&&` and `!` reject a string, and the inferred `logical` does not record which use bound it.
+- **Free names that R6 or withr inject read as base functions** (R6 `if (class)` in
+  `generator_funs$new`, which R6 reparents onto the generator; withr's `wrap()` template reads
+  `append`). The same shape is a true bug in gmp (`if (log)` with no `log` formal).
 
 - **True bugs the corpus run reports, left as reported.** kernlab `ramloss(...)` is a typo for
   `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2) and
@@ -441,7 +466,6 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **Operators do not dispatch per member of a union.** `m >= 0` works through `Compare.matrix` and `x >= 0` works for a double, but a `matrix | double` operand is refused, which matters because `PerformanceAnalytics::maxDrawdown` truly returns that union. `#: fn(x: matrix | double) -> logical` over `f <- function(x) x >= 0` gives `` expected a comparable value (numeric, `character`, or `logical`), found `matrix | double` ``.
 - **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
   ```r
   #: fn() -> double
@@ -499,12 +523,8 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **S4 slots and generics are untyped.** A slot read is `Unknown` even on `Any` (`out <- b@v` with `b: Any` gives `` could not determine the type of `out` ``), slots of a class with a `representation` are not typed, and a generic made by `setGeneric("scale_by", ...)` is silently `Any` at its call sites (`out <- scale_by(q, 2)` returned as `double` checks clean).
 - **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
 - **The summary counts checked files, not files with problems.** A project with one finding in `R/a.R` and two clean files prints `1 problem in 3 files`.
-- **Vectorised and matrix math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, `[.matrix` is undeclared, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``, and `current <- rates[t, ]` gives `` could not determine the type of `current` ``.
+- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``.
 
-- **A function literal passed to a parameter typed `fn(...: Any) -> Any` leaves its own parameters `Unknown`.** `plumber::pr_post(router, "/p", function(req) handle(card, req$postBody))` reports `Unknown` on `req$postBody`; a `...: Any` context should type the literal's parameters `Any`. The typed data science bench binds the closure to an annotated local instead.
-- **The polars stubs cannot declare `$` methods**, so `frame$select(...)` is `Unknown`; the typed data science bench binds each method to an `@if-unknown` local. `$.class` dispatch (`decisions.md`, "`$`, `[` and `[[` dispatch to a class's subset method") could carry them.
-- **An operator mismatch prints an uninstantiated type variable.** With a scalar `+.Date`, `start + sample(0:90, n, replace = TRUE)` printed `` `+` is not defined between `Date` and `T[]` `` instead of `integer[]`.
-- **An annotation absorbs an `Unknown` only as the whole right-hand side.** `#: double[]` above `x <- as.numeric(d$age)` still reports `d$age`, so typed benches split such reads into their own annotated locals.
 
 ## Open: the JIT
 
@@ -565,10 +585,18 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
-- **`.Random.seed` is reread on every RNG call** (`crates/interp/src/random.rs`, `from_words`, about
-  4,400 instructions per `rnorm` call), as GNU R does. Caching the state against the binding's
-  identity would make `vasicek` match GNU R; it is still about 10% behind, with `qnorm` and the
-  twister refill the rest of the cost.
+- **First-call compiles stop at builtins and subscripts.** A fully typed closure compiles at its
+  first call from its signature (`decisions.md`, "the JIT tier"), but a body that calls a builtin
+  or subscripts a value has no result type until feedback arrives, so `vasicek_paths` is refused
+  as COLD at its first call. Its loop runs 2,000 iterations, under the 10,000 back-edge threshold,
+  so it stays in tier 0. Result types for common builtins (`length`, `numeric`, `matrix`, `sqrt`,
+  `rnorm`) and for `[` on typed vectors would let it compile at the first call.
+- **Cold-code cost of typing is unmeasured.** finbench's typed variant uses `#:` comments, which
+  never reach the runtime, so measuring typed against untyped with the JIT on needs an
+  inline-annotated variant (or the strict session's typed finbench) first.
+- **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
+  `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
+  `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
 - **One oracle case fails under both `ry` and `ry-jit`** (`stats__lbfgsb` differs from GNU R
   in late digits), so it is a native gap, not a JIT one. Run the oracle against a release build with `ORACLE_RY=target/release/ry` after building
   both `ry-lang` and `libr`: the JIT lives in `libR`, so building `ry-lang` alone tests a stale JIT.
@@ -623,6 +651,17 @@ change that does not pay.
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
+
+### A first strict `ry load` costs the strict check's wall time
+
+- On typed finbench (4 cores), a load with a cold verdict takes 2.2 to 2.6 s, against 0.6 to 1.0 s untyped and 0.55 s for either once warm. The load overlaps the check (`decisions.md`, "The strict load check overlaps the runtime start"), so the gap is the check alone: about 1.9 s wall and 4.3 CPU-s for 380,000 lines, half of it type checking and a quarter rendering diagnostics and lints that the verdict never shows.
+- Levers, largest first: a verdict-only pass that stops rendering and linting and only asks whether any strict error exists; reusing a `ry check` record (`.ry_cache/check.json`) when it covers the `R/` files under the same configuration, which needs the record to tell an `R/`-only resolution from a whole-project one; and the type checker's own per-item cost.
+
+### Corpus reports that more precise types now reach
+
+- `if (identical(info, NA)) stop(...)` does not remove the `NA` member, so httr's `oauth_listener(url)$code` reports `$` on `logical | list[Any] | NULL`. Removing `logical` is unsound for `TRUE` in general, so it needs a literal `NA` member or a sentinel rule.
+- knitr's `split_file()` infers a `character` member in its groups, so `lapply(groups, function(g) g$params)` matches no overload (`R/output.R`).
+- gt's `vapply(..., FUN.VALUE = character(1))` callbacks return `character | NULL` (`R/fmt.R`, `R/helpers.R`, `R/utils_render_latex.R`).
 
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
@@ -2318,7 +2357,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
   out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
   with a release build.
-- **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+- **Default-package routines still failing on purpose:** tools' `parseLatex`, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
   unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
@@ -3005,17 +3044,28 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - More quick fixes: a missing `library()` for a namespaced name.
 - Semantic tokens: coloring of `$` fields and frame columns.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
-  tabs, and `browser()` in code without a srcref does not stop.
+  tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
-  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`.
-- `browser()` typed at a console with no debugger attached runs past instead of giving GNU R's
-  text `Browse>` prompt.
-- The data viewer has no sorting, filtering or column search; each would be a request the
-  runtime answers per page (`interp::viewer`), never a client-side copy of the data.
+  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`,
+  which waits for a Windows runner to test it on.
+- The `Browse[1]>` prompt always shows depth 1 (GNU R counts nested browsers), and `where` names
+  frames by function, not by call as GNU R does.
+- The data viewer filters by one text over all columns and sorts by one column; per-column
+  filters (a numeric range, a factor level) and multi-column sorts would extend the `ryTable`
+  request the same way.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+- Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
+  httr2 (`pkg::name`, `$` field, argument name, call head, variable):
+  - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to
+    its `list(name = ...)` or `x$name <- ...` site; R6 `self$`/`private$` members are most of them.
+  - Goto and hover on calls into imported packages with no stub (rlang's `is_null`, `enquos`;
+    lifecycle) answer nothing; purrr's call heads answer 74%. More stubs, or reading an installed
+    package's R source for navigation, would close it.
+  - A named argument that R completes by partial matching (`f(fac = 1)` for `factor`) is not
+    linked to its parameter, so a parameter rename leaves it behind.
 - Not done from rust-analyzer's list, with the reason:
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.

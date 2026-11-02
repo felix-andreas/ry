@@ -183,8 +183,12 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     let state = &mut interp().bytecode;
     let calls = state.calls.entry(body).or_insert(0);
     *calls += 1;
-    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes.
-    if *calls < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
+    // so does a typed one, whose signature lets the JIT compile it at that call too.
+    if *calls < COMPILE_AFTER_CALLS
+        && !contains_loop(body, LOOP_SEARCH_DEPTH)
+        && !crate::annotations::is_typed(function)
+    {
         if state.calls.len() > MAX_TRACKED_BODIES {
             state.calls.clear();
         }
