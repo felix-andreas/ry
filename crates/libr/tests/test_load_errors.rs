@@ -2,6 +2,9 @@
 //! caller as an ordinary error, as in GNU R. The jump leaves the dynamic loader's lock with
 //! the jumping thread, so this binary runs on the main thread (`harness = false`), as ry's
 //! runtime does: the lock is recursive, so later loads and the exit handlers still run.
+//!
+//! GNU R's `tcltk.so` is compiled against GNU R's internal object layout, so ry refuses it as a
+//! GNU R built without Tcl/Tk would, before the loader ever opens it.
 
 mod harness;
 
@@ -19,6 +22,14 @@ fn main() {
         "{error}"
     );
     assert_eq!(r.runtime_protect_depth(), 0);
+    let tcltk = r.string("/usr/lib/R/library/tcltk/libs/tcltk.so");
+    let error = r
+        .eval("dyn.load", &[(None, tcltk)])
+        .expect_err("GNU R's tcltk library is refused");
+    assert!(
+        error.contains("Tcl/Tk support is not available on this system"),
+        "{error}"
+    );
     r.load(&build_package("rytest", Headers::Ry));
     println!("test_load_errors: ok");
 }

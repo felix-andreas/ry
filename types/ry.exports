@@ -25,6 +25,7 @@ DataFrame.height
 DataFrame.join
 DataFrame.join_asof
 DataFrame.lazy
+DataFrame.pivot
 DataFrame.read_csv
 DataFrame.read_parquet
 DataFrame.schema
@@ -75,6 +76,8 @@ Expr.max
 Expr.mean
 Expr.median
 Expr.min
+Expr.over
+Expr.rank
 Expr.std
 Expr.sum
 Expr.var
@@ -89,6 +92,7 @@ LazyFrame.group_by
 LazyFrame.head
 LazyFrame.join
 LazyFrame.join_asof
+LazyFrame.pivot
 LazyFrame.scan_csv
 LazyFrame.scan_parquet
 LazyFrame.select
@@ -318,3 +322,7 @@ Str.walk_utf8_with_index
 Str.with_ascii_lowercased
 Str.with_ascii_uppercased
 Str.with_prefix
+DataFrame.pivot
+Expr.over
+Expr.rank
+LazyFrame.pivot

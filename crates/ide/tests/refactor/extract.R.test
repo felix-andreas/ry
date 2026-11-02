@@ -1,0 +1,327 @@
+#==== extract_variable
+#---- argument_expression
+f <- function(a, b) {
+  total <- sum($0a * b$1, na.rm = TRUE)
+  total
+}
+#++++
+action Extract into variable
+  f <- function(a, b) {
+    value <- a * b
+    total <- sum(value, na.rm = TRUE)
+    total
+  }
+action Extract into function
+  extracted <- function(a, b) a * b
+
+  f <- function(a, b) {
+    total <- sum(extracted(a, b), na.rm = TRUE)
+    total
+  }
+
+#---- top_level_call
+report <- paste("n =", $0nrow(cars)$1)
+#++++
+action Extract into variable
+  value <- nrow(cars)
+  report <- paste("n =", value)
+action Extract into function
+  extracted <- function() nrow(cars)
+
+  report <- paste("n =", extracted())
+
+#---- fresh_name_avoids_a_clash
+f <- function(value) {
+  g($0value + 1$1)
+}
+#++++
+action Extract into variable
+  f <- function(value) {
+    value2 <- value + 1
+    g(value2)
+  }
+action Extract into function
+  extracted <- function(value) value + 1
+
+  f <- function(value) {
+    g(extracted(value))
+  }
+
+#---- not_in_a_lazy_operand
+f <- function(x) {
+  ok <- is.null(x) || $0length(x) == 0$1
+  ok
+}
+#++++
+action Extract into function
+  extracted <- function(x) length(x) == 0
+
+  f <- function(x) {
+    ok <- is.null(x) || extracted(x)
+    ok
+  }
+
+#---- not_in_an_if_branch
+f <- function(x) {
+  if (x > 0) $0log(x)$1 else 0
+}
+#++++
+action Extract into function
+  extracted <- function(x) log(x)
+
+  f <- function(x) {
+    if (x > 0) extracted(x) else 0
+  }
+
+#---- if_condition_is_fine
+f <- function(x) {
+  if ($0x > 0$1) log(x) else 0
+}
+#++++
+action Extract into variable
+  f <- function(x) {
+    value <- x > 0
+    if (value) log(x) else 0
+  }
+action Extract into function
+  extracted <- function(x) x > 0
+
+  f <- function(x) {
+    if (extracted(x)) log(x) else 0
+  }
+
+#---- not_inside_quote
+f <- function() {
+  quote($0a + b$1)
+}
+#++++
+no refactors
+
+#---- partial_expression
+f <- function(a, b, c) {
+  a + $0b + c$1
+}
+#++++
+no refactors
+
+#==== extract_function
+#---- statements_with_parameters_and_output
+summarise <- function(values, weights) {
+  $0scaled <- values * weights
+  total <- sum(scaled)$1
+  total / length(values)
+}
+#++++
+action Extract into function
+  extracted <- function(values, weights) {
+    scaled <- values * weights
+    total <- sum(scaled)
+    total
+  }
+
+  summarise <- function(values, weights) {
+    total <- extracted(values, weights)
+    total / length(values)
+  }
+action Inline variable `scaled`
+  summarise <- function(values, weights) {
+    total <- sum(values * weights)
+    total / length(values)
+  }
+
+#---- single_expression
+area <- function(radius) {
+  $0pi * radius^2$1
+}
+#++++
+action Extract into function
+  extracted <- function(radius) {
+    pi * radius^2
+  }
+
+  area <- function(radius) {
+    extracted(radius)
+  }
+
+#---- two_outputs_are_refused
+f <- function(x) {
+  $0a <- x + 1
+  b <- x + 2$1
+  a + b
+}
+#++++
+action Inline variable `a`
+  f <- function(x) {
+    b <- x + 2
+    x + 1 + b
+  }
+
+#---- return_is_refused
+f <- function(x) {
+  $0if (x < 0) return(NA)
+  y <- sqrt(x)$1
+  y
+}
+#++++
+no refactors
+
+#---- top_level_assignment_is_refused
+$0rate <- 0.05$1
+grow <- function(x) x * (1 + rate)
+#++++
+action Inline variable `rate`
+  grow <- function(x) x * (1 + 0.05)
+
+#---- top_level_expression
+$0print(head(cars))$1
+#++++
+action Extract into function
+  extracted <- function() {
+    print(head(cars))
+  }
+
+  extracted()
+
+#---- superassignment_is_refused
+counter <- function() {
+  count <- 0
+  function() {
+    $0count <<- count + 1$1
+    count
+  }
+}
+#++++
+no refactors
+#==== extract_keeps_evaluation
+#---- loop_write_read_on_next_pass
+f <- function(x) {
+  while (x > 1) {
+    $0x <- x / 2$1
+  }
+  x
+}
+#++++
+action Extract into function
+  extracted <- function(x) {
+    x <- x / 2
+    x
+  }
+
+  f <- function(x) {
+    while (x > 1) {
+      x <- extracted(x)
+    }
+    x
+  }
+
+#---- loop_write_read_earlier_in_body
+f <- function(x) {
+  for (i in 1:3) {
+    print(x)
+    $0x <- i$1
+  }
+}
+#++++
+action Extract into function
+  extracted <- function(x, i) {
+    x <- i
+    x
+  }
+
+  f <- function(x) {
+    for (i in 1:3) {
+      print(x)
+      x <- extracted(x, i)
+    }
+  }
+
+#---- handler_argument
+f <- function() {
+  tryCatch($0stop("boom")$1, error = function(e) NA)
+}
+#++++
+action Extract into function
+  extracted <- function() stop("boom")
+
+  f <- function() {
+    tryCatch(extracted(), error = function(e) NA)
+  }
+
+#---- switch_branch
+f <- function(k) {
+  switch(k, b = $0expensive()$1)
+}
+#++++
+action Extract into function
+  extracted <- function() expensive()
+
+  f <- function(k) {
+    switch(k, b = extracted())
+  }
+
+#---- data_mask
+f <- function(df) {
+  dplyr::filter(df, $0col > 1$1)
+}
+#++++
+no refactors
+
+#---- data_table_index
+f <- function(d) {
+  d[$0x > 1$1, ]
+}
+#++++
+no refactors
+
+#---- later_operand_with_earlier_call
+f <- function(x) {
+  y <- g() + $0f(x)$1
+  y
+}
+#++++
+action Extract into function
+  extracted <- function(x) f(x)
+
+  f <- function(x) {
+    y <- g() + extracted(x)
+    y
+  }
+
+#---- above_the_annotation
+#: double
+x <- sqrt($01 + 2$1)
+#++++
+action Extract into variable
+  value <- 1 + 2
+  #: double
+  x <- sqrt(value)
+action Extract into function
+  extracted <- function() 1 + 2
+
+  #: double
+  x <- sqrt(extracted())
+action Convert to inline annotation
+  x: double <- sqrt(1 + 2)
+
+#---- multi_line_string_keeps_its_lines
+f <- function() {
+  $0s <- "a
+b"
+  print(s)$1
+}
+#++++
+action Extract into function
+  extracted <- function() {
+    s <- "a
+  b"
+    print(s)
+  }
+
+  f <- function() {
+    extracted()
+  }
+action Inline variable `s`
+  f <- function() {
+    print("a
+  b")
+  }

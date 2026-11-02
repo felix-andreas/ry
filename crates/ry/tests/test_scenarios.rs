@@ -628,6 +628,40 @@ impl Journey {
                     .ok_or(format!("no code action titled `{title}`: {response}"))?;
                 self.apply_workspace_edit(&action["edit"])
             }
+            ["refactor", path, selection, title] => {
+                let actions = self.code_actions(path, selection, "all")?;
+                let action = actions
+                    .iter()
+                    .find(|action| action["title"].as_str() == Some(title))
+                    .ok_or(format!(
+                        "no refactoring titled `{title}` over `{selection}`: {actions:?}"
+                    ))?;
+                self.apply_workspace_edit(&action["edit"])
+            }
+            ["expect", "action", path, selection, only, title] => {
+                let actions = self.code_actions(path, selection, only)?;
+                match actions
+                    .iter()
+                    .any(|action| action["title"].as_str() == Some(title))
+                {
+                    true => Ok(()),
+                    false => Err(format!(
+                        "asking for `{only}` over `{selection}` offers no `{title}`: {actions:?}"
+                    )),
+                }
+            }
+            ["expect", "no", "action", path, selection, only, title] => {
+                let actions = self.code_actions(path, selection, only)?;
+                match actions
+                    .iter()
+                    .find(|action| action["title"].as_str() == Some(title))
+                {
+                    None => Ok(()),
+                    Some(action) => Err(format!(
+                        "asking for `{only}` over `{selection}` still offers {action}"
+                    )),
+                }
+            }
             ["expect", "fold", path, from, to] => {
                 let folds = self.request_at(RequestKind::FoldingRange, path, "", "")?;
                 let text = self.text_of(path)?;
@@ -1132,6 +1166,38 @@ impl Journey {
             self.find(path, anchor)?
         };
         self.request_offset(kind, path, offset, new_name)
+    }
+
+    /// The code actions over the first occurrence of `selection` in the buffer. `only` is a code
+    /// action kind such as `refactor.extract`, which limits the answer as an editor's refactor
+    /// menu does, or `all` for every kind.
+    fn code_actions(
+        &mut self,
+        path: &str,
+        selection: &str,
+        only: &str,
+    ) -> Result<Vec<Value>, String> {
+        let start = self.find(path, selection)?;
+        let text = self.text_of(path)?;
+        let range = lsp_types::Range::new(
+            position_of(&text, start, self.options.utf8),
+            position_of(&text, start + selection.len(), self.options.utf8),
+        );
+        let only = match only {
+            "all" => None,
+            kind => Some(vec![lsp_types::CodeActionKind::from(kind.to_owned())]),
+        };
+        let uri = self.uri(path);
+        let editor = self.editor();
+        let id = editor.code_action(&uri, range, only);
+        editor.settle();
+        match editor.take_response(id) {
+            Some(Ok(Value::Null)) => Ok(Vec::new()),
+            Some(Ok(Value::Array(actions))) => Ok(actions),
+            Some(Ok(value)) => Err(format!("the code action response is not a list: {value}")),
+            Some(Err(error)) => Err(format!("the code action request failed: {error:?}")),
+            None => Err("the code action request got no response from an idle server".to_owned()),
+        }
     }
 
     fn diagnostics(&mut self, path: &str) -> Result<Vec<String>, String> {

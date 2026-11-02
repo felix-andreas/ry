@@ -955,7 +955,16 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
                 let mut keep = vec![true; height];
                 for value in numbers {
                     let position = (-value) as usize;
-                    if position >= 1 && position <= height {
+                    if position > height {
+                        return Err(error_in(
+                            call,
+                            format!(
+                                "row {} is out of range for a DataFrame of {height} rows",
+                                format_position(value)
+                            ),
+                        ));
+                    }
+                    if position >= 1 {
                         keep[position - 1] = false;
                     }
                 }
@@ -1436,11 +1445,6 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
             }
         }
     }
-    Ok(parts)
-}
-
-/// Lowers the parts of a query.
-pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts, Plan)> {
     if let Some(expression) = parts.by.as_ref().and_then(Piece::expression)
         && expression.kind() == SexpType::Symbol
         && symbol_name(expression) == ".EACHI"
@@ -1448,6 +1452,11 @@ pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts
         parts.by = None;
         parts.each_i = true;
     }
+    Ok(parts)
+}
+
+/// Lowers the parts of a query.
+pub(crate) unsafe fn plan(parts: Parts, lowering: &Lowering<'_>) -> R<(Parts, Plan)> {
     let by = match &parts.by {
         Some(piece) => lowering.by(piece, parts.j.as_ref().and_then(Piece::expression))?,
         None => Some(Vec::new()),
@@ -1978,13 +1987,16 @@ impl Lowering<'_> {
                 .position(|(column, _)| column == name)
         };
         let (from, to) = (position(&symbol_name(from))?, position(&symbol_name(to))?);
-        let (from, to) = if from <= to { (from, to) } else { (to, from) };
-        Some(
-            self.schema.columns[from..=to]
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
-        )
+        let (low, high) = (from.min(to), from.max(to));
+        let mut range: Vec<PlSmallStr> = self.schema.columns[low..=high]
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        // `c:a` runs backwards, as `3:1` does.
+        if from > to {
+            range.reverse();
+        }
+        Some(range)
     }
 
     unsafe fn assignments(&self, expression: Sexp) -> R<Option<Select>> {

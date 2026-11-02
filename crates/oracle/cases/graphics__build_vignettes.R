@@ -1,3 +1,4 @@
+# oracle: requires knitr, rmarkdown
 # `R CMD build` builds vignettes with `tools::buildVignettes`, here a knitr vignette that plots.
 package <- file.path(tempfile(), "vigplot")
 dir.create(file.path(package, "vignettes"), recursive = TRUE)

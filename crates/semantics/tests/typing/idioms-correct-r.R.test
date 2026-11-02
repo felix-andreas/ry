@@ -1140,10 +1140,10 @@ none <- split_deps(FALSE)
 split_deps: <T> fn(dp: T) -> list{character[], character[]} | list{T, T}
 none: list{character[], character[]} | list{logical, logical}
 
-#---- a_list_branch_whose_variable_is_constrained_still_unifies
+#---- a_list_branch_keeps_a_constrained_variable_open
 pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
 #++++
-pair: fn(dp: integer) -> list{integer, integer}
+pair: <T: numeric> fn(dp: T) -> list{T, T} | list{integer, integer}
 
 #---- unlink_takes_a_vector_as_its_recursive_flag
 remove_paths <- function(paths) unlink(paths, recursive = dir.exists(paths) & rep(TRUE, 2))
@@ -1195,6 +1195,17 @@ step <- function(f, pars, arglist) {
 }
 #++++
 step: <T: numeric, U, V: numeric> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> V
+
+#---- a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed
+# AzureRMR calls `api_func(op, options = ...)` and then `api_func(op)`, relying on the callee's
+# default for `options`.
+fetch <- function(op, api) {
+  listed <- api(op, options = list(filter = "x"), version = "v1")
+  single <- api(op, version = "v1")
+  list(listed, single)
+}
+#++++
+fetch: <T, U> fn(op: T, api: fn(T, options: list{filter: character}, version: character) -> U) -> list{U, U}
 
 #---- a_callback_called_by_name_still_takes_no_extra_argument
 step <- function(f, pars, arglist) {
@@ -2095,7 +2106,7 @@ simplify <- function(x, reals = TRUE) Reduce(if (reals) merge_a else merge_b, la
 #++++
 merge_a: <T, U> fn(x: T, y: U) -> Unknown
 merge_b: <T, U> fn(x: T, y: U) -> Unknown
-simplify: <T, U> fn(x: T, [reals]: U) -> Unknown
+simplify: <T, U> fn(x: T, [reals]: U) -> list[Any]
 
 #---- a_fold_start_the_function_rejects_is_reported
 add <- function(count, value) count + 1L
@@ -2157,6 +2168,26 @@ use <- function(x) wrapper(x, valueOnly = FALSE)
 p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
 wrapper: <T: numeric> fn(x: T, ...: Any) -> double
 use: <T: numeric> fn(x: T) -> double
+
+#---- a_wrapper_that_forwards_to_reduce_folds_like_reduce
+reduce <- function(.x, .f, ..., .init) {
+  f <- function(x, y) .f(x, y, ...)
+  Reduce(f, .x, init = .init)
+}
+locations <- function(sizes) {
+  reduce(sizes, .init = list(0), function(output, input) {
+    n <- output[[1]]
+    c(output, list(seq(n + 1, n + input)))
+  })
+}
+starts <- function() reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")
+scaled <- function(xs) reduce(xs, function(total, item, scale) total + item * scale, 2, .init = 0)
+#++++
+reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
+locations: <T> fn(sizes: list[T] | T[]) -> list{double} | list[Unknown]
+starts: Unknown
+scaled: fn(xs: list[double] | double[]) -> double
+356..362 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_string_naming_the_reduce_function_is_accepted
 op <- "sum"

@@ -1,5 +1,6 @@
 use {
     clap::Parser,
+    loader::package_cache_path,
     ry::{
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Migrate, Mode, Runtime, resolve_runtime},
@@ -96,21 +97,35 @@ unsafe impl GlobalAlloc for Allocator {
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
+/// `mi_option_purge_delay` in mimalloc v3's `mi_option_e`, which `libmimalloc-sys` does not
+/// export as a constant either.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
 /// zeroing cost a cold check more time than parsing did. The first arena is reserved before
 /// `main`, so the option is set from a constructor, as a default that
 /// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
 /// same option in `crates/libr/src/libr.rs`.
+///
+/// The purge delay drops from mimalloc v3's default of a second to 10 ms, which is v2's default
+/// (a workspace build links v2, because `libr` asks for it). A cold check runs for
+/// about a second and frees its parse trees file by file, so with the default delay none of that
+/// memory went back to the OS before the peak, which added about 15 MiB to peak RSS on a
+/// 300,000-line project at no measurable cost in time.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static LAZY_ARENA_COMMIT: extern "C" fn() = {
-    extern "C" fn lazy_arena_commit() {
+static ALLOCATOR_OPTIONS: extern "C" fn() = {
+    extern "C" fn allocator_options() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe {
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, 10);
+        }
     }
-    lazy_arena_commit
+    allocator_options
 };
 
 fn main() -> ExitCode {
@@ -149,7 +164,7 @@ fn main() -> ExitCode {
         ..
     } = &cli.command
     {
-        return run_load(path, expressions, file.as_deref(), *runtime);
+        return run_load(path, "", expressions, file.as_deref(), *runtime);
     }
 
     if let Command::Test {
@@ -167,6 +182,15 @@ fn main() -> ExitCode {
             *watch,
             *runtime,
         );
+    }
+
+    if let Command::Document {
+        path,
+        roclets,
+        runtime,
+    } = &cli.command
+    {
+        return run_document(path, roclets, *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -254,6 +278,7 @@ fn main() -> ExitCode {
         | Command::Repl { .. }
         | Command::Load { .. }
         | Command::Test { .. }
+        | Command::Document { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -265,6 +290,59 @@ fn main() -> ExitCode {
         .expect("command thread should spawn")
         .join()
         .expect("command thread should not panic")
+}
+
+/// Drops this executable's resident code pages once the script's check is done. The check runs
+/// the analysis core, whose code is most of what the executable has resident (about 6 MB), and
+/// the script then runs in `libR` without returning to it. The pages are file-backed and
+/// unmodified, so dropping them loses nothing: the few the runtime's callbacks into the
+/// executable touch, and the check of a strict package the script loads, fault back in from the
+/// file. Under a debugger the pages may hold breakpoints written into private copies, which
+/// dropping would erase, so a traced process keeps them.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn release_executable_code() {
+    let traced = fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("TracerPid:"))
+            .is_some_and(|pid| pid.trim() != "0")
+    });
+    if traced {
+        return;
+    }
+    unsafe extern "C" fn release(
+        info: *mut libc::dl_phdr_info,
+        _size: libc::size_t,
+        _data: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        // SAFETY: the loader passes a valid description of one loaded object, and the first one
+        // it passes is the executable.
+        let info = unsafe { &*info };
+        let headers = unsafe { std::slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum.into()) };
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        for header in headers {
+            if header.p_type != libc::PT_LOAD || header.p_flags & libc::PF_X == 0 {
+                continue;
+            }
+            let start = (info.dlpi_addr + header.p_vaddr).next_multiple_of(page);
+            let end = (info.dlpi_addr + header.p_vaddr + header.p_filesz) / page * page;
+            if start < end {
+                // A failure leaves the pages resident, which is only a missed saving.
+                // SAFETY: the range is the executable's read-only, file-backed code.
+                unsafe {
+                    libc::madvise(
+                        start as *mut std::ffi::c_void,
+                        (end - start) as usize,
+                        libc::MADV_DONTNEED,
+                    )
+                };
+            }
+        }
+        1
+    }
+    // SAFETY: the callback only reads the loader's description and advises on its pages.
+    unsafe { libc::dl_iterate_phdr(Some(release), std::ptr::null_mut()) };
 }
 
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
@@ -285,17 +363,16 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
         return ExitCode::from(1);
     }
+    let flags = runtime_flags(preflight.config());
+    drop(preflight);
     match runtime {
-        Runtime::Ry => runtime_exit(checking_loads().and_then(|()| {
-            repl::run_on_ry_runtime(
-                Some(file),
-                None,
-                &arguments,
-                runtime_flags(preflight.config()),
-                None,
-                None,
-            )
-        })),
+        Runtime::Ry => {
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            release_executable_code();
+            runtime_exit(checking_loads().and_then(|()| {
+                repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
+            }))
+        }
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
             startup: vec![load::embedded_runtime()],
@@ -416,8 +493,6 @@ fn run_debug_adapter() -> ExitCode {
     runtime_exit(debug_adapter::run(runtime_flags(preflight.config())))
 }
 
-/// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
-/// it, and exits with the session's status.
 /// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
 fn run_test(
     path: &Path,
@@ -442,11 +517,45 @@ fn run_test(
         reporter = argument(reporter),
         watch = if watch { "TRUE" } else { "FALSE" },
     );
-    run_load(path, &[run], None, runtime)
+    run_load(path, "", &[run], None, runtime)
 }
 
+/// `ry load` with the code that runs roxygen2 against the lazily loaded namespace.
+fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> ExitCode {
+    let root = match load::package_root(path) {
+        Ok(root) => root,
+        Err(error) => {
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    let roclets = if roclets.is_empty() {
+        "NULL".to_owned()
+    } else {
+        let quoted: Vec<String> = roclets
+            .iter()
+            .map(|roclet| load::r_string(roclet))
+            .collect();
+        format!("c({})", quoted.join(", "))
+    };
+    let cache = package_cache_path(&root, "roxygen").map_or_else(
+        || "NULL".to_owned(),
+        |path| load::r_string(&path.to_string_lossy()),
+    );
+    let run = format!(
+        "({driver})({root}, {roclets}, {cache})",
+        driver = include_str!("document.R").trim_end(),
+        root = load::r_string(&root.to_string_lossy()),
+    );
+    // roxygen2 reads R6 methods' source references, so the load keeps source, as pkgload's does.
+    run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
+}
+
+/// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then
+/// `file` against it, and exits with the session's status.
 fn run_load(
     path: &Path,
+    prelude: &str,
     expressions: &[String],
     file: Option<&Path>,
     runtime: Option<Runtime>,
@@ -459,7 +568,7 @@ fn run_load(
         }
     };
     // A new session has nothing loaded, so its first load is always a full one.
-    let mut input = load::load_statement(&root, false);
+    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
     for expression in expressions {
         input.push('\n');
         input.push_str(expression);

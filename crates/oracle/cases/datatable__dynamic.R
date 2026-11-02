@@ -1,3 +1,4 @@
+# oracle: requires data.table
 # Queries whose `j` arrives through `eval()`, or with a primitive spliced in as the function, as
 # data.table's own `dcast` builds them, run on ry's engine with data.table's results.
 library(data.table)

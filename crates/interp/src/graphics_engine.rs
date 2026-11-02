@@ -506,7 +506,9 @@ unsafe fn open_default_device() -> R<()> {
     crate::heap().root(function);
     eval::apply(nil(), function, &[], values::global_env())?;
     if no_devices() {
-        return Err(error("no active or default device"));
+        return Err(error(
+            "no active device and default getOption(\"device\") is invalid",
+        ));
     }
     Ok(())
 }
@@ -1058,7 +1060,7 @@ pub const LINE_TYPES: [(&str, c_int); 7] = [
     ("dotted", 0x31),
     ("dotdash", 0x3431),
     ("longdash", 0x37),
-    ("twodash", 0x2262),
+    ("twodash", 0x2622),
 ];
 
 /// The line end and join names with their engine codes. A number picks from the first two
@@ -2801,30 +2803,14 @@ pub fn pretty_axis(low: &mut f64, high: &mut f64, divisions: &mut c_int) -> R<()
     Ok(())
 }
 
-// Mathematical annotation. ry does not lay out plotmath yet: an expression is measured and
-// drawn as the plain text of its deparse.
-
-unsafe fn expression_text(expression: Sexp) -> String {
-    let expression = if expression.kind() == SexpType::Expression && length(expression) > 0 {
-        expression.element(0)
-    } else {
-        expression
-    };
-    match expression.kind() {
-        SexpType::String => {
-            values::first_string(expression).map_or_else(String::new, |text| text.into_owned())
-        }
-        SexpType::Symbol => values::symbol_name(expression).into_owned(),
-        _ => crate::deparse::deparse_one_line(expression),
-    }
-}
+// Mathematical annotation, laid out by the plotmath port.
 
 pub unsafe fn expression_width(expression: Sexp, gc: &GEContext, dd: *mut GEDevDesc) -> R<f64> {
-    str_width(&expression_text(expression), gc, dd)
+    crate::plotmath::expression_width(expression, gc, dd)
 }
 
 pub unsafe fn expression_height(expression: Sexp, gc: &GEContext, dd: *mut GEDevDesc) -> R<f64> {
-    str_height(&expression_text(expression), gc, dd)
+    crate::plotmath::expression_height(expression, gc, dd)
 }
 
 pub unsafe fn expression_metric(
@@ -2832,7 +2818,7 @@ pub unsafe fn expression_metric(
     gc: &GEContext,
     dd: *mut GEDevDesc,
 ) -> R<[f64; 3]> {
-    str_metric(&expression_text(expression), gc, dd)
+    crate::plotmath::expression_metric(expression, gc, dd)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2846,7 +2832,7 @@ pub unsafe fn math_text(
     gc: &GEContext,
     dd: *mut GEDevDesc,
 ) -> R<()> {
-    text(x, y, &expression_text(expression), xc, yc, rotation, gc, dd)
+    crate::plotmath::math_text(x, y, expression, xc, yc, rotation, gc, dd)
 }
 
 // The display list.
