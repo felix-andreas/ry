@@ -113,6 +113,12 @@ bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/base/run.py {{ args }}
 
+# Times each List, Str, Dict and Result function on ry against its fastest GNU R equivalent (base R, purrr, stringr, stringi from R_LIBS_USER), e.g.
+# `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/stdlib/results.md`.
+bench-stdlib filter="" n="1e6" *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
+
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`.
 bench-table dir *args:

@@ -404,6 +404,19 @@ kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory`
 runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
 `RY_BENCH_RLIB` (default `~/R/library`).
 
+`just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
+n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
+the ratio ry / GNU R. The cases live in `tools/bench/stdlib`: `ry.R` holds ry's side and `gnu.R`
+the R alternatives in base R, purrr, stringr and stringi under the same case names, and the
+fastest alternative sets the bar. A callback function is compared with R's callback idioms
+(`vapply`, `Filter`, `Reduce`, a `for` loop, purrr), and a function on one string with R's
+vectorized string functions. Where ry's input is a vector, the case also runs it on an Array,
+ry's unboxed vector, and the faster of the two counts. Each case runs in its own process, so a case slower than
+`--timeout` shows as `timeout` without stopping the rest, and a `check` column compares
+checksums of both results. Packages load from `R_LIBS_USER`, and an alternative whose package is
+missing is skipped and named in the row. `--sort ratio` puts the slowest functions first, and
+`--write` saves the table, as in `tools/bench/stdlib/results.md`.
+
 ### Coverage-guided fuzzing
 
 `fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. Each target is a
