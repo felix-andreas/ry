@@ -4365,14 +4365,33 @@ check` releases its trees once, and memoized records are compact" below).
   ry's runtime is a second artifact (`libR.so`/`libR.dylib`) that links zlib, bzip2 and xz on
   Linux, which zig's glibc 2.17 sysroot does not carry, and macOS cross-linking has only
   libSystem stubs.
-- **Shape.** `.github/pending-release.yml` (moved into `.github/workflows/` by a maintainer)
-  builds each platform on its own runner with `just package VERSION`, smoke-tests the archive with
-  `tools/smoke-test.sh`, and publishes. `just package` is the one recipe CI and
-  `just release-dry-run` share, so a local dry run exercises the same packaging. An archive is
-  flat (`ry`, the runtime library, `LICENSE`), because `ry run` looks beside the executable first
-  and the Zed extension expects `ry` at the archive root; installers may move the library to
-  `../lib/ry/`, the other place ry looks. Windows archives carry `ry.exe` alone and use the MSVC
-  target, which native Windows runners build without MinGW.
+- **Shape.** `.github/workflows/release.yml` (staged in `.github/pending/workflows/` until a
+  maintainer moves it) builds each platform on its own runner with `just package VERSION`,
+  smoke-tests the archive with `tools/smoke-test.sh`, and publishes. `just package` is the one
+  recipe CI and `just release-dry-run` share, so a local dry run exercises the same packaging. An
+  archive is flat (`ry`, the runtime library, `ry-rcmd`, `LICENSE`), because `ry run` looks beside
+  the executable first, `ry load` finds `ry-rcmd` beside the runtime, and the Zed extension expects
+  `ry` at the archive root; installers may move the library to `../lib/ry/`, another place ry
+  looks.
+- **Targets.** Linux x86_64, macOS arm64 and Windows x86_64, the three the VS Code extension has
+  always bundled. Linux arm64 and Intel macOS were dropped for the first runtime release, because
+  their runtimes had never run anywhere; `ry.vsix` without a binary still serves them, and adding
+  a matrix row brings them back.
+- **Windows is `x86_64-pc-windows-gnullvm`, not MSVC.** The archive carries `ry.exe`, `R.dll` and
+  `ry-rcmd.exe`, built with MSYS2's clang64 toolchain, so all three link the UCRT as Rtools-built
+  package DLLs do and can share one C runtime with them. `just package` refuses a Windows binary
+  that imports a toolchain runtime the archive does not carry.
+- **The VS Code extension bundles the whole archive.** `just build-platform-vsix` copies every file
+  but `LICENSE` into `editors/code/bin`, so the bundled `ry` finds its runtime beside itself.
+- **Publishing.** The GitHub release uses the workflow's `GITHUB_TOKEN`. The extension goes to the
+  VS Code Marketplace only, by user decision; Positron and VSCodium users install the `.vsix` files
+  attached to the GitHub release, and there is no Open VSX step or token. The Marketplace step uses
+  trusted publishing (`vsce publish --oidc`, which needs vsce 4.1 and a policy on the publisher; packaging stays on the locked vsce 3.6, because 4.1 rejects bun's `node_modules` layout),
+  because the only token the Marketplace accepts is an Azure DevOps global PAT, and those are
+  retired on December 1, 2026. A `VSCE_PAT` secret, when set, is used instead, as a fallback.
+- **One version per release.** `just bump-version` sets the CLI to `X.Y.Z-beta` and both
+  extensions to `X.Y.Z`; the Zed extension's version used to be bumped by hand, which let it drift.
+  The news page is the release record, and the stale `CHANGELOG.md` was removed so there is one.
 - **Linux glibc floor.** Native builds on `ubuntu-22.04` need glibc 2.35, up from 2.17. Accepted
   for the beta; a manylinux-style container is the fix if users on older distributions ask.
 - **Nix.** The flake's toolchain comes from `rust-toolchain.toml` (rust-overlay's
@@ -5858,3 +5877,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** `library_candidates` (`crates/interp/src/linalg.rs`) tries, in order: the sonames, so `LD_LIBRARY_PATH` stays the user's override and a distribution's R gets the library it links; Accelerate on macOS; each library `BLAS_LIBS` (and for LAPACK, `LAPACK_LIBS` then `BLAS_LIBS`) names, in its `-L` directories and then by soname; and `R_HOME/lib/libRblas`/`libRlapack` last, because R's own libraries leave `xerbla_` to GNU R's `libR`. A candidate must define every routine of the table, so a BLAS tried for LAPACK is passed over. Opening LAPACK loads BLAS first, so a LAPACK whose BLAS sits in a directory of its own resolves the dependency by soname. A failure lists every place searched and the fix.
 - **One Makeconf reader.** `make_assignments` and `expand_make` live in `crates/rcmd/src/makeconf.rs`, which `interp` includes by path, as `repl` includes `gnu_r_home.rs`. `Toolchain::for_gnu_r_home` on Linux keeps the default compilers but takes `BLAS_LIBS` and `LAPACK_LIBS` from GNU R's `Makeconf` (`Toolchain::with_makeconf_libraries`), so compiled packages link the same libraries the interpreter loads.
 - **Impact.** No change where the sonames load. `La_library()` already reports the file the routines came from; `extSoftVersion()["BLAS"]` now does too. The candidate order is pinned by unit tests in `linalg.rs` and `rcmd.rs`.
+
+## CI runs `just gate` against GNU R 4.3.3, and nothing ignored
+
+- **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
+- **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R 4.3.3 is installed because the runtime's suites skip without an installation, which would leave the runtime untested; 4.3.3 is the oldest version the runtime supports and the one the suites are run against locally. The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
+- **Impact.** CI covers every crate except `zed_ry` (wasm), on every push to main and every pull request.

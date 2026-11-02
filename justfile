@@ -141,10 +141,13 @@ build *args:
 zigbuild $target *args:
     cargo zigbuild --target {{ target }} {{ args }}
 
-build-platform-vsix target vscode-target binary-name dir kind:
+# Package the VS Code extension for one platform from its unpacked archive in DIR/ry-TARGET. The
+# extension bundles everything but LICENSE (`ry`, the runtime and `ry-rcmd`), because the bundled
+# `ry` looks for its runtime beside itself.
+build-platform-vsix target vscode-target dir kind:
     rm -rf editors/code/bin
     mkdir -p editors/code/bin
-    cp {{ dir }}/ry-{{ target }}/{{ binary-name }} editors/code/bin
+    find {{ dir }}/ry-{{ target }} -maxdepth 1 -type f ! -name LICENSE -exec cp {} editors/code/bin/ \;
     just build-extension {{ kind }} --target {{ vscode-target }} --out ../../{{ dir }}/ry-{{ vscode-target }}.vsix
 
 build-extension $kind *args:
@@ -168,11 +171,12 @@ bump-version $version:
     vscode_version="${cli_version%%-*}"
     sed -i "s/\"version\": \"[a-zA-Z0-9._-]*\"/\"version\": \"$vscode_version\"/" editors/code/package.json
 
-    # The Zed extension ships no binary, so editors/zed/extension.toml is bumped by hand on
-    # its own version line.
+    # The Zed extension takes the same suffix-free version, so one release names one version in
+    # every channel.
+    sed -i "s/^version = \"[a-zA-Z0-9._-]*\"/version = \"$vscode_version\"/" editors/zed/extension.toml editors/zed/Cargo.toml
 
     cargo check # updates Cargo.lock
-    git add Cargo.toml Cargo.lock editors/code/package.json
+    git add Cargo.toml Cargo.lock editors/code/package.json editors/zed/extension.toml editors/zed/Cargo.toml
     git commit -m "chore: release {{ version }}"
 
 # Build a release archive into release/VERSION: `ry` and ry's runtime (libR) side by side. TARGET

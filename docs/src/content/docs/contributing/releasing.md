@@ -4,30 +4,71 @@ description: How a ry release is cut, what it ships, and the checklist to follow
 ---
 
 A release is one tag. Pushing a tag such as `0.4.0-beta` (no leading `v`), or starting the Release
-workflow by hand with that version, builds every platform's archive on its own runner, smoke-tests
-it, and publishes the GitHub release and the VS Code extension. The workflow is
-`.github/workflows/release.yml`; until a maintainer moves it there, it waits in
-`.github/pending-release.yml`, and there is no other release path.
+workflow by hand with that version, builds each platform's archive on its own runner, smoke-tests
+it, and then publishes the GitHub release and the VS Code extension. The workflow is
+`.github/workflows/release.yml`, and there is no other release path.
+
+## Enabling the workflows
+
+Agents cannot write to `.github/workflows/`, so they stage workflow files in `.github/pending/`,
+which mirrors the final layout. A maintainer moves everything staged there into place with one
+command from the repository root, then commits and pushes:
+
+```bash
+git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
+```
+
+`.github/pending/workflows/release.yml` becomes the release workflow, and
+`.github/pending/workflows/ci.yml` replaces the live CI workflow.
+
+## Credentials
+
+The GitHub release needs no secret: the workflow's own `GITHUB_TOKEN` creates it, with the
+`contents: write` permission the publish job declares.
+
+The VS Code Marketplace also needs no secret. The publish job uses trusted publishing: `vsce publish
+--oidc` exchanges a GitHub OIDC token (the job's `id-token: write` permission) for a Marketplace
+credential that lasts 15 minutes. The Marketplace accepts the exchange only from a workflow named in
+a policy on the publisher, which a publisher owner creates once:
+
+1. Sign in to the [publisher management page](https://marketplace.visualstudio.com/manage) and open
+   the publisher `felix-andreas`.
+2. Select **Trusted Publishing**, expand **Create**, and enter a policy name, the owner
+   `felix-andreas`, the repository `ry`, and the workflow file `release.yml`. Leave the environment
+   empty, because the job uses none.
+3. Select **Create**.
+
+A repository secret named `VSCE_PAT`, if one exists, takes precedence over trusted publishing. It is
+a fallback for when the policy does not work. The Marketplace accepts only a token created for
+**All accessible organizations**, and Azure DevOps retires such global tokens on December 1, 2026,
+so the fallback stops working on that date. To create one, open
+[Azure DevOps](https://dev.azure.com) with the account that owns the publisher, go to **User
+settings**, then **Personal access tokens**, and select **New Token**. Choose **All accessible
+organizations**, then **Custom defined** scopes, **Show all scopes**, and **Marketplace: Manage**.
+Paste the token under the repository's **Settings**, **Secrets and variables**, **Actions**, as a new
+repository secret named `VSCE_PAT`.
+
+The extension is published to the VS Code Marketplace only, not to Open VSX. Positron and VSCodium
+users install the `.vsix` files attached to the GitHub release.
 
 ## What a release ships
 
-Each archive holds `ry` and ry's runtime side by side, so `ry run` finds the runtime without
-configuration:
+Each archive holds `ry`, ry's runtime and `ry-rcmd` side by side, so `ry run` finds the runtime
+without configuration:
 
 | Archive | Contents |
 | --- | --- |
-| `ry-x86_64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `LICENSE` |
-| `ry-aarch64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `LICENSE` |
-| `ry-aarch64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `LICENSE` |
-| `ry-x86_64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `LICENSE` |
-| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `R.dll`, `LICENSE` |
+| `ry-x86_64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `ry-rcmd`, `LICENSE` |
+| `ry-aarch64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `ry-rcmd`, `LICENSE` |
+| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `R.dll`, `ry-rcmd.exe`, `LICENSE` |
 
-ry looks for its runtime beside the executable and in `../lib/ry/`, so an installer may place
-`ry` in `bin/` and the library in `lib/ry/`. At run time, `ry run`, `ry R` and `ry load` also need
-a GNU R installation built as a shared library, because ry's runtime reads base R from it. `ry
-check`, `ry fmt` and `ry server` need nothing else.
+ry looks for its runtime in `RY_LIBR`, then beside the executable, then in `deps/` and
+`../lib/ry/` next to it, so an installer may place `ry` in `bin/` and the library in `lib/ry/`.
+`ry load` compiles a package's `src/` with the `ry-rcmd` it finds beside the runtime. At run time,
+`ry run`, `ry R` and `ry load` also need a GNU R installation built as a shared library, because
+ry's runtime reads base R from it. `ry check`, `ry fmt` and `ry server` need nothing else.
 
-The Linux archives are built on Ubuntu 22.04, so they need glibc 2.35 or newer. On macOS, `libR.dylib`
+The Linux archive is built on Ubuntu 22.04, so it needs glibc 2.35 or newer. On macOS, `libR.dylib`
 has the install name `@rpath/libR.dylib` and exports the same names as the Linux library, which is
 checked by cross-compiling from Linux (`contributing/design/r-runtime.md`, section 11). The smoke
 test's `RY_SMOKE_PACKAGES` step, which loads a CRAN binary of jsonlite under `ry run`, is the first
@@ -38,36 +79,35 @@ The Windows archive is built for `x86_64-pc-windows-gnullvm` with MSYS2's clang6
 (`contributing/design/r-runtime.md`, section 11); the smoke test, which also loads a CRAN binary of
 jsonlite and calls the installation's `Rblas.dll` and `Rlapack.dll`, is the first run on Windows.
 
-The VS Code extension is published once per platform, each copy bundling that platform's `ry`,
-plus one copy without a binary for every other platform. The Zed extension ships no binary: it
-downloads the matching archive from the newest GitHub pre-release (`pre_release: true` in
-`editors/zed/src/lib.rs`, which matches pre-releases only), and it is published to Zed's registry
-separately. Flip that flag in the same change as the first stable release, or Zed keeps serving the
-last beta.
+The VS Code extension is published once per platform, each copy bundling everything in that
+platform's archive except `LICENSE`, plus one copy without a binary (`ry.vsix`) for every other
+platform. The Zed extension ships no binary: it downloads the matching archive from the newest
+GitHub pre-release (`pre_release: true` in `editors/zed/src/lib.rs`, which matches pre-releases
+only), and it is published to Zed's registry separately. Flip that flag in the same change as the
+first stable release, or Zed keeps serving the last beta.
 
 ## Version numbers
 
-`just bump-version X.Y.Z-beta` sets `workspace.package.version` in `Cargo.toml` and the VS Code
-extension's version, which drops the suffix because the Marketplace rejects one. The patch number is
-therefore the one counter across channels: never release `0.4.0-beta` and `0.4.0` both. A
-`-alpha` or `-beta` suffix marks a pre-release, on GitHub and on the Marketplace alike
-(`just release-kind`). The Zed extension has its own version in `editors/zed/extension.toml` and
-`editors/zed/Cargo.toml`, bumped by hand when the extension changes.
+`just bump-version X.Y.Z-beta` sets `workspace.package.version` in `Cargo.toml` to `X.Y.Z-beta`,
+and the VS Code and Zed extensions' versions to `X.Y.Z`, because the Marketplace rejects a suffix.
+The patch number is therefore the one counter across channels: never release `0.4.0-beta` and
+`0.4.0` both. A `-alpha` or `-beta` suffix marks a pre-release, on GitHub and on the Marketplace
+alike (`just release-kind`). The release workflow refuses a version that differs from any of the
+three.
 
 ## Checklist
 
-1. On a clean main, run `just release-dry-run`. It packages this machine's archive, installs it
-   into a scratch directory, smoke-tests it (`tools/smoke-test.sh`), packages the VS Code extension
-   and builds the nix package.
+1. On a clean main, run `just release-dry-run`. It packages this machine's archive, installs it into
+   a scratch directory, smoke-tests it (`tools/smoke-test.sh`), packages the VS Code extension and
+   builds the nix package.
 2. Run `just try` and read every step's output.
-3. Write the release's entry on the [news page](/news) and move `[Unreleased]` in `CHANGELOG.md`
-   under the new version.
+3. Write the release's entry on the [news page](/news).
 4. Run `just bump-version X.Y.Z-beta` (it commits), and push.
-5. Push the tag, or start the Release workflow with the version. The workflow refuses a version that
-   differs from `Cargo.toml`.
-6. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
-   hand and run `ry --version`.
-7. Update [Installation](/installation). For the first release from the workflow that means: each
-   archive holds `ry` and the runtime, which must stay side by side (or the runtime goes in
-   `../lib/ry/`); the Windows archive is now `ry-x86_64-pc-windows-gnullvm.zip` and carries `R.dll` (say that `ry run` and `ry load` work on Windows only if the Windows smoke test passed); Linux needs glibc
-   2.35; and Linux arm64 and Intel macOS archives exist.
+5. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the
+   version, untick **publish**, and run it. It builds and smoke-tests every archive without
+   publishing anything.
+6. Push the tag (`git tag X.Y.Z-beta && git push origin X.Y.Z-beta`), or run the workflow again
+   with **publish** ticked.
+7. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
+   hand and run `ry --version`, and check the extension's version on the Marketplace.
+8. Update [Installation](/installation) to name the new release and its archives.
