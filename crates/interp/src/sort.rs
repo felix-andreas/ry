@@ -1085,7 +1085,6 @@ enum Column<'a> {
     Integer(&'a [i32]),
     Real(&'a [f64]),
     Complex(&'a [Rcomplex]),
-    Raw(&'a [u8]),
     String(Vec<Option<Cow<'a, str>>>),
     /// Strings the radix sort orders: GNU R's radix sort compares bytes, as in the C locale,
     /// whatever the session's collation.
@@ -1101,7 +1100,6 @@ unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
         SexpType::Logical | SexpType::Integer => Some(Column::Integer(values::ints(vector))),
         SexpType::Real => Some(Column::Real(values::reals(vector))),
         SexpType::Complex => Some(Column::Complex(values::complexes(vector))),
-        SexpType::Raw => Some(Column::Raw(values::raws(vector))),
         SexpType::String => Some(Column::String(
             (0..length(vector))
                 .map(|index| string_at(vector, index))
@@ -1140,7 +1138,7 @@ impl Column<'_> {
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
             Column::String(items) | Column::Bytes(items) => items[index].is_none(),
-            Column::Grouped(_) | Column::Raw(_) => false,
+            Column::Grouped(_) => false,
         }
     }
 
@@ -1149,7 +1147,6 @@ impl Column<'_> {
         match self {
             Column::Integer(items) => items[left].cmp(&items[right]),
             Column::Grouped(items) => items[left].cmp(&items[right]),
-            Column::Raw(items) => items[left].cmp(&items[right]),
             Column::Real(items) => items[left]
                 .partial_cmp(&items[right])
                 .unwrap_or(Ordering::Equal),
@@ -1220,7 +1217,6 @@ fn sort_key<'a>(column: &'a Column<'_>, decreasing: bool, na_last: bool) -> Opti
     let source = match column {
         Column::Integer(items) => KeySource::Integer(items),
         Column::Real(items) => KeySource::Real(items),
-        Column::Raw(items) => KeySource::Raw(items),
         Column::Grouped(items) => KeySource::Grouped(items),
         Column::Bytes(items) => {
             let mut distinct: FxHashMap<&str, u32> = FxHashMap::default();
@@ -1262,7 +1258,6 @@ struct SortKey<'a> {
 enum KeySource<'a> {
     Integer(&'a [i32]),
     Real(&'a [f64]),
-    Raw(&'a [u8]),
     /// First-appearance codes, which keep their order whatever the direction says.
     Grouped(&'a [i32]),
     /// Byte-order ranks from 1, with 0 for NA, below `top`.
@@ -1303,7 +1298,6 @@ impl SortKey<'_> {
                 });
                 place(key, u64::MAX)
             }
-            KeySource::Raw(items) => place(Some(u64::from(items[index]) + 1), 257),
             KeySource::Grouped(items) => items[index] as u64,
             KeySource::Ranked { ranks, top } => {
                 let rank = ranks[index];
@@ -1313,82 +1307,174 @@ impl SortKey<'_> {
     }
 }
 
-/// The stable order of `count` rows by `keys`, the first key most significant: a least
-/// significant digit radix sort, one key at a time from the last, each over only the digits
-/// its range spans. Each pass gathers its key's values in the current order, so the values and
-/// the order move together through the digit passes as two parallel arrays.
+/// The stable order of `count` rows by `keys`, the first key most significant.
 fn radix_order(keys: &[SortKey<'_>], count: usize) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..count as u32).collect();
+    sort_rows(keys, &mut order, &mut RadixScratch::default());
+    order
+}
+
+/// Buffers a radix sort reuses across keys and groups.
+#[derive(Default)]
+struct RadixScratch {
+    values: Vec<u64>,
+    spare_values: Vec<u64>,
+    spare_order: Vec<u32>,
+    histogram: Vec<usize>,
+}
+
+/// Rows at most this many sort by comparison, which beats a histogram's fixed cost.
+const SMALL_GROUP: usize = 48;
+
+/// Sorts `order` stably by `keys`. When the first of several keys spans fewer values than there
+/// are rows (a group code, a year, a small-range integer), one counting pass splits the rows by
+/// it and each group sorts by the remaining keys on its own, so every later pass works in a
+/// slice that fits in cache and over the narrower range that one group spans. Otherwise a least
+/// significant digit radix sort takes one key at a time from the last.
+fn sort_rows(keys: &[SortKey<'_>], order: &mut [u32], scratch: &mut RadixScratch) {
+    let Some((first, rest)) = keys.split_first() else {
+        return;
+    };
+    if order.len() < 2 {
+        return;
+    }
+    if order.len() <= SMALL_GROUP {
+        order.sort_by(|&left, &right| {
+            keys.iter()
+                .map(|key| key.get(left as usize).cmp(&key.get(right as usize)))
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or(Ordering::Equal)
+        });
+        return;
+    }
+    if rest.is_empty() {
+        lsd_pass(first, order, scratch);
+        return;
+    }
+    scratch.values.clear();
+    scratch
+        .values
+        .extend(order.iter().map(|&index| first.get(index as usize)));
+    let low = scratch.values.iter().copied().min().unwrap_or(0);
+    let high = scratch.values.iter().copied().max().unwrap_or(low);
+    let span = high - low;
+    if span >= order.len() as u64 {
+        for key in keys.iter().rev() {
+            lsd_pass(key, order, scratch);
+        }
+        return;
+    }
+    let mut starts = vec![0usize; span as usize + 2];
+    for &value in &scratch.values {
+        starts[(value - low) as usize + 1] += 1;
+    }
+    for bucket in 1..starts.len() {
+        starts[bucket] += starts[bucket - 1];
+    }
+    let ends: Vec<usize> = starts[1..].to_vec();
+    scratch.spare_order.clear();
+    scratch.spare_order.resize(order.len(), 0);
+    for (&value, &index) in scratch.values.iter().zip(order.iter()) {
+        let bucket = &mut starts[(value - low) as usize];
+        scratch.spare_order[*bucket] = index;
+        *bucket += 1;
+    }
+    order.copy_from_slice(&scratch.spare_order);
+    let mut start = 0;
+    for end in ends {
+        if let Some(group) = order.get_mut(start..end) {
+            sort_rows(rest, group, scratch);
+        }
+        start = end;
+    }
+}
+
+/// One stable radix pass of `order` by `key`, over only the digits its range spans: one
+/// counting pass when the range is dense, else 11-bit digits. The key's values are gathered in
+/// the current order and move with it through the digit passes as a parallel array.
+fn lsd_pass(key: &SortKey<'_>, order: &mut [u32], scratch: &mut RadixScratch) {
     const BITS: u32 = 11;
     const BUCKETS: usize = 1 << BITS;
-    let mut order: Vec<u32> = (0..count as u32).collect();
-    let mut spare_order: Vec<u32> = Vec::new();
-    let mut values: Vec<u64> = Vec::with_capacity(count);
-    let mut spare_values: Vec<u64> = Vec::new();
-    let mut histogram = vec![0usize; BUCKETS];
-    for key in keys.iter().rev() {
-        values.clear();
-        values.extend(order.iter().map(|&index| key.get(index as usize)));
-        let Some(&low) = values.iter().min() else {
-            continue;
-        };
-        let high = values.iter().copied().max().unwrap_or(low);
-        let span = high - low;
-        if span == 0 {
-            continue;
-        }
-        spare_order.resize(count, 0);
-        // A dense key (such as a permutation or small-range integers) sorts in one counting
-        // pass, which beats two or more digit passes.
-        if span < count.max(1 << 16) as u64 {
-            histogram.clear();
-            histogram.resize(span as usize + 2, 0);
-            for &value in &values {
-                histogram[(value - low) as usize + 1] += 1;
-            }
-            for bucket in 1..histogram.len() {
-                histogram[bucket] += histogram[bucket - 1];
-            }
-            for (&value, &index) in values.iter().zip(&order) {
-                let bucket = &mut histogram[(value - low) as usize];
-                spare_order[*bucket] = index;
-                *bucket += 1;
-            }
-            std::mem::swap(&mut order, &mut spare_order);
-            histogram.clear();
-            histogram.resize(BUCKETS, 0);
-            continue;
-        }
-        for value in &mut values {
-            *value -= low;
-        }
-        spare_values.resize(count, 0);
-        let digits = (u64::BITS - span.leading_zeros()).div_ceil(BITS);
-        for digit in 0..digits {
-            let shift = digit * BITS;
-            histogram.fill(0);
-            for &value in &values {
-                histogram[((value >> shift) as usize) & (BUCKETS - 1)] += 1;
-            }
-            if histogram.iter().any(|&bucket| bucket == count) {
-                continue;
-            }
-            let mut start = 0;
-            for bucket in histogram.iter_mut() {
-                let size = *bucket;
-                *bucket = start;
-                start += size;
-            }
-            for (&value, &index) in values.iter().zip(&order) {
-                let bucket = &mut histogram[((value >> shift) as usize) & (BUCKETS - 1)];
-                spare_values[*bucket] = value;
-                spare_order[*bucket] = index;
-                *bucket += 1;
-            }
-            std::mem::swap(&mut values, &mut spare_values);
-            std::mem::swap(&mut order, &mut spare_order);
-        }
+    let count = order.len();
+    let RadixScratch {
+        values,
+        spare_values,
+        spare_order,
+        histogram,
+    } = scratch;
+    values.clear();
+    values.extend(order.iter().map(|&index| key.get(index as usize)));
+    let Some(&low) = values.iter().min() else {
+        return;
+    };
+    let high = values.iter().copied().max().unwrap_or(low);
+    let span = high - low;
+    if span == 0 {
+        return;
     }
-    order
+    spare_order.clear();
+    spare_order.resize(count, 0);
+    // A dense key (such as a permutation or small-range integers) sorts in one counting pass,
+    // which beats two or more digit passes.
+    if span < count.max(1 << 16) as u64 {
+        histogram.clear();
+        histogram.resize(span as usize + 2, 0);
+        for &value in values.iter() {
+            histogram[(value - low) as usize + 1] += 1;
+        }
+        for bucket in 1..histogram.len() {
+            histogram[bucket] += histogram[bucket - 1];
+        }
+        for (&value, &index) in values.iter().zip(order.iter()) {
+            let bucket = &mut histogram[(value - low) as usize];
+            spare_order[*bucket] = index;
+            *bucket += 1;
+        }
+        order.copy_from_slice(spare_order);
+        return;
+    }
+    for value in values.iter_mut() {
+        *value -= low;
+    }
+    spare_values.clear();
+    spare_values.resize(count, 0);
+    let digits = (u64::BITS - span.leading_zeros()).div_ceil(BITS);
+    // The passes alternate between `order` and the spare buffer, so an odd number of moves
+    // ends in the spare one and is copied back once.
+    let mut in_spare = false;
+    for digit in 0..digits {
+        let shift = digit * BITS;
+        histogram.clear();
+        histogram.resize(BUCKETS, 0);
+        for &value in values.iter() {
+            histogram[((value >> shift) as usize) & (BUCKETS - 1)] += 1;
+        }
+        if histogram.iter().any(|&bucket| bucket == count) {
+            continue;
+        }
+        let mut start = 0;
+        for bucket in histogram.iter_mut() {
+            let size = *bucket;
+            *bucket = start;
+            start += size;
+        }
+        let (source, target): (&[u32], &mut [u32]) = if in_spare {
+            (spare_order, order)
+        } else {
+            (order, spare_order)
+        };
+        for (&value, &index) in values.iter().zip(source.iter()) {
+            let bucket = &mut histogram[((value >> shift) as usize) & (BUCKETS - 1)];
+            spare_values[*bucket] = value;
+            target[*bucket] = index;
+            *bucket += 1;
+        }
+        std::mem::swap(values, spare_values);
+        in_spare = !in_spare;
+    }
+    if in_spare {
+        order.copy_from_slice(spare_order);
+    }
 }
 
 /// Compares two rows key by key. A key of a type that cannot be ordered is recorded in
