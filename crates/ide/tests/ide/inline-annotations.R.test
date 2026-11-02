@@ -107,9 +107,7 @@ references: 63..68*, 80..85
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `other`
-  edit 61..61 -> "  #: integer\n"
-action: Add inferred type annotations for the whole file
-  edit 61..61 -> "  #: integer\n"
+  edit 68..68 -> ": integer"
 completion (1): other
 hint @68: integer
 
@@ -122,3 +120,104 @@ references: 21..22*, 27..28, 33..34
 rename: 3 edit(s)
 signature: none
 completion (16): Any, character, complex, double, fn, integer, list, logical
+
+#---- inferred_annotation_fills_a_generic_function_header
+sca$0le_by <- function(values, factor = 2, ...) values * factor
+#++++
+hover 0..8: scale_by: <T: numeric> fn(values: T, [factor]: T, ...: Any) -> T
+hover-definition: global 0..8
+definition 0..8
+references: 0..8*
+rename: 1 edit(s)
+calls scale_by: in  | out
+signature: none
+action: Add inferred type annotation for `scale_by`
+  edit 20..20 -> "<T: numeric>"
+  edit 27..27 -> ": T"
+  edit 35..35 -> ": T"
+  edit 44..44 -> ": Any"
+  edit 45..45 -> " -> T"
+action: Add inferred type annotations for the whole file
+  edit 20..20 -> "<T: numeric>"
+  edit 27..27 -> ": T"
+  edit 35..35 -> ": T"
+  edit 44..44 -> ": Any"
+  edit 45..45 -> " -> T"
+completion (128+): scale_by, scale, scale.default, scan, scatter.smooth, smoothScatter, cmdscale, LazyFrame.scan_csv
+hint @8: <T: numeric> fn(values: T, [factor]: T, ...: Any) -> T
+
+#---- inferred_annotation_fills_a_backslash_lambda
+twi$0ce <- \(x) x * 2L
+#++++
+hover 0..5: twice: <T: numeric> fn(x: T) -> T
+hover-definition: global 0..5
+definition 0..5
+references: 0..5*
+rename: 1 edit(s)
+calls twice: in  | out
+signature: none
+action: Add inferred type annotation for `twice`
+  edit 10..10 -> "<T: numeric>"
+  edit 12..12 -> ": T"
+  edit 13..13 -> " -> T"
+action: Add inferred type annotations for the whole file
+  edit 10..10 -> "<T: numeric>"
+  edit 12..12 -> ": T"
+  edit 13..13 -> " -> T"
+completion (51): twice, HoltWinters, Num.bitwise_and, Num.bitwise_not, Num.bitwise_or, Num.bitwise_xor, .__C__MethodWithNextWithTrace, RtangleWritedoc
+hint @5: <T: numeric> fn(x: T) -> T
+
+#---- inferred_annotation_falls_back_to_a_comment_for_a_right_assignment
+1L -> cou$0nt
+#++++
+hover 6..11: count: integer
+hover-definition: global 6..11
+definition 6..11
+references: 6..11*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotation for `count`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
+hint @11: integer
+
+#---- inferred_annotation_types_a_local_inline
+f <- function() {
+  tot$0al <- 1L
+  total
+}
+#++++
+hover 20..25: total: integer
+hover-definition: local 20..25
+definition 20..25
+references: 20..25*, 34..39
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `total`
+  edit 25..25 -> ": integer"
+action: Add inferred type annotation for `f`
+  edit 15..15 -> " -> integer"
+action: Add inferred type annotations for the whole file
+  edit 15..15 -> " -> integer"
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+hint @1: fn() -> integer
+hint @25: integer
+
+#---- inferred_annotation_keeps_an_unread_formal_optional_in_a_comment
+pi$0ck <- function(condition, value) if (condition) value else NULL
+#++++
+hover 0..4: pick: <T> fn(condition: logical, [value]: T) -> T | NULL
+hover-definition: global 0..4
+definition 0..4
+references: 0..4*
+rename: 1 edit(s)
+calls pick: in  | out
+signature: none
+action: Add inferred type annotation for `pick`
+  edit 0..0 -> "#: <T> fn(condition: logical, [value]: T) -> T | NULL\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn(condition: logical, [value]: T) -> T | NULL\n"
+completion (6): pi, pick, pico, pictex, pie, pipe
+hint @4: <T> fn(condition: logical, [value]: T) -> T | NULL

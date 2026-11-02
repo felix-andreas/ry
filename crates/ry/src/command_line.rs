@@ -50,6 +50,11 @@ pub enum Command {
         /// the nearest spelling of a misspelled name
         #[arg(long, default_value_t = false, requires = "fix")]
         unsafe_fixes: bool,
+        /// Write the inferred type of each unannotated top-level function and binding as its
+        /// annotation, inline or as a `#:` comment as `[check] inline-annotations` says, then
+        /// report what remains
+        #[arg(long, default_value_t = false)]
+        annotate: bool,
     },
     /// Run the formatter on the given files or directories
     #[command(alias = "format")]

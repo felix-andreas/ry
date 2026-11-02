@@ -6,6 +6,7 @@ use {
         position::LineIndex,
     },
     console::style,
+    ide::{InferredAnnotation, TextEdit, inferred_annotations},
     ignore::gitignore::{Gitignore, GitignoreBuilder},
     miette::{
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
@@ -120,6 +121,7 @@ pub fn check(
     output: OutputFormat,
     min_severity: MinSeverity,
     fix: FixMode,
+    annotate: bool,
 ) -> Result<Outcome, CommandError> {
     let root: Vec<PathBuf> = vec![".".into()];
     let files = maybe_files.unwrap_or(&root);
@@ -153,6 +155,7 @@ pub fn check(
     let mut n_fixed = 0;
     let mut n_fixable = 0;
     let mut n_unsafe_fixable = 0;
+    let mut n_annotated = 0;
     for (root, config, requested) in groups {
         let mut analysis = analyze_project(&root, config.clone(), &requested)?;
         if fix != FixMode::Off {
@@ -162,6 +165,13 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
+                analysis = analyze_project(&root, config.clone(), &requested)?;
+            }
+        }
+        if annotate {
+            let annotated = write_inferred_annotations(&analysis)?;
+            if annotated > 0 {
+                n_annotated += annotated;
                 analysis = analyze_project(&root, config.clone(), &requested)?;
             }
         }
@@ -207,6 +217,14 @@ pub fn check(
         if n_fixed > 0 {
             let fixes = if n_fixed == 1 { "fix" } else { "fixes" };
             println!("applied {n_fixed} {fixes}");
+        }
+        if n_annotated > 0 {
+            let annotations = if n_annotated == 1 {
+                "annotation"
+            } else {
+                "annotations"
+            };
+            println!("added {n_annotated} inferred {annotations}");
         }
         report_check_summary(n_files, n_diagnostics);
         let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
@@ -264,6 +282,54 @@ fn apply_check_fixes(
         applied += fixes.len();
     }
     Ok(applied)
+}
+
+/// Writes the inferred annotation of every unannotated top-level binding in the requested files
+/// and returns how many it wrote. One pass is enough: an annotation states what inference
+/// already found, so it exposes no further binding to annotate.
+fn write_inferred_annotations(analysis: &ProjectAnalysis) -> Result<usize, CommandError> {
+    let mut written = 0;
+    for file in analysis
+        .files
+        .iter()
+        .filter(|file| file.requested && fixes_apply(file))
+    {
+        let annotations: Vec<InferredAnnotation> = inferred_annotations(&analysis.db, file.file)
+            .into_iter()
+            .filter(|annotation| annotation.top_level)
+            .collect();
+        if annotations.is_empty() {
+            continue;
+        }
+        let count = annotations.len();
+        let mut edits: Vec<TextEdit> = annotations
+            .into_iter()
+            .flat_map(|annotation| annotation.edits)
+            .collect();
+        let original = fs::read_to_string(&file.path).map_err(|err| {
+            error_because(&format!("failed to read: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        if analysable_source(&file.path, original.clone()) != analysis.source(file) {
+            continue;
+        }
+        // Every edit is an insertion at a distinct offset, so applying them from the end keeps
+        // each earlier offset valid.
+        edits.sort_by_key(|edit| Reverse(edit.range.start()));
+        let mut edited = original;
+        for edit in edits {
+            edited.replace_range(
+                usize::from(edit.range.start())..usize::from(edit.range.end()),
+                &edit.replacement,
+            );
+        }
+        fs::write(&file.path, edited).map_err(|err| {
+            error_because(&format!("failed to write: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        written += count;
+    }
+    Ok(written)
 }
 
 /// A file with a syntax error takes no fixes, because they were computed on a recovered tree and
