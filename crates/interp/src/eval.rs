@@ -3002,6 +3002,9 @@ pub unsafe fn complex_assign(
         base = values::shallow_duplicate(base)?;
         base.set_array(was_array);
     }
+    // GNU R binds `*tmp*` in this frame for the length of the assignment, and in a hashed frame
+    // that moves the table's chain counter, which `ls(sorted = FALSE)` order depends on.
+    heap.count_transient_binding(env, symbols.tmp);
     // Values of each level, innermost first: the variable, then each getter applied to it.
     let mut levels = vec![base];
     let tmp_symbol = symbols.tmp;

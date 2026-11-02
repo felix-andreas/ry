@@ -53,8 +53,9 @@ pub struct Frame {
     /// Boxed, because only large frames have one and the inline map would push every
     /// environment into a larger size class.
     index: Option<Box<FxHashMap<Sexp, u32>>>,
-    /// The initial table size of a hashed frame, or 0 for an unhashed one.
-    hash_size: u32,
+    /// GNU R's table bookkeeping, for a hashed frame only. Boxed, so an unhashed frame pays one
+    /// word for it.
+    hash: Option<Box<HashTable>>,
     /// How many leading slots are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
     formals: u32,
@@ -64,6 +65,24 @@ pub struct Frame {
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
     /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
     filter: u64,
+}
+
+/// What a hashed frame needs to list itself as GNU R's chained table would: the table's growth
+/// history and its chain counter. GNU R lists a hashed frame bucket by bucket, so the order
+/// depends on every size the table has had, and the size grows when the counter passes 85% of
+/// it. Measured against GNU R, an insert counts one even into an occupied bucket, a removal
+/// uncounts one only when it empties its bucket, and a growth restarts the counter at the number
+/// of occupied buckets.
+struct HashTable {
+    initial_size: u32,
+    size: u32,
+    /// GNU R's chain counter, which `env.profile` reports as `nchains`.
+    count: u32,
+    /// How many live bindings each bucket of the current table holds, which tells a removal
+    /// whether it empties its bucket.
+    occupancy: Vec<u32>,
+    /// For each growth, how many leading slots of [`Frame::bindings`] were inserted before it.
+    grows: Vec<u32>,
 }
 
 /// The [`Frame::filter`] bit for `symbol`: a multiplicative hash of its address, since a
@@ -125,11 +144,24 @@ impl Frame {
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
     /// positive).
     pub fn set_hashed(&mut self, size: i32) {
-        self.hash_size = if size > 0 {
+        let size = if size > 0 {
             size as u32
         } else {
             HASH_MINIMUM_SIZE
         };
+        let mut table = HashTable {
+            initial_size: size,
+            size,
+            count: 0,
+            occupancy: vec![0; size as usize],
+            grows: Vec::new(),
+        };
+        for slot in 0..self.bindings.len() {
+            if self.bindings[slot].symbol != REMOVED {
+                hash_insert(&mut table, &self.bindings, slot);
+            }
+        }
+        self.hash = Some(Box::new(table));
     }
 
     /// Marks every cell bound so far as a closure formal.
@@ -142,7 +174,7 @@ impl Frame {
     /// # Safety
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn listed_cells(&self) -> Vec<Sexp> {
-        if self.hash_size == 0 {
+        if self.hash.is_none() {
             let formals = (self.formals as usize).min(self.bindings.len());
             let (formals, locals) = self.bindings.split_at(formals);
             return locals
@@ -153,7 +185,7 @@ impl Frame {
                 .map(|binding| binding.cell)
                 .collect();
         }
-        let (heads, next, _) = unsafe { self.hash_chains() };
+        let (heads, next) = unsafe { self.hash_chains() };
         let cells: Vec<Sexp> = self.cells().collect();
         let mut listed = Vec::with_capacity(cells.len());
         for &head in &heads {
@@ -173,10 +205,8 @@ impl Frame {
     /// # Safety
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn hash_profile(&self) -> Option<(Vec<usize>, usize)> {
-        if self.hash_size == 0 {
-            return None;
-        }
-        let (heads, next, count) = unsafe { self.hash_chains() };
+        let count = self.hash.as_ref()?.count as usize;
+        let (heads, next) = unsafe { self.hash_chains() };
         let lengths = heads
             .iter()
             .map(|&head| {
@@ -192,28 +222,30 @@ impl Frame {
         Some((lengths, count))
     }
 
-    /// Replays GNU R's chained table, measured against its output: an insert prepends to its
-    /// bucket and counts one, and once the count passes 85% of the size the table grows to
-    /// `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry prepended,
-    /// after which the count restarts at the number of occupied buckets. Each bucket is a chain
-    /// threaded through `next`, so an insert and a rehash allocate nothing per entry. Returns the
-    /// bucket heads, the chain links and the count, with positions counting live bindings only.
-    unsafe fn hash_chains(&self) -> (Vec<usize>, Vec<usize>, usize) {
-        let mut size = (self.hash_size as usize).max(1);
+    /// Replays GNU R's chained table over the live bindings: an insert prepends to its bucket,
+    /// and a growth to `size * 1.2 + 1` rehashes the old buckets in ascending order with each
+    /// entry prepended. Removed bindings only ever left their chains, so leaving them out keeps
+    /// every other entry's order. Each bucket is a chain threaded through `next`, so an insert and
+    /// a rehash allocate nothing per entry. Returns the bucket heads and the chain links, with
+    /// positions counting live bindings only, or no buckets for an unhashed frame.
+    unsafe fn hash_chains(&self) -> (Vec<usize>, Vec<usize>) {
+        let Some(table) = self.hash.as_deref() else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut size = table.initial_size as usize;
         let mut heads = vec![EMPTY_CHAIN; size];
-        let mut next = vec![EMPTY_CHAIN; self.bindings.len()];
-        let mut count = 0;
+        let mut next = vec![EMPTY_CHAIN; self.len()];
         let hashes: Vec<usize> = self
             .live()
-            .map(|binding| unsafe { pjw_hash(binding.symbol.car().bytes()) } as usize)
+            .map(|binding| symbol_hash(binding.symbol) as usize)
             .collect();
-        for (position, hash) in hashes.iter().enumerate() {
-            let bucket = hash % size;
-            next[position] = heads[bucket];
-            heads[bucket] = position;
-            count += 1;
-            if count as f64 > size as f64 * 0.85 {
-                size = (size as f64 * 1.2) as usize + 1;
+        let mut grows = table.grows.iter().copied().peekable();
+        let mut position = 0;
+        // A growth marker counts the slots inserted before it, and compaction can leave one at 0
+        // when every binding inserted before the growth has since been removed.
+        for slot in 0..=self.bindings.len() {
+            while grows.next_if_eq(&(slot as u32)).is_some() {
+                size = grown_size(size as u32) as usize;
                 let mut grown = vec![EMPTY_CHAIN; size];
                 for &head in &heads {
                     let mut moved = head;
@@ -225,11 +257,18 @@ impl Frame {
                         moved = following;
                     }
                 }
-                count = grown.iter().filter(|head| **head != EMPTY_CHAIN).count();
                 heads = grown;
             }
+            if let Some(binding) = self.bindings.get(slot)
+                && binding.symbol != REMOVED
+            {
+                let bucket = hashes[position] % size;
+                next[position] = heads[bucket];
+                heads[bucket] = position;
+                position += 1;
+            }
         }
-        (heads, next, count)
+        (heads, next)
     }
 
     /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
@@ -238,6 +277,9 @@ impl Frame {
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
+        if let Some(table) = &mut self.hash {
+            hash_insert(table, &self.bindings, position as usize);
+        }
         self.filter |= filter_bit(symbol);
         match &mut self.index {
             Some(index) => {
@@ -253,6 +295,29 @@ impl Frame {
                 self.index = Some(Box::new(index));
             }
             None => {}
+        }
+    }
+
+    /// Counts an insert and removal of `symbol` in a hashed frame's table without keeping a
+    /// binding, for a binding that exists only for the length of one operation. GNU R would
+    /// rebind an existing binding instead, which counts nothing.
+    pub(crate) fn count_transient(&mut self, symbol: Sexp) {
+        if self.hash.is_none() || self.find(symbol).is_some() {
+            return;
+        }
+        let slot = self.bindings.len();
+        self.bindings.push(Binding {
+            symbol,
+            cell: REMOVED,
+        });
+        if let Some(table) = &mut self.hash {
+            hash_insert(table, &self.bindings, slot);
+        }
+        self.bindings[slot].symbol = REMOVED;
+        self.removed += 1;
+        self.uncount_removal(symbol);
+        if self.removed as usize * 2 > self.bindings.len() {
+            self.compact();
         }
     }
 
@@ -272,6 +337,7 @@ impl Frame {
         let cell = binding.cell;
         binding.symbol = REMOVED;
         self.removed += 1;
+        self.uncount_removal(symbol);
         // Only formals repeat a symbol, and a duplicate behind the removed one now answers for it.
         if let Some(index) = &mut self.index
             && let Some(duplicate) = (position + 1..self.formals as usize)
@@ -285,12 +351,35 @@ impl Frame {
         Some(cell)
     }
 
+    /// Takes a removed binding of `symbol` out of a hashed frame's table, where GNU R uncounts it
+    /// only when it empties its bucket.
+    fn uncount_removal(&mut self, symbol: Sexp) {
+        let Some(table) = &mut self.hash else {
+            return;
+        };
+        let bucket = symbol_hash(symbol) as usize % table.size as usize;
+        if let Some(occupants) = table.occupancy.get_mut(bucket) {
+            *occupants = occupants.saturating_sub(1);
+            if *occupants == 0 {
+                table.count = table.count.saturating_sub(1);
+            }
+        }
+    }
+
     /// Drops the removed slots, keeping the live bindings in insertion order.
     fn compact(&mut self) {
         let formals = self.bindings[..(self.formals as usize).min(self.bindings.len())]
             .iter()
             .filter(|binding| binding.symbol != REMOVED)
             .count();
+        if let Some(table) = &mut self.hash {
+            for grow in &mut table.grows {
+                *grow = self.bindings[..*grow as usize]
+                    .iter()
+                    .filter(|binding| binding.symbol != REMOVED)
+                    .count() as u32;
+            }
+        }
         self.bindings.retain(|binding| binding.symbol != REMOVED);
         self.formals = formals as u32;
         self.removed = 0;
@@ -301,6 +390,47 @@ impl Frame {
             }
         }
     }
+}
+
+/// Counts the insert of the live binding at `slot` in GNU R's table, growing it as GNU R would.
+fn hash_insert(table: &mut HashTable, bindings: &[Binding], slot: usize) {
+    let Some(binding) = bindings.get(slot) else {
+        return;
+    };
+    let bucket = symbol_hash(binding.symbol) as usize % table.size as usize;
+    if let Some(occupants) = table.occupancy.get_mut(bucket) {
+        *occupants += 1;
+    }
+    table.count += 1;
+    if table.count as f64 <= table.size as f64 * 0.85 {
+        return;
+    }
+    table.size = grown_size(table.size);
+    table.occupancy = vec![0; table.size as usize];
+    for binding in bindings[..=slot]
+        .iter()
+        .filter(|binding| binding.symbol != REMOVED)
+    {
+        if let Some(occupants) = table
+            .occupancy
+            .get_mut(symbol_hash(binding.symbol) as usize % table.size as usize)
+        {
+            *occupants += 1;
+        }
+    }
+    table.count = table.occupancy.iter().filter(|&&occupants| occupants > 0).count() as u32;
+    table.grows.push(slot as u32 + 1);
+}
+
+fn grown_size(size: u32) -> u32 {
+    (size as f64 * 1.2) as u32 + 1
+}
+
+/// The PJW hash of a bound symbol's name.
+fn symbol_hash(symbol: Sexp) -> u32 {
+    // SAFETY: a frame binds only interned symbols, which are never collected, and a symbol's
+    // first field is its name.
+    unsafe { pjw_hash(symbol.car().bytes()) }
 }
 
 /// GNU R's `R_Newhashpjw`, which adds each byte as a signed `char`.
