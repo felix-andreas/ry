@@ -346,6 +346,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         // never needs one of its own to return to.
         srcref: nil(),
         rebinding: None,
+        bound: None,
         tail_updates: (Vec::new(), nil()),
     };
     let heap = crate::heap();
