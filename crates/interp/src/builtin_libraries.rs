@@ -276,6 +276,7 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
         "stats" => &[crate::stats::ROUTINES, crate::distributions::ROUTINES],
         "utils" => &[crate::utils::ROUTINES],
         "tools" => &[crate::tools::ROUTINES],
+        #[cfg(unix)]
         "parallel" => &[crate::parallel::ROUTINES],
         "grDevices" => &[crate::graphics::GRDEVICES_ROUTINES],
         "graphics" => &[crate::graphics::GRAPHICS_ROUTINES],

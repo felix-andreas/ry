@@ -166,17 +166,21 @@ unsafe fn fork(call: &NativeCall<'_>) -> R<Sexp> {
             Some((result, input)) => {
                 close_fd(result[0]);
                 close_fd(input[1]);
-                libc::dup2(input[0], libc::STDIN_FILENO);
+                let redirected = libc::dup2(input[0], libc::STDIN_FILENO);
                 close_fd(input[0]);
                 state.master = Some(result[1]);
+                if redirected < 0 {
+                    return Err(call.error("unable to redirect the child's standard input"));
+                }
                 result[1]
             }
             None => {
                 let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
-                if null >= 0 {
-                    libc::dup2(null, libc::STDIN_FILENO);
+                if null < 0 || libc::dup2(null, libc::STDIN_FILENO) < 0 {
                     close_fd(null);
+                    return Err(call.error("unable to redirect the child's standard input"));
                 }
+                close_fd(null);
                 NA_INTEGER
             }
         };
@@ -346,8 +350,11 @@ unsafe fn redirect_standard(call: &NativeCall<'_>, fd: c_int) -> R<Sexp> {
         if null < 0 {
             return Err(call.error("cannot open /dev/null"));
         }
-        libc::dup2(null, fd);
+        let redirected = libc::dup2(null, fd);
         close_fd(null);
+        if redirected < 0 {
+            return Err(call.error("cannot redirect to /dev/null"));
+        }
     } else {
         close_fd(fd);
     }
@@ -356,6 +363,7 @@ unsafe fn redirect_standard(call: &NativeCall<'_>, fd: c_int) -> R<Sexp> {
 
 /// `mc_affinity(cpus)`: restricts the process to the given one-based CPUs when `cpus` is not
 /// `NULL`, then returns the CPUs it may run on.
+#[cfg(target_os = "linux")]
 unsafe fn affinity(call: &NativeCall<'_>) -> R<Sexp> {
     let requested = call.arg(0);
     if requested != nil() {
@@ -388,6 +396,13 @@ unsafe fn affinity(call: &NativeCall<'_>) -> R<Sexp> {
         .map(|cpu| cpu as i32 + 1)
         .collect();
     values::integer_vector(&cpus)
+}
+
+/// Without Linux's affinity calls, GNU R's `mc_affinity` returns `NULL`, which
+/// `mcaffinity()` reports as affinity being unsupported.
+#[cfg(not(target_os = "linux"))]
+unsafe fn affinity(_call: &NativeCall<'_>) -> R<Sexp> {
+    Ok(nil())
 }
 
 /// `mc_cleanup(kill, detach, shutdown)`: signals (`kill = TRUE` sends `SIGTERM`, a number sends
@@ -540,11 +555,31 @@ fn reap() {
     });
 }
 
+// Both ends are close-on-exec, so a `system()` command started later does not hold the pipes open.
+#[cfg(target_os = "linux")]
 fn make_pipe() -> Option<[c_int; 2]> {
     let mut fds = [0; 2];
-    // Close-on-exec, so a `system()` command started later does not hold the pipes open.
     // SAFETY: `fds` has room for both ends.
     (unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0).then_some(fds)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn make_pipe() -> Option<[c_int; 2]> {
+    let mut fds = [0; 2];
+    // SAFETY: `fds` has room for both ends, and both are descriptors this call just opened.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return None;
+        }
+        for fd in fds {
+            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                close_fd(fds[0]);
+                close_fd(fds[1]);
+                return None;
+            }
+        }
+    }
+    Some(fds)
 }
 
 fn close_fd(fd: c_int) {

@@ -2639,7 +2639,7 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         }
         values::set_elt(result, dimension, component);
     }
-    let mut names = values::names(dimnames);
+    let names = values::names(dimnames);
     if names != nil() {
         let padded = alloc(SexpType::String, dims.len())?;
         for index in 0..dims.len() {
