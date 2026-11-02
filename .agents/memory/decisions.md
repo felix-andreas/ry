@@ -4834,3 +4834,19 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
+
+## utils' sockets, internal downloads and allocation profiling
+
+- `make.socket` and friends keep their `TcpStream`s and `TcpListener`s in one locked map in
+  `crates/interp/src/utils.rs`, keyed by the OS handle, because that handle is the `socket`
+  number R code sees and passes back.
+- `download.file(method = "internal")` and `url(method = "internal")` read only `file://`
+  URLs and give GNU R's "defunct" or "not supported" errors for the rest, as R 4.2 and later do.
+- `Rprofmem` logs a vector only when its data exceeds 128 bytes, sized as GNU R counts it (data
+  rounded up to 8 bytes plus a 48-byte header), because GNU R takes smaller vectors from pages of
+  small cells. ry has no such pages, so it writes no `new page:` lines. The heap calls a plain
+  `fn(usize)` reporter (`Heap::report_allocations`), which costs one compare per vector while no
+  profile runs. The bytecode compiler hides its own vectors with `Heap::swap_report_threshold`.
+- `Rprof` raises intervals below 10 ms to 10 ms with GNU R's warning, since GNU R's timer cannot
+  sample faster.
+- `system(intern = FALSE)` and `system2` return invisibly, as in GNU R.

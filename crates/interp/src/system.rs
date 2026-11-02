@@ -212,7 +212,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", -1, do_system),
+    internal("system", -1, do_system).keep_visibility(),
     internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
     internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
     internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
@@ -3110,6 +3110,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
                 format!("running command '{command}' had status {status}"),
             )?;
         }
+        interp().visible = true;
         return Ok(result);
     }
     // The child writes straight to the terminal, as GNU R's does, so earlier output must be out

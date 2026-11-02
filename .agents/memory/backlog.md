@@ -2266,7 +2266,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
-  `format.Date`, `parseLatex`, `stem`, profiling, ...);
+  `format.Date`, `stem`, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -2275,7 +2275,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`exists(name, registry)` on the namespace registry segfaults** (its enclosure is NULL, as in
   GNU R, where the lookup errors "use of NULL environment is defunct" instead).
 - **`lazyLoad()` returns visibly** (prints `NULL` at top level); GNU R's result is invisible.
-- **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
+- **Connections gaps:** `fifo()` and non-file URL connections are not implemented. `xzfile()`'s
   negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
@@ -2324,8 +2324,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
   out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
   with a release build.
-- **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
-  `Rprofmem` warn and do nothing.
+- **The help server is not implemented** (`tools::startDynamicHelp`). `Rprof` samples only the
+  call stack, without memory, GC or line profiling.
 - **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
   context, so it prints `Calls: print -> .Call` where ry prints none.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer

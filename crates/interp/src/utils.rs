@@ -17,15 +17,17 @@ use {
             self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
             string_vector, symbols,
         },
-        write_console,
+        platform, write_console,
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
     std::{
         cell::RefCell,
         fs::File,
-        io::{BufWriter, Write},
+        collections::BTreeMap,
+        io::{BufWriter, Read, Write},
+        net::{Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs},
         sync::{
-            Arc,
+            Arc, Mutex, MutexGuard, PoisonError,
             atomic::{AtomicBool, Ordering},
         },
     },
@@ -71,17 +73,13 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("Rprof", do_rprof),
     ("Rprofmem", do_rprofmem),
     ("unzip", do_unzip),
-    ("download", |_| {
-        Err(error(
-            "the \"internal\" download method is not supported in ry; use method = \"libcurl\"",
-        ))
-    }),
-    ("sockconnect", no_sockets),
-    ("sockread", no_sockets),
-    ("sockclose", no_sockets),
-    ("sockopen", no_sockets),
-    ("socklisten", no_sockets),
-    ("sockwrite", no_sockets),
+    ("download", do_download),
+    ("sockconnect", do_sockconnect),
+    ("sockread", do_sockread),
+    ("sockclose", do_sockclose),
+    ("sockopen", do_sockopen),
+    ("socklisten", do_socklisten),
+    ("sockwrite", do_sockwrite),
     ("addhistory", |_| Ok(nil())),
     // The `.External2` routines report errors against their own call, as GNU R's do.
     ("loadhistory", |call| {
@@ -134,8 +132,154 @@ unsafe fn edit(call: &NativeCall<'_>) -> R<Sexp> {
     crate::session::eval_text(EDIT, env)
 }
 
-unsafe fn no_sockets(_: &NativeCall<'_>) -> R<Sexp> {
-    Err(error("sockets are not supported in ry yet"))
+/// The sockets of `make.socket()` and friends, keyed by their OS handle, which is the number
+/// GNU R hands to R code.
+static SOCKETS: Mutex<BTreeMap<i32, UtilsSocket>> = Mutex::new(BTreeMap::new());
+
+enum UtilsSocket {
+    Stream(TcpStream),
+    Listener(TcpListener),
+}
+
+/// `.Call(C_sockconnect, port, host)`: a connected socket's number, or 0 after printing why
+/// the connection failed, which `make.socket()` turns into "socket not established".
+unsafe fn do_sockconnect(call: &NativeCall<'_>) -> R<Sexp> {
+    let port = values::as_integer_scalar(call.arg(0));
+    let host = values::require_string(call.arg(1), "host")?;
+    let Ok(port) = u16::try_from(port) else {
+        return scalar_integer(0);
+    };
+    let Ok(addresses) = (host.as_str(), port).to_socket_addrs() else {
+        return scalar_integer(0);
+    };
+    let mut failure = None;
+    for address in addresses {
+        match TcpStream::connect(address) {
+            Ok(stream) => {
+                let handle = platform::stream_handle(&stream);
+                return register_socket(handle, UtilsSocket::Stream(stream));
+            }
+            Err(reason) => failure = Some(reason),
+        }
+    }
+    if let Some(reason) = failure {
+        report_socket_error(&reason);
+    }
+    scalar_integer(0)
+}
+
+/// `.Call(C_sockopen, port)`: a socket listening on `port`.
+unsafe fn do_sockopen(call: &NativeCall<'_>) -> R<Sexp> {
+    let port = values::as_integer_scalar(call.arg(0));
+    let port = u16::try_from(port).map_err(|_| error("invalid 'port' argument"))?;
+    match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)) {
+        Ok(listener) => {
+            let handle = platform::listener_handle(&listener);
+            register_socket(handle, UtilsSocket::Listener(listener))
+        }
+        Err(reason) => {
+            report_socket_error(&reason);
+            scalar_integer(-1)
+        }
+    }
+}
+
+/// `.Call(C_socklisten, socket)`: waits for one connection on a listening socket and returns
+/// the connected socket, with the peer's host name as its `host` attribute.
+unsafe fn do_socklisten(call: &NativeCall<'_>) -> R<Sexp> {
+    let key = values::as_integer_scalar(call.arg(0));
+    let accepted = {
+        let sockets = lock_sockets();
+        match sockets.get(&key) {
+            Some(UtilsSocket::Listener(listener)) => listener.try_clone(),
+            _ => return Err(error("invalid 'socket' argument")),
+        }
+    };
+    let accepted = accepted.and_then(|listener| listener.accept());
+    let (stream, peer) = match accepted {
+        Ok(connection) => connection,
+        Err(reason) => {
+            report_socket_error(&reason);
+            return scalar_integer(-1);
+        }
+    };
+    let host = if peer.ip().is_loopback() {
+        "localhost".to_owned()
+    } else {
+        peer.ip().to_string()
+    };
+    let handle = platform::stream_handle(&stream);
+    let result = register_socket(handle, UtilsSocket::Stream(stream))?;
+    crate::heap().root(result);
+    values::set_attr(result, values::install("host")?, scalar_string(&host)?)?;
+    Ok(result)
+}
+
+/// `.Call(C_sockread, socket, maxlen)`: at most `maxlen` bytes from one read, or `""` at the
+/// end of the stream.
+unsafe fn do_sockread(call: &NativeCall<'_>) -> R<Sexp> {
+    let key = values::as_integer_scalar(call.arg(0));
+    let maximum = values::as_integer_scalar(call.arg(1));
+    let maximum = usize::try_from(maximum).map_err(|_| error("maxlen must be non-negative"))?;
+    let stream = socket_stream(key);
+    let mut buffer = vec![0; maximum];
+    let count = match stream.and_then(|mut stream| stream.read(&mut buffer)) {
+        Ok(count) => count,
+        Err(reason) => {
+            report_socket_error(&reason);
+            0
+        }
+    };
+    buffer.truncate(count);
+    values::scalar_string(&String::from_utf8_lossy(&buffer))
+}
+
+/// `.Call(C_sockwrite, socket, string)`: the number of bytes written.
+unsafe fn do_sockwrite(call: &NativeCall<'_>) -> R<Sexp> {
+    let key = values::as_integer_scalar(call.arg(0));
+    let text = values::require_string(call.arg(1), "string")?;
+    let written = socket_stream(key).and_then(|mut stream| stream.write(text.as_bytes()));
+    match written {
+        Ok(count) => scalar_integer(i32::try_from(count).unwrap_or(i32::MAX)),
+        Err(reason) => {
+            report_socket_error(&reason);
+            scalar_integer(-1)
+        }
+    }
+}
+
+/// `.Call(C_sockclose, socket)`: FALSE when the socket closed and TRUE when it could not, as
+/// GNU R returns.
+unsafe fn do_sockclose(call: &NativeCall<'_>) -> R<Sexp> {
+    let key = values::as_integer_scalar(call.arg(0));
+    let closed = lock_sockets().remove(&key).is_some();
+    if !closed {
+        report_socket_error(&std::io::Error::from_raw_os_error(libc::EBADF));
+    }
+    scalar_bool(!closed)
+}
+
+unsafe fn register_socket(handle: platform::SocketHandle, socket: UtilsSocket) -> R<Sexp> {
+    let key = i32::try_from(handle).map_err(|_| error("socket handle out of range"))?;
+    lock_sockets().insert(key, socket);
+    scalar_integer(key)
+}
+
+/// A second handle on a connected socket, so a blocking read or write does not hold the table.
+fn socket_stream(key: i32) -> std::io::Result<TcpStream> {
+    match lock_sockets().get(&key) {
+        Some(UtilsSocket::Stream(stream)) => stream.try_clone(),
+        _ => Err(std::io::Error::from_raw_os_error(libc::EBADF)),
+    }
+}
+
+fn lock_sockets() -> MutexGuard<'static, BTreeMap<i32, UtilsSocket>> {
+    SOCKETS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn report_socket_error(reason: &std::io::Error) {
+    let message = format!("socket error: {}\n", crate::connections::os_message(reason));
+    write_console(message.as_bytes(), true);
 }
 
 // The tokenizer.
@@ -1605,6 +1749,10 @@ unsafe fn do_nsl(call: &NativeCall<'_>) -> R<Sexp> {
 /// this flag where calls begin, which costs one relaxed load per call while no profile runs.
 pub static PROFILE_TICK: AtomicBool = AtomicBool::new(false);
 
+/// GNU R's profiling timer cannot sample more often than this, so it raises shorter intervals
+/// to it with a warning.
+const MINIMUM_PROFILE_MICROS: u64 = 10_000;
+
 struct Profiler {
     output: BufWriter<File>,
     stop: Arc<AtomicBool>,
@@ -1625,12 +1773,16 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
     };
     let append = values::as_logical_scalar(call.arg(1)) == 1;
     let interval = values::as_real_scalar(call.arg(2));
-    let interval = if interval.is_finite() && interval > 0.0 {
-        interval
+    let interval = if interval.is_nan() { 0.02 } else { interval };
+    let micros = if interval * 1e6 < MINIMUM_PROFILE_MICROS as f64 {
+        warning(format!(
+            "interval too short for this platform, using '{:.6}'",
+            MINIMUM_PROFILE_MICROS as f64 / 1e6
+        ))?;
+        MINIMUM_PROFILE_MICROS
     } else {
-        0.02
+        (interval * 1e6).round().min(u32::MAX as f64) as u64
     };
-    let micros = (interval * 1e6).round().max(1.0) as u64;
     let path = crate::connections::expand_path(&filename);
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -1743,11 +1895,67 @@ fn profile_write_error(failure: std::io::Error) -> Unwind {
     error(format!("Rprof: cannot write the profile file: {failure}"))
 }
 
+/// `Rprofmem(filename, append, threshold)`: logs every vector allocation larger than
+/// `threshold` bytes, or stops logging for an empty or `NULL` filename. Like GNU R, only vectors
+/// too large for the small-object pages are logged; ry has no pages, so it writes no
+/// `new page:` lines.
 unsafe fn do_rprofmem(call: &NativeCall<'_>) -> R<Sexp> {
-    if values::first_string(call.arg(0)).is_some_and(|name| !name.is_empty()) {
-        warning("memory profiling is not supported in ry yet; Rprofmem() does nothing")?;
-    }
+    stop_memory_profiler()?;
+    let Some(filename) = values::first_string(call.arg(0)).filter(|name| !name.is_empty()) else {
+        return Ok(nil());
+    };
+    let append = values::as_logical_scalar(call.arg(1)) == 1;
+    let threshold = values::as_real_scalar(call.arg(2));
+    let threshold = if threshold.is_finite() && threshold > 0.0 {
+        threshold as usize
+    } else {
+        0
+    };
+    let path = crate::connections::expand_path(&filename);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&path)
+        .map_err(|_| error(format!("Rprofmem: cannot open output file '{filename}'")))?;
+    MEMORY_PROFILE.with_borrow_mut(|output| *output = Some(BufWriter::new(file)));
+    crate::heap().report_allocations(Some(record_allocation), threshold);
     Ok(nil())
+}
+
+thread_local! {
+    static MEMORY_PROFILE: RefCell<Option<BufWriter<File>>> = const { RefCell::new(None) };
+}
+
+/// Stops a running memory profile and flushes its file; the session calls it on exit as well.
+pub unsafe fn stop_memory_profiler() -> R<()> {
+    crate::heap().report_allocations(None, 0);
+    let Some(mut output) = MEMORY_PROFILE.with_borrow_mut(Option::take) else {
+        return Ok(());
+    };
+    output
+        .flush()
+        .map_err(|failure| error(format!("Rprofmem: cannot write the output file: {failure}")))
+}
+
+/// The heap calls this inside an allocation, so it must not allocate R objects: it writes the
+/// size and the names of the calls on the stack, innermost first, as GNU R does.
+fn record_allocation(size: usize) {
+    let mut line = format!("{size} :");
+    for frame in crate::interp().frames.iter().rev() {
+        line.push_str(&format!("\"{}\" ", unsafe { profile_name(frame.call.car()) }));
+    }
+    line.push('\n');
+    let written = MEMORY_PROFILE.with_borrow_mut(|output| match output {
+        Some(output) => output.write_all(line.as_bytes()),
+        None => Ok(()),
+    });
+    // The allocation itself must still succeed, so a write failure ends the profile instead.
+    if written.is_err() {
+        MEMORY_PROFILE.with_borrow_mut(Option::take);
+        crate::heap().report_allocations(None, 0);
+    }
 }
 
 // Hash tables.
@@ -2031,6 +2239,61 @@ unsafe fn do_is_hashtab(call: &NativeCall<'_>) -> R<Sexp> {
 /// `unzip(zipfile, files, exdir, list, overwrite, junkpaths, setTimes)`: lists or extracts the
 /// members of a zip archive (stored or deflated). Listing returns the names, sizes and
 /// modification times; extracting returns 0 with the extracted paths as `extracted`.
+/// `download.file(method = "internal")`: `.External(C_download, url, destfile, quiet, mode,
+/// headers, cacheOK)`. Since R 4.2 the internal method only copies `file://` URLs; http and ftp
+/// are defunct for it and every other scheme is refused, with the messages GNU R gives.
+unsafe fn do_download(call: &NativeCall<'_>) -> R<Sexp> {
+    let urls = call.arg(0);
+    if urls.kind() != SexpType::String || length(urls) == 0 {
+        return Err(error("invalid 'url' argument"));
+    }
+    if length(urls) > 1 {
+        warning("only first element of 'url' argument used")?;
+    }
+    let url = values::string_at(urls, 0).ok_or_else(|| error("invalid 'url' argument"))?;
+    let destination = call.arg(1);
+    if destination.kind() != SexpType::String || length(destination) == 0 {
+        return Err(error("invalid 'destfile' argument"));
+    }
+    if length(destination) > 1 {
+        warning("only first element of 'destfile' argument used")?;
+    }
+    let destination = values::string_at(destination, 0)
+        .ok_or_else(|| error("invalid 'destfile' argument"))?;
+    let mode = values::require_string(call.arg(3), "mode")?;
+    let Some(path) = url.strip_prefix("file://") else {
+        let scheme = ["http", "ftp"]
+            .into_iter()
+            .find(|scheme| url.starts_with(&format!("{scheme}://")));
+        return Err(error(match scheme {
+            Some(scheme) => format!("the 'internal' method for {scheme}:// URLs is defunct"),
+            None => format!("scheme not supported in URL '{url}'"),
+        }));
+    };
+    let contents = std::fs::read(crate::connections::expand_path(path)).map_err(|failure| {
+        error(format!(
+            "cannot open URL '{url}', reason '{}'",
+            crate::connections::os_message(&failure)
+        ))
+    })?;
+    let destination = crate::connections::expand_path(&destination);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(mode.starts_with('a'))
+        .truncate(!mode.starts_with('a'))
+        .open(&destination)
+        .map_err(|failure| {
+            error(format!(
+                "cannot open destfile '{destination}', reason '{}'",
+                crate::connections::os_message(&failure)
+            ))
+        })?;
+    file.write_all(&contents)
+        .map_err(|failure| error(crate::connections::os_message(&failure)))?;
+    scalar_integer(0)
+}
+
 unsafe fn do_unzip(call: &NativeCall<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "zipfile")?;
     let path = crate::connections::expand_path(&path);
