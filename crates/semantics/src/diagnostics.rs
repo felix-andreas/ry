@@ -795,10 +795,7 @@ fn classify_non_local_read(
     let files = context.files;
     let test_files = context.test_files;
     if crate::package_scheme_exists_in(db, files, context.library, name)
-        || test_files.is_some_and(|_| {
-            let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
-            binding.winner.is_some() || !binding.conditional_writers.is_empty()
-        })
+        || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)

@@ -773,3 +773,100 @@ fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
         "while (b > 0L) b <- b - 1L\n",
     );
 }
+
+const ONE_SHOT_PROJECT: &[&str] = &[
+    "x <- function() 1L\nping <- function(n) if (n > 0L) pong(n - 1L) else 0L\n",
+    "use_x <- function() x()\npong <- function(n) ping(n)\n",
+    "other <- function() also()\nbad <- function() use_x() + \"a\"\n",
+];
+
+fn diagnostics_of(db: &ProbeDatabase, files: &[SourceFile]) -> Vec<String> {
+    files
+        .iter()
+        .flat_map(|&file| file_diagnostics(db, file))
+        .map(|diagnostic| format!("{diagnostic:?}"))
+        .collect()
+}
+
+#[test]
+fn a_one_shot_check_records_no_per_name_or_per_item_group_edges() {
+    if syntax::testing::invariants_enabled() {
+        return;
+    }
+    let db = ProbeDatabase::one_shot();
+    let files = db.project(ONE_SHOT_PROJECT);
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&[
+            "package_name",
+            "test_name",
+            "interface_group",
+            "project_interface_groups",
+        ]),
+        [0, 0, 0, 1],
+        "a one-shot host reads the project maps once and finds every cyclic group in one walk"
+    );
+}
+
+#[test]
+fn the_incremental_path_keeps_its_per_name_and_per_item_firewalls() {
+    let db = ProbeDatabase::default();
+    let files = db.project(ONE_SHOT_PROJECT);
+    settle(&db, &files);
+    let [package_names, interface_groups, project_groups] = db.executions_since(&[
+        "package_name",
+        "interface_group",
+        "project_interface_groups",
+    ])[..] else {
+        panic!("three counts");
+    };
+    assert!(
+        package_names > 0,
+        "names resolve through per-name projections"
+    );
+    assert!(interface_groups > 0, "groups are found per item");
+    assert_eq!(
+        project_groups, 0,
+        "no edit invalidates a project-wide group walk"
+    );
+}
+
+#[test]
+fn a_one_shot_check_reports_what_the_incremental_check_reports() {
+    let incremental = ProbeDatabase::default();
+    let incremental_files = incremental.project(ONE_SHOT_PROJECT);
+    let one_shot = ProbeDatabase::one_shot();
+    let one_shot_files = one_shot.project(ONE_SHOT_PROJECT);
+    let expected = diagnostics_of(&incremental, &incremental_files);
+    assert!(!expected.is_empty(), "the project has findings to compare");
+    assert_eq!(diagnostics_of(&one_shot, &one_shot_files), expected);
+}
+
+/// Invariants are process-wide, so the cross-check runs in a child process instead of
+/// switching them on under the tests above that count query executions.
+#[test]
+fn a_one_shot_check_agrees_with_the_projections_under_invariants() {
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", "one_shot_invariants_child", "--nocapture"])
+        .env("RY_ONE_SHOT_INVARIANTS_CHILD", "1")
+        .status()
+        .expect("child test runs");
+    assert!(status.success(), "the one-shot cross-check failed");
+}
+
+#[test]
+fn one_shot_invariants_child() {
+    if std::env::var_os("RY_ONE_SHOT_INVARIANTS_CHILD").is_none() {
+        return;
+    }
+    syntax::testing::enable_invariants();
+    let db = ProbeDatabase::one_shot();
+    let files = db.project(ONE_SHOT_PROJECT);
+    settle(&db, &files);
+    assert!(
+        db.executions_since(&["package_name", "interface_group"])
+            .iter()
+            .all(|&count| count > 0),
+        "the cross-check consulted the incremental projections"
+    );
+}
