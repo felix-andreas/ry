@@ -15465,13 +15465,11 @@ impl<'db> Checker<'db, '_> {
                 Ok(*element)
             }
             // A literal name may be absent from a list at runtime (`T | NULL`).
-            TyKind::NamedList(element) => {
-                Ok(if literal_name.is_some() {
-                    union_of(self.db, [*element, null(self.db)])
-                } else {
-                    *element
-                })
-            }
+            TyKind::NamedList(element) => Ok(if literal_name.is_some() {
+                union_of(self.db, [*element, null(self.db)])
+            } else {
+                *element
+            }),
             TyKind::NativeTuple(items) => match literal_position {
                 Some(position) => match items.get(position) {
                     Some(&item) => Ok(item),

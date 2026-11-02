@@ -1662,11 +1662,10 @@ pub(crate) fn is_package_source(path: &Path) -> bool {
     let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
         return false;
     };
-    let Some(directory) = path.parent().filter(|directory| {
-        directory
-            .file_name()
-            .is_some_and(|name| name == "R")
-    }) else {
+    let Some(directory) = path
+        .parent()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "R"))
+    else {
         return false;
     };
     match extension {

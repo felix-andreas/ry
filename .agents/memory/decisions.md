@@ -6474,6 +6474,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - A bare `NA` local that a closure fills with `<<-` is a placeholder like `NULL` (knitr).
 - `seq`'s integer and double overloads come before the Date and POSIXct ones, so a `from` of an
   unresolved numeric type does not pick a date.
+
 # Decision record: a cold check holds one parse tree per worker
 
 - **Previous source.** `ry check` memoized every file's tree in the syntax pass and then released
