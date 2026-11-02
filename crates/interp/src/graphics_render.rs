@@ -7,11 +7,12 @@
 use {
     crate::{
         eval,
-        graphics::{Colour, parse_colour_spec, text_width_ems},
+        graphics::{Colour, SYMBOL_BOX, parse_colour_spec, symbol_metrics, text_width_ems},
         graphics_engine::{
             DevDesc, GEContext, Rboolean, TRANSPARENT_WHITE, VERSION_GLYPHS, VERSION_GROUP,
             add_device_named, check_device_available, create_device, fail, fail_with,
         },
+        plotmath::adobe_symbol_code,
         unwind::{R, error},
         values::{self, length, nil},
     },
@@ -4206,7 +4207,15 @@ unsafe extern "C" fn device_metric_info(
     let bold = gc.fontface == 2 || gc.fontface == 4;
     let scale = text_points(device, gc) / 72.0 / device.unit_inches / 1000.0;
     let code = c.unsigned_abs();
-    let (up, down, across) = if code == 0 {
+    let (up, down, across) = if gc.fontface == 5 {
+        // A negative character is Unicode, a positive one an Adobe Symbol code.
+        let [width, up, down] = match c {
+            0 => [SYMBOL_BOX[2], SYMBOL_BOX[0], SYMBOL_BOX[1]],
+            1.. => symbol_metrics(code),
+            _ => symbol_metrics(adobe_symbol_code(code).unwrap_or(code)),
+        };
+        (f64::from(up), f64::from(down), f64::from(width))
+    } else if code == 0 {
         if bold {
             (962.0, 228.0, 0.0)
         } else {

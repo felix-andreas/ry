@@ -318,6 +318,18 @@ const OPERATORS: &[(&str, c_int)] = &[
     ("max", LIMIT_NAME + 6),
 ];
 
+/// The Adobe Symbol code of a Unicode character outside ASCII that a symbol-face glyph was
+/// translated to, the reverse of [`ADOBE_SYMBOL_UNICODE`].
+pub(crate) fn adobe_symbol_code(character: u32) -> Option<u32> {
+    if character < 128 {
+        return None;
+    }
+    ADOBE_SYMBOL_UNICODE
+        .iter()
+        .position(|&unicode| u32::from(unicode) == character)
+        .map(|index| index as u32 + 32)
+}
+
 /// Adobe Symbol codes 32 to 255 as Unicode, as GNU R's `AdobeSymbol2utf8` maps them when the
 /// private use area is off: bracket and brace pieces become the Unicode bracket-piece code
 /// points, which UTF-8 devices such as ragg draw with ordinary text fonts.

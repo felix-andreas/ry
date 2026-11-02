@@ -2306,9 +2306,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.
-  - plotmath lays out as GNU R's does, but symbol-font glyphs are measured with Helvetica's AFM
-    on the built-in devices (GNU R uses the Symbol AFM), Hershey fonts fall back to ordinary
-    text, and the Adobe symbol conversions pass text through.
+  - Hershey fonts fall back to ordinary text, and a symbol-face string that is not valid UTF-8
+    (`symbol("\256")`) is measured as replacement characters, where GNU R reads the bytes as
+    Adobe Symbol codes.
   - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
     points); open splines match GNU R value for value.
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events

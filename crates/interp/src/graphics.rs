@@ -16,6 +16,7 @@ use {
             self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
         },
         graphics_render::{self, Format, Paper, Rect, Stroke},
+        plotmath::adobe_symbol_code,
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -2949,6 +2950,16 @@ const HELVETICA_BOLD_KERNING: [(u8, u8, i16); 203] = [
 /// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
 /// are bold).
 pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
+    if font == 5 {
+        let total: i32 = line
+            .chars()
+            .map(|character| {
+                let unicode = character as u32;
+                i32::from(symbol_metrics(adobe_symbol_code(unicode).unwrap_or(unicode))[0])
+            })
+            .sum();
+        return f64::from(total) / 1000.0;
+    }
     let (widths, kerning): (&[u16; 95], &[(u8, u8, i16)]) = if font == 2 || font == 4 {
         (&HELVETICA_BOLD_WIDTHS, &HELVETICA_BOLD_KERNING)
     } else {
@@ -2972,6 +2983,71 @@ pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
         previous = code;
     }
     f64::from(total) / 1000.0
+}
+
+/// The Symbol font's metrics for Adobe Symbol codes 32 to 255, in thousandths of the font
+/// size, from GNU R's `afm/Symbol.afm`: the width, the top of the glyph above the baseline,
+/// and how far it reaches below. Codes the font lacks are 0.
+const SYMBOL_WIDTHS: [u16; 224] = [
+    250, 333, 713, 500, 549, 833, 778, 439, 333, 333, 500, 549, 250, 549, 250, 278, 500, 500, 500,
+    500, 500, 500, 500, 500, 500, 500, 278, 278, 549, 549, 549, 444, 549, 722, 667, 722, 612, 611,
+    763, 603, 722, 333, 631, 722, 686, 889, 722, 722, 768, 741, 556, 592, 611, 690, 439, 768, 645,
+    795, 611, 333, 863, 333, 658, 500, 500, 631, 549, 549, 494, 439, 521, 411, 603, 329, 603, 549,
+    549, 576, 521, 549, 549, 521, 549, 603, 439, 576, 713, 686, 493, 686, 494, 480, 200, 480, 549,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 750, 620, 247, 549, 167, 713, 500, 753, 753, 753, 753, 1042, 987, 603, 987, 603, 400, 549,
+    411, 549, 549, 713, 494, 460, 549, 549, 549, 549, 1000, 603, 1000, 658, 823, 686, 795, 987,
+    768, 768, 823, 768, 768, 713, 713, 713, 713, 713, 713, 713, 768, 713, 790, 790, 890, 823, 549,
+    250, 713, 603, 603, 1042, 987, 603, 987, 603, 494, 329, 790, 790, 786, 713, 384, 384, 384, 384,
+    384, 384, 494, 494, 494, 494, 0, 329, 274, 686, 686, 686, 384, 384, 384, 384, 384, 384, 494,
+    494, 494, 0,
+];
+const SYMBOL_ASCENTS: [i16; 224] = [
+    0, 672, 705, 673, 707, 655, 661, 500, 673, 673, 551, 533, 104, 288, 95, 646, 685, 673, 685,
+    685, 685, 690, 685, 673, 685, 685, 460, 460, 522, 390, 522, 686, 475, 673, 673, 673, 688, 673,
+    673, 673, 673, 673, 689, 673, 688, 673, 673, 685, 673, 685, 673, 673, 673, 673, 500, 688, 673,
+    684, 673, 674, 487, 674, 674, -75, 917, 500, 741, 499, 740, 502, 673, 499, 514, 503, 499, 501,
+    739, 500, 507, 499, 487, 690, 499, 500, 500, 507, 583, 500, 766, 500, 756, 673, 707, 673, 307,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 685, 685, 735, 639, 677, 404, 686, 533, 550, 532, 548, 511, 511, 910, 511, 888, 685, 645,
+    737, 639, 524, 404, 746, 473, 456, 549, 443, 394, 95, 1010, 276, 629, 658, 740, 734, 573, 673,
+    675, 719, 509, 492, 470, 470, 540, 470, 470, 468, 555, 673, 718, 673, 675, 673, 751, 917, 310,
+    288, 454, 477, 510, 513, 911, 508, 890, 745, 746, 670, 675, 673, 752, 926, 925, 926, 926, 925,
+    926, 925, 935, 935, 935, 0, 746, 916, 920, 975, 921, 926, 925, 926, 926, 925, 926, 925, 935,
+    935, 0,
+];
+const SYMBOL_DESCENTS: [i16; 224] = [
+    0, 17, 0, 16, 0, 36, 18, 17, 191, 191, -134, 0, 152, -233, 17, 18, 14, 0, 0, 14, 0, 14, 14, 16,
+    14, 18, 17, 152, 0, -141, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 0, 0, 0, 8, 17, 0, 17, 0, 0,
+    0, 0, 233, 0, 0, 0, 0, 155, 0, 155, 0, 125, -881, 18, 223, 231, 19, 19, 224, 225, 202, 17, 224,
+    0, 17, 223, 16, 19, 19, 17, 230, 21, 19, 18, 18, 17, 224, 228, 225, 183, 293, 183, -203, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    12, 0, -459, 0, 12, -124, 193, 26, 36, 33, 36, 15, 15, 0, 15, 22, -385, 0, -459, 0, -8, -123,
+    20, -113, -71, 25, -82, -135, 17, 120, -220, 16, 18, 53, 15, 211, 17, 15, 24, 0, 17, 0, 125,
+    70, 0, 125, 0, 58, 0, 19, 17, 15, -293, 101, 38, -210, 0, 0, 0, 20, 15, -2, 20, 19, 0, 198, 20,
+    15, -293, 108, 293, 85, 293, 80, 79, 80, 85, 85, 75, 85, 0, 198, 107, 88, 88, 87, 293, 85, 293,
+    80, 79, 80, 85, 85, 75, 0,
+];
+
+/// The Symbol font's bounding box as ascent, descent and width, what a device reports for
+/// character 0 in the symbol face.
+pub(crate) const SYMBOL_BOX: [i16; 3] = [1010, 293, 1270];
+
+/// The width, ascent and descent of the glyph with Adobe Symbol code `code` in the symbol
+/// face (`font` 5), in thousandths of the font size. Plotmath measures a glyph by its code; a
+/// string reaches the device as the Unicode characters the codes translate to.
+pub(crate) fn symbol_metrics(code: u32) -> [i16; 3] {
+    match usize::try_from(code)
+        .ok()
+        .and_then(|code| code.checked_sub(32))
+    {
+        Some(index) if index < SYMBOL_WIDTHS.len() => [
+            SYMBOL_WIDTHS[index] as i16,
+            SYMBOL_ASCENTS[index],
+            SYMBOL_DESCENTS[index],
+        ],
+        _ => [0, 0, 0],
+    }
 }
 
 /// One label of a text argument: lines of plain text, or a plotmath expression.
