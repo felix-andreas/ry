@@ -152,3 +152,35 @@ value <- fread("data/prices.csv")
 fread: <T> fn([path]: T) -> integer
 value: integer
 27..32 warning[unused] `value` is assigned but never used.
+
+#---- a_null_placeholder_is_the_column_of_an_unknown_frame
+library(data.table)
+f <- function(path) {
+  nTest <- time <- NULL
+  dt <- fread(path)
+  dt[nTest > 0.0][order(-time)]
+}
+#++++
+Any
+f: fn(path: character) -> data.table
+20..21 warning[unused] `f` is assigned but never used.
+
+#---- a_null_placeholder_indexing_an_unknown_value_is_a_column
+read_sorted <- function(path, frame) {
+  time <- NULL
+  frame[order(-time)]
+}
+#++++
+read_sorted: <T, U> fn([path]: T, frame: U) -> Unknown
+0..11 warning[unused] `read_sorted` is assigned but never used.
+
+#---- a_null_value_indexing_a_vector_is_still_checked
+sorted <- function(values) {
+  time <- NULL
+  values <- c(3, 1, 2)
+  values[order(-time)]
+}
+#++++
+sorted: Unknown
+0..6 warning[unused] `sorted` is assigned but never used.
+83..87 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`

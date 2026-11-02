@@ -5,7 +5,7 @@
 use {
     crate::{SyntaxError, kind::SyntaxKind},
     SyntaxKind::*,
-    rowan::{TextRange, TextSize},
+    text_size::{TextRange, TextSize},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

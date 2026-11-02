@@ -352,4 +352,4 @@ renamed <- List.update(people, 1L, function(p) (name = p$nme, age = p$age))
 #++++
 people: Array<Record{age: double, name: character}>
 renamed: Unknown
-114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`
+114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`. Did you mean `name`?

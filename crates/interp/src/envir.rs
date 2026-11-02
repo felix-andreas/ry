@@ -108,7 +108,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("getNamespaceValue", 3, |call| unsafe {
         let name = values::require_string(call.arg(1), "name")?;
         let exported = values::as_logical_scalar(call.arg(2)) == 1;
-        namespace_lookup(call.arg(0), &name, exported, call.env)
+        namespace_lookup(call.arg(0), &name, exported)
     }),
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
@@ -971,15 +971,18 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     let what = call.arg(0);
     let position = values::as_integer_scalar(call.arg(1)).max(2) as usize;
     let name = call.arg(2);
-    let env = if what.kind() == SexpType::Environment {
-        what
-    } else {
-        let env = new_env(empty_env())?;
-        if what.kind() == SexpType::List {
-            fill_env(env, what)?;
+    // An environment is attached as a copy of its bindings, as in GNU R, so its own enclosure
+    // (a namespace's imports, for one) stays as it was.
+    let env = new_env(empty_env())?;
+    match what.kind() {
+        SexpType::List => fill_env(env, what)?,
+        SexpType::Environment => {
+            for symbol in env_symbols(what, true, false) {
+                define(symbol, find_var_in_frame(symbol, what)?, env)?;
+            }
         }
-        env
-    };
+        _ => {}
+    }
     let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
     let mut previous = global_env();
@@ -1246,7 +1249,8 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             crate::format::set_output_decimal(&mark);
             Ok(value)
         }
-        "scipen" | "deparse.cutoff" => {
+        // GNU R keeps `scipen` as given and reads it as an integer where it is used.
+        "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {
@@ -1420,13 +1424,13 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
     for index in 0..length(arguments) {
         let tag = if names != nil() {
             let name = names.element(index);
-            // An `NA` name tags its argument `NA`, as GNU R installs the string's text.
-            if name == values::na_string() {
-                values::install("NA")?
-            } else if name.bytes().is_empty() {
+            // An NA name tags its argument `NA`, as GNU R's `install` of the NA string does.
+            if name.bytes().is_empty() {
                 nil()
+            } else if name == values::na_string() {
+                values::install("NA")?
             } else {
-                crate::heap().install_char(name)?
+                values::install_charsxp(name)?
             }
         } else {
             nil()
@@ -1969,7 +1973,7 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     let package = colon_name(call.arg(0))?;
     let name = colon_name(call.arg(1))?;
     let package_value = values::scalar_string(&package)?;
-    namespace_lookup(package_value, &name, exported, call.env)
+    namespace_lookup(package_value, &name, exported)
 }
 
 /// Looks `name` up in a package's namespace (a namespace environment or a package name),
@@ -1977,7 +1981,7 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
 /// which maps it to the internal name, from the namespace outward, because a package may export
 /// a function it imports, as graphics does with base's `plot`; lazy data comes last. An
 /// internal name (`:::`) must be bound in the namespace itself.
-unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
+unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool) -> R<Sexp> {
     let symbol = values::install(name)?;
     let namespace = if package.kind() == SexpType::Environment {
         package
@@ -1986,8 +1990,15 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     } else if let Some(loaded) = loaded_namespace(package)? {
         loaded
     } else {
-        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
-        eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?
+        // GNU R evaluates `loadNamespace(x)` with `x` bound to the name, so an error from a
+        // missing package names that call.
+        let frame = values::new_env(base_namespace())?;
+        let x = values::install("x")?;
+        eval::define(x, package, frame)?;
+        eval::eval(
+            values::call(values::install("loadNamespace")?, &[x])?,
+            frame,
+        )?
     };
     if namespace == base_namespace() || !exported {
         let value = find_var_in_frame(symbol, namespace)?;

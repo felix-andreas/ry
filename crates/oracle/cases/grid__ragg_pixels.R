@@ -1,3 +1,4 @@
+# oracle: requires ragg
 # Grid and base graphics drawn on a ragg device, compared pixel for pixel through a checksum
 # of the captured raster. ragg rasterizes, so equal pixels mean the engine handed it the same
 # shapes, coordinates, clipping and graphical parameters as GNU R's engine does.

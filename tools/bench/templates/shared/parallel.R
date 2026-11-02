@@ -27,7 +27,7 @@ with_workers_@ID@ <- function<T>(expr: T) -> T {
 }
 
 run_isolated_@ID@ <- function(n: integer) -> integer {
-  callr::r(function(n) sum(seq_len(n)), args = list(n = n))
+  callr::r(function(n: integer) -> integer sum(seq_len(n)), args = list(n = n))
 }
 #@ test
 test_that("reductions @ID@ agree across engines", {

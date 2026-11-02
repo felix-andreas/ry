@@ -642,7 +642,7 @@ impl Replay {
         match kind {
             SyntaxKind::L_PAREN => self.contexts.push(b'('),
             SyntaxKind::L_BRACKET => self.contexts.push(b'['),
-            SyntaxKind::L_BRACKET2 => self.contexts.extend([b'[', b'[']),
+            SyntaxKind::L_BRACKET2 => self.contexts.extend(*b"[["),
             SyntaxKind::L_BRACE => self.contexts.push(b'{'),
             SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET | SyntaxKind::R_BRACE => {
                 while self.contexts.last() == Some(&b'i') {

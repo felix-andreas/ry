@@ -14,6 +14,13 @@
 //! findings recorded: the run analysed them only as far as the requested files' checks reached
 //! them. A later run treats such a file as stale. `ry load` relies on this to share the record
 //! with `ry check` while checking only `R/`.
+//!
+//! A run asked only about package files leaves the tests and scripts unanalysed, because they
+//! read the package namespace but add nothing to it. Such a file is recorded without a surface,
+//! and so is every file of theirs whose text changed, and every file that kind could affect is
+//! recorded unchecked. A changed file without a recorded surface therefore cannot invalidate any
+//! recorded findings, and a later run computes its surface. For the same reason a run that
+//! leaves a file unanalysed does not compare that file's surface when its text changed.
 
 use {
     crate::config::{self, Config},
@@ -38,7 +45,7 @@ use {
 pub const DIRECTORY: &str = ".ry_cache";
 const RECORD: &str = "check.json";
 /// Bumped whenever the record's layout or its reuse rule changes.
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 
 /// Whether a run may read and write the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +79,8 @@ pub struct Record {
 struct RecordedFile {
     path: PathBuf,
     content: Fingerprint,
-    surface: Fingerprint,
+    /// `None` for a file the run that wrote the record left unanalysed (see the module docs).
+    surface: Option<Fingerprint>,
     /// Positions, in the run's file order, of the files this file's findings depend on.
     dependencies: Vec<u32>,
     /// The NAMESPACE imports the file's code uses, which the NAMESPACE findings depend on.
@@ -124,7 +132,7 @@ pub enum Plan {
 pub struct FileOutcome<'a> {
     pub path: &'a Path,
     pub content: Fingerprint,
-    pub surface: Fingerprint,
+    pub surface: Option<Fingerprint>,
     pub dependencies: Vec<u32>,
     pub tokens: Vec<String>,
     /// `None` for a file this run did not check.
@@ -154,6 +162,12 @@ impl Fingerprinter {
 
     pub fn finish(&self) -> Fingerprint {
         Fingerprint(self.fast.finish(), self.sip.finish())
+    }
+}
+
+impl Default for Fingerprinter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -207,11 +221,11 @@ pub fn is_project(root: &Path) -> bool {
 }
 
 /// The fingerprint of everything a run's findings depend on besides the files' text: the ry
-/// binary at `executable`, the settings, the root, the data files, `NAMESPACE`, `DESCRIPTION`
+/// binary (its [`build_identity`]), the settings, the root, the data files, `NAMESPACE`, `DESCRIPTION`
 /// and the project stubs. `ry check` and the language server compute it the same way, so the
 /// server trusts a record only when it would have computed the same findings.
 pub fn key<'a>(
-    executable: &Path,
+    build: &str,
     config: &Config,
     root: &Path,
     data_files: &impl Debug,
@@ -228,7 +242,7 @@ pub fn key<'a>(
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter
         .text(env!("CARGO_PKG_VERSION"))
-        .text(&build_identity(executable))
+        .text(build)
         .text(&format!("{config:?}"))
         .text(&root.to_string_lossy())
         .text(&format!("{data_files:?}"));
@@ -257,6 +271,7 @@ pub fn plan(
     key: Fingerprint,
     paths: &[PathBuf],
     contents: &[Fingerprint],
+    analysed: impl Fn(usize) -> bool,
     surface_of: impl Fn(usize) -> Fingerprint,
 ) -> Plan {
     let Some(previous) = previous else {
@@ -287,7 +302,12 @@ pub fn plan(
         return Plan::Replay(previous);
     }
     for (index, recorded) in previous.files.iter().enumerate() {
-        if changed[index] && surface_of(index) != recorded.surface {
+        if changed[index]
+            && analysed(index)
+            && recorded
+                .surface
+                .is_some_and(|surface| surface != surface_of(index))
+        {
             return Plan::Fresh;
         }
     }
@@ -336,7 +356,17 @@ impl Record {
     }
 
     pub fn surface(&self, index: usize) -> Option<Fingerprint> {
-        self.files.get(index).map(|recorded| recorded.surface)
+        self.files.get(index).and_then(|recorded| recorded.surface)
+    }
+
+    pub fn content(&self, index: usize) -> Option<Fingerprint> {
+        self.files.get(index).map(|recorded| recorded.content)
+    }
+
+    /// Whether the run that wrote the record analysed every file, so that its attached set is
+    /// the whole project's.
+    pub fn analysed_every_file(&self) -> bool {
+        self.files.iter().all(|recorded| recorded.surface.is_some())
     }
 
     pub fn tokens(&self, index: usize) -> Option<&[String]> {
@@ -536,7 +566,7 @@ fn restore(
 /// Identifies a ry binary by its bytes, so a record written by another build is never read
 /// back, even one with the same size and modification time. Hashing the binary takes a few
 /// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
-fn build_identity(executable: &Path) -> String {
+pub fn build_identity(executable: &Path) -> String {
     match fs::read(executable) {
         Ok(bytes) => {
             let mut hasher = FxHasher::default();

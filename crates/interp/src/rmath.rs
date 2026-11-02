@@ -2119,7 +2119,9 @@ fn gamma_lower_series(x: f64, shape: f64, log: bool) -> f64 {
 /// `Gamma(shape, x) = e^-x x^shape / (x + 1 - shape - 1 (1 - shape) / (x + 3 - shape - 2 (2
 /// - shape) / (x + 5 - shape - ...)))`,
 ///
-/// evaluated by Lentz's method (Thompson and Barnett 1986) for `x` above about `shape + 1`.
+/// for `x` above about `shape + 1`. Lentz's method (Thompson and Barnett 1986) finds how many
+/// terms converge, and the fraction is then evaluated again from that depth upward, which
+/// damps rounding errors where Lentz's forward products accumulate one per term.
 fn gamma_upper_fraction(x: f64, shape: f64, log: bool) -> f64 {
     const TINY: f64 = 1e-300;
     let nonzero = |value: f64| if value.abs() < TINY { TINY } else { value };
@@ -2138,6 +2140,17 @@ fn gamma_upper_fraction(x: f64, shape: f64, log: bool) -> f64 {
             break;
         }
         index += 1.0;
+    }
+    if denominator.is_finite() && denominator != 0.0 {
+        let mut tail = 0.0;
+        let mut depth = index + 4.0;
+        while depth >= 1.0 {
+            let partial_numerator = -depth * (depth - shape);
+            let partial_denominator = x + 2.0 * depth + 1.0 - shape;
+            tail = partial_numerator / nonzero(partial_denominator + tail);
+            depth -= 1.0;
+        }
+        denominator = x + 1.0 - shape + tail;
     }
     if log {
         shape.ln() + gamma_density_factor(x, shape, true) - denominator.ln()
@@ -2210,7 +2223,15 @@ fn gamma_uniform_expansion(x: f64, shape: f64, log: bool) -> (f64, bool) {
 /// `x^shape e^-x / Gamma(shape + 1)` on the requested scale, as `exp(-stirlerr(shape) -
 /// deviance) / sqrt(2 pi shape)` (Loader 2000), which keeps the large exponents of the two
 /// factors from cancelling.
+///
+/// For a small shape and moderate `x` the factors cannot overflow, and the direct product is
+/// more accurate: `exp` of an exponent `E` carries a relative error of about `|E|` rounding
+/// errors, while `x^shape`, `e^-x` and `Gamma(shape + 1)` each round once.
 fn gamma_density_factor(x: f64, shape: f64, log: bool) -> f64 {
+    // `gammafn` is a product of a few accurate factors up to 10 and an exponential above.
+    if !log && shape < 9.0 && x < 600.0 {
+        return x.powf(shape) * (-x).exp() / gammafn(shape + 1.0);
+    }
     let exponent = -stirlerr(shape) - gamma_deviance(x, shape);
     if log {
         exponent - 0.5 * (M_2PI * shape).ln()
@@ -7108,8 +7129,11 @@ const MAX_COUNT_CELLS: f64 = (1u64 << 27) as f64;
 thread_local! {
     /// The last Mann-Whitney table, because vectorised calls repeat the same `m` and `n` and
     /// a table costs `O(m n (m + n))` to build.
-    static WILCOX_CACHE: RefCell<Option<((usize, usize), Rc<[f64]>)>> = const { RefCell::new(None) };
+    static WILCOX_CACHE: RefCell<Option<WilcoxTable>> = const { RefCell::new(None) };
 }
+
+/// A Mann-Whitney count table and the sample sizes `(m, n)` it was built for.
+type WilcoxTable = ((usize, usize), Rc<[f64]>);
 
 /// The number of ways the Mann-Whitney statistic of samples of sizes `m` and `n` takes each
 /// value from 0 to `m n`: the coefficients of the Gaussian binomial `[m + n choose m]_q`,
@@ -7923,7 +7947,8 @@ pub fn bessel_j(x: f64, alpha: f64) -> f64 {
     }
     if alpha > BESSEL_NU_MAX {
         warning(format!(
-            "besselJ(x, nu): nu={alpha} too large for bessel_j() algorithm"
+            "besselJ(x, nu): nu={} too large for bessel_j() algorithm",
+            format_g(alpha)
         ));
         return f64::NAN;
     }
@@ -7933,7 +7958,15 @@ pub fn bessel_j(x: f64, alpha: f64) -> f64 {
     if x == f64::INFINITY {
         return 0.0;
     }
-    bessel_jy_any(x, alpha).0
+    let value = bessel_jy_any(x, alpha).0;
+    if value == 0.0 && x > 0.0 {
+        warning(format!(
+            "bessel_j({},nu={}): precision lost in result",
+            format_g(x),
+            format_g(alpha)
+        ));
+    }
+    value
 }
 
 /// `J_nu(x)` and `Y_nu(x)`. Below `x = 20` the continued fractions of `bessel_jy` serve,
@@ -8120,7 +8153,8 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
     }
     if alpha > BESSEL_NU_MAX {
         warning(format!(
-            "besselY(x, nu): nu={alpha} too large for bessel_y() algorithm"
+            "besselY(x, nu): nu={} too large for bessel_y() algorithm",
+            format_g(alpha)
         ));
         return f64::NAN;
     }
@@ -8130,5 +8164,13 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
     if x == f64::INFINITY {
         return 0.0;
     }
-    bessel_jy_any(x, alpha).1
+    let value = bessel_jy_any(x, alpha).1;
+    if value.is_infinite() {
+        warning(format!(
+            "bessel_y({},nu={}): precision lost in result",
+            format_g(x),
+            format_g(alpha)
+        ));
+    }
+    value
 }

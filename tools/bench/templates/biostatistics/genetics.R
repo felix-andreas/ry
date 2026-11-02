@@ -15,7 +15,7 @@ simulate_genotypes_@ID@ <- function(individuals: integer = @INDIVIDUALS@L, varia
 allele_frequency_@ID@ <- function(genotypes: matrix) -> double[] colMeans(genotypes) / 2
 
 hardy_weinberg_@ID@ <- function(genotypes: matrix) -> double[] {
-  apply(genotypes, 2, function(g) {
+  apply(genotypes, 2, function(g: integer[]) -> double[] {
     counts <- tabulate(g + 1L, nbins = 3L)
     n <- sum(counts)
     p <- (2 * counts[[3]] + counts[[2]]) / (2 * n)

@@ -189,6 +189,8 @@ pub enum Expr {
     Double(f64),
     Logical(bool),
     Character(String),
+    /// A date literal, whole days since 1970-01-01.
+    Date(i32),
     /// A typed `NA`.
     Na(ColumnType),
     Unary(UnaryOp, Box<Expr>),
@@ -206,6 +208,15 @@ pub enum Expr {
     Correlation(Box<Expr>, Box<Expr>),
     /// `fifelse(test, yes, no)` and `ifelse`.
     IfElse(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `Expr.over(x, keys)`: `x` computed within each group of rows sharing the keys' values, one
+    /// value per row, so an aggregation gives every row its group's result.
+    Window(Box<Expr>, Vec<PlSmallStr>),
+    /// `Expr.rank(x)`: each value's position in the sorted values, from 1, with ties in row order,
+    /// as `frank(ties.method = "first")` ranks. `NA` ranks last.
+    Rank {
+        arg: Box<Expr>,
+        descending: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,6 +374,7 @@ fn holds(kind: ColumnType) -> &'static str {
         ColumnType::Double => "doubles",
         ColumnType::Character => "strings",
         ColumnType::Factor => "factor levels",
+        ColumnType::Date => "dates",
     }
 }
 
@@ -387,23 +399,23 @@ pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
     let mut columns = HashSet::new();
     match &query.rows {
         Rows::All | Rows::Positions(_) => {}
-        Rows::Filter(condition) => expression_columns(condition, &mut columns),
+        Rows::Filter(condition) => column_references(condition, &mut columns),
         Rows::Order(keys) => keys
             .iter()
-            .for_each(|key| expression_columns(&key.expr, &mut columns)),
+            .for_each(|key| column_references(&key.expr, &mut columns)),
         Rows::Join(_) => return None,
     }
     match &query.select {
         Select::All => return None,
         Select::Columns(items) => items
             .iter()
-            .for_each(|(_, expr)| expression_columns(expr, &mut columns)),
-        Select::Value(expr) => expression_columns(expr, &mut columns),
+            .for_each(|(_, expr)| column_references(expr, &mut columns)),
+        Select::Value(expr) => column_references(expr, &mut columns),
         Select::Assign(items) => {
             for (name, expr) in items {
                 columns.insert(name.clone());
                 if let Some(expr) = expr {
-                    expression_columns(expr, &mut columns);
+                    column_references(expr, &mut columns);
                 }
             }
         }
@@ -411,34 +423,8 @@ pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
     query
         .by
         .iter()
-        .for_each(|(_, expr)| expression_columns(expr, &mut columns));
+        .for_each(|(_, expr)| column_references(expr, &mut columns));
     Some(columns)
-}
-
-fn expression_columns(expr: &Expr, columns: &mut HashSet<PlSmallStr>) {
-    match expr {
-        Expr::Column(name) => {
-            columns.insert(name.clone());
-        }
-        Expr::Integer(_)
-        | Expr::Double(_)
-        | Expr::Logical(_)
-        | Expr::Character(_)
-        | Expr::Na(_)
-        | Expr::Count => {}
-        Expr::Unary(_, inner) | Expr::Head(inner, _) | Expr::Aggregate { arg: inner, .. } => {
-            expression_columns(inner, columns)
-        }
-        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
-            expression_columns(left, columns);
-            expression_columns(right, columns);
-        }
-        Expr::IfElse(test, yes, no) => {
-            expression_columns(test, columns);
-            expression_columns(yes, columns);
-            expression_columns(no, columns);
-        }
-    }
 }
 
 fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Executed> {
@@ -593,8 +579,12 @@ fn bind_group_columns(mut query: Query) -> Query {
             | Expr::Logical(_)
             | Expr::Character(_)
             | Expr::Na(_)
+            | Expr::Date(_)
             | Expr::Count => {}
-            Expr::Unary(_, arg) | Expr::Head(arg, _) => bind(arg, keys),
+            Expr::Unary(_, arg)
+            | Expr::Head(arg, _)
+            | Expr::Rank { arg, .. }
+            | Expr::Window(arg, _) => bind(arg, keys),
             Expr::Aggregate { arg, .. } => bind(arg, keys),
             Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
                 bind(left, keys);
@@ -792,15 +782,14 @@ fn prefixed_copies(
     )))
 }
 
-/// Every column name `expr` reads.
-fn column_references(expr: &Expr, names: &mut HashSet<PlSmallStr>) {
+/// Every column name `expr` reads, window keys included.
+pub(crate) fn column_references(expr: &Expr, names: &mut impl Extend<PlSmallStr>) {
     match expr {
-        Expr::Column(name) => {
-            names.insert(name.clone());
-        }
-        Expr::Unary(_, arg) | Expr::Head(arg, _) | Expr::Aggregate { arg, .. } => {
-            column_references(arg, names);
-        }
+        Expr::Column(name) => names.extend([name.clone()]),
+        Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Aggregate { arg, .. }
+        | Expr::Rank { arg, .. } => column_references(arg, names),
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
             column_references(left, names);
             column_references(right, names);
@@ -810,10 +799,15 @@ fn column_references(expr: &Expr, names: &mut HashSet<PlSmallStr>) {
             column_references(yes, names);
             column_references(no, names);
         }
+        Expr::Window(arg, keys) => {
+            column_references(arg, names);
+            names.extend(keys.iter().cloned());
+        }
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Count => {}
     }
@@ -1011,10 +1005,16 @@ fn per_row_of_i(
         Expr::Head(arg, rows) => Expr::Head(rewrite(arg), *rows),
         Expr::Binary(op, left, right) => Expr::Binary(*op, rewrite(left), rewrite(right)),
         Expr::IfElse(test, yes, no) => Expr::IfElse(rewrite(test), rewrite(yes), rewrite(no)),
+        Expr::Rank { arg, descending } => Expr::Rank {
+            arg: rewrite(arg),
+            descending: *descending,
+        },
+        Expr::Window(arg, keys) => Expr::Window(rewrite(arg), keys.clone()),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_) => expr.clone(),
     }
@@ -1029,10 +1029,12 @@ fn reads_count(expr: &Expr) -> bool {
             reads_count(left) || reads_count(right)
         }
         Expr::IfElse(test, yes, no) => reads_count(test) || reads_count(yes) || reads_count(no),
+        Expr::Rank { arg, .. } | Expr::Window(arg, _) => reads_count(arg),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_) => false,
     }
@@ -1202,9 +1204,11 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
             arg,
             ..
         } => typer.expr(arg)? != ColumnType::Double,
-        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => {
-            has_integer_sum(typer, arg)?
-        }
+        Expr::Aggregate { arg, .. }
+        | Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Rank { arg, .. }
+        | Expr::Window(arg, _) => has_integer_sum(typer, arg)?,
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
             has_integer_sum(typer, left)? || has_integer_sum(typer, right)?
         }
@@ -1217,6 +1221,7 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => false,
@@ -1231,7 +1236,11 @@ fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> 
             arg,
             ..
         } if typer.expr(arg)? != ColumnType::Double => sums.push(expr.clone()),
-        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => {
+        Expr::Aggregate { arg, .. }
+        | Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Rank { arg, .. }
+        | Expr::Window(arg, _) => {
             integer_sums(typer, arg, sums)?;
         }
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
@@ -1247,6 +1256,7 @@ fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> 
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => {}
@@ -1286,10 +1296,16 @@ fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
         Expr::Binary(op, left, right) => Expr::Binary(*op, double(left)?, double(right)?),
         Expr::Correlation(left, right) => Expr::Correlation(double(left)?, double(right)?),
         Expr::IfElse(test, yes, no) => Expr::IfElse(double(test)?, double(yes)?, double(no)?),
+        Expr::Rank { arg, descending } => Expr::Rank {
+            arg: double(arg)?,
+            descending: *descending,
+        },
+        Expr::Window(arg, keys) => Expr::Window(double(arg)?, keys.clone()),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => expr.clone(),
@@ -2096,8 +2112,9 @@ pub(crate) fn collapses(expr: &Expr) -> bool {
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_) => true,
-        Expr::Column(_) | Expr::Head(..) => false,
+        Expr::Column(_) | Expr::Head(..) | Expr::Rank { .. } | Expr::Window(..) => false,
         Expr::Unary(_, arg) => collapses(arg),
         Expr::Binary(_, left, right) => collapses(left) && collapses(right),
         Expr::IfElse(test, yes, no) => collapses(test) && collapses(yes) && collapses(no),
@@ -2719,12 +2736,18 @@ fn relevel(column: Column, levels: &[String]) -> Result<Column> {
 /// whole frame and keeping the selected rows gives the same values as evaluating it on them.
 fn row_wise(expr: &Expr) -> bool {
     match expr {
-        Expr::Aggregate { .. } | Expr::Count | Expr::Head(..) | Expr::Correlation(..) => false,
+        Expr::Aggregate { .. }
+        | Expr::Count
+        | Expr::Head(..)
+        | Expr::Correlation(..)
+        | Expr::Rank { .. }
+        | Expr::Window(..) => false,
         Expr::Column(_)
         | Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_) => true,
         Expr::Unary(_, arg) => row_wise(arg),
         Expr::Binary(_, left, right) => row_wise(left) && row_wise(right),
@@ -2817,14 +2840,17 @@ impl NullCounts {
             | Expr::Double(_)
             | Expr::Logical(_)
             | Expr::Character(_)
-            | Expr::Count => false,
+            | Expr::Date(_)
+            | Expr::Count
+            | Expr::Rank { .. } => false,
             Expr::Unary(UnaryOp::IsNa, _) => false,
             Expr::Unary(_, arg) | Expr::Head(arg, _) => self.may_be_null(arg),
             // Integer arithmetic overflows to NA, so it may always produce one.
             Expr::Binary(..)
             | Expr::Aggregate { .. }
             | Expr::Correlation(..)
-            | Expr::IfElse(..) => true,
+            | Expr::IfElse(..)
+            | Expr::Window(..) => true,
         }
     }
 }
@@ -2845,6 +2871,7 @@ impl Typer<'_> {
             Expr::Double(_) => ColumnType::Double,
             Expr::Logical(_) => ColumnType::Logical,
             Expr::Character(_) => ColumnType::Character,
+            Expr::Date(_) => ColumnType::Date,
             Expr::Na(kind) => *kind,
             Expr::Unary(UnaryOp::Not, arg) => {
                 expect_truthy(self.expr(arg)?, "`!`")?;
@@ -2857,6 +2884,10 @@ impl Typer<'_> {
             Expr::Unary(UnaryOp::Negate, arg) => arithmetic(self.expr(arg)?, ColumnType::Integer)?,
             Expr::Binary(op, left, right) => {
                 let (left, right) = (self.expr(left)?, self.expr(right)?);
+                let arithmetic = |left, right| match op {
+                    BinaryOp::Add | BinaryOp::Subtract => date_arithmetic(*op, left, right),
+                    _ => arithmetic(left, right),
+                };
                 match op {
                     BinaryOp::Add
                     | BinaryOp::Subtract
@@ -2908,20 +2939,53 @@ impl Typer<'_> {
                 expect_logical(self.expr(test)?, "an `ifelse` test")?;
                 supertype(self.expr(yes)?, self.expr(no)?)
             }
+            Expr::Rank { arg, .. } => {
+                self.expr(arg)?;
+                ColumnType::Integer
+            }
+            Expr::Window(arg, keys) => {
+                for key in keys {
+                    self.expr(&Expr::Column(key.clone()))?;
+                }
+                self.expr(arg)?
+            }
         })
     }
 }
 
 /// The result type of R arithmetic: logical promotes to integer, and anything with a double is
-/// double. Characters and factors are refused, as R refuses them.
+/// double. Characters and factors are refused, as R refuses them, and so are dates, which only
+/// take the `+` and `-` of [`date_arithmetic`].
 fn arithmetic(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     match (left, right) {
+        (ColumnType::Date, _) | (_, ColumnType::Date) => Err(Error::Query(
+            "a date only takes `+` and `-` with a number of days, or `-` with another date"
+                .to_string(),
+        )),
         (ColumnType::Character | ColumnType::Factor, _)
         | (_, ColumnType::Character | ColumnType::Factor) => Err(Error::Query(
             "arithmetic needs numeric or logical columns".to_string(),
         )),
         (ColumnType::Double, _) | (_, ColumnType::Double) => Ok(ColumnType::Double),
         _ => Ok(ColumnType::Integer),
+    }
+}
+
+/// The result type of `+` or `-`, which also take dates: a date plus or minus a number of days is
+/// a date, and the difference of two dates is their distance in whole days, an integer, where R
+/// would give a `difftime`.
+fn date_arithmetic(op: BinaryOp, left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+    let days = |kind| {
+        matches!(
+            kind,
+            ColumnType::Logical | ColumnType::Integer | ColumnType::Double
+        )
+    };
+    match (op, left, right) {
+        (BinaryOp::Subtract, ColumnType::Date, ColumnType::Date) => Ok(ColumnType::Integer),
+        (_, ColumnType::Date, other) if days(other) => Ok(ColumnType::Date),
+        (BinaryOp::Add, other, ColumnType::Date) if days(other) => Ok(ColumnType::Date),
+        _ => arithmetic(left, right),
     }
 }
 
@@ -2933,7 +2997,7 @@ fn supertype(left: ColumnType, right: ColumnType) -> ColumnType {
             ColumnType::Logical => 0,
             ColumnType::Integer => 1,
             ColumnType::Double => 2,
-            ColumnType::Character | ColumnType::Factor => 3,
+            ColumnType::Character | ColumnType::Factor | ColumnType::Date => 3,
         }
     }
     if left == right {
@@ -2962,6 +3026,18 @@ fn expect_truthy(kind: ColumnType, what: &str) -> Result<()> {
 /// formatting (`1e+06`, fifteen significant digits) has no Polars equivalent, so that mix is
 /// refused rather than compared wrongly.
 pub(crate) fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+    // Without this, a date against anything else would meet at character and compare as text.
+    if (left == ColumnType::Date) != (right == ColumnType::Date) {
+        let other = if left == ColumnType::Date {
+            right
+        } else {
+            left
+        };
+        return Err(Error::Query(format!(
+            "a Date compares only with a Date, not with {}",
+            other.name()
+        )));
+    }
     let textual = |kind| matches!(kind, ColumnType::Character | ColumnType::Factor);
     if (textual(left) && right == ColumnType::Double)
         || (left == ColumnType::Double && textual(right))
@@ -2991,6 +3067,7 @@ fn dtype(kind: ColumnType) -> DataType {
         // A factor result of `ifelse` and friends is character, as `supertype` decides, so this
         // arm only casts a factor column onto itself.
         ColumnType::Character | ColumnType::Factor => DataType::String,
+        ColumnType::Date => DataType::Date,
     }
 }
 
@@ -3017,6 +3094,7 @@ impl Lowering<'_> {
             Expr::Double(value) => lit(*value),
             Expr::Logical(value) => lit(*value),
             Expr::Character(value) => lit(value.clone()),
+            Expr::Date(days) => lit(*days).cast(DataType::Date),
             Expr::Na(kind) => lit(polars::prelude::Null {}).cast(dtype(*kind)),
             Expr::Count => len().cast(DataType::Int32),
             Expr::Unary(UnaryOp::Not, arg) => self.logical(arg)?.not(),
@@ -3136,6 +3214,23 @@ impl Lowering<'_> {
                     .then(yes)
                     .otherwise(no)
             }
+            // The row numbers sorted by the values, stably, list the rows in rank order, and
+            // sorting those positions back gives each row its rank. The second sort has no ties.
+            Expr::Rank { arg, descending } => {
+                let value = self.expr(arg)?;
+                // `is_null` is never null, so its running count is the row number.
+                let rows = value.clone().is_null().cum_count(false);
+                let options = SortMultipleOptions::default()
+                    .with_order_descending(*descending)
+                    .with_nulls_last(true)
+                    .with_maintain_order(true);
+                (rows.sort_by([value], options).arg_sort(false, false) + lit(1))
+                    .cast(DataType::Int32)
+            }
+            Expr::Window(arg, keys) => {
+                let keys: Vec<PolarsExpr> = keys.iter().map(|key| col(key.clone())).collect();
+                self.expr(arg)?.over(keys)?
+            }
         })
     }
 
@@ -3182,6 +3277,20 @@ impl Lowering<'_> {
         let typer = self.typer();
         let (left_kind, right_kind) = (typer.expr(left)?, typer.expr(right)?);
         Ok(match op {
+            BinaryOp::Add | BinaryOp::Subtract if kind == ColumnType::Date => {
+                // Days are whole in a Polars date, so a fractional number of days is floored, as
+                // R's `format` of a fractional date shows the day it falls in.
+                let days = |expr: &Expr, kind: ColumnType| -> Result<PolarsExpr> {
+                    let value = self.expr(expr)?;
+                    Ok(match kind {
+                        ColumnType::Double => value.floor().cast(DataType::Int64),
+                        _ => value.cast(DataType::Int32).cast(DataType::Int64),
+                    })
+                };
+                let (l, r) = (days(left, left_kind)?, days(right, right_kind)?);
+                let sum = if op == BinaryOp::Add { l + r } else { l - r };
+                checked_int32(sum).cast(DataType::Date)
+            }
             BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply
                 if kind == ColumnType::Integer =>
             {

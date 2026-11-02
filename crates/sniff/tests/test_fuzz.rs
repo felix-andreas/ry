@@ -55,7 +55,7 @@ fn fuzz_mutations_and_random_bytes() {
 /// A file with more records than the head sample reads takes the jump-point path.
 #[test]
 fn fuzz_large_files() {
-    let mut rng = SplitMix64(0x5a1f_b16);
+    let mut rng = SplitMix64(0x05a1_fb16);
     for _ in 0..fuzz_iterations(3000) / 100 {
         let mut text = String::from("a,b,c\n");
         for row in 0..1200 + rng.below(3000) {

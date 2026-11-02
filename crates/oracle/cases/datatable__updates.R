@@ -1,3 +1,4 @@
+# oracle: requires data.table
 # `:=` on data.tables under ry's runtime: in place, by reference, and only as data.table would.
 library(data.table)
 dt <- data.table(g = c("a", "b", "a", "c", "b"), x = 1:5, y = c(1.5, 2.5, NA, 4.5, 5.5))

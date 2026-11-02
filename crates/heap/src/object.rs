@@ -323,8 +323,8 @@ pub mod gp {
     /// must respect before it updates a value in place.
     pub const COMPILED_FRAME: u16 = 1 << 9;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
-    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
-    /// compiled code revalidates its lookups only when the epoch moved.
+    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
+    /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
     pub const WATCHED: u16 = 1 << 10;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.
@@ -347,6 +347,12 @@ pub(crate) mod gc_bits {
     pub const MARK: u8 = 1 << 0;
     /// In the remembered set: an old object that may point at young objects.
     pub const REMEMBERED: u8 = 1 << 1;
+    /// Survived a collection: the object's mark, which is sticky, was set at least once. Outside
+    /// a collection this agrees with the mark, which lives in a side bitmap for small objects;
+    /// the copy in the header is what lets the write barrier decide from the parent's header
+    /// alone, which a store has in cache, instead of locating its slot in the bitmaps. It is
+    /// never cleared, because a freed slot's next object starts with fresh header bits.
+    pub const OLD: u8 = 1 << 2;
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;
@@ -551,10 +557,13 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 length
             };
             let data = elements.checked_mul(element)?;
+            // A string's bytes need no alignment, so a string of up to seven bytes fits the
+            // 40-byte slot class, a sixth smaller than the 48 bytes 16-byte rounding gives it.
+            let align = if kind == SexpType::Char { 7 } else { 15 };
             VECTOR_DATA_OFFSET
                 .checked_add(data)?
-                .checked_add(15)
-                .map(|size| size & !15)
+                .checked_add(align)
+                .map(|size| size & !align)
         }
         Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),

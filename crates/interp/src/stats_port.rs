@@ -131,7 +131,8 @@ pub unsafe fn port_nlsb(call: &NativeCall<'_>) -> R<Sexp> {
 /// The ranges are PORT's: `rel.tol` between machine epsilon and 0.1, the step bounds positive
 /// normal numbers, the other tolerances in [0, 1] (`abs.tol` any finite nonnegative number).
 fn out_of_range_control(v: &[f64]) -> Option<i32> {
-    let checks: [(usize, fn(f64) -> bool); 7] = [
+    type Check = (usize, fn(f64) -> bool);
+    let checks: [Check; 7] = [
         (31, |value| (0.0..f64::INFINITY).contains(&value)),
         (32, |value| (f64::EPSILON..=0.1).contains(&value)),
         (33, |value| (0.0..=1.0).contains(&value)),
@@ -711,7 +712,7 @@ fn cholesky(matrix: &mut [f64], size: usize) -> bool {
         for k in 0..j {
             diagonal -= matrix[k * size + j].powi(2);
         }
-        if !(diagonal > 0.0) || !diagonal.is_finite() {
+        if diagonal <= 0.0 || !diagonal.is_finite() {
             return false;
         }
         let root = diagonal.sqrt();

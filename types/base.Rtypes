@@ -55,6 +55,9 @@
 @type POSIXct
 @type difftime
 @type environment
+# What a `tryCatch` or `withCallingHandlers` handler receives. Its fields depend on what signalled it, so it
+# is opaque, like rlang's conditions.
+@type condition
 
 # Operator methods. R gives a class arithmetic and comparison through S3 group
 # generics (`Ops.Date`), and a declaration named the way R names the method is
@@ -176,15 +179,21 @@ seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [alon
 seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
 seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
 seq : @pure fn(...: Any) -> Any
-seq.int : @pure Any
+seq.int : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
+seq.int : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
+seq.int : @pure fn(...: Any) -> Any
 # `rep` ignores the arguments it does not know, so `rep(".", n, collapse = TRUE)` runs.
 rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> T[]
 rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> Any
 rep_len : @pure fn(x: Any, length.out: Any) -> Any
+rep.int : @pure <T> fn(x: T[], times: Any) -> T[]
+rep.int : @pure fn(x: Any, times: Any) -> Any
 
 # Type predicates: a single logical, computed from the whole value.
 is.null : @pure fn(x: Any) -> logical
 is.numeric : @pure fn(x: Any) -> logical
+is.raw : @pure fn(x: Any) -> logical
+is.complex : @pure fn(x: Any) -> logical
 is.double : @pure fn(x: Any) -> logical
 is.integer : @pure fn(x: Any) -> logical
 is.character : @pure fn(x: Any) -> logical
@@ -307,7 +316,7 @@ regexpr : @pure fn(pattern: character[], text: Any, [ignore.case]: logical, [per
 gregexpr : @pure fn(pattern: character, text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> list[integer[]]
 gregexpr : @pure fn(pattern: character[], text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> list[integer[]]
 regexec : @pure Any
-regmatches : @pure Any
+regmatches : @pure fn(x: character[], m: Any, [invert]: Any) -> Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
@@ -487,6 +496,7 @@ match : @pure fn(x: Any, table: Any, [nomatch]: Any, [incomparables]: Any) -> in
 names : @pure fn(x: Any) -> Any
 class : @pure fn(x: Any) -> character
 oldClass : @pure fn(x: Any) -> Any
+unname : @pure <T> fn(obj: T, [force]: logical) -> T
 inherits : @pure fn(x: Any, what: Any, [which]: logical) -> logical
 dim : @pure fn(x: Any) -> Any
 nrow : @pure fn(x: Any) -> Any
@@ -537,11 +547,13 @@ crossprod : @pure fn(x: Any, [y]: Any, ...: Any) -> matrix
 tcrossprod : @pure fn(x: Any, [y]: Any, ...: Any) -> matrix
 drop : @pure fn(x: Any) -> Any
 replicate : fn(n: Any, expr: Any, [simplify]: logical | character) -> Any
-solve : Any
+solve : @pure fn(a: Any, [b]: Any, ...: Any) -> Any
 outer : Any
 cut : @pure fn(x: Any, [breaks]: Any, [labels]: Any, [include.lowest]: logical, [right]: logical, [dig.lab]: Any, [ordered_result]: logical, ...: Any) -> Any
 split : @pure fn(x: Any, f: Any, [drop]: logical, ...: Any, [sep]: character, [lex.order]: logical) -> list[Any]
-merge : Any
+# Methods such as `merge.xts` take only `...`, so the generic requires nothing.
+merge : @pure fn(x: data.frame, y: data.frame, ...: Any) -> data.frame
+merge : @pure fn(...: Any) -> Any
 # `scale` centres and scales the columns of its argument, and the default method always returns a
 # matrix, even for a plain vector.
 scale : @pure fn(x: Any, [center]: Any, [scale]: Any) -> matrix
@@ -584,10 +596,10 @@ Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logic
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
 invisible : @pure <T> fn([x]: T) -> T
 force : <T> fn(x: T) -> T
-# `sapply`/`vapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
-# results (value-dependent); `apply` and friends also forward named arguments to the callee. `Negate`
-# needs a variadic-generic signature. All stay `Any`.
-sapply : Any
+# `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
+# results (value-dependent), so their results stay `Any`; `apply` and friends also forward named
+# arguments to the callee. `Negate` needs a variadic-generic signature.
+sapply : fn(X: Any, FUN: Any, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
 # `vapply`'s whole reason to exist is that `FUN.VALUE` DECLARES the result type,
 # so the declaration ties the callback's return to it: a callback returning
 # `character` under a `numeric(1)` template is the error R raises at runtime
@@ -613,7 +625,7 @@ vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: A
 # Tried last, because a generic `FUN` would also match it. A matrix carries no element
 # type, so a matrix-valued `FUN` accepts any template, and R stacks the results into a matrix.
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
-mapply : Any
+mapply : fn(FUN: Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
 Map : Any
 # `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).
 tapply : @pure fn(X: Any, INDEX: Any, [FUN]: Any, ...: Any, [default]: Any, [simplify]: logical) -> Any
@@ -670,9 +682,9 @@ topenv : @pure fn([envir]: environment, [matchThisEnv]: environment) -> environm
 new.env : @pure fn([hash]: logical, [parent]: environment, [size]: integer) -> environment
 parent.frame : fn([n]: double) -> environment
 parent.env : fn(env: environment) -> environment
-sys.call : Any
+sys.call : fn([which]: Any) -> Any
 sys.function : Any
-match.call : Any
+match.call : fn([definition]: Any, [call]: Any, [expand.dots]: logical, [envir]: Any) -> Any
 environmentName : @pure fn(env: Any) -> character
 get : fn(x: character, [pos]: Any, [envir]: Any, [mode]: character, [inherits]: logical) -> Any
 get0 : fn(x: character, [envir]: Any, [mode]: character, [inherits]: logical, [ifnotfound]: Any) -> Any
@@ -685,16 +697,24 @@ evalq : fn(expr: Any, [envir]: Any, [enclos]: Any) -> Any
 quote : @pure fn(expr: Any) -> Any
 substitute : @pure fn([expr]: Any, [env]: Any) -> Any
 bquote : fn(expr: Any, [where]: Any, [splice]: logical) -> Any
-deparse : fn(expr: Any, [width.cutoff]: Any, [backtick]: logical, [control]: Any, [nlines]: Any) -> character
+deparse : @pure fn(expr: Any, [width.cutoff]: Any, [backtick]: logical, [control]: Any, [nlines]: Any) -> character
 parse : fn([file]: Any, [n]: Any, [text]: Any, [prompt]: Any, [keep.source]: logical, [srcfile]: Any, [encoding]: character) -> Any
 body : fn(fun: Any) -> Any
 formals : fn([fun]: Any, [envir]: Any) -> Any
 args : fn(name: Any) -> Any
-# NSE data-masking helpers: deliberately not modeled beyond resolution.
-subset : Any
-transform : Any
-with : Any
-within : Any
+# Data-masking helpers: every argument but the data evaluates inside it, which naming handles,
+# so the stubs type only the result. They are `@pure` because the masked arguments are walked
+# for effects on their own. `subset` keeps a frame, a matrix (its `drop` defaults to FALSE) or a
+# vector's element type, `transform` turns anything into a frame, and `within` keeps a frame.
+# `with` returns whatever its expression does, so its result is deliberately untyped.
+subset : @pure fn(x: data.frame, ...: Any) -> data.frame
+subset : @pure fn(x: matrix, ...: Any) -> matrix
+subset : @pure <T> fn(x: T[], ...: Any) -> T[]
+subset : @pure fn(x: Any, ...: Any) -> Any
+transform : @pure fn(...: Any) -> data.frame
+with : @pure fn(data: Any, ...: Any) -> Any
+within : @pure fn(data: data.frame, ...: Any) -> data.frame
+within : @pure fn(data: Any, ...: Any) -> Any
 
 # Attach and load. `library` returns the attached-package list or a logical depending on
 # `logical.return` (value-dependent); `require`'s logical is genuine (`if (require(pkg))`).
@@ -799,3 +819,6 @@ untrace : fn(what: Any, [signature]: Any, [where]: Any) -> Any
 traceback : fn([x]: Any, [max.lines]: Any) -> Any
 # The S4 dispatch primitive lives in base, not methods.
 standardGeneric : fn(f: character, [fdef]: Any) -> Any
+getwd : fn() -> character
+system.file : fn(...: Any, [package]: character, [lib.loc]: Any, [mustWork]: logical) -> character
+asNamespace : fn(ns: Any, [base.OK]: logical) -> environment

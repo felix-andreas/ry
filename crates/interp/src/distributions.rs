@@ -1443,10 +1443,19 @@ pub fn rmultinom(
         return Ok(());
     };
     let mut left = size;
-    let mut remaining_probability: f64 = probabilities.iter().sum();
+    // GNU R keeps the remaining probability in a `long double`. In plain `f64` ten draws of 0.1
+    // leave a conditional probability a hair above 0.5, which makes `rbinom` draw the
+    // complement and changes the counts, so the sum is carried as an unevaluated pair of
+    // doubles (`high + low`) that is at least as precise.
+    let (mut high, mut low) = (0.0, 0.0);
+    for &probability in probabilities {
+        (high, low) = two_sum_pair(high, low, probability);
+    }
     for (index, &probability) in probabilities[..last].iter().enumerate() {
         if probability > 0.0 {
-            let conditional = probability / remaining_probability;
+            let quotient = probability / high;
+            let residual = (-quotient).mul_add(high, probability) - quotient * low;
+            let conditional = quotient + residual / high;
             counts[index] = if conditional < 1.0 {
                 rbinom(deviates, f64::from(left), conditional)? as i32
             } else {
@@ -1457,19 +1466,26 @@ pub fn rmultinom(
         if left <= 0 {
             return Ok(());
         }
-        remaining_probability -= probability;
+        (high, low) = two_sum_pair(high, low, -probability);
     }
     counts[last] = left;
     Ok(())
 }
 
+/// `high + low + value` as a normalized pair of doubles, by Knuth's two-sum.
+fn two_sum_pair(high: f64, low: f64, value: f64) -> (f64, f64) {
+    let sum = high + value;
+    let virtual_value = sum - high;
+    let error = (high - (sum - virtual_value)) + (value - virtual_value);
+    let low = low + error;
+    let total = sum + low;
+    (total, low - (total - sum))
+}
+
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use {
-        super::*,
-        crate::{random::SeededDeviates, rmath::*},
-    };
+    use {super::*, crate::random::SeededDeviates};
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
 

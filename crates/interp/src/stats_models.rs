@@ -794,7 +794,7 @@ impl Model {
                     }
                     (Some("^"), 2) => {
                         let power = values::as_real_scalar(second());
-                        if !is_numeric_scalar(second()) || !(power >= 1.0) {
+                        if !is_numeric_scalar(second()) || power.is_nan() || power < 1.0 {
                             return Err(self.error("invalid power in formula"));
                         }
                         let left = self.encode(first())?;
@@ -925,29 +925,69 @@ unsafe fn lhs_symbols(expression: Sexp, names: &mut Vec<String>) {
     }
 }
 
-/// The right-hand side with `.` replaced by the sum of the data columns, parenthesized when
-/// there is more than one.
-unsafe fn expand_frame_dot(expression: Sexp, names: &[String]) -> R<Sexp> {
+/// The right-hand side with `.` replaced by the sum of the data columns. GNU R rewrites only
+/// a formula with a `.` among its formula operators, and then rewrites every `.`, including
+/// those inside calls such as `log(.)`. The sum stays bare at the top, inside parentheses, as
+/// a call's argument, and as the left operand of a binary `+`, and is parenthesized as any
+/// other operand.
+unsafe fn expand_frame_dot(rhs: Sexp, names: &[String]) -> R<Sexp> {
+    if !has_operator_dot(rhs) {
+        return Ok(rhs);
+    }
+    let mut sum = values::install(&names[0])?;
+    for name in &names[1..] {
+        sum = values::call(symbols().plus, &[sum, values::install(name)?])?;
+    }
+    substitute_frame_dot(rhs, sum, false)
+}
+
+unsafe fn has_operator_dot(expression: Sexp) -> bool {
     if is_dot(expression) {
-        let mut sum = values::install(&names[0])?;
-        for name in &names[1..] {
-            sum = values::call(symbols().plus, &[sum, values::install(name)?])?;
-        }
-        return if names.len() > 1 {
-            values::call(symbols().paren, &[sum])
+        return true;
+    }
+    if expression.kind() != SexpType::Language || !is_formula_operator(expression) {
+        return false;
+    }
+    values::pairlist_items(expression.cdr())
+        .into_iter()
+        .any(|(_, operand)| has_operator_dot(operand))
+}
+
+unsafe fn is_formula_operator(expression: Sexp) -> bool {
+    matches!(
+        operator_name(expression).as_deref(),
+        Some("+" | "-" | "*" | "/" | ":" | "^" | "%in%" | "(")
+    )
+}
+
+unsafe fn substitute_frame_dot(expression: Sexp, sum: Sexp, wrap: bool) -> R<Sexp> {
+    if is_dot(expression) {
+        let value = values::duplicate(sum)?;
+        return if wrap && value.kind() == SexpType::Language {
+            values::call(symbols().paren, &[value])
         } else {
-            Ok(sum)
+            Ok(value)
         };
     }
     if expression.kind() != SexpType::Language {
         return Ok(expression);
     }
+    let operator = if is_formula_operator(expression) {
+        operator_name(expression)
+    } else {
+        None
+    };
+    let binary_plus = operator.as_deref() == Some("+") && length(expression) == 3;
+    let parenthesis = operator.as_deref() == Some("(");
     let copy = values::shallow_duplicate(expression)?;
     let mut cell = copy.cdr();
+    let mut position = 0;
     while cell != nil() {
-        let expanded = expand_frame_dot(cell.car(), names)?;
+        let wrap = operator.is_some() && !parenthesis && !(binary_plus && position == 0);
+        let expanded = substitute_frame_dot(cell.car(), sum, wrap)?;
         crate::heap().set_car(cell, expanded);
         cell = cell.cdr();
+        position += 1;
     }
     Ok(copy)
 }

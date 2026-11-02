@@ -53,12 +53,15 @@ pub mod latex;
 pub mod linalg;
 pub mod long_double;
 pub mod lower;
+#[path = "../../rcmd/src/makeconf.rs"]
+mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
+pub mod plotmath;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -132,6 +135,12 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
+    /// A compact ALTREP integer sequence of the length, first element and increment (1 or
+    /// -1), or `None` when the host has no ALTREP classes.
+    pub compact_intseq: unsafe fn(usize, i32, i32) -> R<Option<Sexp>>,
+    /// `as.character` of an integer or double vector without attributes as a vector that
+    /// converts each element when it is read, or `None` when the host has no such class.
+    pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -207,6 +216,11 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
+    /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
+    /// ry answers a lookup that finds no binding from here instead, so an assignment neither
+    /// adds a binding nor invalidates the lookup caches.
+    pub tmp_values: Vec<(Sexp, Sexp)>,
     /// The environments of the loops the tree-walking interpreter is running, innermost last.
     pub loop_envs: Vec<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
@@ -244,6 +258,7 @@ pub struct Interp {
     pub annotations: annotations::State,
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
+    pub method_cache: dispatch::MethodCache,
     pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
@@ -337,6 +352,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
+        tmp_values: Vec::new(),
         loop_envs: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
@@ -357,6 +373,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         moves: moves::State::default(),
+        method_cache: dispatch::MethodCache::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
@@ -381,6 +398,8 @@ pub fn default_hooks() -> Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        compact_intseq: |_, _, _| Ok(None),
+        defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
@@ -496,6 +515,10 @@ impl RootSource for InterpRoots {
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);
+            }
+            for &(env, value) in &interp.tmp_values {
+                marker.mark(env);
+                marker.mark(value);
             }
             for &(call, _) in &interp.warnings {
                 marker.mark(call);

@@ -224,6 +224,10 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
         return Ok(nil());
     }
     check_sortable(x)?;
+    // Strings are compared through their characters, which a string declared as bytes lacks.
+    if length(x) > 1 {
+        values::refuse_bytes(x)?;
+    }
     let result = values::duplicate(x)?;
     values::clear_attributes(result);
     match result.kind() {
@@ -356,6 +360,11 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&key| values::materialize(key))
         .collect::<R<Vec<Sexp>>>()?;
+    if count > 1 {
+        for &key in &keys {
+            values::refuse_bytes(key)?;
+        }
+    }
     // GNU R's `orderVector1` and `listgreater` have no raw case.
     let columns: Vec<Option<Column<'_>>> = keys
         .iter()
@@ -1500,7 +1509,7 @@ fn msd_sort<K: RadixKey>(
     for &(key, _) in pairs.iter() {
         sizes[digit(key.wide(), shift)] += 1;
     }
-    if sizes.iter().any(|&size| size == pairs.len()) {
+    if sizes.contains(&pairs.len()) {
         if shift == 0 {
             sink.emit(offset, pairs);
         } else {
@@ -1572,6 +1581,34 @@ unsafe fn compare_strings_na_last(left: Sexp, right: Sexp) -> Ordering {
 /// Complex order: by real part, then imaginary part. Any comparison with NaN is false.
 fn complex_less(left: Rcomplex, right: Rcomplex) -> bool {
     left.r < right.r || (left.r == right.r && left.i < right.i)
+}
+
+/// GNU R's `rsort_with_index`: a shell sort with Knuth's gaps (1, 4, 13, 40, ...) that orders
+/// `(key, payload)` pairs by key, NaN last. It is not stable, and graphics code that draws in
+/// this order (`persp`'s facets) must break ties the way GNU R does.
+pub(crate) fn rsort_with_index<T: Copy>(items: &mut [(f64, T)]) {
+    let greater = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
+        (true, false) => true,
+        (false, false) => left > right,
+        _ => false,
+    };
+    let count = items.len();
+    let mut gap = 1;
+    while gap <= count / 9 {
+        gap = 3 * gap + 1;
+    }
+    while gap > 0 {
+        for index in gap..count {
+            let item = items[index];
+            let mut slot = index;
+            while slot >= gap && greater(items[slot - gap].0, item.0) {
+                items[slot] = items[slot - gap];
+                slot -= gap;
+            }
+            items[slot] = item;
+        }
+        gap /= 3;
+    }
 }
 
 /// Shell sort with Sedgewick's gaps 4^k + 3 * 2^(k - 1) + 1 (1, 8, 23, 77, 281, ...), moving an
@@ -1782,7 +1819,8 @@ fn singleton_sort<T: Copy + PartialOrd>(items: &mut [T], index: &mut [i32]) {
                         items[slot as usize] = items[(slot - 1) as usize];
                         index[slot as usize] = index[(slot - 1) as usize];
                         slot -= 1;
-                        if slot < 1 || !(value < get(items, slot)) {
+                        if slot < 1 || value.partial_cmp(&get(items, slot)) != Some(Ordering::Less)
+                        {
                             break;
                         }
                     }
@@ -1896,10 +1934,10 @@ unsafe fn duplicated_elements(
     } else {
         incomparable_keys(incomparables, x.kind())?
     };
-    if incomparables.is_none() {
-        if let Some(keys) = plain_keys(x) {
-            return Ok(duplicate_flags(keys, from_last));
-        }
+    if incomparables.is_none()
+        && let Some(keys) = plain_keys(x)
+    {
+        return Ok(duplicate_flags(keys, from_last));
     }
     let mut duplicated = vec![false; count];
     let visit: Box<dyn Iterator<Item = usize>> = if from_last {

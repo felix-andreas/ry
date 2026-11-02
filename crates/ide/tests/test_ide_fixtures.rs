@@ -5,26 +5,57 @@
 
 use {
     ide::{
-        CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, HoverDefinition,
-        call_hierarchy_item, code_actions, code_lenses, completion, definition, diagnostic_fixes,
-        document_symbols, folding_ranges, hover, incoming_calls, inlay_hints, outgoing_calls,
-        references, rename, selection_ranges, semantic_tokens, signature_help, type_definition,
-        workspace_symbols,
+        CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, Formal, HoverDefinition,
+        Installed, PackageTarget, call_hierarchy_item, code_actions, code_lenses, completion,
+        completion_with, data_table_rewrites, definition, diagnostic_fixes, document_symbols,
+        folding_ranges, hover, import_fixes, incoming_calls, inlay_hints, outgoing_calls,
+        refactors, references, rename, selection_ranges, semantic_tokens, signature_help,
+        signature_help_with, type_definition, workspace_symbols,
     },
+    salsa::Setter,
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Applicability, file_diagnostics},
         lints::{LintConfig, lint_file},
+        metadata::{PackageMetadata, attached_union},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
         testing::{ProbeDatabase, with_fixture_project},
     },
-    std::path::Path,
+    std::{cmp::Reverse, path::Path, sync::Arc},
     syntax::{
         TextRange, TextSize,
         testing::{run_fixture_suite, split_files},
     },
 };
+
+/// The installed library the cases see: one package without stubs, `fakepkg`, so a case can
+/// exercise what the editor reads from an installed package's `NAMESPACE` and source.
+struct FixtureLibrary;
+
+impl Installed for FixtureLibrary {
+    fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
+        (target.packages.first().map(String::as_str) == Some("fakepkg")
+            && target.name == "fetch_rows")
+            .then(|| {
+                vec![
+                    Formal {
+                        name: "con".to_owned(),
+                        default: None,
+                    },
+                    Formal {
+                        name: "limit".to_owned(),
+                        default: Some("10".to_owned()),
+                    },
+                ]
+            })
+    }
+
+    fn exports(&mut self, package: &str) -> Option<Arc<[String]>> {
+        (package == "fakepkg")
+            .then(|| Arc::from(["fetch_columns".to_owned(), "fetch_rows".to_owned()]))
+    }
+}
 
 fn render(source: &str) -> String {
     let files: Vec<(Option<String>, String)> = match split_files(source) {
@@ -242,7 +273,7 @@ fn render_at(
     if let Some(type_target) = type_definition(db, files, file, offset) {
         output.push_str(&render_target("type-definition", Some(type_target)));
     }
-    match signature_help(db, file, offset) {
+    match signature_help_with(db, file, offset, &mut FixtureLibrary) {
         Some(help) => {
             for (signature_index, signature) in help.signatures.iter().enumerate() {
                 let marker =
@@ -282,7 +313,7 @@ fn render_at(
             ));
         }
     }
-    match completion(db, files, file, offset) {
+    match completion_with(db, files, file, offset, &mut FixtureLibrary) {
         Some(result) => {
             let labels: Vec<String> = result
                 .items
@@ -490,6 +521,124 @@ fn ide_fixtures() {
 }
 
 #[test]
+fn refactor_fixtures() {
+    run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/refactor"),
+        &render_refactors,
+    );
+}
+
+/// `$0` starts the selection and `$1`, when present, ends it. Each refactoring renders as its
+/// title and the whole file after its edits, so an expectation shows exactly what the editor
+/// would leave behind.
+fn render_refactors(source: &str) -> String {
+    let start = source.find("$0").unwrap_or(0);
+    let mut text = source.replacen("$0", "", 1);
+    let end = text.find("$1").unwrap_or(start);
+    text = text.replacen("$1", "", 1);
+    let selection = TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32));
+    with_fixture_project(
+        vec![(text.clone(), DocumentKind::Package)],
+        |db, sources| {
+            let mut output = String::new();
+            for action in refactors(db, sources[0], selection) {
+                output.push_str(&format!("action {}\n", action.title));
+                let mut edited = text.clone();
+                let mut edits = action.edits.clone();
+                edits.sort_by_key(|edit| Reverse(edit.range.start()));
+                for edit in edits {
+                    edited.replace_range(
+                        usize::from(edit.range.start())..usize::from(edit.range.end()),
+                        &edit.replacement,
+                    );
+                }
+                for line in edited.lines() {
+                    if line.is_empty() {
+                        output.push('\n');
+                    } else {
+                        output.push_str(&format!("  {line}\n"));
+                    }
+                }
+            }
+            if output.is_empty() {
+                output.push_str("no refactors\n");
+            }
+            output
+        },
+    )
+}
+
+#[test]
+fn migrate_fixtures() {
+    run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/migrate"),
+        &render_migration,
+    );
+}
+
+/// Each rewrite renders as its title, then the code it replaces and the code it writes, line by
+/// line. With a `$0` cursor, the data.table code actions offered there come first.
+/// Each case gets a fresh database whose attached packages are the ones the script attaches, as
+/// the hosts set them up, so `library(data.table)` types `data.table()` and `fread()`.
+fn render_migration(source: &str) -> String {
+    let cursor = source.find("$0");
+    let text = source.replacen("$0", "", 1);
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let file = SourceFile::new(&db, text.clone(), DocumentKind::Script);
+    ProjectFiles::new(&db, vec![file]);
+    let attached = attached_union(&db, [file]);
+    let metadata = PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        Default::default(),
+        None,
+        Default::default(),
+    );
+    metadata.set_attached(&mut db).to(attached);
+    let mut output = String::new();
+    if let Some(cursor) = cursor {
+        let at = TextSize::from(cursor as u32);
+        for action in code_actions(&db, file, TextRange::new(at, at)) {
+            if matches!(
+                action.kind,
+                CodeActionKind::MigrateDataTable | CodeActionKind::MigrateDataTableFile
+            ) {
+                output.push_str(&format!(
+                    "action: {} ({} edit(s))\n",
+                    action.title,
+                    action.edits.len()
+                ));
+            }
+        }
+    }
+    let rewrites = data_table_rewrites(&db, file);
+    if rewrites.is_empty() {
+        output.push_str("no rewrite\n");
+    }
+    for rewrite in &rewrites {
+        output.push_str(&format!("{}\n", rewrite.title));
+        let original = text
+            .get(usize::from(rewrite.range.start())..usize::from(rewrite.range.end()))
+            .unwrap_or("<out of range>");
+        for line in original.lines() {
+            output.push_str(&format!("- {line}\n"));
+        }
+        for line in rewrite.replacement.lines() {
+            output.push_str(&format!("+ {line}\n"));
+        }
+        if rewrite.standalone != rewrite.replacement {
+            output.push_str("applied alone:\n");
+            for line in rewrite.standalone.lines() {
+                output.push_str(&format!("+ {line}\n"));
+            }
+        }
+    }
+    output
+}
+
+#[test]
 fn structure_fixtures() {
     run_fixture_suite(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/structure"),
@@ -556,6 +705,16 @@ fn render_structure(source: &str) -> String {
                     output.push_str(&format!(
                         "fix {}{unsafe_marker}: {} -> {:?}\n",
                         fix.title,
+                        covered(edit.range),
+                        edit.replacement
+                    ));
+                }
+            }
+            for action in import_fixes(db, file, &diagnostics, whole, &mut FixtureLibrary) {
+                for edit in &action.edits {
+                    output.push_str(&format!(
+                        "fix {}: {} -> {:?}\n",
+                        action.title,
                         covered(edit.range),
                         edit.replacement
                     ));

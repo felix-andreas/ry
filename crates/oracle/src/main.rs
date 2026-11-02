@@ -3,8 +3,8 @@ use {
     oracle::{
         Engine, EngineError, ProcessEngine,
         bench::{self, Summary},
-        diff, engine_from_environment, expected_path, find_cases, gnu_r_available, install,
-        packages, parse, render,
+        diff, engine_from_environment, expected_path, find_cases, gallery, gnu_r_available,
+        install, packages, parse, render, runnable_cases,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -37,6 +37,29 @@ enum Command {
     },
     /// Print the outcome of one file under GNU R.
     Show { path: PathBuf },
+    /// Render the plot gallery (`gallery/*.R`) under GNU R and ry's runtime, compare the
+    /// images device by device, and time every render on both.
+    Gallery {
+        /// The seed that picks the sample and seeds R's random numbers in every figure.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// How many figures to sample (default: every figure).
+        #[arg(long)]
+        count: Option<usize>,
+        /// Figures to render instead of a sample, as `file:figure`, such as `base:persp_surface`.
+        #[arg(long, value_delimiter = ',')]
+        figures: Vec<String>,
+        /// The devices, comma separated: `agg`, `png`, `pdf` and `svg`.
+        #[arg(long, default_value = "agg,png,pdf,svg")]
+        devices: String,
+        /// Renders per figure and device; the report keeps the fastest.
+        #[arg(long, default_value_t = 1)]
+        repeats: u32,
+        /// Where the images go (default: a `gallery` directory in the system's temporary
+        /// directory).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Generate random R programs from consecutive seeds and run each under GNU R and the
     /// given engines, reporting every divergence with its seed and program.
     Fuzz {
@@ -72,6 +95,9 @@ enum Command {
         /// Run GNU R only, to time it or to check the suite itself.
         #[arg(long)]
         gnu_r_only: bool,
+        /// Run ry only, to time it: every test counts as matching, and GNU R's columns repeat ry's.
+        #[arg(long, conflicts_with = "gnu_r_only")]
+        ry_only: bool,
         /// List matching tests too, not only the differing ones.
         #[arg(long)]
         verbose: bool,
@@ -166,6 +192,7 @@ fn main() -> ExitCode {
             filter,
             timeout,
             gnu_r_only,
+            ry_only,
             verbose,
             keep,
             json,
@@ -185,6 +212,7 @@ fn main() -> ExitCode {
                 filter,
                 timeout: Duration::from_secs(timeout),
                 skip_ry: gnu_r_only,
+                skip_gnu_r: ry_only,
                 keep,
             };
             run_bench(&packages, &options, verbose, json.as_deref())
@@ -221,6 +249,21 @@ fn main() -> ExitCode {
             timeout,
             print: _,
         } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout)),
+        Command::Gallery {
+            seed,
+            count,
+            figures,
+            devices,
+            repeats,
+            output,
+        } => run_gallery(gallery::Options {
+            seed,
+            count,
+            figures,
+            devices: devices.split(',').map(str::to_string).collect(),
+            repeats,
+            output: output.unwrap_or_else(|| std::env::temp_dir().join("gallery")),
+        }),
         Command::Show { path } => match gnu_r.run(&path) {
             Ok(outcome) => {
                 print!("{}", render(&outcome));
@@ -231,6 +274,27 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+fn run_gallery(options: gallery::Options) -> ExitCode {
+    if !oracle::ry_runtime_available() {
+        eprintln!("ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return ExitCode::from(2);
+    }
+    match gallery::run(&options) {
+        Ok(renders) => {
+            print!("{}", gallery::render_report(&renders));
+            println!("images: {}", options.output.display());
+            match renders.iter().any(gallery::Render::fails) {
+                true => ExitCode::FAILURE,
+                false => ExitCode::SUCCESS,
+            }
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -249,7 +313,11 @@ fn cases(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
         found.extend(cases);
     }
-    found
+    let (runnable, missing) = runnable_cases(found);
+    for (case, packages) in &missing {
+        println!("skip    {}: needs {}", case.display(), packages.join(", "));
+    }
+    runnable
 }
 
 fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {

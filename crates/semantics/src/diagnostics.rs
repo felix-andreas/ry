@@ -8,7 +8,7 @@ use {
         },
         check::{
             ExpressionNeeds, ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind,
-            TypeError, TypeErrorKind, column_element,
+            TypeError, TypeErrorKind, alias_cycle_walk, column_element,
         },
         comment_annotation,
         exhaustiveness::{MatchFinding, MatchFindingKind},
@@ -25,7 +25,10 @@ use {
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, project_type_definitions, statement_annotations,
-        stubs::{CONDITIONAL_NAMESPACES, StubLibrary, namespace_exports, namespace_known, stubs},
+        stubs::{
+            CONDITIONAL_NAMESPACES, StubLibrary, dormant_namespace_exports, namespace_exports,
+            namespace_known, stubs,
+        },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -330,10 +333,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let sites = file_syntax_sites(db, file);
     // Only a sequence with an annotation among its statements can hold a dangling one.
     let sequences = sites.nodes(&root, SiteRole::AnnotatedSequence);
-    for (node, target) in sequences
-        .iter()
-        .flat_map(|parent| statement_annotations(parent))
-    {
+    for (node, target) in sequences.iter().flat_map(statement_annotations) {
         let Some(annotation) = comment_annotation(db, file, &node) else {
             continue;
         };
@@ -636,7 +636,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 db,
                 context.get_or_init(|| read_context(db, file)),
                 item_index,
-                &check,
+                check,
                 naming,
                 expression,
                 *name,
@@ -675,6 +675,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics.extend(duplicate_binding_diagnostics(db, file));
     diagnostics.extend(duplicate_type_diagnostics(db, file));
     diagnostics.extend(unknown_type_diagnostics(db, file));
+    diagnostics.extend(alias_cycle_diagnostics(db, file));
     diagnostics.extend(annotation_rule_diagnostics(db, file));
     diagnostics.extend(annotation_agreement_diagnostics(db, file));
 
@@ -712,7 +713,7 @@ fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId,
                 .iter()
                 .filter_map(|(expression, name)| {
                     let read = classify_non_local_read(
-                        db, &context, item_index, &check, naming, expression, *name,
+                        db, &context, item_index, check, naming, expression, *name,
                     );
                     (read != NonLocalRead::Resolvable).then_some((*expression, read))
                 })
@@ -797,6 +798,7 @@ fn classify_non_local_read(
     if crate::package_scheme_exists_in(db, files, context.library, name)
         || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
+        || crate::sourced_definition(db, file, symbol).is_some()
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -825,6 +827,38 @@ fn classify_non_local_read(
         suggestion: project_typo
             .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
+}
+
+/// An alias whose expansion reaches itself never becomes a type. It is reported at each
+/// declaration on the cycle, including one no annotation uses; a use only compares like
+/// `Unknown`, so the one mistake is reported once, where the fix goes.
+fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    let table = TypeDefinitions::of(db, file);
+    let mut diagnostics = Vec::new();
+    for (name, range) in type_declaration_sites(db, file) {
+        let interned = Name::new(db, name.as_str());
+        let Some(definition) = table.get(db, interned) else {
+            continue;
+        };
+        if !definition.alias {
+            continue;
+        }
+        let mut expanding = FxHashSet::default();
+        expanding.insert(interned);
+        if alias_cycle_walk(db, table, definition.body, &mut expanding).as_deref()
+            == Some(name.as_str())
+        {
+            diagnostics.push(Diagnostic::new(
+                *range,
+                Severity::Error,
+                "annotation",
+                format!(
+                    "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                ),
+            ));
+        }
+    }
+    diagnostics
 }
 
 /// Without this, a misspelled type name would silently become an opaque nominal.
@@ -1321,7 +1355,7 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
         };
         let governing = match coercion(&lower_inline_annotation(db, &site)) {
             Some(directive) => Some(("inline annotation's", directive)),
-            None => coercion(&lowered_comment).map(|directive| ("comment's", directive)),
+            None => coercion(lowered_comment).map(|directive| ("comment's", directive)),
         };
         for inline in inline_slots(db, &site) {
             let Some(written) = comment_slots.iter().find(|slot| slot.slot == inline.slot) else {
@@ -1917,14 +1951,16 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed. A shipped package
-        // the project neither declares nor attaches is real too: `pkg::name` loads it
-        // without attaching it, so a script may use it that way alone.
-        false
-            if declared_dependency(db, &read.package)
-                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
-        {
-            None
+        // A declared dependency without stubs is real, just undescribed.
+        false if declared_dependency(db, &read.package) => None,
+        // A shipped package the project neither declares nor attaches is real too: `pkg::name`
+        // loads it without attaching it, so a script may use it that way alone. Its name is
+        // still checked against the shipped export list, without activating the namespace for
+        // bare names.
+        false if CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) => {
+            let name = read.name.as_ref()?;
+            (!read.internal && dormant_namespace_exports(db, &read.package, name) == Some(false))
+                .then(|| format!("`{name}` is not exported by `{}`.", read.package))
         }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
@@ -2209,7 +2245,7 @@ pub(crate) fn nearest_name<'a>(
     candidates: impl Iterator<Item = &'a str>,
 ) -> Option<String> {
     let name_characters: Vec<char> = name.chars().collect();
-    if name_characters.len() < 4 {
+    if name_characters.len() < 2 {
         return None;
     }
     // A standard-library name such as `Str.split` is usually the start of a longer one
@@ -2226,6 +2262,20 @@ pub(crate) fn nearest_name<'a>(
         if let Some(candidate) = completion {
             return Some((*candidate).to_owned());
         }
+    }
+    // A short name is one substitution away from many unrelated names (`df` and `dt`), so it
+    // gets a suggestion only when exactly one candidate is the name with one character
+    // inserted, as `name` is for `nam` and `nme`.
+    if name_characters.len() < 4 {
+        let mut extensions = candidates.iter().filter(|candidate| {
+            let mut characters = candidate.chars();
+            candidate.chars().count() == name_characters.len() + 1
+                && name_characters
+                    .iter()
+                    .all(|wanted| characters.any(|character| character == *wanted))
+        });
+        let first = extensions.next()?;
+        return extensions.next().is_none().then(|| (*first).to_owned());
     }
     let candidates = candidates.into_iter();
     let budget = if name_characters.len() >= 8 { 2 } else { 1 };
@@ -2312,6 +2362,10 @@ fn edit_distance_within(
 /// A script's top level is one frame run in order, so the unused check spans
 /// items. A read inside a nested function keeps every write to the name live.
 fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    // A sourced file's bindings land in the sourcing frame, which reads them.
+    if ProjectFiles::try_get(db).is_some_and(|files| *crate::file_is_sourced(db, files, file)) {
+        return Vec::new();
+    }
     let error_ranges = file_error_ranges(db, file);
     struct Definer {
         item_index: usize,
@@ -2497,7 +2551,17 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 assignment_targets.insert(*value, *name);
             }
         }
+        let naming = item_naming(db, item);
         for origin in &check.strict_origins {
+            // An unresolved `pkg::name` is already reported as unresolved, and that finding
+            // names the fix; a second one saying its type is unknown adds nothing.
+            if naming
+                .as_ref()
+                .and_then(|naming| naming.namespace_reads.get(&origin.expression))
+                .is_some_and(|read| namespace_read_message(db, read).is_some())
+            {
+                continue;
+            }
             // Loop-widened and recursive origins are about the named binding.
             let assignment_target = match &origin.kind {
                 StrictOriginKind::LoopWidened(_)
@@ -2680,8 +2744,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         }
         TypeErrorKind::ArityMismatch { expected, found } => {
             if found < expected {
+                // Only a function type without parameter names reaches here, so the missing
+                // arguments are named by position.
+                let missing = if expected - found == 1 {
+                    format!("argument {expected} is missing")
+                } else {
+                    format!("arguments {} to {expected} are missing", found + 1)
+                };
                 format!(
-                    "this call supplies {found} positional {}, but the function requires {expected}, so a required argument is missing",
+                    "this call supplies {found} positional {}, but the function requires {expected}: {missing}",
                     plural(*found, "argument", "arguments"),
                 )
             } else {
@@ -2691,7 +2762,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 )
             }
         }
-        TypeErrorKind::MissingArguments { names } => {
+        TypeErrorKind::MissingArguments { names, misspelled } => {
             let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
             let listed = match quoted.split_last() {
                 Some((last, [])) => last.clone(),
@@ -2700,7 +2771,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             // A declared required parameter need not be read, so the reason is the
             // signature's, not the body's.
-            format!("this call leaves out {listed}, which the function requires")
+            let hint = misspelled
+                .as_ref()
+                .map(|(argument, nearest)| {
+                    format!(
+                        ". `{argument}` names no parameter, so it goes to `...`. Did you mean `{nearest}`?"
+                    )
+                })
+                .unwrap_or_default();
+            format!("this call leaves out {listed}, which the function requires{hint}")
         }
         TypeErrorKind::NamedArgumentMismatch {
             argument,
@@ -2752,9 +2831,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             format!(
                 "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
             )
-        }
-        TypeErrorKind::AliasCycle { name } => {
-            format!("Type alias `{name}` expands in a cycle.")
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
             "expected {}, found `{}`",
@@ -2951,6 +3027,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             right,
         } => format!(
             "`{operator}` compares `{}` with `{}`, text with a number, which almost always means the wrong column",
+            renderer.render(db, *left),
+            renderer.render(db, *right)
+        ),
+        TypeErrorKind::DateOperation {
+            operator,
+            left,
+            right,
+        } => format!(
+            "`{operator}` is not defined between `{}` and `{}`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates",
             renderer.render(db, *left),
             renderer.render(db, *right)
         ),
