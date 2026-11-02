@@ -4366,13 +4366,13 @@ check` releases its trees once, and memoized records are compact" below).
   promise per argument and entered the callee's compiled body: about 5,000 instructions per
   element under callgrind, of which the callback's own `a + x` was about 1,000. Compiled code
   treated the whole library call as one opaque step.
-- **Interpreter.** `standard_library::Callback` prepares a closure callback once per library
-  call: when the closure has no `...` and takes exactly the arguments the library passes, it
-  builds the call `(f)(formal1, formal2)` once and binds each element positionally with
-  `bind_arguments` and `run_closure`, skipping argument matching and the per-call `LANGSXP`.
-  This mirrors GNU R's `lapply`, whose callback sees `FUN(X[[i]], ...)` as its call, so
-  `sys.call()` inside a callback shows the formals rather than the values. Any other callback
-  goes through `eval::apply` as before.
+- **Interpreter.** `standard_library::Callback` checks a closure callback once per library
+  call: when it has no `...` and takes exactly the arguments the library passes, each item binds
+  positionally with `bind_arguments` and `run_closure`, skipping argument matching. The frame's
+  call still quotes the values, `(f)(5)`, as `eval::apply` does. A call naming the formals, like
+  GNU R's `FUN(X[[i]], ...)`, would be wrong: `sys.call()` and `match.call()` users evaluate it
+  in the caller's frame, where the formal names find the caller's own variables. Any other
+  callback goes through `eval::apply` as before.
 - **JIT.** `call_builtin` turns `List.walk`, `List.map`, `List.keep_if`, `List.drop_if`,
   `List.any`, `List.all` and `List.count_if` into `Action::Traverse` when the callback inlines:
   a closure literal at the call site (`Ty::Closure`), a function constant (`Ty::Fun`), or a name

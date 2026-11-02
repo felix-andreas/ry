@@ -591,16 +591,13 @@ unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Callback>
     Callback::new(value)
 }
 
-/// A function the library calls back, prepared once per library call. A closure whose formals
-/// have no `...` gets the call its frames record built here, once, as `(f)(a, b)` with its own
-/// formals as the arguments, which is what GNU R's `lapply` does with `FUN(X[[i]], ...)`: the
-/// call names the arguments instead of quoting their values, so building it costs nothing per
-/// item, and evaluating it in the frame still gives the same values.
+/// A function the library calls back, checked once per library call. A closure whose formals
+/// have no `...` binds its arguments by position, which skips argument matching on every item.
 #[derive(Clone, Copy)]
 struct Callback {
     function: Sexp,
-    /// The prepared call and the number of formals, for a closure without `...`.
-    form: Option<(Sexp, usize)>,
+    /// The number of formals, for a closure without `...`.
+    formals: Option<usize>,
 }
 
 impl Callback {
@@ -608,40 +605,48 @@ impl Callback {
         if function.kind() != SexpType::Closure {
             return Ok(Callback {
                 function,
-                form: None,
+                formals: None,
             });
         }
-        let mut items = vec![(nil(), function)];
+        let mut count = 0;
         let mut formal = function.car();
         while formal.kind() == SexpType::Pairlist {
             if formal.tag() == values::symbols().dots {
                 return Ok(Callback {
                     function,
-                    form: None,
+                    formals: None,
                 });
             }
-            items.push((nil(), formal.tag()));
+            count += 1;
             formal = formal.cdr();
         }
-        let form = values::pairlist(&items, SexpType::Language)?;
-        crate::heap().root(form);
         Ok(Callback {
             function,
-            form: Some((form, items.len() - 1)),
+            formals: Some(count),
         })
     }
 }
 
 /// Calls `callback` with positional `arguments`. A closure given an argument for each formal
-/// takes the prepared call; anything else takes the interpreter's ordinary call path.
+/// binds them directly; anything else takes the interpreter's ordinary call path.
+///
+/// The frame's call quotes the argument values, `(f)(5)`, as the ordinary path does. Naming the
+/// formals instead, as GNU R's `FUN(X[[i]], ...)` does, would be wrong here: `sys.call()` and
+/// `match.call()` evaluate such a call in the caller's frame, where the formal names find the
+/// caller's own variables.
 unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<Sexp> {
     let arguments: SmallVec<[Arg; 4]> = arguments
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    match callback.form {
-        Some((form, formals)) if formals == arguments.len() => {
+    match callback.formals {
+        Some(formals) if formals == arguments.len() => {
             let function = callback.function;
+            let mut items: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+            items.push((nil(), function));
+            items.extend(arguments.iter().map(|argument| (nil(), argument.value)));
+            let form = values::pairlist(&items, SexpType::Language)?;
+            crate::heap().root(form);
             let env = eval::bind_arguments(form, function, &arguments, None)?;
             let promargs = eval::args_pairlist(&arguments)?;
             eval::run_closure(form, function, env, call.env, promargs, Entry::Unchecked)
