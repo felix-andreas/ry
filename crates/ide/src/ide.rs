@@ -10,8 +10,8 @@ use {
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
-            Argument, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId, PatternKind,
-            Symbol,
+            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId,
+            PatternKind, Symbol,
         },
         infer::apply_definition,
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
@@ -1936,14 +1936,36 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             .iter()
             .map(|(id, _)| *id)
             .collect();
+        // An annotation, inline or `#:`, belongs to a statement: inside a call's arguments
+        // `x: T <- 1` does not parse, and a `#:` line there annotates nothing.
+        let statements: BTreeSet<ExprId> = hir
+            .root
+            .into_iter()
+            .chain(
+                hir.expressions()
+                    .flat_map(|expression| match &expression.kind {
+                        ExpressionKind::Block { statements } => hir[statements].to_vec(),
+                        _ => Vec::new(),
+                    }),
+            )
+            .collect();
         for (index, expression) in hir.expressions().enumerate() {
-            let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
+            // `<<-` writes a binding outside this scope, which an annotation here cannot type.
+            let ExpressionKind::Assign {
+                spelling: AssignSpelling::Local | AssignSpelling::Equals,
+                target,
+                value,
+            } = &expression.kind
+            else {
                 continue;
             };
             let ExpressionKind::NameRef(name) = &hir.kind(*target) else {
                 continue;
             };
             let id = ExprId::new(index);
+            if !statements.contains(&id) {
+                continue;
+            }
             let is_root = hir.root == Some(id);
             if (is_root && annotated)
                 || annotated_expressions.contains(&id)

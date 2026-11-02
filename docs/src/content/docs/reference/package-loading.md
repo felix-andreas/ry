@@ -42,8 +42,9 @@ This page is the exact behavior.
   `# typing: strict` comment, `ry load` checks the package's `R/` files. If any has a strict-mode
   error, it prints the errors and exits with status 1 before anything with an effect runs. On GNU
   R the check finishes before the load starts. On ry's runtime it runs while the runtime starts
-  and the package's definitions bind, and the load waits for it before running any other
-  top-level statement, compiled code, `.onLoad`, or your `-e` and `-f` code. The
+  and the package's definitions bind. Imported packages may load in that time, but the load waits
+  for the check before it runs a top-level statement whose arguments could have an effect,
+  `data/*.R`, compiled code, `.onLoad`, or your `-e` and `-f` code. The
   `R/` files are checked together, so a name one file defines resolves in the others, and test
   files are not part of the check.
   A later `load_all()` in the same session, and the load a console makes, do not check.

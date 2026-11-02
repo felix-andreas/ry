@@ -607,6 +607,17 @@ An independent review profiled before it proposed. Every number below was taken 
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
 
+### A first strict `ry load` costs the strict check's wall time
+
+- On typed finbench (4 cores), a load with a cold verdict takes 2.2 to 2.6 s, against 0.6 to 1.0 s untyped and 0.55 s for either once warm. The load overlaps the check (`decisions.md`, "The strict load check overlaps the runtime start"), so the gap is the check alone: about 1.9 s wall and 4.3 CPU-s for 380,000 lines, half of it type checking and a quarter rendering diagnostics and lints that the verdict never shows.
+- Levers, largest first: a verdict-only pass that stops rendering and linting and only asks whether any strict error exists; reusing a `ry check` record (`.ry_cache/check.json`) when it covers the `R/` files under the same configuration, which needs the record to tell an `R/`-only resolution from a whole-project one; and the type checker's own per-item cost.
+
+### Corpus reports that more precise types now reach
+
+- `if (identical(info, NA)) stop(...)` does not remove the `NA` member, so httr's `oauth_listener(url)$code` reports `$` on `logical | list[Any] | NULL`. Removing `logical` is unsound for `TRUE` in general, so it needs a literal `NA` member or a sentinel rule.
+- knitr's `split_file()` infers a `character` member in its groups, so `lapply(groups, function(g) g$params)` matches no overload (`R/output.R`).
+- gt's `vapply(..., FUN.VALUE = character(1))` callbacks return `character | NULL` (`R/fmt.R`, `R/helpers.R`, `R/utils_render_latex.R`).
+
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
 This was framed as the interface fixpoint being superlinear in the size of the cyclic definition

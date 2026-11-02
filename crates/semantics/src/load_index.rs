@@ -16,7 +16,7 @@ use {
             parse_namespace_spec, string_content,
         },
         parse,
-        top_level::{TopLevel, item_super_assigned_names, item_top_level},
+        top_level::{TopLevel, item_effect_free, item_super_assigned_names, item_top_level},
     },
     rowan::{GreenNodeData, Language, NodeOrToken},
     rustc_hash::FxHashMap,
@@ -306,8 +306,9 @@ pub struct PackageBindings {
 pub struct EagerItem {
     /// Positioned as in [`PackageBindings::lazy`].
     pub at: (u32, u32),
-    /// Running it binds names and registers classes and has no other effect: it defines a
-    /// function, or it is a statement of a strict file that strict mode accepts at top level.
+    /// Running it binds names, registers classes and loads other packages, and has no other
+    /// effect: it defines a function, or it is a statement of a strict file that
+    /// [`item_effect_free`] accepts.
     /// A host may run such an item before the strict check of the package has finished,
     /// because nothing it does is visible outside the session the check may still refuse.
     pub effect_free: bool,
@@ -665,8 +666,11 @@ pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc
                 .flatten()
                 .map(|loaded| item_top_level(db, loaded.item));
             let constant = is_constant_candidate(item) && top_level == Some(&TopLevel::Constant);
-            let effect_free =
-                function || matches!(top_level, Some(TopLevel::Definition | TopLevel::Constant));
+            let effect_free = function
+                || (strict
+                    && loaded
+                        .get(index)
+                        .is_some_and(|loaded| *item_effect_free(db, loaded.item)));
             ItemBinds {
                 effect_free,
                 binds: item.binds.clone(),

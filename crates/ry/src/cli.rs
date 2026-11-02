@@ -413,7 +413,13 @@ pub(crate) fn analyze_project(
                 .map(|diagnostic| check_cache::recorded_form(diagnostic, files))
                 .collect()
         };
-        for (cached, recomputed) in analysis.files.iter().zip(&fresh.files) {
+        // A fresh run without the cache checks only the requested files.
+        for (cached, recomputed) in analysis
+            .files
+            .iter()
+            .zip(&fresh.files)
+            .filter(|(cached, _)| cached.requested)
+        {
             assert_eq!(
                 comparable(&cached.diagnostics, &reused_files),
                 comparable(&recomputed.diagnostics, &fresh_files),

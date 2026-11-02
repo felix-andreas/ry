@@ -84,6 +84,28 @@ pub fn item_top_level<'db>(db: &'db dyn Db, item: Item<'db>) -> TopLevel {
     Classifier { db, module }.statement(root)
 }
 
+/// Whether running the item has no effect but bindings, registrations and the loading of other
+/// packages, so a host may run it before the package's strict check finishes. A constant
+/// qualifies. A definition qualifies only when the arguments of its declaring calls have no
+/// effect either: `setRefClass("A", methods = list(m = { cat("x"); function() 1 }))` is a
+/// definition strict mode accepts, but its argument prints.
+#[salsa::tracked]
+pub fn item_effect_free<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    match item_top_level(db, item) {
+        TopLevel::Constant => true,
+        TopLevel::Effect { .. } => false,
+        TopLevel::Definition => {
+            let Some(module) = item_hir(db, item) else {
+                return true;
+            };
+            let Some(root) = module.root else {
+                return true;
+            };
+            Classifier { db, module }.inert(root)
+        }
+    }
+}
+
 /// Whether the item declares the function it binds pure, with `#: @pure` or an inline
 /// `@pure function`. Trusted, not checked against the body: a body edit leaves the `bool`
 /// unchanged, and salsa backdates it.
@@ -323,6 +345,40 @@ impl Classifier<'_> {
                 TopLevel::Definition
             }
             _ => self.effect(id, &mut None).unwrap_or(TopLevel::Definition),
+        }
+    }
+
+    /// Whether a statement classified as a definition evaluates nothing with an effect, which
+    /// `statement` leaves to R for the arguments of a declaring call.
+    fn inert(&self, id: ExprId) -> bool {
+        match &self.module.expression(id).kind {
+            ExpressionKind::Paren(inner) => self.inert(*inner),
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Local | AssignSpelling::Equals,
+                target,
+                value,
+            } if self.binds_name(*target) => self.inert(*value),
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Destructure,
+                value,
+                ..
+            } => self.inert(*value),
+            ExpressionKind::Call { callee, arguments } if self.declares(*callee) => self.module
+                [arguments]
+                .iter()
+                .filter_map(|argument| argument.value)
+                .all(|argument| self.effect(argument, &mut None).is_none()),
+            ExpressionKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => std::iter::once(*then_branch)
+                .chain(*else_branch)
+                .all(|branch| self.inert(branch)),
+            ExpressionKind::Block { statements } => self.module[statements]
+                .iter()
+                .all(|&statement| self.inert(statement)),
+            _ => true,
         }
     }
 

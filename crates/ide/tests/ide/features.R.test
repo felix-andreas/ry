@@ -441,8 +441,8 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
-parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[] | matrix, [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[] | matrix] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
 signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
@@ -465,8 +465,8 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double (active)
-parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[] | matrix, [na.rm]: logical) -> double (active)
+parameters: [...: double[] | integer[] | logical[] | matrix] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
 signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double

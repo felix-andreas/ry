@@ -231,6 +231,10 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   state$s4_cursor <- NULL
   .ry_phase("run")
+  # Everything above only binds names, registers classes and loads imported packages, unless a
+  # statement the plan did not mark effect-free ran, and that one waited. `data/*.R`, compiled
+  # code and hooks may have effects.
+  .ry_await_verdict()
   if (!identical(plan$sysdata, "keep")) {
     if (length(state$sysdata)) {
       rm(list = intersect(state$sysdata, ls(ns, all.names = TRUE)), envir = ns)
@@ -266,9 +270,6 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       matrix(NA_character_, 0L, 4L)
     })
   }
-  # Everything above only binds names and registers classes, unless a statement the plan did
-  # not mark effect-free ran, and that one waited. Compiled code and hooks may have effects.
-  .ry_await_verdict()
   if (!is.null(plan$dynamic_libraries)) {
     .ry_load_compiled(state, plan$dynamic_libraries)
   }

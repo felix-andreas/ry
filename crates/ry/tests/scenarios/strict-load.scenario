@@ -53,3 +53,18 @@ run ry load -e "cat('user code ran\n')"
 expect exit 1
 expect stderr "so this code does not run"
 expect stdout lacks "ran"
+
+# A definition strict mode accepts may still compute an argument with an effect, and a data file
+# is ordinary code, so both wait for the verdict too.
+file R/value.R
+| #: fn(x: list) -> double
+| value <- function(x) x$value
+| A <- setRefClass("A", methods = list(m = { cat("argument ran\n"); function() 1 }))
+| bad <- function(x: double) -> double paste(x)
+file data/d.R
+| cat("data file ran\n")
+
+run ry load -e "cat('user code ran\n')"
+expect exit 1
+expect stderr "so this code does not run"
+expect stdout lacks "ran"

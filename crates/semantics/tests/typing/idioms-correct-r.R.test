@@ -1044,7 +1044,7 @@ widths <- function(words) vapply(words, my_helper, integer(1))
 #++++
 my_helper: NULL
 widths: Unknown
-44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
+44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 6 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
 
 #---- a_branch_with_an_open_variable_inside_a_list_is_not_pinned_by_the_other_branch
 split_deps <- function(dp) if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)
@@ -1258,3 +1258,14 @@ f <- function() {
 #++++
 f: fn() -> Unknown
 20..21 warning[unused] `x` is assigned but never used.
+
+#---- a_matrix_valued_vapply_callback_and_a_matrix_sum_type
+pair <- function(x) matrix(c(x, x), nrow = 1)
+#: fn(xs: character[]) -> matrix
+pairs <- function(xs) vapply(xs, pair, character(2))
+#: fn(m: matrix | double[]) -> double
+energy <- function(m) sum(m^2)
+#++++
+pair: <T> fn(x: T) -> matrix
+pairs: fn(xs: character[]) -> matrix
+energy: fn(m: matrix | double[]) -> double

@@ -11197,9 +11197,6 @@ impl<'db> Checker<'db, '_> {
         result
     }
 
-    /// The return type a stub declares for `[.class` or `[[.class`. The index arguments are
-    /// not checked against it: the stubs declare these methods only to say which class the
-    /// subset keeps.
     /// `m[i, j]` on a `matrix`, whose element type is not tracked, so elements are `Any`. R
     /// drops a dimension indexed by one position, so a scalar index gives elements, while empty
     /// and vector indexes, or `drop = FALSE`, keep the matrix. `None` leaves other forms to the
@@ -11259,6 +11256,9 @@ impl<'db> Checker<'db, '_> {
         })
     }
 
+    /// The return type a stub declares for `[.class` or `[[.class`. The index arguments are
+    /// not checked against it: the stubs declare these methods only to say which class the
+    /// subset keeps.
     fn index_method_result(&mut self, class: &str, double: bool) -> Option<Ty<'db>> {
         self.subset_method_result(if double { "[[" } else { "[" }, class)
     }

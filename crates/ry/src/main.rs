@@ -419,8 +419,9 @@ fn lower_priority() {}
 static PACKAGE_CHECK: Mutex<Option<JoinHandle<Result<Verdict, CommandError>>>> = Mutex::new(None);
 
 /// [`repl::PackageVerdict`] for `ry load`: waits for the strict check, which has printed any
-/// errors by then, and answers 0 to run, 1 to refuse and 2 when the check could not run. The
-/// answer is kept, so asking again returns at once.
+/// errors by then, and answers 0 to run, 1 to refuse and 2 when the check could not run. A
+/// panic in the check ends the process with status 101. The answer is kept, so asking again
+/// returns at once.
 extern "C" fn package_verdict() -> c_int {
     static STATUS: OnceLock<c_int> = OnceLock::new();
     *STATUS.get_or_init(|| {
@@ -431,10 +432,12 @@ extern "C" fn package_verdict() -> c_int {
         let Some(check) = check else {
             return 0;
         };
-        match check
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-        {
+        // Unwinding out of an `extern "C"` function aborts, so a panic in the check, whose
+        // message the panic hook has printed, ends the process with a panic's usual status.
+        let Ok(verdict) = check.join() else {
+            std::process::exit(101);
+        };
+        match verdict {
             Ok(Verdict::Run) => 0,
             Ok(Verdict::Refuse) => 1,
             Err(CommandError) => 2,

@@ -221,3 +221,25 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(condition: logical, [value]: T) -> T | NULL\n"
 completion (6): pi, pick, pico, pictex, pie, pipe
 hint @4: <T> fn(condition: logical, [value]: T) -> T | NULL
+
+#---- inferred_annotation_skips_a_super_assignment_and_a_binding_inside_a_call
+f <- function() {
+  cou$0nt <<- 5
+  print(
+    y <- 1
+  )
+}
+#++++
+hover 20..25: count: double
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `f`
+  edit 15..15 -> " -> double"
+action: Add inferred type annotations for the whole file
+  edit 15..15 -> " -> double"
+completion (54): count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote
+hint @1: fn() -> double
+hint @25: double
+hint @46: double
