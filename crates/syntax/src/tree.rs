@@ -104,6 +104,36 @@ impl Tree {
         }
     }
 
+    /// This window copied into columns of its own, so that keeping it does not keep the rest of
+    /// its file's tree alive. It compares equal to the window it was copied from.
+    pub fn detach(&self) -> Tree {
+        let window = self.column(0)..self.column(self.len);
+        let text_start = usize::from(self.base);
+        let first = self.first;
+        let base = self.base;
+        let columns = &self.columns;
+        Tree::from_columns(Columns {
+            text: columns.text[text_start..text_start + usize::from(self.end_offset(0))].into(),
+            kinds: columns.kinds[window.clone()].into(),
+            starts: columns.starts[window.clone()]
+                .iter()
+                .map(|&start| start - base)
+                .collect(),
+            ends: columns.ends[window.clone()]
+                .iter()
+                .map(|&end| end - first)
+                .collect(),
+            parents: iter::once(NO_PARENT)
+                .chain(
+                    columns.parents[window]
+                        .iter()
+                        .skip(1)
+                        .map(|&parent| parent - first),
+                )
+                .collect(),
+        })
+    }
+
     #[inline]
     fn column(&self, index: u32) -> usize {
         (self.first + index) as usize
@@ -734,6 +764,11 @@ impl SyntaxNode {
     /// The node as a tree of its own, with offsets counted from its start.
     pub fn subtree(&self) -> Tree {
         self.tree.subtree(self.node_ref())
+    }
+
+    /// The node as a tree with columns of its own; see [`Tree::detach`].
+    pub fn detached_subtree(&self) -> Tree {
+        self.subtree().detach()
     }
 
     pub fn kind(&self) -> SyntaxKind {
