@@ -1998,10 +1998,7 @@ impl<'db> Checker<'db, '_> {
         }
         // A standard-library type such as `data.frame` comes from its own constructors, so the
         // advice to wrap a value with `@new` would be wrong there.
-        let declared = self
-            .table
-            .definitions
-            .and_then(|definitions| definitions.get(self.db, *name));
+        let declared = self.table.definition(self.db, *name);
         let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
         if declared.is_some() && declared == from_stubs {
             return false;

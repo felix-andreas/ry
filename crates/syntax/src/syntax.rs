@@ -543,10 +543,28 @@ pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
     }
 }
 
-/// The first node in preorder under `root` with this kind and exactly this range. The search
-/// only descends into children whose range contains `range`, so it touches one path of the
-/// tree, plus the neighbors of an empty range.
+/// The first node in preorder under `root` with this kind and exactly this range. A non-empty
+/// range lies inside at most one child, so the search descends one path through a binary search
+/// over the green children and builds only the red nodes on that path. An empty range can sit on
+/// the boundary of several children (and inside empty nodes), so it falls back to a preorder
+/// search over every child that contains it.
 pub fn node_at(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
+    if range.is_empty() {
+        return node_at_empty(root, kind, range);
+    }
+    if !root.text_range().contains_range(range) {
+        return None;
+    }
+    let mut node = root.clone();
+    loop {
+        if node.kind() == kind && node.text_range() == range {
+            return Some(node);
+        }
+        node = node.child_or_token_at_range(range)?.into_node()?;
+    }
+}
+
+fn node_at_empty(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
     let mut stack = vec![root.clone()];
     while let Some(node) = stack.pop() {
         if node.kind() == kind && node.text_range() == range {
