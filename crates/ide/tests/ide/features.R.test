@@ -70,7 +70,7 @@ action: Add inferred type annotation for `g`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
   edit 28..28 -> "#: fn() -> double\n"
-completion (27): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Num.to_double
+completion (29): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Num.to_double
 hint @6: <T: numeric> fn(x: T) -> T
 hint @29: fn() -> double
 
@@ -396,8 +396,8 @@ hint @1: fn() -> character
 #---- unknown_name_hits_dots
 h <- function() paste(collapse$0 = "")
 #++++
-hover 16..36: character
-definition: none
+hover 22..30: [collapse]: character | NULL
+definition: stub source base at `paste`
 references: none
 rename: none
 signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
@@ -873,7 +873,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (49): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -886,7 +886,7 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (49): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_frame_update_types_later_reads
 sales <- DataFrame(a = 1)

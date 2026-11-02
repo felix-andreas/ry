@@ -94,7 +94,9 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
 - `ry debug analysis-stats [path]` (or `just stats`) runs the full pipeline over a workspace,
   through the same queries the language server uses. It prints the wall time and resident-memory
   growth of each phase, the slowest files by type-checking time, and an incremental probe that
-  reports keystroke latency and rechecks per keystroke. It forces `[check] typing` on. Build with
+  reports keystroke latency and rechecks per keystroke. An editor-coverage table then counts how
+  often hover and goto-definition answer at sampled identifiers, grouped by role (call head,
+  variable, argument name, `$` field, `pkg::name`), with a few unanswered lines per role. It forces `[check] typing` on. Build with
   `--release` when absolute numbers matter; a debug build still gives honest ratios.
 
 ## The docs site

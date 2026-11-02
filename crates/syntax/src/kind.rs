@@ -213,6 +213,16 @@ impl SyntaxKind {
 
     /// A backticked spelling is never a keyword.
     pub fn from_keyword(word: &str) -> Option<SyntaxKind> {
+        // A keyword is 2 to 13 bytes and starts with one of a few letters, so most names
+        // are rejected before any comparison.
+        if !(2..=13).contains(&word.len())
+            || !matches!(
+                word.as_bytes()[0],
+                b'f' | b'i' | b'e' | b'r' | b'w' | b'n' | b'b' | b'T' | b'F' | b'N' | b'I'
+            )
+        {
+            return None;
+        }
         KEYWORDS
             .iter()
             .find(|(spelling, _)| *spelling == word)

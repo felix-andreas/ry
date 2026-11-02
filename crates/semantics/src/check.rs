@@ -23,7 +23,7 @@ use {
             is_column_update, query_index_arguments,
         },
         sorted::{SortedMap, SortedSet},
-        stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
+        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -33,8 +33,10 @@ use {
             native_record, null, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
+    bumpalo::{Bump, collections::Vec as BumpVec},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
+        borrow::Cow,
         mem,
         ops::Range,
         rc::Rc,
@@ -538,38 +540,38 @@ pub enum StrictOriginKind {
 pub trait GlobalEnv<'db> {
     /// `deferred`: a read inside a nested function runs after the document frame
     /// settled, so the LAST binding wins; an immediate read sees only earlier ones.
-    fn scheme(&self, name: &str, deferred: bool) -> Option<TypeScheme<'db>>;
+    fn scheme(&self, name: Symbol, deferred: bool) -> Option<TypeScheme<'db>>;
 
     /// `None` when the name has at most one candidate or a package/local definition
     /// shadows the stub set.
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<TypeScheme<'db>>>;
+    fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [TypeScheme<'db>]>;
 
     /// A project definition has its own attributable site, so a reference propagates
     /// its `Unknown` instead of re-originating one.
-    fn defined_in_project(&self, name: &str, deferred: bool) -> bool;
+    fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool;
 
     /// Never a stub, and never the project-wide conditional slot, whose join includes
     /// this item's own write.
-    fn earlier_binding(&self, name: &str) -> Option<TypeScheme<'db>>;
+    fn earlier_binding(&self, name: Symbol) -> Option<TypeScheme<'db>>;
 
     /// Every stub candidate for `name`, ignoring project definitions: what `pkg::name` or a
     /// call that skipped the project's non-function binding reaches. Empty for an export
     /// the stubs list without a type.
-    fn library_candidates(&self, name: &str) -> Option<Vec<TypeScheme<'db>>>;
+    fn library_candidates(&self, name: &str) -> Option<&'db [TypeScheme<'db>]>;
 
     /// What a call reaches once its lookup has left the file's top-level frame without finding
     /// a function, the library aside. A package file's frame is the namespace itself, so it
     /// reaches nothing; a test or helper file's frame encloses in the helpers' environment and
     /// the namespace, and a script's in the namespace.
-    fn enclosing_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+    fn enclosing_scheme(&self, name: Symbol) -> Option<TypeScheme<'db>>;
 
     /// What the project's own `pkg::name` reads: the package namespace, then the library.
     /// A test file's or a script's own bindings and the helpers' are not in the namespace.
-    fn namespace_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+    fn namespace_scheme(&self, name: Symbol) -> Option<TypeScheme<'db>>;
 
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
-    fn type_definitions(&self) -> TypeDefinitions;
+    fn type_definitions(&self) -> TypeDefinitions<'db>;
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
 
@@ -600,11 +602,14 @@ pub fn check_item_with_annotation<'db>(
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
     }
+    let arena = Bump::new();
     let mut context = Checker {
         db,
         module,
         naming,
         globals,
+        arena: &arena,
+        library: stubs(db),
         table,
         frame_level: 0,
         discarded_if: None,
@@ -1029,6 +1034,12 @@ struct Checker<'db, 'a> {
     module: &'a Module,
     naming: &'a ItemNaming,
     globals: Option<&'a dyn GlobalEnv<'db>>,
+    /// Scratch space for the short-lived vectors of argument matching, which runs for every
+    /// call and every overload probe. It is freed in one step when the check ends.
+    arena: &'a Bump,
+    /// Fetched once per check: the checker consults the stubs at most calls, and each salsa
+    /// fetch records a dependency edge on the running query.
+    library: Option<&'db StubLibrary<'db>>,
     table: InferenceTable<'db>,
     /// A binding's right-hand side infers one level deeper so a function generalizes at
     /// its binding; a stored monotype lowers back to this level, or a later
@@ -1121,7 +1132,7 @@ enum FunctionLookup<'db> {
     /// The callee's type, already recorded for the head.
     Found(Ty<'db>),
     /// The library's candidates, past every project binding of the name.
-    Library(Symbol, Vec<TypeScheme<'db>>),
+    Library(Symbol, &'db [TypeScheme<'db>]),
     /// The nearest binding is untyped and also read as a value, and an outer binding of the
     /// name holds a function, so the call may reach either one and is not checked.
     Undetermined,
@@ -1621,13 +1632,14 @@ pub enum ArgumentTarget {
 /// FUN = f)` sends `character(1)` to `FUN.VALUE`. Positionals then fill fixed
 /// parameters, then unclaimed named formals before `...`. `None` marks a `...` forward.
 /// The checker and the editor's parameter hints share it, so both agree on where an argument goes.
-pub fn argument_targets(
+pub fn argument_targets<'arena>(
     db: &dyn Db,
+    arena: &'arena Bump,
     function: &FunctionType<'_>,
     arguments: &[ArgumentShape<'_>],
-) -> Vec<Option<ArgumentTarget>> {
-    let mut targets: Vec<Option<ArgumentTarget>> = arguments.iter().map(|_| None).collect();
-    let mut claimed = vec![false; function.named.len()];
+) -> &'arena mut [Option<ArgumentTarget>] {
+    let targets = arena.alloc_slice_fill_copy(arguments.len(), None);
+    let claimed = arena.alloc_slice_fill_copy(function.named.len(), false);
 
     for (index, argument) in arguments.iter().enumerate() {
         if argument.forwards_dots {
@@ -1745,7 +1757,7 @@ pub fn argument_targets(
         && function.variadic.is_none()
         && targets.contains(&Some(ArgumentTarget::UndeclaredName))
     {
-        for target in &mut targets {
+        for target in targets.iter_mut() {
             if let Some(ArgumentTarget::Positional(_)) = target {
                 *target = Some(ArgumentTarget::UndeclaredName);
             }
@@ -1762,14 +1774,14 @@ enum ConditionSite {
     Operand,
 }
 
-fn argument_shapes<'a>(arguments: &'a [CallArgument<'_>]) -> Vec<ArgumentShape<'a>> {
-    arguments
-        .iter()
-        .map(|argument| ArgumentShape {
-            name: argument.name.as_deref(),
-            forwards_dots: argument.forwards_dots,
-        })
-        .collect()
+fn argument_shapes<'arena, 'a>(
+    arena: &'arena Bump,
+    arguments: &'a [CallArgument<'_>],
+) -> &'arena [ArgumentShape<'a>] {
+    arena.alloc_slice_fill_iter(arguments.iter().map(|argument| ArgumentShape {
+        name: argument.name.as_deref(),
+        forwards_dots: argument.forwards_dots,
+    }))
 }
 
 fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
@@ -2027,7 +2039,9 @@ impl<'db> Checker<'db, '_> {
         // A standard-library type such as `data.frame` comes from its own constructors, so the
         // advice to wrap a value with `@new` would be wrong there.
         let declared = self.table.definition(self.db, *name);
-        let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
+        let from_stubs = self
+            .library
+            .and_then(|library| library.type_definitions.get(name));
         if declared.is_some() && declared == from_stubs {
             return false;
         }
@@ -2321,7 +2335,7 @@ impl<'db> Checker<'db, '_> {
                     && !self.naming.resolutions.contains_key(&callee)
                     && !self
                         .globals
-                        .is_some_and(|globals| globals.defined_in_project(name.as_str(), true))
+                        .is_some_and(|globals| globals.defined_in_project(*name, true))
                 {
                     return any(self.db);
                 }
@@ -2360,15 +2374,16 @@ impl<'db> Checker<'db, '_> {
                 package,
                 name,
             } => {
-                let validated = validated_namespace_name(self.db, *internal, package, name);
+                let validated =
+                    validated_namespace_name(self.db, self.library, *internal, package, name);
                 let reaches_project = namespace_reaches_project(self.db, package);
                 let name = *name;
                 match validated.as_ref().and_then(|name| {
                     let globals = self.globals?;
                     if reaches_project {
-                        globals.namespace_scheme(name)
+                        globals.namespace_scheme(Symbol::new(name))
                     } else {
-                        globals.library_candidates(name)?.pop()
+                        globals.library_candidates(name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -2448,7 +2463,7 @@ impl<'db> Checker<'db, '_> {
                     };
                     let entry = named.len();
                     named.push(Parameter {
-                        name: Name::new(self.db, parameter.name.as_str()),
+                        name: Name::new(self.db, &parameter.name),
                         ty: parameter_ty,
                         optional: parameter.default.is_some()
                             || uses.makes_optional(parameter.name),
@@ -2592,7 +2607,7 @@ impl<'db> Checker<'db, '_> {
                 let fields = module[fields]
                     .iter()
                     .map(|field| NativeField {
-                        name: Name::new(self.db, field.name.as_str()),
+                        name: Name::new(self.db, &field.name),
                         ty: self.infer(field.value),
                     })
                     .collect();
@@ -2641,7 +2656,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee)
                     || self
                         .globals
-                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                        .is_some_and(|globals| globals.defined_in_project(*name, deferred))
                 {
                     return;
                 }
@@ -2658,7 +2673,10 @@ impl<'db> Checker<'db, '_> {
             _ => return,
         };
         if accepts_native(function)
-            || (may_be_library && namespace_exports(self.db, STANDARD_LIBRARY, function))
+            || (may_be_library
+                && self
+                    .library
+                    .is_some_and(|library| library.exports(STANDARD_LIBRARY, function)))
         {
             return;
         }
@@ -2902,7 +2920,7 @@ impl<'db> Checker<'db, '_> {
                 .is_ok()
             && !self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                .is_some_and(|globals| globals.defined_in_project(*name, deferred))
         {
             self.record_strict_origin(
                 id,
@@ -2913,7 +2931,7 @@ impl<'db> Checker<'db, '_> {
         if let Some(name) = naming.non_locals.get(&id)
             && let Some(scheme) = self
                 .globals
-                .and_then(|globals| globals.scheme(name, naming.deferred_non_locals.contains(&id)))
+                .and_then(|globals| globals.scheme(*name, naming.deferred_non_locals.contains(&id)))
         {
             let instantiated = self.instantiate(&scheme);
             // A project-defined name owns its `Unknown` at its defining site, so reading it
@@ -2923,7 +2941,7 @@ impl<'db> Checker<'db, '_> {
                 TyKind::Unknown
             ) && !self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                .is_some_and(|globals| globals.defined_in_project(*name, deferred))
             {
                 self.record_strict_origin(
                     id,
@@ -3115,7 +3133,7 @@ impl<'db> Checker<'db, '_> {
         let deferred = naming.deferred_quiet_reads.contains(&id);
         let scheme = self
             .globals
-            .and_then(|globals| globals.scheme(name, deferred));
+            .and_then(|globals| globals.scheme(Symbol::new(name), deferred));
         Some(match scheme {
             Some(scheme) => self.instantiate(&scheme),
             None => unknown(self.db),
@@ -3133,9 +3151,9 @@ impl<'db> Checker<'db, '_> {
         }
         let globals = self.globals?;
         let scheme = if earlier {
-            globals.earlier_binding(&binding.name)?
+            globals.earlier_binding(binding.name)?
         } else {
-            globals.scheme(&binding.name, false)?
+            globals.scheme(binding.name, false)?
         };
         let instantiated = self.instantiate(&scheme);
         // An `Unknown` binding adds nothing over the tolerant read, and materializing it
@@ -4057,7 +4075,7 @@ impl<'db> Checker<'db, '_> {
                 let fields = self.module[fields]
                     .iter()
                     .map(|field| NativeField {
-                        name: Name::new(self.db, field.name.as_str()),
+                        name: Name::new(self.db, &field.name),
                         ty: self.fresh(Constraint::Unconstrained),
                     })
                     .collect();
@@ -4963,7 +4981,7 @@ impl<'db> Checker<'db, '_> {
             },
             None => self
                 .globals
-                .and_then(|globals| globals.scheme(name, true))
+                .and_then(|globals| globals.scheme(Symbol::new(name), true))
                 .map(|scheme| scheme.body),
         };
         let Some(TyKind::Function(function)) = callee_ty.map(|ty| ty.kind(self.db)) else {
@@ -5662,9 +5680,9 @@ impl<'db> Checker<'db, '_> {
         ["-", "Arith", "Ops"].iter().any(|prefix| {
             let method = format!("{prefix}.{class}");
             globals
-                .overloads(&method, false)
+                .overloads(Symbol::new(&method), false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(&method, false).is_some()
+                || globals.scheme(Symbol::new(&method), false).is_some()
         })
     }
 
@@ -5682,9 +5700,9 @@ impl<'db> Checker<'db, '_> {
         ["!", "Ops"].iter().any(|prefix| {
             let method = format!("{prefix}.{class}");
             globals
-                .overloads(&method, false)
+                .overloads(Symbol::new(&method), false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(&method, false).is_some()
+                || globals.scheme(Symbol::new(&method), false).is_some()
         })
     }
 
@@ -6047,17 +6065,17 @@ impl<'db> Checker<'db, '_> {
         lhs: ExprId,
         rhs: ExprId,
     ) -> Option<Ty<'db>> {
-        let library = stubs(self.db)?;
+        let library = self.library?;
         if !library.schemes.contains_key(name) {
             return None;
         }
         if self
             .globals
-            .is_some_and(|globals| globals.defined_in_project(name, false))
+            .is_some_and(|globals| globals.defined_in_project(Symbol::new(name), false))
         {
             return None;
         }
-        let scheme = self.globals?.scheme(name, false)?;
+        let scheme = self.globals?.scheme(Symbol::new(name), false)?;
         let instantiated = self.instantiate(&scheme);
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
@@ -6205,16 +6223,21 @@ impl<'db> Checker<'db, '_> {
                 format!("Ops.{class}"),
             ] {
                 let Some(candidates) = globals
-                    .overloads(&method, false)
-                    .or_else(|| globals.scheme(&method, false).map(|scheme| vec![scheme]))
+                    .overloads(Symbol::new(&method), false)
+                    .map(Cow::Borrowed)
+                    .or_else(|| {
+                        globals
+                            .scheme(Symbol::new(&method), false)
+                            .map(|scheme| Cow::Owned(vec![scheme]))
+                    })
                     .filter(|candidates| !candidates.is_empty())
                 else {
                     continue;
                 };
                 declared_any = true;
-                for scheme in candidates {
+                for scheme in candidates.iter() {
                     let snapshot = self.table.snapshot();
-                    let instantiated = self.instantiate(&scheme);
+                    let instantiated = self.instantiate(scheme);
                     let resolved = self.table.shallow_resolve(self.db, instantiated);
                     let TyKind::Function(function) = resolved.kind(self.db) else {
                         self.table.rollback(snapshot);
@@ -6951,7 +6974,7 @@ impl<'db> Checker<'db, '_> {
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
             signature.named.push(Parameter {
-                name: Name::new(self.db, parameter.name.as_str()),
+                name: Name::new(self.db, &parameter.name),
                 ty: parameter_ty,
                 optional,
                 default: parameter.default.map(|default| self.infer(default)),
@@ -7345,7 +7368,7 @@ impl<'db> Checker<'db, '_> {
             || self.naming.resolutions.contains_key(&callee)
             || self
                 .globals
-                .is_some_and(|globals| globals.defined_in_project("seq", deferred))
+                .is_some_and(|globals| globals.defined_in_project(Symbol::new("seq"), deferred))
         {
             return None;
         }
@@ -7682,7 +7705,7 @@ impl<'db> Checker<'db, '_> {
             let deferred = self.naming.deferred_non_locals.contains(&callee);
             let Some(scheme) = self
                 .globals
-                .and_then(|globals| globals.scheme(non_local, deferred))
+                .and_then(|globals| globals.scheme(*non_local, deferred))
             else {
                 return FunctionLookup::Ordinary;
             };
@@ -7691,7 +7714,7 @@ impl<'db> Checker<'db, '_> {
             }
             if let Some(enclosing) = self
                 .globals
-                .and_then(|globals| globals.enclosing_scheme(non_local))
+                .and_then(|globals| globals.enclosing_scheme(*non_local))
                 && self.callable(enclosing.body) != Callable::No
             {
                 self.callee_targets.insert(callee, CalleeTarget::Project);
@@ -7735,8 +7758,8 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let project = self.globals.and_then(|globals| match reaches_top_level {
-            false => globals.scheme(&name, deferred),
-            true => globals.enclosing_scheme(&name),
+            false => globals.scheme(Symbol::new(&name), deferred),
+            true => globals.enclosing_scheme(Symbol::new(&name)),
         });
         if let Some(scheme) = project
             && self.callable(scheme.body) != Callable::No
@@ -7841,7 +7864,7 @@ impl<'db> Checker<'db, '_> {
 
     /// The library's candidates for `name` when the last one, which a plain read takes, is a
     /// function.
-    fn library_function(&mut self, name: Symbol) -> Option<Vec<TypeScheme<'db>>> {
+    fn library_function(&mut self, name: Symbol) -> Option<&'db [TypeScheme<'db>]> {
         let candidates = self.globals?.library_candidates(&name)?;
         match candidates.last() {
             Some(last) if self.callable(last.body) == Callable::No => None,
@@ -7896,9 +7919,9 @@ impl<'db> Checker<'db, '_> {
     ) -> Option<Ty<'db>> {
         let deferred = self.naming.deferred_non_locals.contains(&callee);
         if self.naming.resolutions.contains_key(&callee)
-            || self
-                .globals
-                .is_some_and(|globals| globals.defined_in_project("DataFrame", deferred))
+            || self.globals.is_some_and(|globals| {
+                globals.defined_in_project(Symbol::new("DataFrame"), deferred)
+            })
         {
             return None;
         }
@@ -7964,8 +7987,8 @@ impl<'db> Checker<'db, '_> {
         let deferred = self.naming.deferred_non_locals.contains(&callee);
         self.globals.is_some_and(|globals| {
             !self.naming.resolutions.contains_key(&callee)
-                && !globals.defined_in_project(name, deferred)
-                && globals.scheme(name, deferred).is_some()
+                && !globals.defined_in_project(*name, deferred)
+                && globals.scheme(*name, deferred).is_some()
         })
     }
 
@@ -9144,11 +9167,11 @@ impl<'db> Checker<'db, '_> {
         };
         let method = format!("c.{}", name.text(self.db));
         self.globals?
-            .scheme(&method, false)
+            .scheme(Symbol::new(&method), false)
             .map(|_| nominal)
             .or_else(|| {
                 self.globals?
-                    .overloads(&method, false)
+                    .overloads(Symbol::new(&method), false)
                     .filter(|candidates| !candidates.is_empty())
                     .map(|_| nominal)
             })
@@ -9375,7 +9398,7 @@ impl<'db> Checker<'db, '_> {
             };
             match self.module.argument_name(argument) {
                 Some(name) => fields.push(RecordField {
-                    name: Name::new(self.db, name.as_str()),
+                    name: Name::new(self.db, &name),
                     ty,
                     optional: false,
                 }),
@@ -9616,7 +9639,8 @@ impl<'db> Checker<'db, '_> {
                 package,
                 name,
             } => {
-                let name = validated_namespace_name(self.db, *internal, package, name)?;
+                let name =
+                    validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
                     let schemes = self.globals?.library_candidates(&name)?;
                     if schemes.len() < 2 {
@@ -9638,9 +9662,10 @@ impl<'db> Checker<'db, '_> {
             }
             _ => return None,
         };
-        let schemes = self
-            .globals?
-            .overloads(&name, self.naming.deferred_non_locals.contains(&callee))?;
+        let schemes = self.globals?.overloads(
+            Symbol::new(&name),
+            self.naming.deferred_non_locals.contains(&callee),
+        )?;
         if schemes.len() < 2 {
             return None;
         }
@@ -9680,13 +9705,18 @@ impl<'db> Checker<'db, '_> {
             .find_map(|generic| {
                 let method = format!("{generic}.{class}");
                 globals
-                    .overloads(&method, false)
-                    .or_else(|| globals.scheme(&method, false).map(|scheme| vec![scheme]))
+                    .overloads(Symbol::new(&method), false)
+                    .map(Cow::Borrowed)
+                    .or_else(|| {
+                        globals
+                            .scheme(Symbol::new(&method), false)
+                            .map(|scheme| Cow::Owned(vec![scheme]))
+                    })
                     .filter(|candidates| !candidates.is_empty())
             })?;
-        for scheme in candidates {
+        for scheme in candidates.iter() {
             let snapshot = self.table.snapshot();
-            let instantiated = self.instantiate(&scheme);
+            let instantiated = self.instantiate(scheme);
             let resolved = self.table.shallow_resolve(self.db, instantiated);
             let TyKind::Function(function) = resolved.kind(self.db) else {
                 self.table.rollback(snapshot);
@@ -10274,8 +10304,9 @@ impl<'db> Checker<'db, '_> {
             let TyKind::Function(function) = resolved.kind(self.db) else {
                 continue;
             };
-            let function = function.clone();
-            let targets = argument_targets(self.db, &function, &argument_shapes(arguments));
+            let arena = self.arena;
+            let targets =
+                argument_targets(self.db, arena, &function, argument_shapes(arena, arguments));
             let target_ty = |target: &Option<ArgumentTarget>| match target {
                 Some(ArgumentTarget::Positional(index)) => function.positional.get(*index).copied(),
                 Some(ArgumentTarget::Named(index)) => {
@@ -10332,7 +10363,7 @@ impl<'db> Checker<'db, '_> {
                 })
                 .collect();
             let snapshot = self.table.snapshot();
-            let accepts = arguments.iter().zip(&targets).zip(deferred).all(
+            let accepts = arguments.iter().zip(targets.iter()).zip(deferred).all(
                 |((argument, target), &deferred)| {
                     if deferred {
                         return true;
@@ -10417,7 +10448,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee)
                     || self
                         .globals
-                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                        .is_some_and(|globals| globals.defined_in_project(*name, deferred))
                 {
                     return;
                 }
@@ -10449,12 +10480,12 @@ impl<'db> Checker<'db, '_> {
                 )
             {
                 // An export the stubs list without a type is still a function.
-                if let Some(mut candidates) = self
+                if let Some(candidates) = self
                     .globals
                     .and_then(|globals| globals.library_candidates(name.as_str()))
                 {
-                    argument.named_function = Some(match candidates.pop() {
-                        Some(scheme) => self.instantiate(&scheme),
+                    argument.named_function = Some(match candidates.last() {
+                        Some(scheme) => self.instantiate(scheme),
                         None => unknown(self.db),
                     });
                 }
@@ -10466,7 +10497,7 @@ impl<'db> Checker<'db, '_> {
             let named = match self.module.kind(value) {
                 ExpressionKind::Literal(LiteralKind::String(text)) => self
                     .globals
-                    .and_then(|globals| globals.scheme(&self.module[text], false))
+                    .and_then(|globals| globals.scheme(Symbol::new(&self.module[text]), false))
                     .map(|scheme| self.instantiate(&scheme)),
                 _ => None,
             };
@@ -10501,8 +10532,7 @@ impl<'db> Checker<'db, '_> {
         };
         match resolved.kind(self.db) {
             TyKind::Function(function) => {
-                let function = function.clone();
-                let findings = self.match_arguments(callee_range, &function, arguments);
+                let findings = self.match_arguments(callee_range, function, arguments);
                 self.errors.extend(findings);
                 function.ret
             }
@@ -10747,17 +10777,21 @@ impl<'db> Checker<'db, '_> {
     ) -> Vec<TypeError<'db>> {
         let total = function.positional.len() + function.named.len();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
-        let targets = argument_targets(self.db, function, &argument_shapes(arguments));
-        self.join_shared_parameters(function, arguments, &targets);
+        let arena = self.arena;
+        let targets =
+            &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+        self.join_shared_parameters(function, arguments, targets);
 
         // A function-typed argument may be checked against arguments forwarded to it later
         // (`lapply(x, gsub, pattern = "a")`), so the rest intake must be known up front.
-        let forwarded_argument_indexes: Vec<usize> = targets
-            .iter()
-            .enumerate()
-            .filter(|(_, target)| matches!(target, Some(ArgumentTarget::Rest)))
-            .map(|(index, _)| index)
-            .collect();
+        let forwarded_argument_indexes = BumpVec::from_iter_in(
+            targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| matches!(target, Some(ArgumentTarget::Rest)))
+                .map(|(index, _)| index),
+            arena,
+        );
 
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();
@@ -11555,7 +11589,7 @@ impl<'db> Checker<'db, '_> {
 
     fn subset_method_result(&mut self, operator: &str, class: &str) -> Option<Ty<'db>> {
         let method = format!("{operator}.{class}");
-        let scheme = self.globals?.scheme(&method, false)?;
+        let scheme = self.globals?.scheme(Symbol::new(&method), false)?;
         let instantiated = self.instantiate(&scheme);
         match self
             .table
@@ -12567,7 +12601,7 @@ impl<'db> Checker<'db, '_> {
                 range,
                 callback.function,
                 callback.name.clone(),
-                &callback.schemes,
+                callback.schemes,
                 &call_arguments,
             );
             results.push((ty, self.errors.split_off(recorded_errors)));
@@ -12754,7 +12788,7 @@ impl<'db> Checker<'db, '_> {
             return None;
         }
         let deferred = self.naming.deferred_non_locals.contains(&function);
-        let schemes = self.globals?.overloads(name, deferred)?;
+        let schemes = self.globals?.overloads(*name, deferred)?;
         (schemes.len() >= 2).then(|| Callback {
             function,
             name: name.to_string(),
@@ -14042,7 +14076,7 @@ impl BoundFormals {
 struct Callback<'db> {
     function: ExprId,
     name: String,
-    schemes: Vec<TypeScheme<'db>>,
+    schemes: &'db [TypeScheme<'db>],
 }
 
 /// The types an apply-family function hands its callback one at a time, and whether the
@@ -14487,7 +14521,7 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
 /// diamond is not a cycle. Nominal definitions may legitimately recurse.
 fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
-    definitions: TypeDefinitions,
+    definitions: TypeDefinitions<'db>,
     ty: Ty<'db>,
     expanding: &mut FxHashSet<Name<'db>>,
 ) -> Option<String> {
@@ -14534,6 +14568,7 @@ fn namespace_reaches_project(db: &dyn Db, package: &Option<Symbol>) -> bool {
 /// every such read resolves.
 fn validated_namespace_name(
     db: &dyn Db,
+    library: Option<&StubLibrary<'_>>,
     internal: bool,
     package: &Option<Symbol>,
     name: &Option<Symbol>,
@@ -14546,11 +14581,11 @@ fn validated_namespace_name(
     if is_own_package(db, package.as_str()) {
         return Some(name);
     }
-    match namespace_known(db, package.as_str()) {
+    match library.map(|library| library.knows_namespace(package.as_str())) {
         None => Some(name),
         Some(false) => None,
         Some(true) => {
-            if internal || namespace_exports(db, package.as_str(), &name) {
+            if internal || library.is_some_and(|library| library.exports(package.as_str(), &name)) {
                 Some(name)
             } else {
                 None

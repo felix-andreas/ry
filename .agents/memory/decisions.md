@@ -743,8 +743,8 @@ beats a classic typed AST of structs with spans for four reasons.
   item's subtree stays structurally equal after an edit elsewhere in the file. That is the property
   per-item cutoffs are built on. An AST that carries spans shifts every span after any edit, which
   kills sub-file incrementality at the root.
-- **Structural sharing.** Immutable refcounted subtrees with builder-level dedup of identical small
-  nodes keep the resident tree near twice the source bytes.
+- **Structural sharing.** Immutable refcounted subtrees share identical tokens through the
+  builder, and a splice reparse shares every untouched subtree with the previous tree.
 
 Use the crate, not an in-house copy of the design. The value is subtle machinery already hardened
 over years in rust-analyzer: the thin-DST layout, red cursors with lazy offsets, node caching and
@@ -757,8 +757,8 @@ That is why inference never walks it. The checker runs on per-item HIR, and rowa
 fidelity layers, which are the IDE, the formatter and refactorings.
 
 Value equality is the mechanism, not pointer identity. rowan's green `Eq` is structural with a
-pointer fast path, and its node cache dedups only nodes with three children or fewer, so a
-from-scratch reparse shares no large subtree. rust-analyzer's barriers are likewise value equality
+pointer fast path, and ry's tree builder shares only tokens, never nodes (see "The cold check's
+per-call work" below), so a from-scratch reparse shares no subtree. rust-analyzer's barriers are likewise value equality
 on its `ItemTree` and `AstIdMap`. A statement-splice reparse of an open document can make those
 compares pointer-fast, but it is an optimization only. Parse stays a pure per-file query and
 correctness never depends on splicing.
@@ -2371,7 +2371,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - HIR lists are boxed slices and `lower_item` shrinks the arena, so a memoized item holds no
     slack. `ItemCheck.expression_types` is a dense table indexed by `ExprId` (ids are dense within
     an item).
-  - Parsing shares one rowan `NodeCache` per thread, replaced every 256 parses so a long-running
+  - Parsing shares one token cache per thread, replaced every 256 parses so a long-running
     server does not pin the garbage of replaced trees.
   - `check` parses each file once on all cores while collecting attached namespaces and used
     tokens, forgets the database instead of dropping it, and the binary uses mimalloc (a default
@@ -5165,16 +5165,72 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Previous shape.** The debugger existed only as `ry debug-adapter`, which launches a fresh script; a `ry run` console had no editor connection, so `debug()`, `View()` and the editor's hover knew nothing of the session.
 - **Transport.** `ry run` listens on a Unix socket in `$TMPDIR/ry-<uid>` (0700, owner and mode verified by both ends) and writes `console-<pid>.json` naming its cwd and socket. Discovery is a directory read, so nothing extra runs at start-up beyond one accept thread; a reader thread per connection queues events, and the interpreter thread answers them (`interp::console_server`). Framing is DAP's `Content-Length`, so one parser serves the debugger, the viewer and the language server.
-- **When requests are answered.** At the prompt, input is read on a helper thread while the interpreter thread answers every request. While a command runs, `poll_interrupt` services the queue: debugger requests are answered (pause, breakpoints), anything that would evaluate R is refused as busy, because it would interleave with the user's code. While stopped, the debugger's own receive loop answers other connections inline.
+- **When requests are answered.** At the prompt, input is read on a persistent input thread (`console_server::read_line`) while the interpreter thread answers every request. The thread owns the console's reader and reads one line per prompt that asks; a line stays owed until the interpreter takes it, so a prompt whose wait ended early (an editor took a `Browse[1]>` stop over) hands its pending line to the next prompt instead of reading ahead; that next prompt is then written to the terminal, since the thread is still showing the old one. A line typed while a command runs goes to `STASHED_INPUT` and the queue keeps draining, so an editor's `pause` behind it is still answered. `browser()` inside R code run for an editor's request at the idle prompt does not stop (`SERVING_REQUEST`), because the top-level read owns the terminal. An editor that attaches while a Browse stop's expression runs keeps its adapter: `with_adapter` drops the finished stop's adapter instead of writing it back. A per-prompt scoped helper thread could not do that, because the scope had to join before the prompt returned. Every request queue is bounded at 64 queued requests per connection: the socket thread blocks, so a flooding client stalls on its own socket buffer and nothing is dropped.
+- **Viewer sort and filter are row numbers, not copies.** A `ryTable` request carries `filter` and `sort`; the view caches the zero-based row numbers they leave (`viewer::Order`) and pages through them, recomputing only when the pair changes. A ry `DataFrame` computes them in the table engine (`table::ops::view_rows`, which reuses `sort_frame`'s radix path on a two-column frame of the key and the row numbers) and gathers a page with `take_rows`; an R object computes them with `grepl()` and `order(na.last = FALSE)` in a base-scoped environment. Both put `NA` first in either direction, keep ties in row order, and let `NA` match no search, so the two engines show the same rows.
+- **`browser()` with no editor drives the same adapter from the terminal.** An interactive console installs `Adapter::for_console` over `console_server::Browse`, a transport that turns GNU R's browser commands into DAP requests (`c` is a disconnect, `n`/`s`/`f` are next/stepIn/stepOut, `Q` is terminate, other lines are an `evaluate` with context `ryBrowse`, which autoprints) and renders responses as text. Stepping rules therefore exist once. An editor `initialize` arriving at the prompt replaces the terminal inside the transport, and `configurationDone` re-sends the `stopped` event. The adapter ends with its command while the terminal drives it (`Adapter::is_browse`), but stays attached once an editor took over. A forced `browser()` stop needs no srcref, and only error stops hide sourceless frames. Scripts (`ry run file.R`) install no reader, so `browser()` stays a no-op there, as in non-interactive GNU R. While a command runs, `poll_interrupt` services the queue: debugger requests are answered (pause, breakpoints), anything that would evaluate R is refused as busy, because it would interleave with the user's code. While stopped, the debugger's own receive loop answers other connections inline.
 - **Attach** installs the same `debugger::Adapter` the launch path uses, with `console = true` so disconnect detaches instead of exiting, and reloads the workspace packages with srcrefs so package breakpoints hit. Only one debugger connection at a time.
 - **`debug`/`debugonce`** set closure gp bits and enter `Mode::FunctionEntry`, stopping with reason "function breakpoint". Code typed at the prompt has no file, so its frames get a `sourceReference` the client fetches with `source`.
 - **Data viewer.** `ryView` evaluates an expression (in a frame when stopped, else in the global env) and registers a view that preserves the object; `ryTable` returns one page of formatted rows, at most 1000; `ryRelease` drops it, and at most 32 views live at once. The data never leaves the runtime whole, so a million-row table costs one page. Variables carry `evaluateName` so the editor's "View Data" names the exact value. `View(x)` sends a `ryView` event to connections that sent `rySubscribe`; VS Code subscribes when it opens or attaches to a console.
 - **Live values in the language server** come from `ryGlobals` (names, class, summary, columns, promises unforced) with a 150 ms timeout (`ry::console_link`). Analysis stays the source of truth: the console only adds hover lines and completion items analysis lacks, and the simulator disables the link to stay deterministic.
 
+## A parameter and its named arguments are one editor binding
+
+- Before, a named argument (`f(rate = 1)`) was no navigation target: hover widened to the whole
+  call, goto and references found nothing, and renaming the parameter left every call site's
+  `rate =` behind, so the rename broke the code.
+- Now `ide::target_at` maps a named argument to the parameter's `Target::Slot` in the callee's
+  item (the callee resolves the way any name read does, `expression_target`), and the occurrences
+  of a parameter slot add the named arguments at every call of its function. Those calls come
+  from the function binding's own occurrences (the global walk for a top-level function, the slot
+  walk for a local one), so a different function with a parameter of the same name is untouched.
+- Nothing new is stored: call sites are derived on request from the existing occurrence walks, so
+  no project-wide map gains a dependency and incremental behavior is unchanged.
+- A library callee has no parameter site, so its named argument goes to the stub's function and
+  hover shows the signature-help label of the parameter. Partial matching is not followed, on
+  purpose: it would make a rename guess.
+
+## The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder
+
+- **Previous shape.** Argument matching allocated its target and match vectors on the heap per
+  call, each item check cloned the stub library's schemes out of a salsa fetch per lookup, the
+  `GlobalEnv` lookups took `&str` and re-interned the name at every layer, parsing went through
+  rowan's `GreenNodeBuilder` with a per-thread `NodeCache`, and `ry check` read, rendered and
+  printed findings on one thread after analysis.
+- **Weakness.** Every one of those is per-call or per-token work that repeats millions of times on
+  a 300k-line project: allocator churn, scheme clones, repeated interning, and the node cache's
+  hashing of every small node to deduplicate it.
+- **Target shape.**
+  - Argument matching allocates in a `bumpalo::Bump` that lives for one item check
+    (`check_item_with_annotation`), and the checker borrows `ItemCheck`s and stub schemes instead of
+    cloning them. The stub library is fetched once per check.
+  - `GlobalEnv` methods take `hir::Symbol`; `types::Name::new` accepts anything `IntoSymbol`, so a
+    caller holding a symbol never round-trips through a string. `hir::Symbol` orders by a cached
+    8-byte big-endian prefix before comparing text, so sorted sets of symbols rarely touch memory.
+  - `syntax::parser::TreeBuilder` builds green nodes directly from a child stack and shares only
+    tokens, through a per-thread hash table plus a per-kind "last token" slot. Nodes are not
+    deduplicated: on the finance bench that costs about 70 MB of peak memory (440 to 510 MB) and
+    saves the node cache's hashing, and value equality of green trees (the firewall mechanism, see
+    the rowan entry) does not depend on sharing.
+  - The lexer has ASCII fast paths for identifiers, numbers and comment bodies, and keyword
+    lookup rejects by length and first byte.
+  - `ry check` reads sources and renders findings in parallel and prints them in path order, and it
+    hashes sources for the cache key only when the cache is read or written.
+  - `TypeDefinitions::of`, `read_context` and `SalsaGlobals::new` fetch the stub library, the
+    project files and the file kind up front instead of on first use. That records a few
+    dependencies a lookup answered file-locally used to skip, so an edit to those inputs
+    re-runs slightly more; all three change rarely (a stub or project-layout edit), and one
+    fetch per check is cheaper than one per lookup.
+- **Impact.** Callgrind on the finance bench (`ry check --no-cache`) went from 24.60 G to
+  22.6-22.8 G instructions across runs, with byte-identical diagnostics. In interleaved runs the
+  one-core median fell from 4.7 to 4.3 s and the 4-core median from about 1.6 to 1.48 s. The 1 s
+  cold-check target is not met, and the rest of the profile is flat across mimalloc, salsa's
+  dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
+  follow-ups").
+
 ## R's dynamic help server runs on the interpreter thread, only while R waits
 
 - **Previous shape.** `startHTTPD` failed on purpose, so `help(help_type = "html")`, `help.start()` and `tools::startDynamicHelp()` reported that the help server was not implemented.
-- **Shape.** `interp::help_server` binds the listener and runs an accept thread plus one thread per connection. Those threads only parse HTTP and queue an exchange; the R handler (`tools:::httpd`, or `tools:::.httpd.handlers.env[[name]]` for `/custom/<name>`) runs on the interpreter thread, which answers the queue and hands the response back over a channel. No R object crosses a thread.
+- **Shape.** `interp::help_server` binds the listener and runs an accept thread plus one thread per connection. Those threads only parse HTTP and queue an exchange; the R handler (`tools:::httpd`, or `tools:::.httpd.handlers.env[[name]]` for `/custom/<name>`) runs on the interpreter thread, which answers the queue and hands the response back over a channel. No R object crosses a thread. The handler runs as under GNU R's `R_ToplevelExec`, with none of the waiting code's condition handlers or restarts in reach (they are parked in `Interp::suspended_handlers`, where the collector sees them), and a Ctrl-C during it reaches the waiting code once the response is sent. `stopHTTPD` shuts every open connection down, and the server bounds request heads (1 MiB) and bodies (64 MiB) and closes idle connections.
 - **When requests are answered** follows GNU R, which serves help only from its event loop: at the console prompt (the `console_server` idle loop, woken through `console_server::wake`), in `Sys.sleep`, in `process.events`, and while an HTTP download runs on its transfer thread, so a session can fetch its own help pages through `url()` or `download.file`. A running command never interleaves with a handler. Off Unix the console idle loop does not serve yet.
 - **Wire format.** Request decoding (path percent-decoding that stops at the first malformed escape, the query vector, the raw body with its `content-type`, the `Request-Method:` header block) and the response rules (error 500 forms, status reason "Code N", HEAD, HTTP version echo, `startHTTPD` return codes 0, -1 and -2) were probed against GNU R and are pinned by `crates/oracle/cases/tools__help_server.R`.
-- **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte.
+- **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte apart from the render timestamps.

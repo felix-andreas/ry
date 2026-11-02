@@ -3005,17 +3005,28 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - More quick fixes: a missing `library()` for a namespaced name.
 - Semantic tokens: coloring of `$` fields and frame columns.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
-  tabs, and `browser()` in code without a srcref does not stop.
+  tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
-  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`.
-- `browser()` typed at a console with no debugger attached runs past instead of giving GNU R's
-  text `Browse>` prompt.
-- The data viewer has no sorting, filtering or column search; each would be a request the
-  runtime answers per page (`interp::viewer`), never a client-side copy of the data.
+  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`,
+  which waits for a Windows runner to test it on.
+- The `Browse[1]>` prompt always shows depth 1 (GNU R counts nested browsers), and `where` names
+  frames by function, not by call as GNU R does.
+- The data viewer filters by one text over all columns and sorts by one column; per-column
+  filters (a numeric range, a factor level) and multi-column sorts would extend the `ryTable`
+  request the same way.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+- Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
+  httr2 (`pkg::name`, `$` field, argument name, call head, variable):
+  - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to
+    its `list(name = ...)` or `x$name <- ...` site; R6 `self$`/`private$` members are most of them.
+  - Goto and hover on calls into imported packages with no stub (rlang's `is_null`, `enquos`;
+    lifecycle) answer nothing; purrr's call heads answer 74%. More stubs, or reading an installed
+    package's R source for navigation, would close it.
+  - A named argument that R completes by partial matching (`f(fac = 1)` for `factor`) is not
+    linked to its parameter, so a parameter rename leaves it behind.
 - Not done from rust-analyzer's list, with the reason:
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
@@ -3046,14 +3057,19 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check is about 1.45-1.6 s on 4 cores and already uses about 3.4 of them, so the 1 s cold
-  target needs about a third less CPU work. Under callgrind the finance bench went from 27.6 to
-  24.6 G instructions with: direct descent in `node_at`, green walks for `write_tokens`, a node-only
-  `walk_green` (syntax lints 2.1 to 1.06 G, syntax sites 0.82 to 0.66 G), a per-check memo of type
-  definitions, and a formal-use walk that tracks only the formals. Wall time did not move outside the
-  machine's noise. What is left is flat: item checking 11.05 G (45%, `infer_ordinary_call` 5.7 G,
-  argument matching 1.75 G, `InferenceTable::resolve` 1.8 G), parse inside `file_attached_namespaces`
-  4.2 G (rowan's node cache, `flush_deferred_trivia`, the lexer), HIR lowering 3.7 G, naming
-  `resolve` 0.88 G, mimalloc about 4.5 G spread over all of them, and salsa's dependency edges about
-  0.7 G. A real third needs the checker's per-call allocations gone (argument targets, scheme clones,
-  `match_arguments` vectors) and a cheaper tree build, not more local cuts.
+- A cold check is about 1.4-1.5 s on 4 cores (4.3 s on one core) and already uses about 3.3 of
+  them, so the 1 s cold target still needs about a third less CPU work. Under callgrind the finance
+  bench went from 27.6 to 24.6 G instructions with green walks and direct descent, then to about
+  22.6-22.8 G with a per-check bump arena for argument matching, borrowed stub schemes and item checks,
+  symbol-keyed `GlobalEnv` lookups, a token-only green builder, lexer fast paths and parallel
+  rendering (`decisions.md`, "The cold check's per-call work"). In interleaved runs against the
+  build before them, one-core wall went from 4.6-4.8 s to 4.2-4.5 s and 4-core medians from about
+  1.6 s to about 1.48 s, while peak RSS rose from about 440 to 510 MiB because green nodes are no
+  longer deduplicated. What is left is flat: mimalloc about 1.4 G, salsa bookkeeping about 1.1 G
+  (dependency edges, memo setup), hashbrown about 1.1 G spread over many tables, parse about 3.4 G
+  inclusive, HIR lowering about 3.6 G inclusive (much of it red-cursor allocation, 3.6 M
+  `NodeData::new`), naming `resolve` about 2.9 G inclusive, and item checking about 7 G. A real third
+  needs a structural change rather than local cuts: lowering HIR straight from the green tree during
+  or right after the parse (no red cursors), and a one-shot check path that does not record salsa
+  dependency edges per item (`package_name` and `test_name` are fetched about 340 k times only to
+  record edges a cold check never replays).
