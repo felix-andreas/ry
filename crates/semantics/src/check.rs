@@ -26,7 +26,7 @@ use {
         stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
-            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
+            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, NullUnless, FunctionType, InferenceVar,
             Name, NativeField, Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty,
             TyKind, TypeScheme, any, array, array_element, column_type, conflicting_tags,
             contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
@@ -1045,7 +1045,35 @@ fn erase_residual_vars_at<'db>(
 #[derive(Debug, Default)]
 struct Environment<'db> {
     entries: FxHashMap<BindingId, EnvEntry<'db>>,
-    undo: Vec<(BindingId, Option<EnvEntry<'db>>)>,
+    /// What dominating tests showed about slots' values beyond their types. A write to a slot
+    /// drops every fact that mentions it.
+    facts: Vec<Fact>,
+    undo: Vec<Undo<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fact {
+    /// After `if (!is_loaded(package)) stop()`, `is_loaded(package)` holds.
+    Holds(BindingId, Symbol),
+    /// After `if (is.null(A) != is.null(b)) stop()`, the two are `NULL` together, so a test
+    /// of one narrows the other.
+    NullTogether(BindingId, BindingId),
+}
+
+impl Fact {
+    fn mentions(self, slot: BindingId) -> bool {
+        match self {
+            Fact::Holds(held, _) => held == slot,
+            Fact::NullTogether(first, second) => first == slot || second == slot,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Undo<'db> {
+    Entry(BindingId, Option<EnvEntry<'db>>),
+    Established(Fact),
+    Dropped(Fact),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1065,7 +1093,36 @@ impl<'db> Environment<'db> {
 
     fn set(&mut self, slot: BindingId, entry: EnvEntry<'db>) {
         let previous = self.entries.insert(slot, entry);
-        self.undo.push((slot, previous));
+        self.undo.push(Undo::Entry(slot, previous));
+        if self.facts.iter().any(|fact| fact.mentions(slot)) {
+            let undo = &mut self.undo;
+            self.facts.retain(|&fact| {
+                let kept = !fact.mentions(slot);
+                if !kept {
+                    undo.push(Undo::Dropped(fact));
+                }
+                kept
+            });
+        }
+    }
+
+    fn establish(&mut self, fact: Fact) {
+        if !self.facts.contains(&fact) {
+            self.facts.push(fact);
+            self.undo.push(Undo::Established(fact));
+        }
+    }
+
+    fn holds_of(&self, slot: BindingId, predicate: Symbol) -> bool {
+        self.facts.contains(&Fact::Holds(slot, predicate))
+    }
+
+    fn null_partners(&self, slot: BindingId) -> impl Iterator<Item = BindingId> + '_ {
+        self.facts.iter().filter_map(move |fact| match *fact {
+            Fact::NullTogether(first, second) if first == slot => Some(second),
+            Fact::NullTogether(first, second) if second == slot => Some(first),
+            _ => None,
+        })
     }
 
     fn mark(&self) -> usize {
@@ -1074,14 +1131,15 @@ impl<'db> Environment<'db> {
 
     fn rollback(&mut self, mark: usize) {
         while self.undo.len() > mark {
-            let (slot, previous) = self.undo.pop().expect("undo length checked");
-            match previous {
-                Some(entry) => {
+            match self.undo.pop().expect("undo length checked") {
+                Undo::Entry(slot, Some(entry)) => {
                     self.entries.insert(slot, entry);
                 }
-                None => {
+                Undo::Entry(slot, None) => {
                     self.entries.remove(&slot);
                 }
+                Undo::Established(fact) => self.facts.retain(|&held| held != fact),
+                Undo::Dropped(fact) => self.facts.push(fact),
             }
         }
     }
@@ -1089,7 +1147,10 @@ impl<'db> Environment<'db> {
     fn writes_since(&self, mark: usize) -> Vec<(BindingId, Option<EnvEntry<'db>>)> {
         let mut seen = FxHashSet::default();
         let mut writes = Vec::new();
-        for (slot, _) in &self.undo[mark..] {
+        for undo in &self.undo[mark..] {
+            let Undo::Entry(slot, _) = undo else {
+                continue;
+            };
             if seen.insert(*slot) {
                 writes.push((*slot, self.entries.get(slot).copied()));
             }
@@ -1441,6 +1502,9 @@ enum SlotRefinement<'db> {
     /// `missing(name)` on a no-default formal: the edge marks the slot read-erroring
     /// instead of refining it.
     Missing(BindingId),
+    /// An edge that records what the test showed beyond a type: `is_loaded(package)` holds,
+    /// which a `null_unless` callee reads, or two slots are `NULL` together.
+    Establish(Fact),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2647,6 +2711,8 @@ impl<'db> Checker<'db, '_> {
                 } else {
                     None
                 };
+                let null_unless =
+                    self.null_unless(&module[parameters], *body, &early_returns, trailing_ty);
                 // The body may settle a formal on a type its default does not have
                 // (`function(class = NULL) { if (!length(class)) class <- ""; ... }`), yet a call
                 // that passes the default's own value is always fine.
@@ -2707,6 +2773,7 @@ impl<'db> Checker<'db, '_> {
                             })
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect(),
+                        null_unless,
                     }),
                 )
             }
@@ -4022,6 +4089,31 @@ impl<'db> Checker<'db, '_> {
 
     /// A diverging branch contributes neither its value nor its slot state, so the
     /// surviving edge's refinement persists after the `if` (the early-exit guard idiom).
+    fn probes_a_shipped_function(&self, condition: ExprId) -> bool {
+        let ExpressionKind::Call { callee, arguments } = self.module.kind(condition) else {
+            return false;
+        };
+        if variable_name(self.module, *callee).as_deref() != Some("exists")
+            || self.naming.resolutions.contains_key(callee)
+        {
+            return false;
+        }
+        let [argument] = &self.module[arguments][..] else {
+            return false;
+        };
+        let Some(value) = argument.value.filter(|_| argument.name.is_none()) else {
+            return false;
+        };
+        let ExpressionKind::Literal(LiteralKind::String(text)) = self.module.kind(value) else {
+            return false;
+        };
+        let probed = &self.module[text];
+        self.globals.is_some_and(|globals| {
+            globals.library_candidates(probed).is_some_and(|candidates| !candidates.is_empty())
+                && !globals.defined_in_project(Symbol::new(probed), false)
+        })
+    }
+
     fn infer_if(
         &mut self,
         condition: ExprId,
@@ -4038,7 +4130,7 @@ impl<'db> Checker<'db, '_> {
             .flat_map(|guard| &guard.true_edge)
             .filter_map(|refinement| match *refinement {
                 SlotRefinement::Narrow(slot, ty) => Some((slot, ty, self.environment.get(slot))),
-                SlotRefinement::Missing(_) => None,
+                SlotRefinement::Missing(_) | SlotRefinement::Establish(_) => None,
             })
             .collect();
         if let Some(guard) = &guard {
@@ -4081,6 +4173,9 @@ impl<'db> Checker<'db, '_> {
             None => (null(self.db), false),
         };
 
+        // `if (exists("emptyenv")) emptyenv() else NULL` probes for a function the library
+        // ships, so the else branch is a fallback for older R that never runs here.
+        let else_diverges = else_diverges || self.probes_a_shipped_function(condition);
         match (then_diverges, else_diverges) {
             (true, false) => else_ty,
             (false, true) => {
@@ -5418,6 +5513,20 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn recognize_guard(&mut self, condition: ExprId) -> Option<GuardRefinement<'db>> {
+        if let Some((pair, differ)) = self.null_states_compared(condition) {
+            let edge = vec![SlotRefinement::Establish(Fact::NullTogether(pair.0, pair.1))];
+            return Some(if differ {
+                GuardRefinement {
+                    true_edge: Vec::new(),
+                    false_edge: edge,
+                }
+            } else {
+                GuardRefinement {
+                    true_edge: edge,
+                    false_edge: Vec::new(),
+                }
+            });
+        }
         match self.module.kind(condition) {
             ExpressionKind::Unary {
                 operator: UnaryOperator::Not,
@@ -5427,7 +5536,7 @@ impl<'db> Checker<'db, '_> {
                 // `!missing(x)` has no read-erroring edge to swap into.
                 let narrowed_only = |edge: Vec<SlotRefinement<'db>>| {
                     edge.into_iter()
-                        .filter(|refinement| matches!(refinement, SlotRefinement::Narrow(..)))
+                        .filter(|refinement| !matches!(refinement, SlotRefinement::Missing(..)))
                         .collect()
                 };
                 Some(GuardRefinement {
@@ -5566,12 +5675,129 @@ impl<'db> Checker<'db, '_> {
                             false_edge: Vec::new(),
                         });
                 }
-                let guard = guard_kind(name)?;
+                let Some(guard) = guard_kind(name) else {
+                    return Some(GuardRefinement {
+                        true_edge: vec![SlotRefinement::Establish(Fact::Holds(slot, *name))],
+                        false_edge: Vec::new(),
+                    });
+                };
                 let EnvEntry::Mono(current) = self.environment.get(slot)? else {
                     return None;
                 };
                 let resolved = self.table.resolve(self.db, current);
-                self.guard_edges(guard, slot, resolved)
+                let mut edges = self.guard_edges(guard, slot, resolved)?;
+                if guard == GuardKind::Null {
+                    let partners: Vec<BindingId> = self.environment.null_partners(slot).collect();
+                    for partner in partners {
+                        let Some(EnvEntry::Mono(current)) = self.environment.get(partner) else {
+                            continue;
+                        };
+                        let resolved = self.table.resolve(self.db, current);
+                        if let Some(partner_edges) = self.guard_edges(guard, partner, resolved) {
+                            edges.true_edge.extend(partner_edges.true_edge);
+                            edges.false_edge.extend(partner_edges.false_edge);
+                        }
+                    }
+                }
+                Some(edges)
+            }
+            _ => None,
+        }
+    }
+
+    /// A test of whether two locals differ in being `NULL`, written as
+    /// `is.null(A) && !is.null(b) || !is.null(A) && is.null(b)`, `xor(is.null(A), is.null(b))` or
+    /// `is.null(A) != is.null(b)`. Returns the two slots and whether the test is true when they
+    /// differ.
+    fn null_states_compared(&self, condition: ExprId) -> Option<((BindingId, BindingId), bool)> {
+        let module = self.module;
+        let strip = |mut id: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(id) {
+                id = *inner;
+            }
+            id
+        };
+        let null_test = |id: ExprId| -> Option<(BindingId, bool)> {
+            let mut id = strip(id);
+            let mut holds = true;
+            while let ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            } = module.kind(id)
+            {
+                holds = !holds;
+                id = strip(*operand);
+            }
+            let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
+                return None;
+            };
+            if variable_name(module, *callee).as_deref() != Some("is.null")
+                || self.naming.resolutions.contains_key(callee)
+            {
+                return None;
+            }
+            let [argument] = &module[arguments][..] else {
+                return None;
+            };
+            let value = strip(argument.value.filter(|_| argument.name.is_none())?);
+            Some((*self.naming.resolutions.get(&value)?, holds))
+        };
+        let pair = |first: ExprId, second: ExprId| {
+            let (first, first_holds) = null_test(first)?;
+            let (second, second_holds) = null_test(second)?;
+            (first != second).then_some(((first, second), first_holds != second_holds))
+        };
+        match module.kind(strip(condition)) {
+            ExpressionKind::Binary {
+                operator: operator @ (BinaryOperator::Equal | BinaryOperator::NotEqual),
+                lhs,
+                rhs,
+                ..
+            } => {
+                let (slots, opposite) = pair(*lhs, *rhs)?;
+                Some((slots, opposite == (*operator == BinaryOperator::Equal)))
+            }
+            ExpressionKind::Call { callee, arguments }
+                if variable_name(module, *callee).as_deref() == Some("xor")
+                    && !self.naming.resolutions.contains_key(callee) =>
+            {
+                let [first, second] = &module[arguments][..] else {
+                    return None;
+                };
+                if first.name.is_some() || second.name.is_some() {
+                    return None;
+                }
+                let (slots, opposite) = pair(first.value?, second.value?)?;
+                Some((slots, !opposite))
+            }
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Or2,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let conjunct = |id: ExprId| match module.kind(strip(id)) {
+                    ExpressionKind::Binary {
+                        operator: BinaryOperator::And2,
+                        lhs,
+                        rhs,
+                        ..
+                    } => {
+                        let (first, first_holds) = null_test(*lhs)?;
+                        let (second, second_holds) = null_test(*rhs)?;
+                        let (first, first_holds, second, second_holds) = if first <= second {
+                            (first, first_holds, second, second_holds)
+                        } else {
+                            (second, second_holds, first, first_holds)
+                        };
+                        (first != second && first_holds != second_holds)
+                            .then_some(((first, second), first_holds))
+                    }
+                    _ => None,
+                };
+                let (left, left_first) = conjunct(*lhs)?;
+                let (right, right_first) = conjunct(*rhs)?;
+                (left == right && left_first != right_first).then_some((left, true))
             }
             _ => None,
         }
@@ -5680,6 +5906,7 @@ impl<'db> Checker<'db, '_> {
                         self.environment.set(slot, EnvEntry::MissingFormal(current));
                     }
                 }
+                SlotRefinement::Establish(fact) => self.environment.establish(fact),
             }
         }
     }
@@ -7357,6 +7584,7 @@ impl<'db> Checker<'db, '_> {
             default_reads: Vec::new(),
             missing_tested: Vec::new(),
             condition_only: Vec::new(),
+            null_unless: None,
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -7658,6 +7886,106 @@ impl<'db> Checker<'db, '_> {
             default: *default,
             when_true: *self.recorded.get(then_branch)?,
             when_false: *self.recorded.get(else_branch)?,
+        })
+    }
+
+    /// `if (!predicate(formal)) return(NULL)` as a statement of the body, when no other way out
+    /// of the body returns `NULL`.
+    fn null_unless(
+        &self,
+        parameters: &[Formal],
+        body: ExprId,
+        early_returns: &[(Ty<'db>, TextRange)],
+        trailing: Ty<'db>,
+    ) -> Option<NullUnless<'db>> {
+        let module = self.module;
+        let strip = |mut id: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(id) {
+                id = *inner;
+            }
+            id
+        };
+        let ExpressionKind::Block { statements } = module.kind(strip(body)) else {
+            return None;
+        };
+        let has_null = |ty: Ty<'db>| {
+            let ty = self.table.resolve(self.db, ty);
+            match ty.kind(self.db) {
+                TyKind::Null => true,
+                TyKind::Union(members) => members
+                    .iter()
+                    .any(|member| matches!(member.kind(self.db), TyKind::Null)),
+                _ => false,
+            }
+        };
+        module[statements].iter().find_map(|&statement| {
+            let ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch: None,
+            } = module.kind(strip(statement))
+            else {
+                return None;
+            };
+            let ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            } = module.kind(strip(*condition))
+            else {
+                return None;
+            };
+            let ExpressionKind::Call { callee, arguments } = module.kind(strip(*operand)) else {
+                return None;
+            };
+            let ExpressionKind::NameRef(predicate) = module.kind(*callee) else {
+                return None;
+            };
+            if self.naming.resolutions.contains_key(callee) || guard_kind(predicate).is_some() {
+                return None;
+            }
+            let [argument] = &module[arguments][..] else {
+                return None;
+            };
+            let value = argument.value.filter(|_| argument.name.is_none())?;
+            let ExpressionKind::NameRef(name) = module.kind(strip(value)) else {
+                return None;
+            };
+            parameters.iter().find(|formal| formal.name == *name)?;
+            if self.writes_name(body, *name) {
+                return None;
+            }
+            let mut exit = strip(*then_branch);
+            if let ExpressionKind::Block { statements } = module.kind(exit) {
+                let [only] = &module[statements][..] else {
+                    return None;
+                };
+                exit = strip(*only);
+            }
+            let ExpressionKind::Call { callee, arguments } = module.kind(exit) else {
+                return None;
+            };
+            if variable_name(module, *callee).as_deref() != Some("return") {
+                return None;
+            }
+            let [returned] = &module[arguments][..] else {
+                return None;
+            };
+            if !matches!(
+                returned.value.map(|value| module.kind(strip(value))),
+                Some(ExpressionKind::Literal(LiteralKind::Null))
+            ) {
+                return None;
+            }
+            let exit_range = module.range(exit);
+            let others_null = early_returns
+                .iter()
+                .filter(|(_, range)| !exit_range.contains_range(*range))
+                .any(|(ty, _)| has_null(*ty))
+                || (!self.diverges(body) && has_null(trailing));
+            (!others_null).then(|| NullUnless {
+                predicate: Name::new(self.db, predicate),
+                parameter: Name::new(self.db, name),
+            })
         })
     }
 
@@ -11338,6 +11666,7 @@ impl<'db> Checker<'db, '_> {
                 self.errors.extend(findings);
                 if narrowed {
                     self.flag_selected_return(function, arguments)
+                        .or_else(|| self.null_excluded_return(function, arguments))
                         .unwrap_or_else(|| self.narrow_echoed_parameter_unions(function, arguments))
                 } else {
                     function.ret
@@ -11381,6 +11710,7 @@ impl<'db> Checker<'db, '_> {
                         default_reads: Vec::new(),
                         missing_tested: Vec::new(),
                         condition_only: Vec::new(),
+                        null_unless: None,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -11618,6 +11948,45 @@ impl<'db> Checker<'db, '_> {
         } else {
             flag.when_false
         })
+    }
+
+    /// The return without `NULL` when the caller already showed the predicate that guards the
+    /// callee's `return(NULL)` holds of the argument it passes.
+    fn null_excluded_return(
+        &self,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> Option<Ty<'db>> {
+        let guard = function.null_unless?;
+        let formal = function
+            .named
+            .iter()
+            .position(|parameter| parameter.name == guard.parameter)?;
+        let arena = self.arena;
+        let targets =
+            &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+        let (argument, _) = arguments.iter().zip(targets).find(
+            |(_, target)| matches!(target, Some(ArgumentTarget::Named(index)) if *index == formal),
+        )?;
+        let mut value = argument.value?;
+        while let ExpressionKind::Paren(inner) = self.module.kind(value) {
+            value = *inner;
+        }
+        let slot = *self.naming.resolutions.get(&value)?;
+        if !self.environment.holds_of(slot, Symbol::new(guard.predicate.text(self.db))) {
+            return None;
+        }
+        let ret = self.table.resolve(self.db, function.ret);
+        let TyKind::Union(members) = ret.kind(self.db) else {
+            return None;
+        };
+        Some(union_of(
+            self.db,
+            members
+                .iter()
+                .copied()
+                .filter(|member| !matches!(member.kind(self.db), TyKind::Null)),
+        ))
     }
 
     /// The return of a call to an inferred signature whose return is a union.

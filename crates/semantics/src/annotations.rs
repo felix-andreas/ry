@@ -189,6 +189,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             default_reads: Vec::new(),
             missing_tested: Vec::new(),
             condition_only: Vec::new(),
+            null_unless: None,
         };
         annotation.declared = Some(TypeScheme {
             binders: forall,
@@ -324,6 +325,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
             }),
         ),
     });
@@ -526,6 +528,7 @@ pub fn merge_annotations<'db>(
                     default_reads: Vec::new(),
                     missing_tested: Vec::new(),
                     condition_only: Vec::new(),
+                    null_unless: None,
                 }),
             ),
         }),
@@ -1681,6 +1684,7 @@ impl<'db> Lowering<'db> {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
             }),
         )
     }

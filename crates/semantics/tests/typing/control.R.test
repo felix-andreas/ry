@@ -27,6 +27,13 @@ fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
 #++++
 fact: fn(n: integer) -> integer
 
+#---- probing_for_a_shipped_function_drops_the_fallback_branch
+empty <- if (exists("emptyenv")) emptyenv() else NULL
+missing_probe <- if (exists("no_such_function_anywhere")) 1L else NULL
+#++++
+empty: environment
+missing_probe: integer | NULL
+
 #==== joins
 #---- if_unifies_or_unions
 same <- function(flag) if (flag) 1L else 2L
@@ -168,6 +175,48 @@ f <- function(c) {
 f: fn(c: logical) -> double | NULL
 
 #==== guards
+#---- a_test_that_two_values_differ_in_being_null_correlates_them
+paired <- function(A = NULL, b = NULL) {
+  if (is.null(A) && !is.null(b) || !is.null(A) && is.null(b)) stop("both or neither")
+  if (!is.null(A)) b <- -b
+  b
+}
+compared <- function(A = NULL, b = NULL) {
+  if (is.null(A) != is.null(b)) stop("both or neither")
+  if (!is.null(A)) b <- -b
+  b
+}
+#++++
+paired: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
+compared: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
+
+#---- a_predicate_the_caller_tested_rules_out_the_callee_null_return
+is_loaded <- function(package) package %in% loadedNamespaces()
+ns_env <- function(package) {
+  if (!is_loaded(package)) return(NULL)
+  asNamespace(package)
+}
+after_stop <- function(package) {
+  if (!is_loaded(package)) stop("not loaded")
+  parent.env(ns_env(package))
+}
+inside <- function(package) if (is_loaded(package)) parent.env(ns_env(package)) else NULL
+unguarded <- function(package) parent.env(ns_env(package))
+rewritten <- function(package) {
+  if (!is_loaded(package)) stop("not loaded")
+  package <- paste0(package, "2")
+  parent.env(ns_env(package))
+}
+#++++
+is_loaded: <T> fn(package: T) -> logical
+ns_env: <T> fn(package: T) -> environment | NULL
+after_stop: <T> fn(package: T) -> environment
+inside: <T> fn(package: T) -> environment | NULL
+unguarded: Unknown
+rewritten: Unknown
+402..417 error[type-mismatch] expected `environment`, found `environment | NULL`
+545..560 error[type-mismatch] expected `environment`, found `environment | NULL`
+
 #---- early_exit_narrows
 #: fn(x: integer | NULL) -> integer
 f <- function(x) {

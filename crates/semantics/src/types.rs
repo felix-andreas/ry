@@ -340,6 +340,17 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
     pub condition_only: Vec<Name<'db>>,
+    /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
+    /// call where the caller already showed `predicate` holds of its argument returns the
+    /// other members alone. Inferred only.
+    pub null_unless: Option<NullUnless<'db>>,
+}
+
+/// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct NullUnless<'db> {
+    pub predicate: Name<'db>,
+    pub parameter: Name<'db>,
 }
 
 /// `formal` is required by a call that leaves out `default_of`, whose default reads it.
@@ -805,6 +816,7 @@ fn mapped_kind<'db>(
             default_reads: function.default_reads.clone(),
             missing_tested: function.missing_tested.clone(),
             condition_only: function.condition_only.clone(),
+            null_unless: function.null_unless,
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -1045,6 +1057,7 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
             }),
         );
 
@@ -1076,6 +1089,7 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
             }),
         );
         let f2 = Ty::new(
@@ -1091,6 +1105,7 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
             }),
         );
         assert_eq!(f1, f2);
