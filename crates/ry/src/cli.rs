@@ -614,6 +614,10 @@ fn analyze_project_with(
         Plan::Partial { previous, .. } => Some(previous),
         Plan::Fresh | Plan::Replay(_) => None,
     };
+    // Only the requested files are checked. Another file's items are still analysed where a
+    // requested file's check reaches them, but its own findings would only be thrown away, so
+    // the record keeps it as unchecked and a later run that asks about it checks it.
+    let checked = |index: usize| reported.get(index).copied().unwrap_or(false);
 
     // Everything later passes read from a tree is derived here, across all cores, so a check
     // that reaches another file never walks that file's tree on its own thread.
@@ -623,7 +627,13 @@ fn analyze_project_with(
     let mut surfaces = vec![Fingerprint::default(); files.len()];
     for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
-        derive_from_syntax(db, file, &config.lint);
+        // A file that is not checked contributes only its share of the project-wide maps.
+        if checked(index) {
+            derive_from_syntax(db, file, &config.lint);
+        } else {
+            semantics::diagnostics::warm_project_folds(db, file);
+            semantics::metadata::file_attached_namespaces(db, file);
+        }
         let root = semantics::parse(db, file).syntax_node();
         let mut tokens = FxHashSet::default();
         if want_tokens {
@@ -689,13 +699,6 @@ fn analyze_project_with(
         metadata.set_attached(&mut db).to(attached.clone());
     }
 
-    // Without the cache only the requested files are checked: another file's items are still
-    // analyzed where a requested file's check reaches them, but its own findings would only be
-    // thrown away. The cache records every file's findings, so with it every stale file is checked.
-    let checked = |index: usize| match cache {
-        CacheUse::ReadWrite => true,
-        CacheUse::Off => reported.get(index).copied().unwrap_or(false),
-    };
     let checked_by_size: Vec<usize> = checked_order
         .iter()
         .copied()
@@ -727,6 +730,10 @@ fn analyze_project_with(
     if let Some(project) = ProjectFiles::try_get(&db) {
         semantics::project_interface_groups(&db.clone(), project);
     }
+    // Whether the file's findings are known, from the record or from this run.
+    let has_findings: Vec<bool> = (0..files.len())
+        .map(|index| recorded[index].is_some() || checked(index))
+        .collect();
     let mut per_file: Vec<Vec<Diagnostic>> = recorded
         .into_iter()
         .map(Option::unwrap_or_default)
@@ -793,6 +800,8 @@ fn analyze_project_with(
                     (Plan::Partial { previous, .. }, false) => {
                         previous.dependencies(index).unwrap_or_default().to_vec()
                     }
+                    // An unchecked file is stale in the next run whatever it depends on.
+                    _ if !has_findings[index] => Vec::new(),
                     _ => semantics::file_dependency_files(&db, files[index])
                         .iter()
                         .filter_map(|file| positions.get(file).copied())
@@ -807,7 +816,7 @@ fn analyze_project_with(
                         .iter()
                         .map(|&token| token.to_owned())
                         .collect(),
-                    diagnostics: &per_file[index],
+                    diagnostics: has_findings[index].then(|| per_file[index].as_slice()),
                 }
             })
             .collect();
@@ -2494,6 +2503,37 @@ fn format_file(
         elapsed,
         write_error,
     }
+}
+
+/// Rewrites each file as its erasure, the same program `ry R` runs. A file with a syntax error is
+/// refused, because its erasure would be a guess at what the broken code means.
+pub fn erase(paths: &[PathBuf]) -> Result<(), CommandError> {
+    let mut failed = false;
+    for path in paths {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => {
+                error(&format!("{}: {err}", path.display()));
+                failed = true;
+                continue;
+            }
+        };
+        let parse = syntax::parse(&text);
+        if let Some(syntax_error) = parse.errors().first() {
+            error(&format!(
+                "{}: not erased, it has a syntax error: {}",
+                path.display(),
+                syntax_error.message
+            ));
+            failed = true;
+            continue;
+        }
+        if let Err(err) = fs::write(path, syntax::erase_inline_annotations(&parse)) {
+            error(&format!("{}: {err}", path.display()));
+            failed = true;
+        }
+    }
+    if failed { Err(CommandError) } else { Ok(()) }
 }
 
 pub fn ast(path: &Path) -> Result<(), CommandError> {

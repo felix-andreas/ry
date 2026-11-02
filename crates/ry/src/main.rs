@@ -223,6 +223,7 @@ fn main() -> ExitCode {
             Debug::AnalysisStats { path } => {
                 exit_code(analysis_stats(path.as_deref()).map(|()| Outcome::Clean))
             }
+            Debug::Erase { paths } => exit_code(cli::erase(&paths).map(|()| Outcome::Clean)),
         },
         Command::Load {
             path,

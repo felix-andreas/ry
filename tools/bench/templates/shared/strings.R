@@ -1,32 +1,26 @@
 #@ weight 3
 #@ param WORDS int 2 9
 # Name normalisation and small string utilities.
-#: fn(x: character[]) -> character[]
-normalise_names_@ID@ <- function(x) {
+normalise_names_@ID@ <- function(x: character[]) -> character[] {
   x |>
     stringr::str_trim() |>
     stringr::str_replace_all("[^[:alnum:] ]", " ") |>
     snakecase::to_snake_case()
 }
 
-#: fn(x: character[]) -> character[]
-title_@ID@ <- function(x) tools::toTitleCase(tolower(x))
+title_@ID@ <- function(x: character[]) -> character[] tools::toTitleCase(tolower(x))
 
-#: fn(text: character, [min_length]: integer) -> character[]
-tokens_@ID@ <- function(text, min_length = 2L) {
+tokens_@ID@ <- function(text: character, min_length: integer = 2L) -> character[] {
   words <- stringr::str_split(stringr::str_to_lower(text), "[^a-z0-9]+")[[1]]
   purrr::keep(words, function(word) nchar(word) >= min_length)
 }
 
-#: fn(text: character) -> integer[]
-word_counts_@ID@ <- function(text) {
-  #: integer[]
-  counts <- table(tokens_@ID@(text))
+word_counts_@ID@ <- function(text: character) -> integer[] {
+  counts: integer[] <- table(tokens_@ID@(text))
   counts[order(-counts, names(counts))]
 }
 
-#: fn(x: double[], y: double[]) -> double[]
-safe_ratio_@ID@ <- function(x, y) {
+safe_ratio_@ID@ <- function(x: double[], y: double[]) -> double[] {
   safe <- purrr::possibly(function(a, b) {
     if (b == 0) rlang::abort("zero denominator")
     a / b
@@ -37,8 +31,7 @@ safe_ratio_@ID@ <- function(x, y) {
 test_that("string helpers @ID@ behave", {
   expect_equal(normalise_names_@ID@(c(" Gross Margin! ", "Net-Income")), c("gross_margin", "net_income"))
   expect_equal(title_@ID@("the QUICK brown fox"), "The Quick Brown Fox")
-  #: character
-  text <- paste(rep("alpha beta alpha gamma", @WORDS@), collapse = " ")
+  text: character <- paste(rep("alpha beta alpha gamma", @WORDS@), collapse = " ")
   expect_equal(unname(word_counts_@ID@(text)[["alpha"]]), 2L * @WORDS@)
   expect_equal(safe_ratio_@ID@(c(1, 2), c(2, 0)), c(0.5, NA))
 })
