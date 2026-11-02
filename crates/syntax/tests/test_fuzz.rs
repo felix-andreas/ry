@@ -207,6 +207,14 @@ const SPLICE_REGRESSIONS: &[(&str, &str, (u32, u32), u32)] = &[
         (23, 67),
         60,
     ),
+    (
+        // The third line's `(` is never closed, so recovery ends its group at the line break;
+        // the `)` the edit adds four lines later closes it in a full parse.
+        "m\ne\n (ict\narea(\"a\", 3totaltotal <é👋library(stats)\n- NULL\n <- NULL\naract👋é👋👋,tiltotal <- NULL\ns)# comment\n 2)\nilibr日本ary(stats{)medi\nea(1,melibrary(stat\"s)\n\t$weightsN👋ULL\n",
+        "m\ne\n (ict\narea(\"a\", 3totaltotal <é👋library(stats)\n- NUL)L\n <- NULL\naract👋é👋👋,tiltotal <- NULL\ns)# comment\n 2)\nilibr日本ary(stats{)medi\nea(1,melibrary(stat\"s)\n\t$weightsN👋ULL\n",
+        (59, 59),
+        1,
+    ),
 ];
 
 #[test]
