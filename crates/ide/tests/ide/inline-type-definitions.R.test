@@ -123,7 +123,7 @@ signature: none
 action: Replace `@if-unknown` with `@trust`
   edit 32..43 -> "@trust"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: data.frame\n"
+  edit 5..5 -> ": data.frame"
 completion (1): integer
 hint @5: data.frame
 
@@ -140,8 +140,8 @@ rename: 2 edit(s)
 type-definition 5..10
 signature: none
 action: Add inferred type annotation for `total`
-  edit 41..41 -> "#: Money\n"
+  edit 46..46 -> ": Money"
 action: Add inferred type annotations for the whole file
-  edit 41..41 -> "#: Money\n"
+  edit 46..46 -> ": Money"
 completion (71): price, prcomp, precip, predict, predict.glm, predict.lm, preplot, presidents
 hint @46: Money

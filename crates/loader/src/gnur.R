@@ -2,6 +2,9 @@
 # code is parsed from it in R, at its real position in the file, so source references, and
 # with them tracebacks and debuggers, point into the file on disk.
 
+# ry checks a package before GNU R loads it, so the load never waits for a verdict.
+.ry_await_verdict <- function() invisible()
+
 .ry_sources <- function(state, plan) {
   if (is.null(state$texts)) {
     state$texts <- new.env(parent = emptyenv())
