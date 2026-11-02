@@ -2968,35 +2968,50 @@ pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
     f64::from(total) / 1000.0
 }
 
-/// The lines of each label of a `strwidth` or `text` argument: strings line by line, other
-/// atomic values as text, and plotmath expressions by their deparsed source.
-unsafe fn label_lines(labels: Sexp) -> R<Vec<Vec<String>>> {
-    let split = |text: &str| text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+/// One label of a text argument: lines of plain text, or a plotmath expression.
+#[derive(Clone)]
+enum Label {
+    Lines(Vec<String>),
+    Math(Sexp),
+}
+
+impl Label {
+    fn is_empty(&self) -> bool {
+        matches!(self, Label::Lines(lines) if lines.is_empty())
+    }
+
+    /// The label as plain text, an expression by its deparsed source.
+    unsafe fn text(&self) -> String {
+        match self {
+            Label::Lines(lines) => lines.join(" "),
+            Label::Math(expression) => crate::deparse::deparse_one_line(*expression),
+        }
+    }
+}
+
+/// The labels of a `strwidth`, `text`, `mtext`, `title` or `axis` argument: strings line by
+/// line, other atomic values as text, and each element of an expression vector, or a lone
+/// call or symbol, as plotmath.
+unsafe fn labels_of(labels: Sexp) -> R<Vec<Label>> {
+    let split = |text: &str| Label::Lines(text.split('\n').map(str::to_owned).collect());
     match labels.kind() {
         SexpType::Nil => Ok(Vec::new()),
-        SexpType::Expression => {
-            let mut result = Vec::with_capacity(length(labels));
-            for index in 0..length(labels) {
-                result.push(vec![crate::deparse::deparse_one_line(values::list_elt(
-                    labels, index,
-                ))]);
-            }
-            Ok(result)
-        }
-        SexpType::Language | SexpType::Symbol => {
-            Ok(vec![vec![crate::deparse::deparse_one_line(labels)]])
-        }
+        SexpType::Expression => Ok((0..length(labels))
+            .map(|index| Label::Math(values::list_elt(labels, index)))
+            .collect()),
+        SexpType::Language | SexpType::Symbol => Ok(vec![Label::Math(labels)]),
         SexpType::String => Ok((0..length(labels))
             .map(|index| match values::string_at(labels, index) {
                 Some(text) => split(&text),
-                None => Vec::new(),
+                None => Label::Lines(Vec::new()),
             })
             .collect()),
         _ => {
             let strings = coerce_vector(labels, SexpType::String)?;
             Ok((0..length(strings))
                 .map(|index| {
-                    values::string_at(strings, index).map_or_else(Vec::new, |text| split(&text))
+                    values::string_at(strings, index)
+                        .map_or_else(|| Label::Lines(Vec::new()), |text| split(&text))
                 })
                 .collect())
         }
@@ -3006,7 +3021,7 @@ unsafe fn label_lines(labels: Sexp) -> R<Vec<Vec<String>>> {
 /// `strwidth` and `strheight`: `(s, units, cex, font, vfont, ...)`, with units 1 for user
 /// coordinates, 2 for the figure and 3 for inches.
 unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
-    let labels = label_lines(call.arg(0))?;
+    let labels = labels_of(call.arg(0))?;
     let units = values::as_integer_scalar(call.arg(1));
     if !(1..=3).contains(&units) {
         return Err(error("invalid units"));
@@ -3047,17 +3062,11 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
             )
         };
         let mut sizes = Vec::with_capacity(labels.len());
-        for lines in &labels {
-            let inches = if lines.is_empty() {
-                0.0
-            } else if height {
-                text_height_inches(device, &lines.join("\n"), cex, font)?
+        for label in &labels {
+            let inches = if height {
+                label_height_inches(device, label, cex, font)?
             } else {
-                let mut widest: f64 = 0.0;
-                for line in lines {
-                    widest = widest.max(text_inches(device, line, cex, font)?);
-                }
-                widest
+                label_inches(device, label, cex, font)?
             };
             sizes.push(match units {
                 1 => inches / plot_inches * user_range,
@@ -3811,7 +3820,7 @@ unsafe fn draw_persp_axis(
         let base = along(*value);
         let tick = outward(base, 1.0);
         push_line(device, axes.clip, vec![inches(base), inches(tick)], stroke)?;
-        push_text(
+        push_label(
             device,
             axes.clip,
             inches(outward(base, 2.0)),
@@ -4473,6 +4482,90 @@ fn push_text(
     }
 }
 
+/// Records `label` like [`push_text`], laying a plotmath expression out with the plotmath
+/// port, which centres it vertically when `yadj` is not finite.
+#[allow(clippy::too_many_arguments)]
+fn push_label(
+    device: &mut Device,
+    clip: Rect,
+    anchor: [f64; 2],
+    label: &Label,
+    rotation: f64,
+    hadj: f64,
+    yadj: f64,
+    cex: f64,
+    font: i32,
+    colour: Colour,
+) -> R<()> {
+    let expression = match label {
+        Label::Lines(lines) => {
+            return push_text(
+                device, clip, anchor, lines, rotation, hadj, yadj, cex, font, colour,
+            );
+        }
+        Label::Math(expression) => *expression,
+    };
+    let dd = device.dd;
+    let [x0, y0] = device.to_device([clip.x0, clip.y0]);
+    let [x1, y1] = device.to_device([clip.x1, clip.y1]);
+    let mut gc = text_context(device, cex, font);
+    gc.col = colour as c_int;
+    gc.lineheight = device.pars.lheight;
+    let [x, y] = device.to_device(anchor);
+    // SAFETY: base graphics' state lives as long as its device, and the expression belongs
+    // to the protected call being evaluated.
+    unsafe {
+        graphics_engine::set_clip(x0, y0, x1, y1, dd)?;
+        graphics_engine::math_text(x, y, expression, hadj, yadj, rotation, &gc, dd)
+    }
+}
+
+/// The width of a label in inches: its widest line, or its plotmath box.
+fn label_inches(device: &Device, label: &Label, cex: f64, font: i32) -> R<f64> {
+    match label {
+        Label::Lines(lines) => {
+            let mut widest: f64 = 0.0;
+            for line in lines {
+                widest = widest.max(text_inches(device, line, cex, font)?);
+            }
+            Ok(widest)
+        }
+        Label::Math(expression) => {
+            let gc = text_context(device, cex, font);
+            // SAFETY: as in `push_label`.
+            unsafe {
+                let width = graphics_engine::expression_width(*expression, &gc, device.dd)?;
+                Ok(graphics_engine::from_device_width(
+                    width,
+                    Unit::Inches,
+                    device.dd,
+                ))
+            }
+        }
+    }
+}
+
+/// The height of a label in inches, as `strheight` measures it: for text the ascent of a
+/// capital plus a line for each line break, for plotmath its box's height and depth.
+fn label_height_inches(device: &Device, label: &Label, cex: f64, font: i32) -> R<f64> {
+    match label {
+        Label::Lines(lines) if lines.is_empty() => Ok(0.0),
+        Label::Lines(lines) => text_height_inches(device, &lines.join("\n"), cex, font),
+        Label::Math(expression) => {
+            let gc = text_context(device, cex, font);
+            // SAFETY: as in `push_label`.
+            unsafe {
+                let height = graphics_engine::expression_height(*expression, &gc, device.dd)?;
+                Ok(graphics_engine::from_device_height(
+                    height,
+                    Unit::Inches,
+                    device.dd,
+                ))
+            }
+        }
+    }
+}
+
 /// The width of a line of text in inches, measured by the device as GNU R's `GStrWidth` does,
 /// so a device with its own fonts (ragg) lays labels out by the glyphs it will draw.
 fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
@@ -4524,7 +4617,7 @@ fn push_margin_text(
     line: f64,
     outer: bool,
     along: f64,
-    lines: &[String],
+    label: &Label,
     las: i32,
     hadj: f64,
     padj: f64,
@@ -4553,10 +4646,9 @@ fn push_margin_text(
     } else {
         [across, along]
     };
-    push_text(
-        device, clip, anchor, lines, rotation, hadj, padj, cex, font, colour,
-    )?;
-    Ok(())
+    push_label(
+        device, clip, anchor, label, rotation, hadj, padj, cex, font, colour,
+    )
 }
 
 /// The elements of a vector argument, recycled: `default` when it is `NULL` or empty.
@@ -5045,7 +5137,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// The labels of an axis: `at` formatted together as GNU R prints numbers, or the given labels
 /// as text.
-unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Vec<String>>>> {
+unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Label>>> {
     match labels.kind() {
         SexpType::Logical | SexpType::Nil => {
             if labels != nil() && values::as_logical_scalar(labels) == 0 {
@@ -5061,16 +5153,16 @@ unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Vec<String>>>> {
             Ok(Some(
                 at.iter()
                     .map(|value| {
-                        vec![
+                        Label::Lines(vec![
                             crate::format::format_real_with(*value, format, "NA")
                                 .trim()
                                 .to_owned(),
-                        ]
+                        ])
                     })
                     .collect(),
             ))
         }
-        _ => Ok(Some(label_lines(labels)?)),
+        _ => Ok(Some(labels_of(labels)?)),
     }
 }
 
@@ -5243,21 +5335,20 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             ordered.reverse();
         }
         for (index, along) in ordered {
-            let Some(lines) = labels.get(index % labels.len().max(1)) else {
+            let Some(label) = labels.get(index % labels.len().max(1)) else {
                 continue;
             };
-            if lines.is_empty() {
+            if label.is_empty() {
                 continue;
             }
-            let extent = if perpendicular {
-                let line_height = 1.2 * f64::from(pars.ps) * label_cex / 72.0;
-                line_height * lines.len() as f64
-            } else {
-                let mut widest: f64 = 0.0;
-                for line in lines {
-                    widest = widest.max(text_inches(device, line, label_cex, label_font)?);
+            let extent = match label {
+                Label::Lines(lines) if perpendicular => {
+                    1.2 * f64::from(pars.ps) * label_cex / 72.0 * lines.len() as f64
                 }
-                widest
+                Label::Math(_) if perpendicular => {
+                    label_height_inches(device, label, label_cex, label_font)?
+                }
+                _ => label_inches(device, label, label_cex, label_font)?,
             };
             let start = along - extent * if perpendicular { 0.5 } else { hadj };
             if start < last_end + gap {
@@ -5271,7 +5362,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 label_line,
                 outer,
                 along,
-                lines,
+                label,
                 pars.las,
                 hadj,
                 padj,
@@ -5336,13 +5427,20 @@ unsafe fn do_box(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// The lines of the first label of an annotation argument, or `None` when there is none.
-unsafe fn annotation(value: Sexp) -> R<Option<Vec<String>>> {
+/// The label of an annotation argument, or `None` when there is none: the first element of
+/// an expression vector, or every string's lines in turn.
+unsafe fn annotation(value: Sexp) -> R<Option<Label>> {
     if value == nil() || length(value) == 0 {
         return Ok(None);
     }
-    let lines: Vec<String> = label_lines(value)?.into_iter().flatten().collect();
-    Ok((!lines.is_empty()).then_some(lines))
+    let mut lines = Vec::new();
+    for label in labels_of(value)? {
+        match label {
+            Label::Math(_) => return Ok(Some(label)),
+            Label::Lines(more) => lines.extend(more),
+        }
+    }
+    Ok((!lines.is_empty()).then_some(Label::Lines(lines)))
 }
 
 /// `title(main, sub, xlab, ylab, line, outer, ...)`.
@@ -5390,7 +5488,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                     device.margin_inches()[2]
                 };
                 let anchor = [along_x, region.y1 + margin / 2.0];
-                push_text(
+                push_label(
                     device,
                     clip,
                     anchor,
@@ -5470,7 +5568,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
 /// `text(xy, labels, adj, pos, offset, vfont, cex, col, font, ...)`.
 unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
     let (x, y) = xy_of(call.arg(0))?;
-    let labels = label_lines(call.arg(1))?;
+    let labels = labels_of(call.arg(1))?;
     let adj = reals_of(call.arg(2))?;
     let pos = call.arg(3);
     let offset = values::as_real_scalar(call.arg(4));
@@ -5549,7 +5647,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
                     _ => return Err(error("invalid 'pos' value")),
                 }
             }
-            push_text(
+            push_label(
                 device, clip, anchor, lines, pars.srt, hadj, yadj, label_cex, label_font, colour,
             )?;
         }
@@ -5561,7 +5659,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
 /// `mtext(text, side, line, outer, at, adj, padj, cex, col, font, ...)`, every argument
 /// recycled to the longest.
 unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
-    let labels = label_lines(call.arg(0))?;
+    let labels = labels_of(call.arg(0))?;
     let arguments: Vec<Sexp> = (1..10).map(|index| call.arg(index)).collect();
     let count = arguments
         .iter()
@@ -6225,9 +6323,9 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
             })
             .collect()
     } else {
-        label_lines(call.arg(4))?
-            .into_iter()
-            .map(|lines| lines.join(" "))
+        labels_of(call.arg(4))?
+            .iter()
+            .map(|label| label.text())
             .collect()
     };
     let (col, lty, lwd) = (call.arg(9), call.arg(10), call.arg(11));
