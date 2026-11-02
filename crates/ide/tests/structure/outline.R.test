@@ -261,6 +261,11 @@ token "expect_true" Function
 token "test_that" Function
 token "paste" LibraryFunction
 token "expect_true" Function
+fix Qualify as `testthat::test_that`: "" -> "testthat::"
+fix Qualify as `testthat::expect_equal`: "" -> "testthat::"
+fix Qualify as `testthat::expect_true`: "" -> "testthat::"
+fix Qualify as `testthat::test_that`: "" -> "testthat::"
+fix Qualify as `testthat::expect_true`: "" -> "testthat::"
 lens run file at line 0
 lens references "helper"
 lens test "adds one" at line 2

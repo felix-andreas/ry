@@ -2873,7 +2873,6 @@ first lines R had already read, leaving R mid-command.
   and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
   `test_standard_library.rs` keeps both equal to what the runtime binds.
 
-
 # Decision record: the JIT tier
 
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
@@ -3401,7 +3400,6 @@ first lines R had already read, leaving R mid-command.
   query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
   tables never shrink.
 
-
 ## Types and names are hash-consed outside salsa
 
 - **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
@@ -3533,7 +3531,6 @@ first lines R had already read, leaving R mid-command.
   they work whether or not the package is attached first.
 - **Impact:** column checks and completion cover the whole query rather than one bracket;
   incremental analysis is unchanged, since the refinement reads only the item's own recorded types.
-
 
 # Decision record: positioning
 
@@ -5262,7 +5259,6 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
   `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
 
-
 ## DataFrame expression operands are checked against the engine's own typing
 
 - **Previous shape.** `frame_expression` in `check.rs` computed each expression's column type but
@@ -5472,7 +5468,6 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Formatting** is per chunk (`format::format_chunks`), returning one edit per changed chunk, so prose, fences and inline code are never rewritten. An indented chunk (inside a list item) is skipped, because re-indenting it would need the list's indentation. Range formatting is off for literate files.
 - **Completion** answers only inside an R region (`syntax::literate::r_regions`), so typing prose shows nothing. Code lenses other than reference counts are dropped, because "Run file" and "Run test" mean nothing for a report.
 - **VS Code** matches literate files by glob, because their language id depends on which extension is installed.
-
 
 ## A running console is a debug adapter, a data source, and a live-value source on one socket
 
@@ -5743,6 +5738,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
 - **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
 - **Benchmark.** In `tools/bench`, `#@ typed` / `#@ untyped` variant blocks ("The bench templates are inline-typed") let the finance `ledger`, data-science `readings` and biostatistics `followup` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
+
+## Completion, signature help and import fixes reach untyped and installed code
+
+- **Installed formals are a callback.** `ide::completion_with` and `ide::signature_help_with` take `&mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>`; the server and `analysis-stats` pass `InstalledPackages::formals`, which parses the definition out of the generated package source (`crates/ry/src/installed.rs`). Reading the R library is I/O and not salsa-tracked, so it stays out of `ide`. Untyped project functions and R6 methods (`fields::field_function`) read formals and default text from the HIR and syntax instead, and a function with a type or stub scheme keeps the typed signature.
+- **Use counts are chunked.** Completion ranks by project use counts. One tracked query over all files re-summed every file per keystroke (p99 about 60 ms on finbench), so `chunk_uses` counts 32 files per tracked query and completion sums the chunks: an edit recomputes one chunk.
+- **Import fixes read the export manifests, not `stubs()`.** `stubs()` skips conditional and qualified-only namespaces the project never uses, which are exactly the ones an "unresolved name" fix must suggest. `stubs::exporting_namespaces` indexes every manifest (`types/*.exports`) by name. The fix offers `pkg::name` and, outside a package, `library(pkg)` after the last top-level attach call.
+- **Header inlay hints reuse the annotate edits.** A function literal's hints are the `inline_annotation_edits` the "Add inferred type annotation" action inserts, so the hint and the inserted text cannot disagree.
 
 ## A strict reload re-checks through a persistent salsa database
 

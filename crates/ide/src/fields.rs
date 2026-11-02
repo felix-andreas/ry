@@ -119,6 +119,63 @@ pub(crate) fn field_producers(
     })
 }
 
+/// Every field the receiver of `field` (a `Field` expression of `item`) is known to have: the
+/// names its constructions declare and the ones written to the same variable. `None` when no
+/// construction of the receiver can be followed.
+pub(crate) fn receiver_fields(
+    db: &dyn Db,
+    files: ProjectFiles,
+    item: Item<'_>,
+    field: ExprId,
+) -> Option<Vec<Symbol>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Field { target, .. } = hir.kind(field) else {
+        return None;
+    };
+    let mut resolver = Resolver::new(db, files);
+    let mut sources = Vec::new();
+    resolver.sources(item, *target, 0, &mut sources);
+    let mut sites = Vec::new();
+    for source in sources {
+        resolver.declarations(source, None, 0, &mut sites);
+    }
+    let mut names: Vec<Symbol> = sites.into_iter().map(|site| site.name).collect();
+    names.extend(resolver.local_writes(item, *target));
+    names.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    names.dedup();
+    (!names.is_empty()).then_some(names)
+}
+
+/// The function a field read is bound to (an R6 method, a function stored in a list), as the
+/// item and `Function` expression of its declaration. Only a precise site counts, because a
+/// by-name guess would show some unrelated function's parameters.
+pub(crate) fn field_function<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    field: ExprId,
+) -> Option<(Item<'db>, ExprId)> {
+    let hir = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Field {
+        target,
+        name: Some(name),
+        ..
+    } = hir.kind(field)
+    else {
+        return None;
+    };
+    let mut resolver = Resolver::new(db, files);
+    resolver
+        .sites(item, *target, hir[*name].name, 0)
+        .into_iter()
+        .find_map(|site| {
+            let value = site.value?;
+            let declaring = item_hir(db, site.item).as_ref()?;
+            matches!(declaring.kind(value), ExpressionKind::Function { .. })
+                .then_some((site.item, value))
+        })
+}
+
 /// Where the field read or written by `field` (a `Field` expression of `item`) is declared.
 pub(crate) fn resolve_field<'db>(
     db: &'db dyn Db,
@@ -642,6 +699,7 @@ fn callee_name(hir: &Module, callee: ExprId) -> Option<Symbol> {
 #[derive(Clone, Copy)]
 struct Site<'db> {
     item: Item<'db>,
+    name: Symbol,
     range: TextRange,
     value: Option<ExprId>,
 }
@@ -703,7 +761,7 @@ impl<'db> Resolver<'db> {
         self.sources(item, receiver, depth, &mut sources);
         let mut sites = Vec::new();
         for source in sources {
-            self.declarations(source, name, depth, &mut sites);
+            self.declarations(source, Some(name), depth, &mut sites);
         }
         self.writes(item, receiver, name, &mut sites);
         sites
@@ -950,11 +1008,11 @@ impl<'db> Resolver<'db> {
         }
     }
 
-    /// The declarations of `name` that `source` lists.
+    /// The declarations of `name` that `source` lists, or all of them for `None`.
     fn declarations(
         &mut self,
         source: Source<'db>,
-        name: Symbol,
+        name: Option<Symbol>,
         depth: usize,
         sites: &mut Vec<Site<'db>>,
     ) {
@@ -965,24 +1023,30 @@ impl<'db> Resolver<'db> {
                 };
                 match hir.kind(expression) {
                     ExpressionKind::Record(fields) => {
-                        sites.extend(hir[fields].iter().filter(|field| field.name == name).map(
-                            |field| Site {
-                                item,
-                                range: field.name_range,
-                                value: Some(field.value),
-                            },
-                        ));
+                        sites.extend(
+                            hir[fields]
+                                .iter()
+                                .filter(|field| name.is_none_or(|name| field.name == name))
+                                .map(|field| Site {
+                                    item,
+                                    name: field.name,
+                                    range: field.name_range,
+                                    value: Some(field.value),
+                                }),
+                        );
                     }
                     ExpressionKind::Call { callee, arguments }
                         if !self.is_r6_class(item, expression) =>
                     {
                         sites.extend(hir[arguments].iter().filter_map(|argument| {
                             let (element_name, range) = element(hir, *callee, argument)?;
-                            (element_name == name).then_some(Site {
-                                item,
-                                range,
-                                value: argument.value,
-                            })
+                            name.is_none_or(|name| element_name == name)
+                                .then_some(Site {
+                                    item,
+                                    name: element_name,
+                                    range,
+                                    value: argument.value,
+                                })
                         }));
                     }
                     _ => {}
@@ -1003,7 +1067,7 @@ impl<'db> Resolver<'db> {
         item: Item<'db>,
         class: ExprId,
         private: bool,
-        name: Symbol,
+        name: Option<Symbol>,
         depth: usize,
         sites: &mut Vec<Site<'db>>,
     ) {
@@ -1037,8 +1101,10 @@ impl<'db> Resolver<'db> {
                 }
             }
         }
-        if !own.is_empty() {
-            sites.extend(own);
+        // Listing every member keeps the inherited ones, which a lookup by name would shadow.
+        let shadowed = name.is_some() && !own.is_empty();
+        sites.extend(own);
+        if shadowed {
             return;
         }
         let Some(parent) = parent else {
@@ -1181,6 +1247,64 @@ impl<'db> Resolver<'db> {
         }
     }
 
+    /// The names `receiver$name <- value` writes in `item` to the local variable `receiver` names,
+    /// or through `self` or `private` inside the same R6 class.
+    fn local_writes(&self, item: Item<'db>, receiver: ExprId) -> Vec<Symbol> {
+        let db = self.db;
+        let (Some(hir), Some(naming)) =
+            (item_hir(db, item).as_ref(), item_naming(db, item).as_ref())
+        else {
+            return Vec::new();
+        };
+        let ExpressionKind::NameRef(variable) = hir.kind(receiver) else {
+            return Vec::new();
+        };
+        let binding = naming
+            .resolutions
+            .get(&receiver)
+            .copied()
+            .filter(|binding| {
+                naming
+                    .bindings
+                    .get(binding)
+                    .is_some_and(|info| info.kind != BindingKind::TopLevel)
+            });
+        let class_range = match binding {
+            Some(_) => None,
+            None if matches!(variable.as_str(), "self" | "private") => {
+                match enclosing_r6_class(hir, receiver) {
+                    Some(class) => Some(hir.range(class)),
+                    None => return Vec::new(),
+                }
+            }
+            None => return Vec::new(),
+        };
+        hir.expressions()
+            .filter_map(|expression| {
+                let ExpressionKind::Assign { target, .. } = &expression.kind else {
+                    return None;
+                };
+                let ExpressionKind::Field {
+                    target: written,
+                    name: Some(field),
+                    at: false,
+                } = hir.kind(*target)
+                else {
+                    return None;
+                };
+                let same = match (binding, class_range) {
+                    (Some(binding), _) => naming.resolutions.get(written) == Some(&binding),
+                    (None, Some(class_range)) => {
+                        matches!(hir.kind(*written), ExpressionKind::NameRef(spelled) if spelled == variable)
+                            && class_range.contains_range(hir.range(*written))
+                    }
+                    (None, None) => false,
+                };
+                same.then_some(hir[*field].name)
+            })
+            .collect()
+    }
+
     /// The writes `receiver$name <- value` in `item`, as the written receiver and the site.
     fn field_writes(&mut self, item: Item<'db>, name: Symbol) -> &[(ExprId, Site<'db>)] {
         let db = self.db;
@@ -1204,6 +1328,7 @@ impl<'db> Resolver<'db> {
                             *written,
                             Site {
                                 item,
+                                name,
                                 range: hir.name_range(*field),
                                 value: Some(*value),
                             },

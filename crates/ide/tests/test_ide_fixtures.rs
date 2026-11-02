@@ -7,9 +7,9 @@ use {
     ide::{
         CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, HoverDefinition,
         call_hierarchy_item, code_actions, code_lenses, completion, definition, diagnostic_fixes,
-        document_symbols, folding_ranges, hover, incoming_calls, inlay_hints, outgoing_calls,
-        references, rename, selection_ranges, semantic_tokens, signature_help, type_definition,
-        workspace_symbols,
+        document_symbols, folding_ranges, hover, import_fixes, incoming_calls, inlay_hints,
+        outgoing_calls, references, rename, selection_ranges, semantic_tokens, signature_help,
+        type_definition, workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -556,6 +556,16 @@ fn render_structure(source: &str) -> String {
                     output.push_str(&format!(
                         "fix {}{unsafe_marker}: {} -> {:?}\n",
                         fix.title,
+                        covered(edit.range),
+                        edit.replacement
+                    ));
+                }
+            }
+            for action in import_fixes(db, file, &diagnostics, whole) {
+                for edit in &action.edits {
+                    output.push_str(&format!(
+                        "fix {}: {} -> {:?}\n",
+                        action.title,
                         covered(edit.range),
                         edit.replacement
                     ));

@@ -5,7 +5,9 @@ compute <- function(x) {
   doubled
 }
 #++++
-hint @7: <T: numeric> fn(x: T) -> T
+hint @19<T: numeric>
+hint @21: T
+hint @22 -> T
 
 #---- variable_typed_local_suppressed
 g <- function(x) {
@@ -13,7 +15,9 @@ g <- function(x) {
   y
 }
 #++++
-hint @1: <T> fn(x: T) -> T
+hint @13<T>
+hint @15: T
+hint @16 -> T
 
 #---- unknown_returning_function_suppressed
 mystery <- function() undefined_fn()
@@ -28,6 +32,7 @@ f <- function(flag) {
   x
 }
 #++++
-hint @1: fn(flag: logical) -> integer | character
+hint @18: logical
+hint @19 -> integer | character
 hint @25: integer
 hint @51: character
