@@ -2198,7 +2198,7 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
             let result = values::alloc_uninit(SexpType::Real, count)?;
             let source = values::reals(operand);
             let target = values::reals_mut(result);
-            // The common roundings get their own loop, so the function is not re-chosen for
+            // The common functions get their own loop, so the function is not re-chosen for
             // every element and the loop has no call left to keep it from being vectorized.
             let produced_nan = match function {
                 Math::Floor => map_reals(source, target, f64::floor),
