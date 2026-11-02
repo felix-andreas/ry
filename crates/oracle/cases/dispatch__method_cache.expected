@@ -11,9 +11,13 @@
 | [1] "local"
 | [1] "registered"
 | [1] "1"               "1"               "formatted thing" "formatted thing"
+| [1] "default"
+| [1] "late table"
+| [1] "no applicable method for 'describe' applied to an object of class \"other\""
+| [1] "global other"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| c("1", "1", "formatted thing", "formatted thing")
+| "global other"

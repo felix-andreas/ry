@@ -38,3 +38,22 @@ for (i in 1:4) {
   values[i] <- format(obj)
 }
 print(values)
+
+# Replacing the global methods table, which reassigns an existing binding.
+.__S3MethodsTable__. <- new.env()
+rm(format.thing)
+other <- structure(1, class = "other")
+print(describe(other))
+late <- new.env()
+assign("describe.other", function(x) "late table", envir = late)
+.__S3MethodsTable__. <- late
+print(describe(other))
+
+# A frame chain that ends at the empty environment continues at base, not the global frame.
+.__S3MethodsTable__. <- new.env()
+describe.other <- function(x) "global other"
+print(tryCatch(
+  eval(as.call(list(describe, other)), new.env(parent = emptyenv())),
+  error = conditionMessage
+))
+print(describe(other))

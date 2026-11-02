@@ -1844,8 +1844,10 @@ including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the g
 calling frames to their top environment uncached, because function frames gain and lose bindings
 without moving any epoch. The rest of the walk (the top environment, the generic's registered
 methods table, the imports, the base namespace and the search path) is cached in
-`dispatch::MethodCache`, keyed by the method name, the top environment and the generic's top
-environment. An entry holds the binding cell rather than its value, since reassigning an existing
+`dispatch::MethodCache`, keyed by the method name, the top environment, the generic's
+registered-methods table (resolved first, since replacing an existing binding's value does not
+move the epoch) and whether the top environment's own frame is searched (it is not when the
+calling frames end at the empty environment). An entry holds the binding cell rather than its value, since reassigning an existing
 binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
 value is no longer a function. The whole cache is dropped when the binding epoch or the collection
 count changes: the epoch covers bindings appearing or disappearing and enclosures changing, and a
