@@ -2618,7 +2618,19 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   the site's feedback, and hands off to tier 0 otherwise. `$` had to join `base_primitive`'s list,
   or every site compiled as a general call. 5,000,000 iterations of `s <- s + p$x * p$y + p$z`
   take 0.074 s on a record against 1.83 s on a list (0.055 s with locals), profiling build.
-  Tuple `[[i]]` and tag payloads read through `match` still take the generic path.
+- **Item, constructor and `match` sites.** `x[[k]]` with a constant `k` compiles to `Op::Item`
+  with the same `[layout, slot]` shape cache (`records::cached_item`); a list or vector subject
+  falls through to `[[`'s path. Constructor calls (`.ry_record`, `.ry_tuple`, `.ry_tag`) whose
+  names are distinct intern their layout at compile time and compile to `Op::Construct`; a
+  payload-free tag is one shared constant. A guard-free `match` compiles to `MatchShape`,
+  `MatchTag`, `MatchLiteral` and `Slot` tests, sets the arm's bindings only after the whole
+  pattern matched (as the special does), and ends in `MatchFail` with the special's error; a
+  `match` with a guard stays with the special. The JIT branches on kind, layout and tag natively
+  and reads slots through `Intrinsic::Field`; `Construct` is an opaque pure step. Profiling
+  build, against the build before these sites: 5,000,000 `t[[2L]]` reads 2.27 s to 0.026 s
+  (`r$b` 0.026 s, list `l[[2L]]` 0.83 s); 2,000,000 three-arm tag `match`es 1.29 s to 0.57 s
+  (`switch` on a list's `$kind` 1.10 s); 2,000,000 `:Ok(i)` constructions 0.69 s to 0.13-0.23 s
+  (`list(kind =, v =)` 0.35 s).
 - **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
   the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
   keeps its slot count in header padding, so the collector never reads the layout table.
@@ -2966,13 +2978,21 @@ first lines R had already read, leaving R mid-command.
     `NA`, so wrapping would have to stop at that one value, and the code that wants wrapping
     (hashing) wants it total.
   - Per-width conversions and limits (`to_i8`, `min_i32`, `int_cast`, `f64_to_parts`, `Dec`):
-    R has one integer and one double type.
+    R has one integer and one double type, so the limits are the four unsized
+    `Num.max_integer`, `min_integer`, `max_double`, `min_double`, plus `Num.infinity`; Roc's
+    `nan_f64` is skipped because no library function takes or returns `NaN` on purpose.
   - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
-  - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
-    and strings are immutable.
-  - `List.range`: `seq_len` and `seq` cover it.
+  - `Str` capacity functions: R strings are immutable.
   - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
     first key fixes the key type.
+- **Taken later:** `List.range` (`seq` returns a vector, not a `list[integer]`),
+  `List.keep_if_try`, `Num.to_integer`, and `Dict.capacity`, `Set.capacity` and
+  `release_excess_capacity` on `List`, `Dict` and `Set`. They were first skipped on the claim
+  that the heap shrinks collections, but it never shrinks a resizable vector, so after a
+  `reserve` the room stays until the value dies.
+- **`NaN` is never a result.** A `NaN` from an unchecked function (`Num.sin(Inf)`,
+  `Num.pow(-1, 0.5)`, a `List.sum` of `Inf` and `-Inf`) is an error, and a `_checked` function
+  returns `:Err(:Undefined)`, which its signature names.
 - **Unchecked operations error where Roc crashes or returns `NaN`.** `Num.add`, `div`, `sqrt`,
   `log`, `asin`, `acos`, `pow_int` and the rest were first skipped because they produce `NaN` or
   overflow for part of their domain. They are taken with an R error there that names the
@@ -4222,19 +4242,25 @@ check` releases its trees once, and memoized records are compact" below).
   (`moves::reaching_environment`, in `subset.rs`). A local assignment of the caller's variable's
   name does not shadow it, since a read before the assignment, or on a path that skips it,
   finds the caller's variable, so such a body is not movable; only a parameter shadows. A closure
-  created in the body captures the frame without entering a closure, so a body or default that
-  may create one gets no tail update and no frame release (`moves::may_capture_frame`).
+  created in the body captures the frame without entering a closure, so every live move records
+  each closure created (`moves::created_closure`), and the frame release and the tail update
+  both require that each is referenced only from the move's private frames (`closures_dead`).
 - **A shared start does not stick.** A value something else also holds, such as `.Last.value`
   holding the dict a top-level `d <- Dict.empty()` created, cannot move, but the call still runs
   tracked (`Move::shared`, binding untouched) so the dead frame is released and the next call
   moves. Before this, one shared call made every later call copy, because the dead frame kept
   each result shared.
-- **Tail update.** A helper whose body ends in `f(p, ...)`, `f` a library builtin that reuses its
-  first argument and `p` the first parameter, compiles that call to `Op::CallTailUpdate`
-  (`bytecode::tail_update`). It updates `p`'s value in place only when, after its arguments are
-  evaluated, a move into this frame still lasts (`moves::frame_private`): then nothing has
-  captured the frame, and nothing in it runs after the call, so no one sees the parameter
-  change. The AST evaluator never does this, so the first two calls, before tier 0 compiles the
+- **Tail update.** A call `f(p, ...)` in tail position, `f` a library builtin that reuses its
+  first argument and `p` the first parameter, compiles to `Op::CallTailUpdate`
+  (`bytecode::tail_updates`). Tail position is the body, the last statement of a `{` or a branch
+  of an `if` in tail position, or the argument of a `return` in a statement outside any function
+  literal or `local`. It updates `p`'s value in place only when, after its arguments are
+  evaluated, a move into this frame still lasts and every closure created while it lasted is
+  dead once the frame is, with none among the call's other arguments, whose values the heap does
+  not count (`moves::frame_private`): then nothing outlives the frame, and nothing in it runs
+  after the call, so no one sees the parameter change. A body that creates closures used to be
+  refused statically; the dynamic rule turned 20,000 calls of `h <- function(d, k) { inc <-
+  function(x) x + 1L; Dict.insert(d, k, inc(k)) }` from 30.6 s into 0.85 s (debug build). The AST evaluator never does this, so the first two calls, before tier 0 compiles the
   body, copy.
 - **Why static types do not prove it.** A type says what a value is, not which frames a
   function reads or whether it captures its environment, so a typed helper needs the same body
@@ -4856,6 +4882,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## Bug lints are on by default, style lints are opt-in
 
+- lintr parity is not a goal. A lint is added only when it catches real bugs (as `length-test`
+  did: every corpus hit was a bug) or when it fits the existing lint architecture and costs little.
+  Lints already ported stay; nobody works through lintr's list for completeness.
 - A lint is on by default when the code it flags behaves differently from how it reads
   (`equals-na`, `vector-logic`, `length-sequence`, `class-equals`, `trailing-comma`, `T`/`F`), and
   off when it only flags taste (`redundant-return`, `commented-code`, naming, shadowing). lintr turns
@@ -4866,16 +4895,37 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `return(x <- 1)` and a trailing `x <- 1` are both invisible.
 - The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
   the contract.
-- `unreachable-code` and `sprintf-arguments` are on by default (each is a bug; a CRAN corpus sweep
-  found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
+- `unreachable-code`, `sprintf-arguments` and `length-test` are on by default (each is a bug; a
+  CRAN corpus sweep found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
   bug, because a callee that collects `...` keeps both on purpose (cli bullets in `c()`, repeated
-  HTML `class` attributes) and a syntax lint cannot see the callee's formals. Moving it to a
-  semantic lint that reads the callee's signature would let it default on.
+  HTML `class` attributes) and a syntax lint cannot see the callee's formals. The semantic
+  version already exists: with `[check] typing = true`, a call that gives a known function's
+  formal twice is a `type-mismatch` (`named_argument_mismatch` in `check.rs`), so no second
+  semantic lint is needed.
 - The other lintr ports (`any-is-na`, `paste-sep`, `lengths`, `literal-coercion`,
   `redundant-equals`, `single-quotes`, `testthat-expectation`, `condition-message`,
   `comparison-negation`, `outer-negation`, `fixed-regex`, `which-grepl`, `length-levels`,
-  `browser-call`, `numeric-leading-zero`) are opt-in taste or speed lints. lintr's whitespace and
+  `browser-call`, `numeric-leading-zero`, `line-length`, `implicit-assignment`, `while-true`,
+  `scalar-in`, `order-subset`, `matrix-apply`, `empty-assignment`, `unnecessary-lambda`,
+  `yoda-test`, `nzchar`, `sample-int`, `unnecessary-concatenation`) are opt-in taste or speed lints. `implicit-assignment` is opt-in because
+  `while ((line <- f()) != "")` is idiomatic R; lintr's `cyclocomp`, `object_length` and
+  `nested_ifelse` were skipped as low value without a fix.
+  `line-length` is the only lintr layout linter ported, because the formatter never splits a
+  line, so nothing else keeps lines short. lintr's whitespace and
   layout linters are not ported, because `ry format` owns layout.
+- `trailing-comma` stays on inside rlang's dynamic dots (`mutate(d, y = 1, )`), where the comma
+  is harmless: it is a warning whose safe fix only removes the comma, and stub `@masked` cannot
+  mark dynamic dots because it also covers data.table verbs, whose `...` is not rlang's.
+- lintr's `# nolint` comments are honored (`apply_suppressions` in `crates/ry/src/diagnostics.rs`),
+  because 15 packages in the CRAN corpus carry them and the mandate is that existing code keeps
+  working. A bare `# nolint` keeps syntax errors, and lintr names map to ry codes in `lintr_codes`;
+  keep that table in step when a lint is ported. A `.lintr` file's `linters` field is read too
+  (`apply_lintr` in `crates/ry/src/config.rs`): it fills only the levels `ry.toml` leaves at
+  `Default`, so `ry.toml` always wins, and an unreadable field is a warning, never an error,
+  because the file is lintr's. Only the `.lintr` at the project root (nearest `ry.toml`,
+  `roughly.toml` or `DESCRIPTION`) applies, so the answer never depends on how a path is spelled.
+  `lint_levels_mut` in `lints.rs` is the one name-to-field table, and
+  a unit test pins it against the struct's fields.
 - Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
   reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their
   opt-in lints are off. A fix whose replacement binds more loosely than what it replaces goes
