@@ -2947,14 +2947,19 @@ first lines R had already read, leaving R mid-command.
   such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
   callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
   on top of the higher entry threshold's 280M.
-- **Function speculation is validated by the binding epoch alone.** Compiling marks each
-  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
-  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
-  speculated binding). A call site then checks one integer instead of re-walking the environment
-  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
-  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
-  re-resolved from the environment its lookup started in, which for a function looked up inside an
-  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **Function speculation is validated by the binding epoch, then by per-symbol stamps.**
+  Compiling marks each speculated symbol and binding cell `WATCHED`, and the heap bumps one global
+  epoch, and the symbol's lookup stamp, when a watched cell is assigned or a watched symbol is
+  defined in any function frame (which could shadow the speculated binding). An unchanged epoch
+  proves every speculation with one compare. The epoch also moves on every binding outside a
+  function frame, which a test suite does constantly, so `valid` (`crates/jit/src/runtime.rs`)
+  then compares each speculated symbol's `Heap::lookup_stamp` with the one recorded at its last
+  check; re-walking every lookup on each epoch move cost a finbench test slice more than the
+  compiled code saved. Only when a stamp moved is each speculation re-resolved from the
+  environment its lookup started in, which for a function looked up inside an inlined or directly
+  called closure is that closure's environment, not the compiled body's. A lookup that passes a
+  non-function binding is not speculated (`resolve_function`), because only the binding found is
+  watched, as for the tier-0 inline caches.
 - **A call to a speculated closure is direct and binds plain values.** Arguments that are
   effect-free are evaluated eagerly in the caller and bound as values into the callee's frame,
   skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early

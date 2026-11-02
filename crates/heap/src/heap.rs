@@ -1215,9 +1215,9 @@ impl Heap {
         }
         if cell.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
-            // A watched cell is one some lookup was compiled against, and a lookup of the same
-            // name from elsewhere may pass it while it holds a non-function, so its new value
-            // can change where that lookup stops.
+            // A watched cell is one some lookup was compiled against, and compiled code checks
+            // its speculations by the symbol's stamp alone while that stamp stays put, so a new
+            // value has to move the stamp.
             bump_symbol_epoch(cell.car());
         }
         self.store(cell, cell.cdr(), value);

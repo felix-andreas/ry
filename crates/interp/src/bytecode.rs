@@ -118,6 +118,7 @@ pub struct Tier {
     /// [`Tier::entry_threshold`] times. Returns `None` to let the interpreter run it from the
     /// start.
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
+    /// Entries after which a body without optimized code asks [`Tier::enter`] to compile it.
     pub entry_threshold: i32,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
@@ -2595,9 +2596,9 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     // than the compiled code saved on a test suite.
     let entered = match interp().bytecode.tier {
         Some(tier)
-            if entries == 1
-                || entries >= tier.entry_threshold
-                || constants.element(TIER1) != nil() =>
+            if constants.element(TIER1) != nil()
+                || ((entries == 1 || entries >= tier.entry_threshold)
+                    && profile[profile::TIER_STATE] >= 0) =>
         {
             (tier.enter)(&mut machine)
         }

@@ -2932,7 +2932,8 @@ pub(crate) unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String
 }
 
 /// Walks from `enclosure` to the binding a function lookup of `symbol` finds, as tier 0 does,
-/// but gives up instead of forcing a promise or calling an active binding.
+/// but gives up instead of forcing a promise, calling an active binding, or passing a binding
+/// that holds something other than a function.
 pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let mut env = start;
@@ -2949,14 +2950,18 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
                 }
                 value = value.car();
             }
-            if values::is_function(value) {
-                return Some(Speculation {
-                    symbol,
-                    env: start,
-                    cell,
-                    function: value,
-                });
+            // A binding passed over for holding a non-function could later hold a function
+            // without moving any epoch or stamp, because only the binding found is watched, so
+            // such a lookup is not speculated on.
+            if !values::is_function(value) {
+                return None;
             }
+            return Some(Speculation {
+                symbol,
+                env: start,
+                cell,
+                function: value,
+            });
         }
         env = env.enclosure();
     }
@@ -3089,8 +3094,8 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
 }
 
 /// The type a base builtin returns for plain arguments of these types, for a call that has not
-/// returned yet. A guess that a scalar comes back can be wrong (an index of 0 selects nothing),
-/// which the check after the call catches.
+/// returned yet. A guess can be wrong (`max` of an empty integer vector is the double `-Inf`,
+/// `1.5:3` makes doubles), which the check after the call catches.
 fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
     let numeric = |ty: &Ty| ty.is_vector() || ty.is_numeric_scalar();
     let all = |test: &dyn Fn(&Ty) -> bool| !types.is_empty() && types.iter().all(test);
