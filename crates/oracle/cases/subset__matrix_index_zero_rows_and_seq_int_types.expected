@@ -1,0 +1,20 @@
+[stdout]
+| [1]  1 NA
+| [1] 4
+| [1] "negative values are not allowed in a matrix subscript"
+|  int 0
+|  int [1:3] 2 6 10
+|  int [1:3] 1 3 5
+|  num [1:4] 0 0.333 0.667 1
+|  num [1:4] 1 4 7 10
+|  int [1:4] 1 4 7 10
+| [1] "#4C00FF" "#004CFF" "#00E5FF" "#00FF4D" "#FFFF00"
+| [1] 4
+| [1] "max 3"
+| [1] "min 1"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "min 1"

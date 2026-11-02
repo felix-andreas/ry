@@ -45,6 +45,15 @@ word "total" in a string are three different things.
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
 
+## R Markdown and Quarto
+
+In `.Rmd`, `.qmd`, and `.Rnw` documents, the R chunks get diagnostics, hover, completion,
+go-to-definition, references, rename, and formatting. The chunks are analyzed together as one
+script, so a name defined in a setup chunk resolves in every later chunk and in inline
+`` `r expr` `` code. Formatting rewrites only the R chunks and never touches the prose, and
+completion stays quiet in the prose. VS Code sends these documents to ry whichever extension
+(vscode-R, Quarto, or none) gives them their language.
+
 ## Running and debugging
 
 The VS Code extension runs your code on ry's runtime.
@@ -60,11 +69,30 @@ The VS Code extension runs your code on ry's runtime.
   Breakpoints in your package's `R/` files work while you debug one of its tests, because the
   package is loaded with source references for the session.
 
+- **Attaching to the console**: "ry: Attach to Console" attaches the debugger to the `ry run`
+  console running in your workspace, starting one if none runs. Breakpoints in your files then stop
+  the commands you type, and `debug(f)` or `debugonce(f)` stops when `f` is next called, even for a
+  function you typed at the prompt. Stopping the debug session leaves the console running.
+- **Viewing data**: right-click a data frame, matrix, vector or `DataFrame` in the debugger's
+  variables view and choose "View Data", or call `View(x)` in the console. The viewer fetches
+  100 rows at a time, so a large table opens instantly.
+
+While a console runs in the workspace, hover and completion also use its live values: hovering
+`df` shows its class and size, and `df$` completes the columns of the data frame you actually
+loaded, which the type checker cannot know when the data comes from a file.
+
+On Windows, the console has no editor connection yet, so attaching, `View()` and live values
+are not available there.
+
 Other editors can launch the same debugger as `ry debug-adapter`, a
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) server on standard
 input and output. Its launch arguments are `program` (the script), `args`, `stopOnEntry`, `prelude`
 (R code run first, such as `load_all("."); library(testthat)`) and `testName` (run only the
-`test_that()` block with that description).
+`test_that()` block with that description). To attach to a console instead, connect to the Unix
+socket named in `$TMPDIR/ry-<uid>/console-<pid>.json` and send `initialize` and then `attach`, as
+to any debug adapter. The data viewer's `ryView` and `ryTable` requests go to the debugger
+connection while the program is stopped, and to a second connection while the console waits for
+input.
 
 ## Settings
 

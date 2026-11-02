@@ -626,6 +626,21 @@ pub enum Action<'a> {
     BranchIfObject {
         src: usize,
     },
+    /// Branches unless `src` is a plain record, tuple or tag of `layout`.
+    BranchUnlessShape {
+        src: usize,
+        layout: u32,
+    },
+    /// Branches unless `src` is a plain tag named `tag`.
+    BranchUnlessTag {
+        src: usize,
+        tag: u32,
+    },
+    /// Branches unless `src` matches the literal pattern constant `pattern`.
+    BranchUnlessLiteral {
+        src: usize,
+        pattern: Sexp,
+    },
     Jump,
     JumpUnless {
         src: usize,
@@ -1121,6 +1136,31 @@ impl<'a> Builder<'a> {
     }
 
     /// The layout and slot a `$` site's shape cache holds, once tier 0 has seen a record there.
+    /// Reads slot `index` of the record of `layout` in `src`. A boxed slot is loaded as it is,
+    /// so only an unboxed scalar's type is something the read itself checks.
+    fn slot_read(
+        &mut self,
+        state: &mut State<'a>,
+        dst: usize,
+        src: usize,
+        layout: u32,
+        index: u32,
+        feedback: Ty,
+    ) -> Action<'a> {
+        let result = if feedback.is_unboxed() {
+            feedback
+        } else {
+            Ty::Boxed
+        };
+        state.registers[dst] = result;
+        Action::Intrinsic {
+            intrinsic: Intrinsic::Field { layout, index },
+            dst,
+            args: self.slice([src]),
+            result,
+        }
+    }
+
     fn cached_field(&self, shape: Sexp) -> Option<(u32, u32)> {
         // SAFETY: the shape constant is the two-element integer vector the compiler made.
         let &[layout, index] = (unsafe { values::ints(shape) }) else {
@@ -1531,24 +1571,73 @@ impl<'a> Builder<'a> {
                     Some((layout, index))
                         if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
                     {
-                        // A boxed field is loaded as it is, so only an unboxed scalar's type is
-                        // something the read itself checks.
-                        let feedback = if feedback.is_unboxed() {
-                            feedback
-                        } else {
-                            Ty::Boxed
-                        };
-                        state.registers[operand(0)] = feedback;
                         state.visible = Some(true);
-                        Action::Intrinsic {
-                            intrinsic: Intrinsic::Field { layout, index },
-                            dst: operand(0),
-                            args: self.slice([operand(1)]),
-                            result: feedback,
-                        }
+                        self.slot_read(state, operand(0), operand(1), layout, index, feedback)
                     }
                     _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
                 }
+            }
+            Op::Item => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(3))) {
+                    // A subject of another layout hands the read to tier 0, which takes the
+                    // jump when it is not a record or tuple with that item.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
+                        state.visible = Some(true);
+                        self.slot_read(state, operand(0), operand(1), layout, index, feedback)
+                    }
+                    // A site that never read an item is a vector or list read, which `[[`'s
+                    // path compiles.
+                    _ => {
+                        self.push_edge(operand(4), state);
+                        return Ok(Action::Branch);
+                    }
+                }
+            }
+            Op::Slot => {
+                let feedback = self.feedback_at(inst.pc);
+                if feedback == Ty::Bottom || state.registers[operand(1)] != Ty::Boxed {
+                    self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Pure)
+                } else {
+                    let index = operand(2) as u32;
+                    self.slot_read(
+                        state,
+                        operand(0),
+                        operand(1),
+                        operand(3) as u32,
+                        index,
+                        feedback,
+                    )
+                }
+            }
+            Op::MatchShape | Op::MatchTag | Op::MatchLiteral => {
+                let src = operand(0);
+                self.push_edge(operand(2), state);
+                let ty = state.registers[src];
+                // A value the analysis knows is a vector, a scalar or a function is no record.
+                if inst.op != Op::MatchLiteral && (ty.is_plain() || matches!(ty, Ty::Closure(..))) {
+                    return Ok(Action::Branch);
+                }
+                match inst.op {
+                    Op::MatchShape => Action::BranchUnlessShape {
+                        src,
+                        layout: operand(1) as u32,
+                    },
+                    Op::MatchTag => Action::BranchUnlessTag {
+                        src,
+                        tag: operand(1) as u32,
+                    },
+                    _ => Action::BranchUnlessLiteral {
+                        src,
+                        pattern: self.constant(operand(1)),
+                    },
+                }
+            }
+            Op::MatchFail => self.opaque_step(state, None, &[], Effect::Opaque),
+            Op::Construct => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Pure)
             }
             Op::CallTailUpdate => self.opaque_step(
                 state,
@@ -2810,6 +2899,8 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::Jump => Some(inst.operand(0)),
         Op::JumpUnless => Some(inst.operand(2)),
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
+        Op::Item => Some(inst.operand(4)),
         Op::BranchUnlessPrimitive => Some(inst.operand(2)),
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
@@ -2826,6 +2917,10 @@ fn ends_block(op: Op) -> bool {
             | Op::BranchUnlessBuiltin
             | Op::BranchUnlessPrimitive
             | Op::BranchIfObject
+            | Op::MatchShape
+            | Op::MatchTag
+            | Op::MatchLiteral
+            | Op::Item
             | Op::ForStep
             | Op::LogicLeft
             | Op::Guard
@@ -2860,9 +2955,21 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => {
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => {
             kill(operand(0), live);
             gen_(operand(1), live);
+        }
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => gen_(operand(0), live),
+        Op::Construct => {
+            kill(operand(0), live);
+            for register in operand(2)..operand(2) + operand(3) {
+                gen_(register, live);
+            }
         }
         Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::EndStatement => {

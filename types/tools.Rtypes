@@ -2,4 +2,5 @@
 toTitleCase : @pure fn(text: character[]) -> character[]
 file_ext : @pure fn(x: character[]) -> character[]
 file_path_sans_ext : @pure fn(x: character[], [compression]: logical) -> character[]
-md5sum : fn(files: character[]) -> character[named]
+# `bytes` arrived in R 4.5, so `md5sum(bytes = s)` hashes a raw vector without a file.
+md5sum : fn([files]: character[], [bytes]: raw[]) -> character[named]

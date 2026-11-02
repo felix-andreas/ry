@@ -14,7 +14,7 @@ use {
         arith::real_at,
         builtins::{BuiltinDef, Call, internal},
         conditions::warning,
-        strings::{Syntax, flag, subject_at, translate},
+        strings::{flag, subject_at, translate},
         unwind::{R, error},
         values::{self, alloc, get_attr, length, set_attr, set_elt, symbols},
     },
@@ -56,7 +56,7 @@ unsafe fn agrep(call: &Call<'_>, logical: bool) -> R<Sexp> {
     let expression = if fixed {
         regex_syntax::escape(&pattern)
     } else {
-        let translated = translate(&pattern, Syntax::Extended);
+        let translated = translate(&pattern);
         if let Some(problem) = translated.problem {
             return Err(call.error(format!(
                 "invalid regular expression '{pattern}', reason '{problem}'"
@@ -239,7 +239,7 @@ unsafe fn adist(call: &Call<'_>) -> R<Sexp> {
                     let expression = if fixed {
                         regex_syntax::escape(&pattern)
                     } else {
-                        let translated = translate(&pattern, Syntax::Extended);
+                        let translated = translate(&pattern);
                         if let Some(problem) = translated.problem {
                             return Err(call.error(format!(
                                 "invalid regular expression '{pattern}', reason '{problem}'"

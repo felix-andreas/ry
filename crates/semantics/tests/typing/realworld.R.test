@@ -1283,7 +1283,7 @@ items_of <- function(items = NULL) {
 }
 #++++
 merge_vectors: <T, U> fn(a: T | NULL, b: U) -> Unknown
-items_of: <T> fn([items]: list[T] | T[] | NULL) -> list[T]
+items_of: <T> fn([items]: list[T] | T[] | formula | NULL) -> list[T]
 
 #---- normalizing_a_parameter_keeps_it_open
 # A write under a test that reads the same formal normalizes the input: the body

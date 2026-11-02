@@ -62,6 +62,8 @@ pub struct Heap {
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
     ready_to_finalize: Vec<Sexp>,
+    /// The weak-pair lists the current collection reached, cleared of dead keys after marking.
+    weak_pairs: Vec<Sexp>,
     mark_stack: Vec<Sexp>,
     strings: StringTable,
     symbols: FxHashMap<Sexp, Sexp>,
@@ -89,8 +91,6 @@ pub struct Heap {
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
     /// environments knows it is still valid when the epoch is unchanged.
     binding_epoch: u64,
-    /// Set while a major collection marks, which is when bytecode inline caches are emptied.
-    major_marking: bool,
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
@@ -361,9 +361,9 @@ impl Heap {
             escaped: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
+            weak_pairs: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
-            major_marking: false,
             enclosure_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
@@ -558,6 +558,13 @@ impl Heap {
     /// way (`SETLENGTH`), and binaries built then still do.
     pub unsafe fn mark_resizable(&mut self, vector: Sexp) {
         vector.set_flag(flag_bits::RESIZABLE, true);
+    }
+
+    /// Makes `list`, of even length, hold `(key, value)` pairs weakly: a pair whose key is
+    /// reachable only through the list is cleared at the next collection. An inline cache uses
+    /// this so that it never keeps the environment it was filled from alive.
+    pub unsafe fn mark_weak_pairs(&mut self, list: Sexp) {
+        list.set_flag(flag_bits::WEAK_PAIRS, true);
     }
 
     /// Changes an object's type to another of the same shape (`SET_TYPEOF`): pairlist, call and
@@ -1471,7 +1478,6 @@ impl Heap {
         }
         self.inhibit += 1;
         self.young_parent = None;
-        self.major_marking = kind == Collection::Major;
         if kind == Collection::Major {
             self.clear_marks();
         } else if self.policy.verify {
@@ -1515,7 +1521,7 @@ impl Heap {
         }
         self.drain();
         self.process_weak_refs();
-        self.major_marking = false;
+        self.clear_dead_weak_pairs();
         // Before the sweep, while a mark still means "survives".
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
@@ -1633,7 +1639,9 @@ impl Heap {
         }
         match object.kind().shape() {
             Shape::Vector => {
-                if matches!(
+                if object.flags() & flag_bits::WEAK_PAIRS != 0 {
+                    self.weak_pairs.push(object);
+                } else if matches!(
                     object.kind(),
                     SexpType::String | SexpType::List | SexpType::Expression
                 ) {
@@ -1645,22 +1653,7 @@ impl Heap {
             Shape::Triple => {
                 self.mark(object.car());
                 self.mark(object.cdr());
-                let tag = object.tag();
-                // A bytecode object's tag holds its inline caches: the environment each lookup
-                // started from and the binding cell it found. They are only a speed-up, but
-                // traced they would keep an environment alive for as long as the code lives,
-                // such as an R6 object whose methods a clone shares. A major collection empties
-                // them instead, and the next lookup refills them.
-                if self.major_marking
-                    && object.kind() == SexpType::Bytecode
-                    && tag.kind() == SexpType::List
-                {
-                    for index in 0..tag.length() as usize {
-                        tag.element(index).decrement_refcount();
-                        tag.set_element_unbarriered(index, self.known.nil);
-                    }
-                }
-                self.mark(tag);
+                self.mark(object.tag());
             }
             Shape::Environment => {
                 self.mark(object.enclosure());
@@ -1685,7 +1678,11 @@ impl Heap {
     }
 
     /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
-    /// key is, so the values are marked to a fixpoint before any key is declared dead.
+    /// key is, so the values are marked to a fixpoint before any key is declared dead. Every
+    /// reference with a dead key is then taken off at once: one with a finalizer is revived with
+    /// its key, value and finalizer until the finalizer has run, and one without is cleared.
+    /// Because all dying references leave together, what the revived finalizers reach cannot
+    /// revive another, so one pass suffices.
     unsafe fn process_weak_refs(&mut self) {
         self.mark_live_weak_values();
         let mut dying = Vec::new();
@@ -1715,6 +1712,27 @@ impl Heap {
         self.drain();
     }
 
+    /// Runs after every weak reference is settled, so a key a finalizer revived counts as live.
+    /// A live key's value stays unmarked when it is reachable only through the pair, so the
+    /// pair is cleared then too rather than left pointing at a freed object.
+    unsafe fn clear_dead_weak_pairs(&mut self) {
+        let nil = self.known.nil;
+        for list in std::mem::take(&mut self.weak_pairs) {
+            for pair in 0..list.length() as usize / 2 {
+                let key = list.element(pair * 2);
+                let value = list.element(pair * 2 + 1);
+                if !self.space.is_marked(key) || !self.space.is_marked(value) {
+                    key.decrement_refcount();
+                    value.decrement_refcount();
+                    list.set_element_unbarriered(pair * 2, nil);
+                    list.set_element_unbarriered(pair * 2 + 1, nil);
+                }
+            }
+        }
+    }
+
+    /// Marks the value and finalizer of every weak reference whose key is marked, to a
+    /// fixpoint.
     unsafe fn mark_live_weak_values(&mut self) {
         loop {
             let mut changed = false;

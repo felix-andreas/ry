@@ -612,6 +612,71 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.fill_edges()?;
                 return Ok(true);
             }
+            Action::BranchUnlessShape { src, layout } => {
+                let value = self.load_register(src);
+                let usable = self.plain_record(value);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                let record = self.builder.create_block();
+                self.builder.ins().brif(usable, record, &[], taken, &[]);
+                self.builder.switch_to_block(record);
+                // Only a record has a layout word, so it is read after the kind check.
+                let id = self
+                    .builder
+                    .ins()
+                    .load(I32, flags(), value, RECORD_LAYOUT_OFFSET as i32);
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, id, i64::from(layout));
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessTag { src, tag } => {
+                let value = self.load_register(src);
+                let found = self
+                    .call(
+                        runtime::jit_plain_tag as *const () as usize,
+                        &[I64],
+                        Some(I64),
+                        &[value],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, found, i64::from(tag));
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessLiteral { src, pattern } => {
+                self.box_reads(position, &before);
+                let value = self.load_register(src);
+                let pattern = self.builder.ins().iconst(I64, pattern.as_ptr() as i64);
+                let matched = self
+                    .call(
+                        runtime::jit_literal_matches as *const () as usize,
+                        &[I64, I64],
+                        Some(I32),
+                        &[value, pattern],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(matched, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
             Action::Jump => {
                 let target = jump_target(inst).ok_or(Refusal("a jump without a target"))?;
                 if target <= pc {
@@ -1498,15 +1563,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Intrinsic::Field { layout, index } => {
                 let record = self.load_register(args[0]);
-                let kind = self.builder.ins().uload8(I32, flags(), record, KIND);
-                let is_record =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Record as i64);
-                let bits = self.builder.ins().uload8(I32, flags(), record, FLAGS);
-                let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
-                let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, object, 0);
-                let usable = self.builder.ins().band(is_record, plain);
+                let usable = self.plain_record(record);
                 self.hand_off_unless(position, before, usable);
                 // Only a record has a layout word, so it is read after the kind check.
                 let id = self
@@ -2425,6 +2482,19 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     // Values.
 
+    /// Whether `value` is a record (or tuple, tag, dict or set) without a class.
+    fn plain_record(&mut self, value: Value) -> Value {
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let is_record = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Record as i64);
+        let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+        let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+        let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, object, 0);
+        self.builder.ins().band(is_record, plain)
+    }
+
     fn load_register(&mut self, register: usize) -> Value {
         self.builder
             .ins()
@@ -2697,7 +2767,14 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::CallBuiltin => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))
             .collect(),
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => vec![operand(1)],
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => vec![operand(1)],
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => vec![operand(0)],
+        Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }

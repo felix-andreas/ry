@@ -294,7 +294,7 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let data = values::list_vector(&columns)?;
     values::set_attr(data, symbols().names, values::string_vector(&names)?)?;
-    let row_names = if length(row_names) == rows && rows > 0 {
+    let row_names = if length(row_names) == rows {
         row_names
     } else {
         values::integer_vector(&[NA_INTEGER, rows as i32])?
