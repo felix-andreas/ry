@@ -11,7 +11,7 @@
 use {
     crate::{
         ColumnType, Error, Result, Schema, Table,
-        convert::{enum_dtype, factor_levels},
+        factor::{self, Levels},
         group, join,
         kernel::{Evaluator, Vector, scatter, selected_rows},
     },
@@ -21,7 +21,7 @@ use {
         LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
         SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
     },
-    std::{collections::HashSet, fmt},
+    std::{collections::HashSet, fmt, sync::Arc},
 };
 
 /// One `tbl[i, j, by]` call.
@@ -1620,8 +1620,8 @@ fn join_plan(
             continue;
         };
         let i_dtype = column_dtype(&i, &condition.i)?;
-        x = x.with_column(col(condition.x.clone()).cast(common.clone()));
-        i = i.with_column(col(condition.i.clone()).cast(common.clone()));
+        x = x.with_column(factor::cast_expr(col(condition.x.clone()), common.clone()));
+        i = i.with_column(factor::cast_expr(col(condition.i.clone()), common.clone()));
         restore.push((condition.i.clone(), i_dtype));
     }
     let left_on: Vec<PolarsExpr> = on
@@ -1755,8 +1755,8 @@ fn non_equi_plan(
         };
         let (mut x_value, mut i_value) = (col(condition.x.clone()), col(condition.i.clone()));
         if let Some(common) = common {
-            x_value = x_value.cast(common.clone());
-            i_value = i_value.cast(common);
+            x_value = factor::cast_expr(x_value, common.clone());
+            i_value = factor::cast_expr(i_value, common);
         }
         x_keys.push(x_value.alias(x_key.clone()));
         i_keys.push(i_value.alias(i_key.clone()));
@@ -1872,7 +1872,9 @@ fn layout_exprs(
                     .iter()
                     .find(|(restored, _)| *restored == column.source)
                 {
-                    Some((_, dtype)) => col(column.source.clone()).cast(dtype.clone()),
+                    Some((_, dtype)) => {
+                        factor::cast_expr(col(column.source.clone()), dtype.clone())
+                    }
                     None => col(column.source.clone()),
                 },
             };
@@ -2077,7 +2079,9 @@ fn assign(
             conversions.push((targets.len(), expr, natural));
         }
         let levels = match existing {
-            Some(ColumnType::Factor) if !replaces => factor_levels(frame.column(name)?.dtype()),
+            Some(ColumnType::Factor) if !replaces => {
+                factor::levels(frame.column(name)?.dtype()).cloned()
+            }
             _ => None,
         };
         // A new column holding an integer sum is a double when a total overflows, as data.table's
@@ -2335,7 +2339,7 @@ struct Target<'a> {
     natural: ColumnType,
     /// The levels of an existing factor column that the value is written into by label. A label
     /// the factor lacks becomes a new level, as data.table adds it.
-    levels: Option<Vec<String>>,
+    levels: Option<Arc<Levels>>,
     /// The value is an integer sum kept in 64 bits, narrowed once its totals are known.
     widens: bool,
 }
@@ -2346,8 +2350,11 @@ impl Target<'_> {
     fn store(&self, value: PolarsExpr) -> PolarsExpr {
         match (&self.levels, self.kind) {
             _ if self.widens => value.cast(DataType::Int64),
-            (Some(_), _) => value.cast(DataType::String),
+            (Some(_), _) => factor::text_expr(value),
             (None, ColumnType::Factor) => value,
+            (None, kind) if self.natural == ColumnType::Factor => {
+                convert(value, self.natural, kind)
+            }
             (None, kind) if parses(self.natural, kind) => parse_strings(value, kind),
             // Polars casts NaN to `true`, where R's `as.logical(NaN)` is `NA`.
             (None, ColumnType::Logical) => when(value.clone().cast(DataType::Float64).is_nan())
@@ -2579,16 +2586,20 @@ fn assigned_type(
 
 /// A string column as a factor whose levels are `levels` followed by the labels they lack, in
 /// order of first appearance.
-fn relevel(column: Column, levels: &[String]) -> Result<Column> {
-    let mut levels = levels.to_vec();
-    let mut known: HashSet<String> = levels.iter().cloned().collect();
-    for label in column.as_materialized_series().str()?.iter().flatten() {
-        if !known.contains(label) {
-            known.insert(label.to_string());
-            levels.push(label.to_string());
-        }
-    }
-    Ok(column.cast(&enum_dtype(&levels)?)?)
+fn relevel(column: Column, levels: &Arc<Levels>) -> Result<Column> {
+    let text = factor::text(&column)?;
+    let strings = text.str()?;
+    let added = || {
+        strings
+            .iter()
+            .flatten()
+            .filter(|label| levels.position(label).is_none())
+    };
+    let levels = match added().next() {
+        None => levels.clone(),
+        Some(_) => Arc::new(Levels::from_labels(levels.iter().chain(added()))),
+    };
+    Ok(factor::recode(&text, &levels)?.into_column())
 }
 
 /// Whether an expression computes each row from that row alone, so that evaluating it over the
@@ -2918,6 +2929,17 @@ fn expect_logical(kind: ColumnType, what: &str) -> Result<()> {
     }
 }
 
+/// `value`, computed as a `from` value, converted to a `kind` one. A factor converts through its
+/// labels, because Polars cannot cast an extension column.
+fn convert(value: PolarsExpr, from: ColumnType, kind: ColumnType) -> PolarsExpr {
+    match (from, kind) {
+        (ColumnType::Factor, ColumnType::Factor) => value,
+        (ColumnType::Factor, ColumnType::Character) => factor::text_expr(value),
+        (ColumnType::Factor, kind) => factor::text_expr(value).cast(dtype(kind)),
+        (_, kind) => value.cast(dtype(kind)),
+    }
+}
+
 fn dtype(kind: ColumnType) -> DataType {
     match kind {
         ColumnType::Logical => DataType::Boolean,
@@ -3058,15 +3080,18 @@ impl Lowering<'_> {
                 let kind = typer.expr(expr)?;
                 // Two factor branches stay factors; Polars refuses them if their levels differ,
                 // as `fifelse` does.
-                let branch = |value: PolarsExpr| match kind {
+                let branch = |value: PolarsExpr, from: ColumnType| match kind {
                     ColumnType::Factor => value,
-                    kind => value.cast(dtype(kind)),
+                    kind => convert(value, from, kind),
                 };
-                let (yes, no) = (branch(self.expr(yes)?), branch(self.expr(no)?));
+                let (yes, no) = (
+                    branch(self.expr(yes)?, typer.expr(yes)?),
+                    branch(self.expr(no)?, typer.expr(no)?),
+                );
                 let test = self.expr(test)?;
                 // An `NA` test gives `NA`, where Polars would take the `no` branch.
                 when(test.clone().is_null())
-                    .then(branch(lit(NULL)))
+                    .then(branch(lit(NULL), ColumnType::Logical))
                     .when(test)
                     .then(yes)
                     .otherwise(no)
@@ -3120,6 +3145,7 @@ impl Lowering<'_> {
                         .otherwise(lit(NULL).cast(DataType::String)),
                 )
             }
+            (ColumnType::Factor, kind) => convert(value, ColumnType::Factor, kind),
             _ => value.cast(dtype(kind)),
         })
     }

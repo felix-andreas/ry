@@ -19,14 +19,13 @@
 use {
     crate::{
         Error, Result, Table,
-        convert::{categorical_codes_to_factor, string_to_factor},
+        factor::{self, Interner},
     },
     memmap2::{Mmap, UncheckedAdvice},
     polars::prelude::{
-        BooleanChunked, CategoricalPhysical, Categories, ChunkedArray, Column, CsvEncoding,
-        CsvReadOptions, DataFrame, DataType, Field, Float64Chunked, Float64Type, Int32Chunked,
-        Int32Type, IntoColumn, IntoSeries, NullValues, PlSmallStr, PolarsDataType,
-        Schema as PolarsSchema, SerReader, Series, UInt32Chunked,
+        BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
+        Field, Float64Chunked, Float64Type, Int32Chunked, Int32Type, IntoColumn, NullValues,
+        PlSmallStr, PolarsDataType, Schema as PolarsSchema, SerReader, Series,
     },
     polars_arrow::{
         array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
@@ -332,7 +331,7 @@ fn read_bytes(
         // Badly quoted text has rows only Polars can find, so it is parsed whole and cut after.
         rows.end = first_rows_end(bytes, rows.clone(), count, layout.separator);
     }
-    let (mut frame, pass) = match read_sliced(
+    let (frame, pass) = match read_sliced(
         bytes,
         &layout,
         &rows,
@@ -345,7 +344,7 @@ fn read_bytes(
         // A value the sniffer's sample missed fails the typed parse, so the file is read again
         // with every column as text, each then typed from all of its values.
         Err(Error::Polars(_)) => {
-            let schema = schema(&layout, options, true);
+            let schema = schema(&layout, true);
             let frame = parse(&bytes[rows.clone()], &layout, options, &schema)?;
             let height = frame.height();
             let columns: Vec<Column> = frame
@@ -357,25 +356,6 @@ fn read_bytes(
         }
         Err(error) => return Err(error),
     };
-    let undecided: Vec<PlSmallStr> = frame
-        .columns()
-        .iter()
-        .filter(|column| matches!(column.dtype(), DataType::Categorical(..)))
-        .map(|column| column.name().clone())
-        .collect();
-    if !undecided.is_empty() {
-        // A categorical column reads an empty field as `NA`, where `fread` reads the empty
-        // string, so a column with a missing value is read again as text to tell the two apart.
-        let text = ReadOptions {
-            columns: Some(undecided),
-            rows: options.rows,
-            factors: false,
-        };
-        let schema = schema(&layout, &text, false);
-        for column in parse(&bytes[rows], &layout, &text, &schema)?.into_columns() {
-            frame.with_column(column)?;
-        }
-    }
     let mut table = Table::new(frame)?;
     if options.factors {
         strings_as_factors(&mut table)?;
@@ -386,8 +366,8 @@ fn read_bytes(
 /// Parses the file slice by slice with the sniffed types, appending each slice's columns to the
 /// table's final column buffers before the next slice is parsed, so a typed column is never held
 /// as parsed pieces and a copy of them. A text column keeps Polars' pieces and joins them at the
-/// end, which copies its strings once. A factor's column numbers its strings with one mapping
-/// across the slices, so the codes of every slice agree and are renumbered into levels in place.
+/// end, which copies its strings once. A factor's column numbers each slice's strings into one
+/// [`Interner`] and drops them, so the file's strings never exist as a whole column.
 fn read_sliced(
     bytes: &[u8],
     layout: &Layout,
@@ -397,18 +377,7 @@ fn read_sliced(
     slice_bytes: usize,
     release: &dyn Fn(Range<usize>) -> std::io::Result<()>,
 ) -> Result<DataFrame> {
-    // Polars parses a quoted field that does not end at its closing quote into codes, where it
-    // rejects the same field as text, so such a file reads its factors as text to fail as a read
-    // without factors does.
-    let schema = if options.factors && malformed {
-        let text = ReadOptions {
-            factors: false,
-            ..options.clone()
-        };
-        schema(layout, &text, false)
-    } else {
-        schema(layout, options, false)
-    };
+    let schema = schema(layout, false);
     let start = rows.start;
     release(0..start)?;
     // One range spanning the rows is the intended value, not a mistyped `(0..n).collect()`.
@@ -435,7 +404,17 @@ fn read_sliced(
             builders = frame
                 .columns()
                 .iter()
-                .map(|column| (column.name().clone(), Builder::new(column.dtype(), reserve)))
+                .map(|column| {
+                    let factor = options.factors
+                        && layout.columns.iter().any(|sniffed| {
+                            sniffed.name == column.name().as_str()
+                                && sniffed.kind == TextColumn::Character
+                        });
+                    (
+                        column.name().clone(),
+                        Builder::new(column.dtype(), factor, reserve),
+                    )
+                })
                 .collect();
         }
         height += frame.height();
@@ -457,20 +436,18 @@ fn read_sliced(
 enum Builder {
     Integer(Vec<i32>, Option<MutableBitmap>),
     Double(Vec<f64>, Option<MutableBitmap>),
-    /// A `Categorical` column's codes, all numbered by the mapping its dtype holds.
-    Codes(DataType, Vec<u32>, Option<MutableBitmap>),
+    /// A factor's strings, numbered as each slice arrives.
+    Factor(Box<Interner>),
     /// Text, kept as Polars' chunks until the column is typed from all of its values.
     Text(Option<Column>),
 }
 
 impl Builder {
-    fn new(dtype: &DataType, rows: usize) -> Builder {
+    fn new(dtype: &DataType, factor: bool, rows: usize) -> Builder {
         match dtype {
             DataType::Int32 => Builder::Integer(Vec::with_capacity(rows), None),
             DataType::Float64 => Builder::Double(Vec::with_capacity(rows), None),
-            DataType::Categorical(..) => {
-                Builder::Codes(dtype.clone(), Vec::with_capacity(rows), None)
-            }
+            DataType::String if factor => Builder::Factor(Box::new(Interner::new(rows))),
             _ => Builder::Text(None),
         }
     }
@@ -487,10 +464,9 @@ impl Builder {
                     extend(values, validity, array);
                 }
             }
-            Builder::Codes(_, values, validity) => {
-                let physical = column.as_materialized_series().to_physical_repr();
-                for array in physical.u32()?.downcast_iter() {
-                    extend(values, validity, array);
+            Builder::Factor(interner) => {
+                for array in column.str()?.downcast_iter() {
+                    interner.intern(array)?;
                 }
             }
             Builder::Text(text) => match text {
@@ -515,22 +491,7 @@ impl Builder {
                 PrimitiveArray::new(ArrowDataType::Float64, values.into(), bitmap(validity)),
             )
             .into_column(),
-            Builder::Codes(dtype, values, validity) => match (&dtype, bitmap(validity)) {
-                (DataType::Categorical(_, mapping), None) => {
-                    categorical_codes_to_factor(name, mapping, values, None)?.into_column()
-                }
-                // A column with a missing value stays categorical, to be read again as text.
-                (_, validity) => {
-                    let codes = UInt32Chunked::with_chunk(
-                        name,
-                        PrimitiveArray::new(ArrowDataType::UInt32, values.into(), validity),
-                    )
-                    .into_series()
-                    .cast(&dtype.to_physical())?;
-                    // SAFETY: every code was numbered by the mapping `dtype` holds.
-                    unsafe { codes.from_physical_unchecked(&dtype) }?.into_column()
-                }
-            },
+            Builder::Factor(interner) => interner.finish(name).into_column(),
             Builder::Text(text) => {
                 let column = match text {
                     Some(text) => text.rechunk(),
@@ -752,8 +713,8 @@ pub fn write_csv_to(table: &Table, writer: &mut impl Write) -> Result<()> {
     let mut columns: Vec<Column> = Vec::with_capacity(frame.width());
     for column in frame.columns() {
         let column = match column.dtype() {
-            DataType::Enum(..) | DataType::Categorical(..) => {
-                let text = column.cast(&DataType::String)?;
+            dtype if factor::is_factor(dtype) => {
+                let text = factor::text(column)?;
                 text_columns.push(text.clone());
                 text
             }
@@ -806,22 +767,12 @@ pub fn write_csv_to(table: &Table, writer: &mut impl Write) -> Result<()> {
 
 /// The Polars schema to parse with. With `as_text`, every column reads as text and is then
 /// typed from all of its values, which is the fallback for a value the sample missed.
-fn schema(layout: &Layout, options: &ReadOptions, as_text: bool) -> Arc<PolarsSchema> {
+fn schema(layout: &Layout, as_text: bool) -> Arc<PolarsSchema> {
     let mut schema = PolarsSchema::with_capacity(layout.columns.len());
     for column in &layout.columns {
         let dtype = match (as_text, column.kind) {
             (false, TextColumn::Integer) => DataType::Int32,
             (false, TextColumn::Double) => DataType::Float64,
-            // A factor's column parses straight into codes, so its strings never exist row by
-            // row. Each column numbers its own strings. A read of the first rows parses them as
-            // text, because Polars may number strings from rows past the last one it keeps, which
-            // would become levels no row has.
-            (false, TextColumn::Character) if options.factors && options.rows.is_none() => {
-                DataType::from_categories(Categories::random(
-                    PlSmallStr::from_static("ry"),
-                    CategoricalPhysical::U32,
-                ))
-            }
             // Polars reads only `true` and `false` as booleans, so a logical column reads as
             // text and is converted with `fread`'s three spellings.
             _ => DataType::String,
@@ -1079,7 +1030,7 @@ pub fn strings_as_factors(table: &mut Table) -> Result<()> {
         .collect();
     let factors = text
         .par_iter()
-        .map(|column| string_to_factor(column.as_materialized_series()))
+        .map(|column| factor::from_strings(column.as_materialized_series()))
         .collect::<Result<Vec<Series>>>()?;
     for factor in factors {
         table.put_column(factor.into_column())?;
