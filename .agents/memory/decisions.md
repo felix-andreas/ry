@@ -1819,6 +1819,23 @@ GNU R runs a closure's first call through the AST, so code that depends on eithe
 already fails there. The ledger fold
 template's per-fill cost dropped from about 19.1k to 17.8k instructions.
 
+**The dispatch loop reads only the code and registers into locals.** `step` is one large inlined
+`match`, and every field of `Decoded` it destructured into a local was reloaded or spilled per
+instruction under register pressure. It now copies out `code` and `registers` and reads the
+constants and the cache through `decoded` where an op needs them, and it fetches the opcode with
+an unchecked index, since the code words are built in process and never deserialized. The ledger
+fold went from about 17.7k to 16.7k instructions per fill. Returning a `Flow` enum from `step`
+instead of its current result was tried and cost about 860 instructions per fill, because the
+compiler stopped keeping the loop state in registers; codegen here is fragile, so measure every
+change to `step` with callgrind.
+
+**A closure call runs one collection check for its frame.** `frame_environment` reserves room
+for the environment plus a binding cell and a default promise per formal (`Heap::reserve`), then
+`bind_arguments` builds them with the `_uncollected` allocators, and `args_pairlist` does the same
+for the argument list, rooting only its head. This is safe because the caller keeps the argument
+values alive and the defaults are reachable from the closure; anything the batch reads that is
+not, such as `match_args`' result, is computed before the reservation.
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
