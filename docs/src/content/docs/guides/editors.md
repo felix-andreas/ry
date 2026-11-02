@@ -17,7 +17,8 @@ You get:
 - completion, including the fields of a list such as `person$` and the argument names a call
   still accepts (`second = `), with your own names ranked ahead of keywords and the library
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
-  callees of a project function, across files
+  callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
+  own package, to the definition
 - signature help with each parameter's type and default, and inlay hints for assignments, loop
   variables, and parameter names in calls with two or more positional arguments
   (`grow(principal = 100, years = 2)`)
@@ -40,7 +41,11 @@ Hover, completion and inlay hints use inferred types even when type errors are s
 get them on any R project.
 
 Rename edits the binding you picked and nothing else: a local `total`, a global `total`, and the
-word "total" in a string are three different things.
+word "total" in a string are three different things. A parameter and the named arguments that fill
+it are one binding, so renaming `rate` in `grow <- function(principal, rate)` also rewrites
+`grow(100, rate = 0.05)` in every file, and hover, go-to-definition and references work from either
+end. An abbreviated argument that R completes by partial matching (`grow(100, ra = 0.05)`) is not
+followed, so spell arguments out before you rename their parameter.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.

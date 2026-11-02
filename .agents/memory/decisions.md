@@ -4998,3 +4998,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`debug`/`debugonce`** set closure gp bits and enter `Mode::FunctionEntry`, stopping with reason "function breakpoint". Code typed at the prompt has no file, so its frames get a `sourceReference` the client fetches with `source`.
 - **Data viewer.** `ryView` evaluates an expression (in a frame when stopped, else in the global env) and registers a view that preserves the object; `ryTable` returns one page of formatted rows, at most 1000; `ryRelease` drops it, and at most 32 views live at once. The data never leaves the runtime whole, so a million-row table costs one page. Variables carry `evaluateName` so the editor's "View Data" names the exact value. `View(x)` sends a `ryView` event to connections that sent `rySubscribe`; VS Code subscribes when it opens or attaches to a console.
 - **Live values in the language server** come from `ryGlobals` (names, class, summary, columns, promises unforced) with a 150 ms timeout (`ry::console_link`). Analysis stays the source of truth: the console only adds hover lines and completion items analysis lacks, and the simulator disables the link to stay deterministic.
+
+## A parameter and its named arguments are one editor binding
+
+- Before, a named argument (`f(rate = 1)`) was no navigation target: hover widened to the whole
+  call, goto and references found nothing, and renaming the parameter left every call site's
+  `rate =` behind, so the rename broke the code.
+- Now `ide::target_at` maps a named argument to the parameter's `Target::Slot` in the callee's
+  item (the callee resolves the way any name read does, `expression_target`), and the occurrences
+  of a parameter slot add the named arguments at every call of its function. Those calls come
+  from the function binding's own occurrences (the global walk for a top-level function, the slot
+  walk for a local one), so a different function with a parameter of the same name is untouched.
+- Nothing new is stored: call sites are derived on request from the existing occurrence walks, so
+  no project-wide map gains a dependency and incremental behavior is unchanged.
+- A library callee has no parameter site, so its named argument goes to the stub's function and
+  hover shows the signature-help label of the parameter. Partial matching is not followed, on
+  purpose: it would make a rename guess.
+
