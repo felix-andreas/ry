@@ -480,12 +480,6 @@ impl RootSource for InterpRoots {
                 marker.mark(call);
             }
             interp.globals.trace(marker);
-            interp.symbols.trace(marker);
-            for definition in &interp.builtins {
-                if let Some(object) = definition.object {
-                    marker.mark(object);
-                }
-            }
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);

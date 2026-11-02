@@ -1072,7 +1072,6 @@ corpus cache, and an OSS-Fuzz submission.
 
 Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
 
-- **Startup-mode collection stress (`RY_GC_STRESS=startup`) is unusable in a debug build**: an empty script runs for over 300 s, because each collection scans every root and every eighth is major. Cheaper root scanning would make it usable.
 - **Run `just gc-torture` over every oracle case on an idle machine.** No full run has completed yet; a debug build needs several minutes per four cases.
 - **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.
 - **The oracle's `run_command` timeout kills only the direct child** (`crates/oracle/src/oracle.rs`). A grandchild that inherited stdout or stderr keeps the drain threads blocked in `join`, so a hung subprocess tree still hangs the harness. Spawn the engine in its own process group and kill the group.
