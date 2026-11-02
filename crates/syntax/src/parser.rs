@@ -9,7 +9,9 @@ use {
         lexer::{Token, lex},
     },
     hashbrown::HashTable,
-    rowan::{GreenNode, GreenToken, NodeOrToken, TextRange, TextSize},
+    rowan::{
+        GreenNode, GreenNodeData, GreenToken, GreenTokenData, NodeOrToken, TextRange, TextSize,
+    },
     rustc_hash::FxHasher,
     std::{
         cell::RefCell,
@@ -17,10 +19,10 @@ use {
     },
 };
 
-/// Parses that share one token cache before it is dropped. Sharing makes identical tokens
-/// (whitespace, punctuation, common names) one allocation across files; the cache keeps its
-/// entries alive, so the bound stops a long-running server from pinning the tokens of trees
-/// it has already replaced.
+/// Parses that share one cache of green elements before it is dropped. Sharing makes identical
+/// tokens (whitespace, punctuation, common names) and small nodes one allocation across files;
+/// the cache keeps its entries alive, so the bound stops a long-running server from pinning
+/// the elements of trees it has already replaced.
 const TOKEN_CACHE_PARSES: u32 = 256;
 
 thread_local! {
@@ -76,9 +78,7 @@ fn parse_with_cache(text: &str, cache: &mut TokenCache) -> Parse {
     Parse::new(green, parser.errors)
 }
 
-/// Builds the green tree bottom-up. Unlike rowan's builder it shares only tokens, not
-/// nodes: hashing every small node to find a twin costs more than allocating it, while
-/// tokens repeat often enough (a space, `<-`, `x`) that sharing them pays.
+/// Builds the green tree bottom-up, sharing identical tokens and small nodes.
 struct TreeBuilder<'cache> {
     cache: &'cache mut TokenCache,
     children: Vec<NodeOrToken<GreenNode, GreenToken>>,
@@ -119,7 +119,7 @@ impl TreeBuilder<'_> {
             .parents
             .pop()
             .expect("finish_node without an open node");
-        let node = GreenNode::new(kind.into(), self.children.drain(first..));
+        let node = self.cache.node(kind, &mut self.children, first);
         self.children.push(NodeOrToken::Node(node));
     }
 
@@ -136,14 +136,21 @@ impl TreeBuilder<'_> {
     }
 }
 
-/// Interned tokens, keyed by kind and text.
+/// Interned tokens, keyed by kind and text, and interned small nodes.
 #[derive(Default)]
 struct TokenCache {
     /// The last token of each kind. Most tokens repeat the previous one of their kind (an
     /// operator, a space, a newline), and comparing one slot is far cheaper than hashing.
     last: Vec<Option<GreenToken>>,
     tokens: HashTable<GreenToken>,
+    /// Nodes of at most [`SHARED_NODE_CHILDREN`] children, keyed by kind and the addresses of
+    /// their children. Children are already shared, so equal addresses mean equal subtrees and
+    /// the key never reads text. Wrappers such as a name expression around one identifier
+    /// repeat throughout a project, and sharing them is most of what a tree's memory saves.
+    nodes: HashTable<GreenNode>,
 }
+
+const SHARED_NODE_CHILDREN: usize = 3;
 
 impl TokenCache {
     fn token(&mut self, kind: SyntaxKind, text: &str) -> GreenToken {
@@ -171,6 +178,71 @@ impl TokenCache {
         self.last[slot] = Some(token.clone());
         token
     }
+}
+
+impl TokenCache {
+    /// The node of `kind` over `children[first..]`, which it drains.
+    fn node(
+        &mut self,
+        kind: SyntaxKind,
+        children: &mut Vec<NodeOrToken<GreenNode, GreenToken>>,
+        first: usize,
+    ) -> GreenNode {
+        let raw = rowan::SyntaxKind::from(kind);
+        let Some(own) = children
+            .get(first..)
+            .filter(|own| own.len() <= SHARED_NODE_CHILDREN)
+        else {
+            return GreenNode::new(raw, children.drain(first..));
+        };
+        let hash = node_hash(
+            raw,
+            own.iter().map(|child| element_address(borrowed(child))),
+        );
+        let same = |node: &GreenNode| {
+            node.kind() == raw
+                && node.children().len() == own.len()
+                && node.children().zip(own).all(|(stored, child)| {
+                    element_address(stored) == element_address(borrowed(child))
+                })
+        };
+        if let Some(node) = self.nodes.find(hash, same) {
+            let node = node.clone();
+            children.truncate(first);
+            return node;
+        }
+        let node = GreenNode::new(raw, children.drain(first..));
+        self.nodes.insert_unique(hash, node.clone(), |node| {
+            node_hash(node.kind(), node.children().map(element_address))
+        });
+        node
+    }
+}
+
+fn borrowed(
+    element: &NodeOrToken<GreenNode, GreenToken>,
+) -> NodeOrToken<&GreenNodeData, &GreenTokenData> {
+    match element {
+        NodeOrToken::Node(node) => NodeOrToken::Node(node),
+        NodeOrToken::Token(token) => NodeOrToken::Token(token),
+    }
+}
+
+/// Where a shared element lives, tagged so a node and a token never collide.
+fn element_address(element: NodeOrToken<&GreenNodeData, &GreenTokenData>) -> usize {
+    match element {
+        NodeOrToken::Node(node) => node as *const GreenNodeData as usize,
+        NodeOrToken::Token(token) => token as *const GreenTokenData as usize | 1,
+    }
+}
+
+fn node_hash(kind: rowan::SyntaxKind, children: impl Iterator<Item = usize>) -> u64 {
+    let mut hasher = FxHasher::default();
+    kind.0.hash(&mut hasher);
+    for address in children {
+        address.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn token_hash(kind: rowan::SyntaxKind, text: &str) -> u64 {
