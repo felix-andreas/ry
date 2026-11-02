@@ -1,0 +1,78 @@
+[stdout]
+| [1] 1 2 1 2 1
+| [[1]]
+| [1] "a" "b"
+| 
+| [[2]]
+| NULL
+| 
+| NULL
+| `foo<-`(`*tmp*`, value = 2)
+| [1] 42
+| [1] 42
+| [1] 7
+| [1] 7
+| [1] "default"
+| [1] "default"
+|        [,1]
+| start     1
+| length    3
+|        [,1]
+| start     1
+| length    3
+|        [,1] [,2]
+| start     1    6
+| length    3    3
+|        [,1] [,2]
+| start     1    4
+| length    3    3
+| [[1]]
+| [1] "k=v;" "k"    "v"   
+| 
+| [1] "[xx]yyb"
+|    a  b
+| a  1 NA
+| b NA  1
+|    a  b
+| a NA NA
+| b NA  1
+|    a  b
+| a  1 NA
+| b NA  1
+|      [,1] [,2]
+| [1,]   NA   NA
+| [2,]   NA   NA
+| <0 x 0 matrix>
+| [1] "Error in var(matrix(numeric(0), 3, 0), use = use) : 'x' is empty\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in var(matrix(numeric(0), 3, 0), use = use): 'x' is empty>
+| [1] "Error in var(matrix(numeric(0), 3, 0), use = use) : \n  no complete element pairs\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in var(matrix(numeric(0), 3, 0), use = use): no complete element pairs>
+| <0 x 0 matrix>
+| [1] "Error in var(matrix(numeric(0), 3, 0), use = use) : 'x' is empty\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in var(matrix(numeric(0), 3, 0), use = use): 'x' is empty>
+| [1] "sysname"        "release"        "version"        "nodename"      
+| [5] "machine"        "login"          "user"           "effective_user"
+| [1] 1
+| [1] 3
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1

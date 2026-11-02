@@ -62,13 +62,43 @@ says, prints how many it added, and then reports what is left.
 [Strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode) shows it at work. A binding
 whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
+### The check cache
+
+`ry check` records its findings in `.ry_cache/check.json` at the project root, and the next run
+reuses them for every file whose findings cannot have changed. On a 300,000-line package, a repeat
+check of an unchanged project takes about 0.1 s instead of 1.5 s. After an edit inside a function
+body, only the edited file and the files whose check read it are checked again, which takes about
+0.45 s. Any other change checks every file again: an edit outside a function body (a new top-level
+name, a changed signature, a class definition), an added or removed file, a different `ry.toml`,
+`NAMESPACE`, `DESCRIPTION` or stub, or a different ry binary. An edit inside a body that changes
+what the rest of the project sees also checks every file, for example one that adds `UseMethod`,
+`<<-`, `assign`, `library`, `setClass` or a `#: @type` declaration. A directory with no `ry.toml`
+or `DESCRIPTION`, such as one holding a single downloaded script, gets no cache.
+
+The output is the same with or without the cache. `--no-cache` checks every file without reading or
+writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
+directory, so the record stays out of version control.
+
+The language server reads the same record when it starts. If the record still holds for a file
+under `R/`, opening that file shows its recorded findings at once, before the server has analysed
+the project, and the server's own analysis replaces them when it settles. A file that changed since
+the check, or whose findings depend on one that did, starts without them. Any edit drops the
+recorded findings of every file, and a record written by a different ry binary is never read.
+
 ## fmt
 
 ```sh
 ry fmt           # rewrite files in place
 ry fmt --check   # name the files that would change, and exit 1 if any would
 ry fmt --diff    # show the changes without writing them, and exit 1 if any
+ry fmt --range 3-8 R/report.R   # format only lines 3 to 8 of one file
 ```
+
+`--range` takes `LINE`, `START-END`, or `LINE:COLUMN-LINE:COLUMN`, counting from 1. It formats the
+lines the range touches exactly as formatting the whole file would, at the indentation the file
+already uses, and leaves every other line alone. A statement is laid out as one unit, so a line
+just outside the range changes when it belongs to a statement the range reaches into. A range that
+starts past the file's last line is an error, and an end past it stops at the last line.
 
 `ry fmt` skips `.Rmd`, `.qmd`, and `.Rnw` files, because it rewrites a whole file's layout and must not
 touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
@@ -125,8 +155,8 @@ like `ry run`. `ry load --r-entry` prints the R code that gives a plain R sessio
 and consoles of `ry run` and `ry R`.
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
-`--experimental-features range_formatting` lets the server format a selection instead of the whole
-file.
+No feature is experimental right now, so `--experimental-features` ignores every name with a warning
+(`range_formatting` is always on).
 
 ## debug-adapter
 

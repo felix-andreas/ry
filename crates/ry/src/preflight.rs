@@ -4,6 +4,7 @@
 
 use {
     crate::{
+        check_cache::CacheUse,
         cli::{
             self, CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote,
             analyze_project, collect_r_files, exclude_matcher, project_stub_paths, render_findings,
@@ -188,6 +189,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
                     &sources,
                     config.clone(),
                     std::slice::from_ref(&sources),
+                    CacheUse::Off,
                 )?;
                 let errors = strict_errors(&analysis);
                 Ok::<_, CommandError>((analysis, errors))

@@ -6,6 +6,7 @@
 
 use {
     R::{arith::Rng, rmath::*},
+    heap::Heap,
     interp::rmath::*,
     syntax::testing::{SplitMix64, fuzz_iterations},
 };
@@ -366,8 +367,15 @@ fn nothing_panics_and_na_stays_na() {
 #[test]
 fn random_variates_stay_in_their_support() {
     let mut seeds = SplitMix64(0x5eed_0006);
-    let mut rng = Rng::default();
-    rng.seed(20251031);
+    // The deviates draw from the interpreter's generator, so the interpreter must exist.
+    let heap: &'static mut Heap = Box::leak(Box::new(Heap::new()));
+    // SAFETY: this is the only test in the file that touches the interpreter, and the heap
+    // lives for the rest of the process.
+    unsafe {
+        interp::install(heap, interp::default_hooks());
+        interp::random::set_seed(20251031).expect("seeding the default generator");
+    }
+    let mut rng = Rng;
     for _ in 0..fuzz_iterations(2000) {
         let a = positive(&mut seeds, 1e-3, 1e4);
         let b = positive(&mut seeds, 1e-3, 1e4);

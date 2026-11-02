@@ -16,7 +16,6 @@
 
 use {
     super::{CancelHandle, Job, Outbox, ServerState, Worker, WorkerSeed, run_job},
-    crate::config::ExperimentalFeatures,
     async_lsp::{
         LanguageServer, ResponseError,
         lsp_types::{self, Position, Url},
@@ -24,6 +23,7 @@ use {
     futures::future::BoxFuture,
     std::{
         collections::{BTreeMap, BTreeSet},
+        env,
         fmt::Write as _,
         fs, mem,
         path::{Path, PathBuf},
@@ -47,6 +47,9 @@ pub enum Outgoing {
 pub struct ClientOptions {
     pub pull_diagnostics: bool,
     pub utf8: bool,
+    /// The session starts before the startup warm-up has run, as an editor's first requests
+    /// arrive while it is still deriving the project.
+    pub cold: bool,
 }
 
 pub type Response = Result<serde_json::Value, ResponseError>;
@@ -86,6 +89,10 @@ pub enum RequestKind {
     /// Asks for callers of an item placed at the position, as a client replays one it kept.
     IncomingCalls,
     OutgoingCalls,
+    /// Selects from the line start up to the position.
+    RangeFormatting,
+    /// Types a line break at the position.
+    OnTypeFormatting,
     CodeLens,
     /// Resolves a reference-count lens placed at the position, as a client resolves one it kept.
     CodeLensResolve,
@@ -111,6 +118,8 @@ pub const REQUEST_KINDS: &[RequestKind] = &[
     RequestKind::CallHierarchy,
     RequestKind::IncomingCalls,
     RequestKind::OutgoingCalls,
+    RequestKind::RangeFormatting,
+    RequestKind::OnTypeFormatting,
     RequestKind::CodeLens,
     RequestKind::CodeLensResolve,
 ];
@@ -133,15 +142,21 @@ pub struct Simulation {
 impl Simulation {
     /// Starts a server on `root`, completes the initialize handshake and settles.
     pub fn start(root: &Path, options: ClientOptions) -> Simulation {
+        Simulation::start_as(root, options, env::current_exe().unwrap_or_default())
+    }
+
+    /// Like [`Simulation::start`], for a server that trusts the `ry check` records `executable`
+    /// writes. The simulated server runs inside a test binary, which no record names.
+    pub fn start_as(root: &Path, options: ClientOptions, executable: PathBuf) -> Simulation {
         syntax::testing::enable_invariants();
         let (sender, receiver) = mpsc::channel();
         let cancel = CancelHandle::default();
         let outbox = Arc::new(Mutex::new(Vec::new()));
         let seed = WorkerSeed {
             outbox: Outbox::Recorder(outbox.clone()),
-            experimental_features: ExperimentalFeatures::default(),
             debug: false,
             cancel: cancel.clone(),
+            executable,
         };
         let mut simulation = Simulation {
             state: ServerState { sender, cancel },
@@ -164,8 +179,20 @@ impl Simulation {
             panic!("initialize failed: {error:?}");
         }
         simulation.notify(SimulatedNotification::Initialized);
-        simulation.settle();
+        if options.cold {
+            simulation.run_queued_jobs();
+        } else {
+            simulation.settle();
+        }
         simulation
+    }
+
+    /// Runs the jobs already queued, and no idle work.
+    pub fn run_queued_jobs(&mut self) {
+        while let Ok(job) = self.receiver.try_recv() {
+            run_job(&mut self.seed, &mut self.worker, Some(job));
+            self.poll_requests();
+        }
     }
 
     pub fn notify(&mut self, notification: impl Into<SimulatedNotification>) {
@@ -282,6 +309,21 @@ impl Simulation {
                     work_done_progress_params: work,
                 }))
             }
+            RequestKind::RangeFormatting => json(self.state.range_formatting(
+                lsp_types::DocumentRangeFormattingParams {
+                    text_document: document,
+                    range: lsp_types::Range::new(Position::new(position.line, 0), position),
+                    options: lsp_types::FormattingOptions::default(),
+                    work_done_progress_params: work,
+                },
+            )),
+            RequestKind::OnTypeFormatting => json(self.state.on_type_formatting(
+                lsp_types::DocumentOnTypeFormattingParams {
+                    text_document_position: at,
+                    ch: "\n".to_owned(),
+                    options: lsp_types::FormattingOptions::default(),
+                },
+            )),
             RequestKind::InlayHint => json(self.state.inlay_hint(lsp_types::InlayHintParams {
                 work_done_progress_params: work,
                 text_document: document,
@@ -648,6 +690,7 @@ pub fn run_session(
     let options = ClientOptions {
         pull_diagnostics: entropy.chance(1, 2),
         utf8: entropy.chance(1, 3),
+        cold: entropy.chance(1, 4),
     };
     let mut session = Session::new(root, options);
     session.log(format!("start {options:?}"));

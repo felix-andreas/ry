@@ -164,6 +164,10 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
+    /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
+    /// `sys.calls()` does not, so they live beside the frames rather than among them.
+    pub foreign_calls: Vec<(Sexp, usize)>,
     /// The handler and restart stacks in effect, which every frame saves and restores.
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
@@ -189,6 +193,8 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The environments of the loops the tree-walking interpreter is running, innermost last.
+    pub loop_envs: Vec<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
@@ -231,6 +237,8 @@ pub struct Interp {
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
+    /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
+    pub forks: parallel::Forks,
 }
 
 struct InterpState {
@@ -302,6 +310,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
         global_handlers: None,
@@ -313,6 +322,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
+        loop_envs: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),
@@ -335,6 +345,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
+        forks: parallel::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -388,9 +399,8 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
     drop(written);
 }
 
-/// Writes to the console through the host.
-/// Writes console output: standard output goes where `sink` diverts it, errors and messages to
-/// the terminal.
+/// Writes console output: standard output goes where `sink` diverts it, errors and messages
+/// where `sink(type = "message")` diverts them.
 pub fn write_console(text: &[u8], is_error: bool) {
     if is_error {
         // SAFETY: the connection table only holds connections of this session.
@@ -448,6 +458,9 @@ impl RootSource for InterpRoots {
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);
             }
+            for &(call, _) in &interp.foreign_calls {
+                marker.mark(call);
+            }
             conditions::trace_handlers(&interp.handlers, marker);
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
@@ -455,6 +468,9 @@ impl RootSource for InterpRoots {
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
+            }
+            for value in interp.returned_values.iter().flatten() {
+                marker.mark(*value);
             }
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);

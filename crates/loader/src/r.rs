@@ -153,6 +153,37 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
             RValue::Logical(plan.run.iter().any(|code| code.registers_s4)),
         ),
         (
+            "deferred_s4".into(),
+            plan.deferred_s4.as_ref().map_or(RValue::Null, |deferred| {
+                RValue::List(vec![
+                    (
+                        "run".into(),
+                        RValue::Integer(
+                            deferred
+                                .run
+                                .iter()
+                                .map(|&position| position as i32 + 1)
+                                .collect(),
+                        ),
+                    ),
+                    ("classes".into(), strings(&deferred.classes)),
+                    ("generics".into(), strings(&deferred.generics)),
+                    (
+                        "foreign_generics".into(),
+                        strings(&deferred.foreign_generics),
+                    ),
+                    (
+                        "cache_key".into(),
+                        deferred
+                            .cache_key
+                            .as_ref()
+                            .map_or(RValue::Null, |key| RValue::Character(vec![key.clone()])),
+                    ),
+                    ("names".into(), strings(&deferred.names)),
+                ])
+            }),
+        ),
+        (
             "sysdata".into(),
             RValue::Character(vec![
                 match plan.sysdata {
@@ -162,6 +193,10 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                 }
                 .to_owned(),
             ]),
+        ),
+        (
+            "data".into(),
+            plan.data.as_deref().map_or(RValue::Null, strings),
         ),
         ("s3_register".into(), s3(&plan.s3_register)),
         ("s3_unregister".into(), s3(&plan.s3_unregister)),

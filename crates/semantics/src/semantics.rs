@@ -16,6 +16,7 @@ pub mod types;
 
 use {
     crate::{hir::Symbol, sorted::SortedSet},
+    rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -23,7 +24,7 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        GreenEvent, Parse, SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        GreenEvent, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{self, BinaryExpr, is_expression_kind},
         matching_nodes, paired_comment_definition,
     },
@@ -1272,7 +1273,7 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
 
 /// The `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
 #[salsa::tracked(returns(ref))]
-fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
+pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
         if let Some(name) = item.name(db).clone()
@@ -1541,29 +1542,35 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
+    // A green walk: the red preorder built a cursor node for every element of every item.
+    if node.kind() == SyntaxKind::FUNCTION_DEF {
+        return 0;
+    }
     let mut count = 0;
-    let mut preorder = node.preorder_with_tokens();
-    while let Some(event) = preorder.next() {
-        let rowan::WalkEvent::Enter(element) = event else {
+    let green = node.green();
+    let mut stack = vec![(node.kind(), green.children())];
+    while let Some((parent_kind, children)) = stack.last_mut() {
+        let parent_kind = *parent_kind;
+        let Some(element) = children.next() else {
+            stack.pop();
             continue;
         };
         match element {
-            SyntaxElement::Node(child) => {
-                if child.kind() == SyntaxKind::FUNCTION_DEF {
-                    preorder.skip_subtree();
+            NodeOrToken::Node(child) => {
+                let kind = RLanguage::kind_from_raw(child.kind());
+                if kind != SyntaxKind::FUNCTION_DEF {
+                    stack.push((kind, child.children()));
                 }
             }
-            SyntaxElement::Token(token) => {
-                let writes = match token.kind() {
+            NodeOrToken::Token(token) => {
+                let writes = match RLanguage::kind_from_raw(token.kind()) {
                     SyntaxKind::LESS_MINUS
                     | SyntaxKind::LESS2_MINUS
                     | SyntaxKind::MINUS_GREATER
                     | SyntaxKind::MINUS_GREATER2
                     | SyntaxKind::COLON_EQ
                     | SyntaxKind::FOR_KW => true,
-                    SyntaxKind::EQ => token
-                        .parent()
-                        .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR),
+                    SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
                     SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
                     SyntaxKind::IDENT => matches!(
                         token.text().trim_matches('`'),
@@ -1578,6 +1585,26 @@ fn write_tokens(node: &SyntaxNode) -> usize {
     count
 }
 
+/// Every other file whose items a check of `file` can read exports from, transitively through
+/// the interface edges, in no particular order. A file's checked findings can change only
+/// when its own text, one of these files, or the project's top-level declarations change.
+pub fn file_dependency_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
+    let mut seen: FxHashSet<Item<'_>> = FxHashSet::default();
+    let mut stack: Vec<Item<'_>> = item_tree(db, file).clone();
+    let mut files: FxHashSet<SourceFile> = FxHashSet::default();
+    while let Some(item) = stack.pop() {
+        if !seen.insert(item) {
+            continue;
+        }
+        let owner = *item.file(db);
+        if owner != file {
+            files.insert(owner);
+        }
+        stack.extend(item_interface_edges(db, item).iter().copied());
+    }
+    files.into_iter().collect()
+}
+
 /// The cyclic group an item belongs to, members in canonical order (project file order, then
 /// item order), or `None` when no read cycle runs through the item. A group must resolve
 /// through one canonical fixpoint, since iterating from whichever member was queried first
@@ -1586,6 +1613,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
 /// A strongly connected component lies inside the reachable set of each of its members, so
 /// the walk visits only what the item can read, transitively. One file's check therefore
 /// names only the items it can reach, not the whole project.
+
 #[salsa::tracked(returns(ref))]
 pub fn interface_group<'db>(
     db: &'db dyn Db,
