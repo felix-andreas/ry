@@ -1904,9 +1904,16 @@ Measured on a closure-call microbenchmark under cachegrind: 4% fewer instruction
 data misses than the free-list pages. Full collections on the loaded dsbench heap take about 35 ms
 against GNU R's 130 ms.
 
-**libR keeps freed memory.** mimalloc's purge delay is set to never (`crates/libr/src/libr.rs`),
+**libR keeps freed memory until `gc()`.** mimalloc's purge delay is 1e9 ms (`crates/libr/src/libr.rs`),
 because returning pages that stay free for 10 ms made the kernel zero them again on reuse, which was
-15% of the benchmark tests' profile. The cost is resident memory that stays at its peak.
+15% of the benchmark tests' profile. The delay is huge rather than -1 (never) because mimalloc only
+schedules a purge when the delay is non-negative, and the forced `mi_collect(true)` that `gc()` runs
+(`frame::release_worker_memory`) carries out scheduled purges. With -1, resident memory stayed at its
+peak for the whole session; with 1e9, an explicit `gc()` returns free pages as GNU R's does, which
+took resident memory after the base benchmark's setup from 91 MB to 76 MB and its setup peak to
+135 MB against GNU R's 136. The price is a page refault on the first kernel after a `gc()`, which
+GNU R pays too (`cumsum` at 1e6 went from about 2 ms to 5 ms in the benchmark, which calls `gc()`
+before each kernel).
 
 **Roots.** The `PROTECT` stack, the precious multiset, the handle stack, registered globals, every
 interned symbol, the weak-reference list, and any `RootSource` an interpreter or JIT registers. A
@@ -4465,9 +4472,9 @@ check` releases its trees once, and memoized records are compact" below).
 - **Trap.** A broadcast waits for every pool thread, and a forked child has none of its parent's
   threads, so a child that drops a large frame or calls `gc()` would hang. Whoever implements
   `fork` (`mcparallel`, `mclapply`) must skip the broadcast in the child.
-- **With libR's purge delay at never** ("libR keeps freed memory"), `mi_collect(true)` returns no
-  pages to the kernel. What it still does is drain each thread's queue of blocks freed elsewhere,
-  so their pages become reusable, and that reuse is what bounds the peak.
+- **`mi_collect(true)` drains each thread's queue of blocks freed elsewhere,** so their pages
+  become reusable, and that reuse is what bounds the peak. It also returns the pages whose purge
+  is scheduled ("libR keeps freed memory until `gc()`").
 - **Rejected.** `MIMALLOC_PURGE_DELAY=0` only purges pages already freed, so it left 5.9 GB; a
   per-query arena would also fix it but needs every kernel to allocate through it.
 
@@ -6659,6 +6666,33 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
+
+# Decision record: string keys sort by rank, and merge pairs come from sorted codes
+
+- **Previous shape.** `order` and `sort` on character vectors compared the strings themselves
+  (a comparison sort over `Vec<String>`-like keys, or text hashed into a map), the radix sort
+  gathered `(key, row)` pairs for every bucket, `paste(collapse =)` built each row as a `String`
+  and joined them, `make.unique` kept every name as a Rust `String` in a hash set, and the
+  `merge` kernel kept an `FxHashMap` of `Vec` per key. Each held a second copy of data the heap
+  already had, so peaks were 1.17 to 1.37 times GNU R's.
+- **Target shape.** A character key becomes `Column::Ranks`: one `u32` per row, the rank of its
+  text among the vector's distinct strings, 0 for `NA` (`string_ranks` in
+  `crates/interp/src/sort.rs`). The distinct strings are found by data.table's trick: each
+  CHARSXP's truelength temporarily holds a negated slot index, checked against the list of slots
+  so a stale value is never trusted, and restored afterwards. Strings are interned, so a CHARSXP
+  is its text per encoding. Only the distinct texts are sorted, by collation for `order` and
+  `sort` and by bytes for the radix method, and the ranks then go through the integer radix sort.
+  The radix sort scatters rows only, and gathers `(key, row)` pairs only for buckets of at most
+  65,536 rows, which fit the cache. `make.unique` with an ASCII separator and ASCII names marks
+  the names the same way and builds candidates as CHARSXPs; `paste(collapse =)` writes all rows
+  into one byte buffer and makes one CHARSXP. `merge`'s matches are found by binary search in
+  sorted `(code, row)` pairs, sized by a counting pass and written straight into the result.
+- **Impact.** At 1e6 rows every base kernel's peak is within 1.13 times GNU R's (`sort(chr)` 1.04,
+  `order(chr)` 1.03 at 0.11 s against 1.9 s, `paste(collapse =)` 0.89, `merge` 0.89 at 0.8 s
+  against 2.2 s, `unsplit` 1.13), and `make.unique` on 1e6 names fell from 227 MB and 0.9 s to
+  127 MB and 0.45 s (GNU R 92 MB, 1.1 s). The truelength marks survive allocation, because the
+  collector never reads truelength and the marked strings stay reachable from the vector being
+  read, but every exit, including an error, must restore them.
 
 ## A release is `ry` alone, with the runtime embedded and the R front end folded in
 

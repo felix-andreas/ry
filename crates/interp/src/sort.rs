@@ -272,19 +272,18 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
             }
         }
         SexpType::String => {
-            let mut items: Vec<Sexp> = (0..length(result))
-                .map(|index| result.element(index))
-                .collect();
-            items.sort_by(|&left, &right| {
-                let ordering = compare_strings_na_last(left, right);
-                if decreasing {
-                    ordering.reverse()
-                } else {
-                    ordering
-                }
-            });
-            for (index, item) in items.into_iter().enumerate() {
-                values::set_elt(result, index, item);
+            // Sorting the strings' collation ranks compares each distinct string once. `NA`
+            // sorts last, or first when decreasing, as the reversed comparison put it.
+            let source = values::materialize(x)?;
+            let ranks = Column::Ranks(string_ranks(source, collate));
+            let Some(keys) = sort_keys(&ranks, decreasing, !decreasing) else {
+                unreachable!("string ranks always have radix keys");
+            };
+            drop(ranks);
+            let mut order = vec![0u32; length(x)];
+            radix_order(&[keys], &mut order);
+            for (index, &row) in order.iter().enumerate() {
+                values::set_elt(result, index, source.element(row as usize));
             }
         }
         _ => {}
@@ -365,10 +364,15 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
             values::refuse_bytes(key)?;
         }
     }
-    // GNU R's `orderVector1` and `listgreater` have no raw case.
+    // GNU R's `orderVector1` and `listgreater` have no raw case. Strings become their ranks
+    // in collation order, so every key but a complex one sorts as integers by the radix sort.
     let columns: Vec<Option<Column<'_>>> = keys
         .iter()
-        .map(|&key| column(key).filter(|_| key.kind() != SexpType::Raw))
+        .map(|&key| match key.kind() {
+            SexpType::Raw => None,
+            SexpType::String => Some(Column::Ranks(string_ranks(key, collate))),
+            _ => column(key),
+        })
         .collect();
     let routine = if keys.len() == 1 {
         "orderVector1"
@@ -377,6 +381,25 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
     };
     if keys.len() == 1 && columns[0].is_none() {
         return Err(unimplemented_type(first, routine));
+    }
+    let radix_keys: Option<Vec<SortKeys>> = columns
+        .iter()
+        .map(|column| {
+            column
+                .as_ref()
+                .and_then(|column| sort_keys(column, decreasing, na_last))
+        })
+        .collect();
+    if let Some(radix_keys) = radix_keys {
+        let permutation = alloc(SexpType::Integer, count)?;
+        let ints = values::ints_mut(permutation);
+        let order: &mut [u32] =
+            std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
+        radix_order(&radix_keys, order);
+        for slot in order.iter_mut() {
+            *slot += 1;
+        }
+        return Ok(permutation);
     }
     let directions = vec![decreasing; columns.len()];
     let unsupported = Cell::new(None);
@@ -1000,9 +1023,11 @@ enum Column<'a> {
     Complex(&'a [Rcomplex]),
     Raw(&'a [u8]),
     String(Vec<Option<Cow<'a, str>>>),
-    /// Strings the radix sort orders: GNU R's radix sort compares bytes, as in the C locale,
-    /// whatever the session's collation.
-    Bytes(Vec<Option<Cow<'a, str>>>),
+    /// Strings as the rank of each element's text among the vector's distinct strings (from 1),
+    /// with 0 for `NA`, so a string key sorts like an integer one. The ranks follow the
+    /// collation for `order`, and bytes, as in the C locale, for the radix sort, which is GNU
+    /// R's rule whatever the session's collation; texts that compare equal rank equal.
+    Ranks(Vec<u32>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
     /// `decreasing` and `na.last` say.
@@ -1040,11 +1065,104 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                 .collect();
             Some(Column::Grouped(codes))
         }
-        _ => match column(vector) {
-            Some(Column::String(items)) => Some(Column::Bytes(items)),
-            other => other,
-        },
+        SexpType::String => Some(Column::Ranks(string_ranks(vector, Ord::cmp))),
+        _ => column(vector),
     }
+}
+
+/// Each element's rank in [`Column::Ranks`], with texts ordered by `compare`. R interns its strings, so equal strings are one
+/// CHARSXP, and only the distinct CHARSXPs are sorted: each is numbered the first time it is
+/// met, with the number negated in its truelength as data.table's C marks strings, which costs
+/// one load per row and no table. The saved truelengths are put back before anything else can
+/// run.
+unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
+    let na = na_string();
+    let rows = length(vector);
+    let mut ranks: Vec<u32> = Vec::with_capacity(rows);
+    let mut saved: Vec<(Sexp, i32)> = Vec::new();
+    let mut stale = false;
+    for index in 0..rows {
+        let charsxp = vector.element(index);
+        if charsxp == na {
+            ranks.push(0);
+            continue;
+        }
+        let mark = charsxp.char_truelength();
+        if mark < 0 {
+            // A mark this loop did not set (one left behind by C code that stopped midway)
+            // would alias two strings, so it is checked against its owner.
+            let code = mark.unsigned_abs();
+            let ours = (code as usize)
+                .checked_sub(1)
+                .and_then(|slot| saved.get(slot))
+                .is_some_and(|(owner, _)| *owner == charsxp);
+            if !ours {
+                stale = true;
+                break;
+            }
+            ranks.push(code);
+            continue;
+        }
+        saved.push((charsxp, mark));
+        let code = saved.len() as u32;
+        charsxp.set_char_truelength(-(code as i32));
+        ranks.push(code);
+    }
+    for (charsxp, mark) in &saved {
+        charsxp.set_char_truelength(*mark);
+    }
+    if stale {
+        return string_ranks_by_text(vector, compare);
+    }
+    // Strings intern by encoding, so one text can be several CHARSXPs, which share a rank.
+    let texts: Vec<Cow<'_, str>> = saved
+        .iter()
+        .map(|&(charsxp, _)| char_str(charsxp))
+        .collect();
+    let mut by_text: Vec<u32> = (0..texts.len() as u32).collect();
+    by_text
+        .sort_unstable_by(|&left, &right| compare(&texts[left as usize], &texts[right as usize]));
+    let mut rank_of_code = vec![0u32; texts.len()];
+    let mut rank = 0;
+    for (position, &code) in by_text.iter().enumerate() {
+        if position == 0
+            || compare(
+                &texts[by_text[position - 1] as usize],
+                &texts[code as usize],
+            )
+            .is_ne()
+        {
+            rank += 1;
+        }
+        rank_of_code[code as usize] = rank;
+    }
+    for slot in ranks.iter_mut().filter(|slot| **slot != 0) {
+        *slot = rank_of_code[*slot as usize - 1];
+    }
+    ranks
+}
+
+/// [`string_ranks`] through a table of the texts, for a vector whose strings carry truelength
+/// marks the CHARSXP numbering cannot use.
+unsafe fn string_ranks_by_text(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
+    let mut distinct: FxHashMap<Cow<'_, str>, u32> = FxHashMap::default();
+    for index in 0..length(vector) {
+        if let Some(text) = string_at(vector, index) {
+            distinct.entry(text).or_insert(0);
+        }
+    }
+    let mut sorted: Vec<Cow<'_, str>> = distinct.keys().cloned().collect();
+    sorted.sort_unstable_by(|left, right| compare(left, right));
+    let mut rank = 0;
+    for position in 0..sorted.len() {
+        if position == 0 || compare(&sorted[position - 1], &sorted[position]).is_ne() {
+            rank += 1;
+        }
+        distinct.insert(sorted[position].clone(), rank);
+    }
+    (0..length(vector))
+        .map(|index| string_at(vector, index).map_or(0, |text| distinct[&text]))
+        .collect()
 }
 
 impl Column<'_> {
@@ -1053,7 +1171,8 @@ impl Column<'_> {
             Column::Integer(items) => items[index] == NA_INTEGER,
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
-            Column::String(items) | Column::Bytes(items) => items[index].is_none(),
+            Column::String(items) => items[index].is_none(),
+            Column::Ranks(ranks) => ranks[index] == 0,
             Column::Grouped(_) | Column::Raw(_) => false,
         }
     }
@@ -1078,7 +1197,7 @@ impl Column<'_> {
                 (Some(left), Some(right)) => collate(left, right),
                 _ => Ordering::Equal,
             },
-            Column::Bytes(items) => items[left].cmp(&items[right]),
+            Column::Ranks(items) => items[left].cmp(&items[right]),
         }
     }
 
@@ -1207,22 +1326,13 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
         Column::Grouped(items) => Some(SortKeys::Narrow(
             items.iter().map(|&code| code as u32).collect(),
         )),
-        Column::Bytes(items) => {
-            let mut distinct: FxHashMap<&str, u64> = FxHashMap::default();
-            for item in items.iter().flatten() {
-                distinct.entry(item.as_ref()).or_insert(0);
-            }
-            let mut sorted: Vec<&str> = distinct.keys().copied().collect();
-            sorted.sort_unstable();
-            for (rank, text) in sorted.iter().enumerate() {
-                distinct.insert(text, rank as u64 + 1);
-            }
+        Column::Ranks(ranks) => {
             // The ranks count the rows at most, which are fewer than `u32::MAX`.
-            let top = sorted.len() as u64 + 1;
+            let top = u64::from(ranks.iter().copied().max().unwrap_or(0)) + 1;
             Some(SortKeys::Narrow(
-                items
+                ranks
                     .iter()
-                    .map(|item| place(item.as_deref().map(|text| distinct[text]), top) as u32)
+                    .map(|&rank| place((rank != 0).then_some(u64::from(rank)), top) as u32)
                     .collect(),
             ))
         }
@@ -1354,8 +1464,10 @@ fn sort_by_key<K: RadixKey>(
         sink.emit(0, &pairs);
         return runs;
     }
-    // The first digit scatters straight from the key, so the pairs are written once before
-    // the recursion takes over.
+    // The first digit scatters the rows straight into `order`. Each bucket then sorts on its
+    // own: one short enough gathers its `(key, row)` pairs into buffers sized to it, and a
+    // larger one scatters its rows by the next digit first. Rows alone move until a bucket is
+    // short, so the scratch is a `u32` per row at most, not two buffers of pairs.
     let mut shift = u64::BITS - span.leading_zeros();
     let sizes = loop {
         shift = shift.saturating_sub(DIGIT);
@@ -1367,31 +1479,90 @@ fn sort_by_key<K: RadixKey>(
             break sizes;
         }
     };
-    let mut pairs = vec![(K::narrow(0), 0u32); count];
-    let mut scratch = vec![(K::narrow(0), 0u32); count];
     let mut cursors = bucket_starts(&sizes);
     for position in 0..count {
         let row = row(position);
-        let key = key[row as usize].wide() - low;
-        let cursor = &mut cursors[digit(key, shift)];
-        pairs[*cursor] = (K::narrow(key), row);
+        let cursor = &mut cursors[digit(key[row as usize].wide() - low, shift)];
+        sink.order[*cursor] = row;
         *cursor += 1;
     }
+    drop(rows);
+    let mut buffers = RowBuffers {
+        pairs: Vec::new(),
+        scratch: Vec::new(),
+        rows: Vec::new(),
+    };
     for (start, &size) in bucket_starts(&sizes).into_iter().zip(&sizes) {
-        let end = start + size;
-        if shift == 0 || size == 1 {
-            sink.emit(start, &pairs[start..end]);
-        } else if size > 1 {
-            msd_sort(
-                &mut pairs[start..end],
-                &mut scratch[start..end],
-                shift,
-                &mut sink,
-                start,
-            );
-        }
+        sort_bucket(key, low, &mut sink, start, size, shift, &mut buffers);
     }
     runs
+}
+
+/// Above this many rows a bucket scatters its rows by the next digit instead of gathering
+/// pairs, which bounds the pair buffers at a few megabytes.
+const GATHER: usize = 1 << 16;
+
+/// The scratch of [`sort_bucket`], grown to the largest bucket that needs it.
+struct RowBuffers<K> {
+    pairs: Vec<(K, u32)>,
+    scratch: Vec<(K, u32)>,
+    rows: Vec<u32>,
+}
+
+/// Sorts the `size` rows at `offset` in the sink's order, whose keys less `low` agree above bit
+/// `shift`, and which are in increasing row order where their keys tie.
+fn sort_bucket<K: RadixKey>(
+    key: &[K],
+    low: u64,
+    sink: &mut Sink<'_>,
+    offset: usize,
+    size: usize,
+    shift: u32,
+    buffers: &mut RowBuffers<K>,
+) {
+    if size <= 1 {
+        return;
+    }
+    if shift == 0 {
+        if let Some(runs) = sink.runs.as_deref_mut() {
+            runs.push((offset, offset + size));
+        }
+        return;
+    }
+    let range = offset..offset + size;
+    if size <= GATHER {
+        buffers.pairs.clear();
+        buffers.pairs.extend(
+            sink.order[range]
+                .iter()
+                .map(|&row| (K::narrow(key[row as usize].wide() - low), row)),
+        );
+        buffers.scratch.resize(size, (K::narrow(0), 0));
+        let mut pairs = std::mem::take(&mut buffers.pairs);
+        let mut scratch = std::mem::take(&mut buffers.scratch);
+        msd_sort(&mut pairs, &mut scratch[..size], shift, sink, offset);
+        buffers.pairs = pairs;
+        buffers.scratch = scratch;
+        return;
+    }
+    let shift = shift.saturating_sub(DIGIT);
+    let mut sizes = [0usize; BUCKETS];
+    for &row in &sink.order[range.clone()] {
+        sizes[digit(key[row as usize].wide() - low, shift)] += 1;
+    }
+    if !sizes.contains(&size) {
+        buffers.rows.clear();
+        buffers.rows.extend_from_slice(&sink.order[range]);
+        let mut cursors = bucket_starts(&sizes);
+        for &row in &buffers.rows {
+            let cursor = &mut cursors[digit(key[row as usize].wide() - low, shift)];
+            sink.order[offset + *cursor] = row;
+            *cursor += 1;
+        }
+    }
+    for (start, &bucket) in bucket_starts(&sizes).iter().zip(&sizes) {
+        sort_bucket(key, low, sink, offset + start, bucket, shift, buffers);
+    }
 }
 
 /// Below this many pairs a comparison sort beats another radix pass.
@@ -1565,17 +1736,6 @@ fn compare_rows(
         }
     }
     Ordering::Equal
-}
-
-/// Increasing order for character elements, NA last.
-unsafe fn compare_strings_na_last(left: Sexp, right: Sexp) -> Ordering {
-    let na = na_string();
-    match (left == na, right == na) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => collate(&char_str(left), &char_str(right)),
-    }
 }
 
 /// Complex order: by real part, then imaginary part. Any comparison with NaN is false.
@@ -2539,19 +2699,36 @@ unsafe fn do_merge(call: &Call<'_>) -> R<Sexp> {
     }
     let x = values::ints(x_codes);
     let y = values::ints(y_codes);
-    let mut rows_of_code: FxHashMap<i32, Vec<usize>> = FxHashMap::default();
-    for (row, &code) in y.iter().enumerate() {
-        if code > 0 {
-            rows_of_code.entry(code).or_default().push(row + 1);
+    // The y rows sorted by code, row order kept within a code, so each code's rows are one
+    // range found by binary search; the result vectors are sized by a counting pass, so nothing
+    // but the results grows with the matches.
+    let mut y_by_code: Vec<(i32, i32)> = y
+        .iter()
+        .enumerate()
+        .filter(|(_, code)| **code > 0)
+        .map(|(row, &code)| (code, row as i32 + 1))
+        .collect();
+    y_by_code.sort_unstable();
+    let matches_of = |code: i32| -> &[(i32, i32)] {
+        if code <= 0 {
+            return &[];
         }
-    }
-    let mut x_rows = Vec::new();
-    let mut y_rows = Vec::new();
-    for (row, &code) in x.iter().enumerate() {
-        if let Some(matches) = rows_of_code.get(&code).filter(|_| code > 0) {
-            for &y_row in matches {
-                x_rows.push(row as i32 + 1);
-                y_rows.push(y_row as i32);
+        let start = y_by_code.partition_point(|&(other, _)| other < code);
+        let end = start + y_by_code[start..].partition_point(|&(other, _)| other == code);
+        &y_by_code[start..end]
+    };
+    let pairs: usize = x.iter().map(|&code| matches_of(code).len()).sum();
+    let x_rows = alloc(SexpType::Integer, pairs)?;
+    let y_rows = alloc(SexpType::Integer, pairs)?;
+    {
+        let x_slots = values::ints_mut(x_rows);
+        let y_slots = values::ints_mut(y_rows);
+        let mut next = 0;
+        for (row, &code) in x.iter().enumerate() {
+            for &(_, y_row) in matches_of(code) {
+                x_slots[next] = row as i32 + 1;
+                y_slots[next] = y_row;
+                next += 1;
             }
         }
     }
@@ -2567,10 +2744,12 @@ unsafe fn do_merge(call: &Call<'_>) -> R<Sexp> {
             .collect();
         values::integer_vector(&rows)
     };
+    let x_alone = alone(x, all_x == 1)?;
+    let y_alone = alone(y, all_y == 1)?;
     values::named_list(&[
-        ("xi", values::integer_vector(&x_rows)?),
-        ("yi", values::integer_vector(&y_rows)?),
-        ("x.alone", alone(x, all_x == 1)?),
-        ("y.alone", alone(y, all_y == 1)?),
+        ("xi", x_rows),
+        ("yi", y_rows),
+        ("x.alone", x_alone),
+        ("y.alone", y_alone),
     ])
 }

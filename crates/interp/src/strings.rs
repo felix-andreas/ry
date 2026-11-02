@@ -11,7 +11,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, require},
-        coerce::coerce_vector,
+        coerce::{coerce_vector, integer_digits},
         conditions::warning,
         eval,
         format::{display_width, scientific_text},
@@ -154,8 +154,7 @@ unsafe fn paste(
         }
         encoding
     };
-    let join = |charsxps: &[Sexp], encoding: Encoding| {
-        let mut bytes = Vec::new();
+    let join_into = |bytes: &mut Vec<u8>, charsxps: &[Sexp], encoding: Encoding| {
         for &charsxp in charsxps {
             if charsxp == na_string() {
                 bytes.extend_from_slice(b"NA");
@@ -165,11 +164,8 @@ unsafe fn paste(
                 bytes.extend_from_slice(charsxp.bytes());
             }
         }
-        bytes
     };
-    let result = alloc(SexpType::String, count)?;
-    let mut parts = Vec::new();
-    for row in 0..count {
+    let row_pieces = |parts: &mut Vec<Sexp>, row: usize| {
         parts.clear();
         for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
             if position > 0
@@ -181,22 +177,84 @@ unsafe fn paste(
                 parts.push(column.element(row % column_length));
             }
         }
-        let encoding = encoding_of(&parts);
-        values::set_mkchar_bytes(result, row, &join(&parts, encoding), encoding)?;
-    }
+    };
+    let mut parts = Vec::new();
     let Some(collapse) = collapse else {
+        let result = alloc(SexpType::String, count)?;
+        let mut bytes = Vec::new();
+        for row in 0..count {
+            row_pieces(&mut parts, row);
+            let encoding = encoding_of(&parts);
+            bytes.clear();
+            join_into(&mut bytes, &parts, encoding);
+            values::set_mkchar_bytes(result, row, &bytes, encoding)?;
+        }
         return Ok(result);
     };
-    parts.clear();
+    // With `collapse`, each row's bytes go straight into the one result instead of becoming a
+    // string of their own, and the buffer is sized up front, so the peak is the joined text
+    // and its copy in the result. The bytes are those the row's string would hold, and the
+    // result's encoding follows from what each row's string would be marked: ASCII text is
+    // marked ASCII whatever its pieces were.
+    let mut estimate = 0;
+    for row in 0..count {
+        row_pieces(&mut parts, row);
+        estimate += parts
+            .iter()
+            .map(|&charsxp| {
+                if charsxp == na_string() {
+                    2
+                } else {
+                    charsxp.bytes().len()
+                }
+            })
+            .sum::<usize>();
+    }
+    let collapse_bytes = collapse.bytes();
+    estimate += count.saturating_sub(1) * collapse_bytes.len();
+    let mut bytes = Vec::with_capacity(estimate);
+    let mut encoding = if count > 1 {
+        encoding_of(&[collapse])
+    } else {
+        Encoding::Native
+    };
+    let collapse_latin1 = collapse.has_gp(gp::LATIN1);
+    let mut latin1_collapses = Vec::new();
     for row in 0..count {
         if row > 0 {
-            parts.push(collapse);
+            if collapse_latin1 {
+                // Whether the collapse is translated depends on the result's encoding, which is
+                // known only at the end.
+                latin1_collapses.push(bytes.len());
+            }
+            bytes.extend_from_slice(collapse_bytes);
         }
-        parts.push(result.element(row));
+        row_pieces(&mut parts, row);
+        let row_encoding = encoding_of(&parts);
+        let start = bytes.len();
+        join_into(&mut bytes, &parts, row_encoding);
+        match row_encoding {
+            Encoding::Bytes => encoding = Encoding::Bytes,
+            Encoding::Utf8 if encoding == Encoding::Native && !bytes[start..].is_ascii() => {
+                encoding = Encoding::Utf8;
+            }
+            _ => {}
+        }
     }
-    let encoding = encoding_of(&parts);
+    if !latin1_collapses.is_empty() && encoding != Encoding::Bytes {
+        let translated = values::char_str(collapse);
+        let mut joined = Vec::with_capacity(bytes.len());
+        let mut from = 0;
+        for &at in &latin1_collapses {
+            joined.extend_from_slice(&bytes[from..at]);
+            joined.extend_from_slice(translated.as_bytes());
+            from = at + collapse_bytes.len();
+        }
+        joined.extend_from_slice(&bytes[from..]);
+        bytes = joined;
+    }
     let collapsed = alloc(SexpType::String, 1)?;
-    values::set_mkchar_bytes(collapsed, 0, &join(&parts, encoding), encoding)?;
+    values::set_mkchar_bytes(collapsed, 0, &bytes, encoding)?;
     Ok(collapsed)
 }
 
@@ -1605,6 +1663,14 @@ unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(error("'sep' must be a character string")),
     };
+    let ascii = separator.is_ascii()
+        && (0..length(names)).all(|index| {
+            let charsxp = names.element(index);
+            charsxp == na_string() || charsxp.has_gp(gp::ASCII)
+        });
+    if ascii {
+        return make_unique_interned(names, separator.as_bytes());
+    }
     // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA, and
     // a repeat is made unique from the text "NA", as in GNU R.
     let original: Vec<Option<String>> = strings(names);
@@ -1630,6 +1696,115 @@ unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
         made.push(Some(candidate));
     }
     values::string_vector_na(&made)
+}
+
+/// `make.unique` over ASCII names, which works on the strings themselves rather than copies of
+/// their text. R interns its strings and ASCII text has one CHARSXP, so a name is taken exactly
+/// when its CHARSXP is marked. The mark is the CHARSXP's truelength, negated, as data.table's C
+/// marks strings: it numbers the string's slot in `marked`, which keeps the truelength to put
+/// back and, for a name of the input, the next suffix to try (0 until its first occurrence has
+/// been kept). Copying every name into owned text took about 150 MB for a million names, which
+/// `[.data.frame` builds row names from whenever its row index repeats.
+unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
+    struct Marked {
+        strings: Vec<Sexp>,
+        truelengths: Vec<i32>,
+        counters: Vec<u32>,
+    }
+    impl Marked {
+        /// The slot of `charsxp` if this call marked it; a negative truelength another
+        /// caller left behind names no slot of ours.
+        unsafe fn slot(&self, charsxp: Sexp) -> Option<usize> {
+            let mark = charsxp.char_truelength();
+            let slot = (mark < 0).then(|| mark.unsigned_abs() as usize - 1)?;
+            (self.strings.get(slot) == Some(&charsxp)).then_some(slot)
+        }
+
+        unsafe fn mark(&mut self, charsxp: Sexp) -> usize {
+            let slot = self.strings.len();
+            self.strings.push(charsxp);
+            self.truelengths.push(charsxp.char_truelength());
+            self.counters.push(0);
+            charsxp.set_char_truelength(-(slot as i32 + 1));
+            slot
+        }
+
+        unsafe fn restore(&self) {
+            for (&charsxp, &truelength) in self.strings.iter().zip(&self.truelengths) {
+                charsxp.set_char_truelength(truelength);
+            }
+        }
+    }
+    let na = na_string();
+    let count = length(names);
+    // Each name marks at most one string, its own or the one made for it, so the slots never
+    // grow past the names and never reallocate.
+    let mut marked = Marked {
+        strings: Vec::with_capacity(count),
+        truelengths: Vec::with_capacity(count),
+        counters: Vec::with_capacity(count),
+    };
+    for index in 0..count {
+        let charsxp = names.element(index);
+        if charsxp != na && marked.slot(charsxp).is_none() {
+            marked.mark(charsxp);
+        }
+    }
+    let result = made_unique(names, separator, &mut marked);
+    marked.restore();
+    return result;
+
+    unsafe fn made_unique(names: Sexp, separator: &[u8], marked: &mut Marked) -> R<Sexp> {
+        let na = na_string();
+        let count = length(names);
+        let result = alloc(SexpType::String, count)?;
+        // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA,
+        // and a repeat is made unique from the text "NA", as in GNU R.
+        let mut na_counter = 0;
+        let mut candidate = Vec::new();
+        for index in 0..count {
+            let charsxp = names.element(index);
+            let (counter, text): (&mut u32, &[u8]) = if charsxp == na {
+                (&mut na_counter, b"NA")
+            } else {
+                let slot = marked
+                    .slot(charsxp)
+                    .ok_or_else(|| error("a name lost its mark while 'make.unique' ran"))?;
+                (&mut marked.counters[slot], charsxp.bytes())
+            };
+            if *counter == 0 {
+                *counter = 1;
+                set_elt(result, index, charsxp);
+                continue;
+            }
+            let mut next = *counter;
+            let made = loop {
+                candidate.clear();
+                candidate.extend_from_slice(text);
+                candidate.extend_from_slice(separator);
+                // A suffix counts the names, which fit an `i32`.
+                candidate.extend_from_slice(integer_digits(next as i32, &mut [0; 11]));
+                next += 1;
+                let made = crate::heap().mk_char(&candidate, Encoding::Native)?;
+                if marked.slot(made).is_none() {
+                    break made;
+                }
+            };
+            set_elt(result, index, made);
+            marked.mark(made);
+            // `mark` may have grown the counters, so the slot is looked up again.
+            let counter = if charsxp == na {
+                &mut na_counter
+            } else {
+                let slot = marked
+                    .slot(charsxp)
+                    .ok_or_else(|| error("a name lost its mark while 'make.unique' ran"))?;
+                &mut marked.counters[slot]
+            };
+            *counter = next;
+        }
+        Ok(result)
+    }
 }
 
 unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
