@@ -69,6 +69,9 @@ pub unsafe fn port_nlminb(call: &NativeCall<'_>) -> R<Sexp> {
     let start = real_values(coerce_vector(par, SexpType::Real)?)?;
     let n = start.len();
     let scale = real_values(coerce_vector(call.arg(6), SexpType::Real)?)?;
+    if n == 0 {
+        return Err(call.error("'d' must be a nonempty numeric vector"));
+    }
     if scale.len() != n {
         return Err(call.error(format!("'d' must be a numeric vector of length {n}")));
     }

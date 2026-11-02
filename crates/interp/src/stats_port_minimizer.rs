@@ -1484,8 +1484,9 @@ fn dd7dgb(
     let gnorm0 = v.dgnorm;
     v.dstnrm = 0.0;
     let mut dnwtst = 0.0;
-    // PORT leaves NRED unset when no variable is free. Any value other than zero then gives
-    // the reference's outcome, X-convergence; NaN keeps it from reading as a reduction.
+    // PORT leaves NRED unset when no variable is free. NaN keeps it from reading as a
+    // reduction, which gives X-convergence (code 3); GNU R's build gives that only where the
+    // objective is zero at the bound and reports code 5 otherwise (see backlog.md).
     let mut nred = f64::NAN;
     if *ka >= 0 {
         dnwtst = v.dst0;

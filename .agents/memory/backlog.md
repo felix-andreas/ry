@@ -2318,6 +2318,13 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     bookkeeping (`DS7BQN`, `DD7DGB`, the `G0` aliasing, `DV7IPR` permutations) and `DRMNG`'s
     restore path after a failed evaluation (`TOOBIG`, statements 190-200). Compare evaluated
     points with `sprintf("%a")` against Rscript to find the first differing step.
+    A bounded run (finite differences or gradient) that ends with no free variable reports
+    X-convergence (3) where GNU R reports 5 unless the objective is 0 there:
+    `nlminb(1, function(x) sum((x-3)^2), lower=0, upper=2)`. `DD7DGB` leaves `NRED` unset in
+    that case and ry uses NaN; keeping the previous `nreduc` fixes `lower = upper` starts but
+    breaks the zero-objective start pinned in `stats__nlminb_port_paths`. Also minor:
+    a gradient that returns a list errors on ry and works in GNU R, and a non-numeric
+    objective misses GNU R's "NAs introduced by coercion" warning (`stats_port.rs`, `Objective`).
   - data.table: `S4`, `autoprint`, `knitr`, `other` and `types` pass. `main.Rraw` reports about
     700 failing tests (among them `-xtfrm(col)` on a character column, `scan()` reading
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2

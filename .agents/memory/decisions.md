@@ -2332,7 +2332,7 @@ primitives, and nothing built or installed packages.
   PORT's `DITSUM` points when `niter % trace == 0`; dparck's control checks report the last bad
   `v` slot and a nonpositive `scale` gives code 18. Quirks kept to match: `DRMNGB`'s `G0` shares
   storage with `DD7DGB`'s and `DQ7RSH`'s scratch, `DD7DGB` leaves `NRED` unset with no free
-  variables (a start on an active bound returns code 3 after one iteration), and `DS7BQN` keeps
+  variables (a start on an active bound where the objective is 0 returns code 3 after one iteration), and `DS7BQN` keeps
   the last violating index. `DV2NRM` is BLAS `dnrm2` (LAPACK 3.12's Blue algorithm), not PORT's
   scaled norm, because GNU R links PORT's norm to the BLAS: with PORT's own norm the iterates
   differ in the last bit from the second step. `stats__nlminb_port_paths` pins the matching
