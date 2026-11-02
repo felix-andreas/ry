@@ -174,7 +174,96 @@ pub fn package_source(package_dir: &Path) -> io::Result<PackageSource> {
         }
         text.push('\n');
     }
+
+    let primitives = primitive_signatures(&index, &data);
+    if !primitives.is_empty() {
+        text.push_str("\n# Primitive functions have no R code, so these show only the arguments args() reports.\n");
+    }
+    for (primitive, formals) in primitives {
+        if definitions.iter().any(|(name, _)| *name == primitive) {
+            continue;
+        }
+        text.push('\n');
+        let start = text.len();
+        text.push_str(&deparse(&Value::Symbol(primitive.as_str().into())));
+        definitions.push((primitive.clone(), start..text.len()));
+        let body = Value::Language(
+            Box::new(Value::Symbol(".Primitive".into())),
+            vec![Argument {
+                name: None,
+                value: Value::Character(Vector {
+                    elements: vec![Some(primitive)],
+                    attributes: Vec::new(),
+                }),
+            }],
+        );
+        text.push_str(" <- ");
+        text.push_str(&deparse(&Value::Closure(Box::new(Closure {
+            formals,
+            body,
+            attributes: Vec::new(),
+        }))));
+        text.push('\n');
+    }
     Ok(PackageSource { text, definitions })
+}
+
+/// The argument lists of base's primitives, sorted by name. Base records them as closures with
+/// empty bodies in the `.ArgsEnv` and `.GenericArgsEnv` environments (what `args(sum)`
+/// reads), and the lazy-load database stores each environment as a record of its own: a list
+/// whose `bindings` element holds the closures.
+fn primitive_signatures(index: &Index, data: &[u8]) -> Vec<(String, Vec<Argument>)> {
+    let mut signatures = Vec::new();
+    for environment in [".ArgsEnv", ".GenericArgsEnv"] {
+        let Some((_, record)) = index.variables.iter().find(|(name, _)| name == environment) else {
+            continue;
+        };
+        let Ok(Value::Environment(found)) = fetch(data, record, index.compression) else {
+            continue;
+        };
+        let Environment::Persistent(keys) = found.as_ref() else {
+            continue;
+        };
+        let Some((_, record)) = keys
+            .first()
+            .and_then(|key| index.references.iter().find(|(name, _)| name == key))
+        else {
+            continue;
+        };
+        let Ok(stored) = fetch(data, record, index.compression) else {
+            continue;
+        };
+        let Value::List(fields) = &stored else {
+            continue;
+        };
+        let Some(bindings) = stored
+            .names()
+            .and_then(|names| {
+                names
+                    .iter()
+                    .position(|name| name.as_deref() == Some("bindings"))
+            })
+            .and_then(|position| fields.elements.get(position))
+        else {
+            continue;
+        };
+        let Value::List(closures) = bindings else {
+            continue;
+        };
+        for (name, closure) in bindings
+            .names()
+            .unwrap_or(&[])
+            .iter()
+            .zip(&closures.elements)
+        {
+            if let (Some(name), Value::Closure(closure)) = (name, closure) {
+                signatures.push((name.clone(), closure.formals.clone()));
+            }
+        }
+    }
+    signatures.sort_by(|left, right| left.0.cmp(&right.0));
+    signatures.dedup_by(|left, right| left.0 == right.0);
+    signatures
 }
 
 /// The help topic `topic` of the package at `package_dir` as Markdown, found through the
@@ -229,6 +318,8 @@ pub fn defines(package_dir: &Path, name: &str) -> bool {
 /// compressed.
 struct Index {
     variables: Vec<(String, Record)>,
+    /// Environments stored as records of their own, by the key a `Persistent` value names.
+    references: Vec<(String, Record)>,
     /// `lazyLoadDBfetch`'s `compressed`: 0 none, 1 zlib, 2 and 3 a per-record method byte.
     compression: i32,
 }
@@ -287,12 +378,23 @@ fn read_index(path: &Path) -> io::Result<Index> {
         Some(Value::Double(vector)) => vector.elements.first().map_or(1, |&value| value as i32),
         _ => 1,
     };
-    let Some(variables @ Value::List(entries)) = field("variables") else {
+    let Some(variables) = field("variables") else {
         return Err(invalid("lazy-load index has no variables"));
     };
-    let variable_names = variables.names().unwrap_or(&[]);
+    Ok(Index {
+        variables: records(variables)?,
+        references: field("references").map_or(Ok(Vec::new()), records)?,
+        compression,
+    })
+}
+
+fn records(table: &Value) -> io::Result<Vec<(String, Record)>> {
+    let Value::List(entries) = table else {
+        return Err(invalid("lazy-load index table is not a list"));
+    };
+    let names = table.names().unwrap_or(&[]);
     let mut records = Vec::with_capacity(entries.elements.len());
-    for (name, entry) in variable_names.iter().zip(&entries.elements) {
+    for (name, entry) in names.iter().zip(&entries.elements) {
         let Some(name) = name else { continue };
         let bounds: Option<[f64; 2]> = match entry {
             Value::Integer(vector) => match vector.elements.as_slice() {
@@ -316,10 +418,7 @@ fn read_index(path: &Path) -> io::Result<Index> {
             },
         ));
     }
-    Ok(Index {
-        variables: records,
-        compression,
-    })
+    Ok(records)
 }
 
 fn fetch(data: &[u8], record: &Record, compression: i32) -> io::Result<Value> {

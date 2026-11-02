@@ -194,7 +194,7 @@ completion (2): fi, first_field
 #---- single_colon_not_namespace
 pkg:al$0
 #++++
-hover 0..6: Unknown
+hover 4..6: al
 hover-definition: installed al from base, stats, utils, methods, graphics, grDevices, datasets
 definition: installed al from base, stats, utils, methods, graphics, grDevices, datasets
 references: none

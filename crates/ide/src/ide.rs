@@ -211,6 +211,34 @@ fn typed_hover(
             definition: None,
         });
     }
+    // A callee the checker types through a special rule (`c`, `lapply`) or an overload it could
+    // not settle records no type of its own; its declared signature still says what it takes,
+    // which beats widening to the call's result.
+    if let Some(innermost) = position.expression_at()
+        && check.expression_types.get(&innermost).is_none()
+        && let ExpressionKind::NameRef(name) = &hir.kind(innermost)
+        && item_naming(db, position.item)
+            .as_ref()
+            .is_some_and(|naming| naming.non_locals.contains_key(&innermost))
+    {
+        // With neither a project nor a stub declaration, the caller attaches the installed
+        // package's documentation instead.
+        let (lines, definition) = match referenced_scheme(db, files, name, &check, innermost) {
+            Some(mut scheme) => {
+                scheme.body = without_impossible_vectors(db, scheme.body);
+                (
+                    hover_lines(db, name, &scheme),
+                    hover_definition(db, files, position.item, innermost, name),
+                )
+            }
+            None => (vec![name.to_string()], None),
+        };
+        return Some(Hover {
+            range: trim_trailing_trivia(file.text(db), hir.range(innermost) + position.item_offset),
+            lines,
+            definition,
+        });
+    }
     // Write targets and operators record no type, so the hover widens to the enclosing typed
     // expression.
     let (expression, ty) = position

@@ -719,3 +719,39 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
 completion (128+): S3Class, S3Part, sample, sample.int, sapply, save, save.image, savehistory
 hint @5: integer
+
+#==== hover_untyped_callees
+#---- lapply_unknown
+f <- function(objs) {
+  lap$0ply(objs, function(x) {
+    x
+  })
+}
+#++++
+hover 24..30: lapply: <T, U> fn(
+hover 24..30:   X: list[T] | T[] | formula | NULL,
+hover 24..30:   FUN: fn(T) -> U,
+hover 24..30:   ...: Any,
+hover 24..30: ) -> list[U]
+hover-definition: package base (2 declaration(s), declared in stub source base at `lapply`)
+definition: stub source base at `lapply`
+references: none
+rename: none
+signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U] (active)
+parameters: [X: list[named: T]] | FUN: fn(T) -> U | ...: Any
+signature: <T, U> fn(X: list[T] | T[] | formula | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+parameters: [X: list[T] | T[] | formula | NULL] | FUN: fn(T) -> U | ...: Any
+completion (58): lapply, lag.plot, LazyFrame.explain, LazyFrame.group_by, LazyFrame.scan_parquet, LazyGroupBy.agg, List.append, List.append_if_ok
+
+#---- c_unknown
+f <- function(a, b) {
+  x <- $0c(a, b)
+}
+#++++
+hover 29..30: c
+hover-definition: installed c from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed c from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+completion (128+): a, b, x, f, break, else, FALSE, for
