@@ -11,8 +11,8 @@
 
 use {
     crate::{
-        Code, Loader, NamespaceConditions, Source, cache_directory, find_package_root,
-        package_cache_path, parse_namespace_conditions,
+        Code, Loader, NamespaceConditions, Source, find_package_root, package_cache_path,
+        parse_namespace_conditions,
         r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
     },
     heap::object::{Sexp, SexpType},
@@ -529,31 +529,13 @@ unsafe fn do_compile(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// ry's R home for this runtime, assembled in the user's cache on first use (`rcmd::cached_home`)
-/// from this `libR`, the `ry-rcmd` front end beside it, and the base R the session runs.
+/// ry's R home for this runtime (`rcmd::runtime_home`), with the base R the session runs.
 fn ry_home() -> Result<PathBuf, String> {
     let libr = interp::platform::library_path(do_compile as *const c_void)
         .map(PathBuf::from)
         .ok_or("cannot tell which file ry's runtime was loaded from")?;
-    let rcmd = libr.with_file_name(if cfg!(windows) {
-        "ry-rcmd.exe"
-    } else {
-        "ry-rcmd"
-    });
-    if !rcmd.is_file() {
-        return Err(format!(
-            "compiling src/ needs ry's R front end {}, which is missing",
-            rcmd.display()
-        ));
-    }
-    let cache = cache_directory()
-        .ok_or(
-            "compiling src/ needs a cache directory, and neither XDG_CACHE_HOME nor HOME is set",
-        )?
-        .join("ry")
-        .join("home");
     let gnu_r_home = PathBuf::from(interp::system::r_home());
-    rcmd::cached_home(&cache, &libr, &rcmd, &gnu_r_home).map_err(|failure| failure.to_string())
+    rcmd::runtime_home(&libr, &gnu_r_home).map_err(|failure| failure.to_string())
 }
 
 /// `.Internal(ryLoaderDeferred(root))`: `list(position, path, line)` of the statements held

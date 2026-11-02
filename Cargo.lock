@@ -3626,6 +3626,7 @@ dependencies = [
  "libloading",
  "nu-ansi-term",
  "portable-pty",
+ "rcmd",
  "reedline",
  "syntax",
 ]

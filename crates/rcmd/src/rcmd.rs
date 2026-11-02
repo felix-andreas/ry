@@ -514,6 +514,37 @@ exec "$cmd" $extra "$@"
     )
 }
 
+/// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
+/// ([`cached_home`]) from `libr`, the `ry-rcmd` front end that ships beside it, and the base R
+/// of `gnu_r_home`.
+pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
+    let rcmd = libr.with_file_name(if cfg!(windows) {
+        "ry-rcmd.exe"
+    } else {
+        "ry-rcmd"
+    });
+    if !rcmd.is_file() {
+        return Err(Error::Package(format!(
+            "ry's R front end {} is missing; it ships beside {}",
+            rcmd.display(),
+            libr.display()
+        )));
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
+        .ok_or_else(|| {
+            Error::Package(
+                "ry's R home lives in a cache directory, and neither XDG_CACHE_HOME nor HOME is set"
+                    .into(),
+            )
+        })?
+        .join("ry")
+        .join("home");
+    cached_home(&cache, libr, &rcmd, gnu_r_home)
+}
+
 /// ry's R home for the runtime `libr` and the front end `rcmd`, assembled under `cache` the
 /// first time it is asked for, with ry's embedded headers and the base R of `gnu_r_home`.
 /// The home is named by everything it is built from, so a rebuilt `libR` or another GNU R gets
@@ -1205,7 +1236,10 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         }
                     }
                 }
-                let library = library.unwrap_or_else(|| home.join("library"));
+                let library = match library {
+                    Some(library) => library,
+                    None => default_library(home)?,
+                };
                 let mut output = String::new();
                 for package in packages {
                     let installed = install(home, &package, &library, &options)?;
@@ -1229,6 +1263,31 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
             "usage: R CMD INSTALL|SHLIB|config ... or R RHOME".into(),
         )),
     }
+}
+
+/// The library `R CMD INSTALL` installs into without `-l`: the first of `.libPaths()` in a
+/// session of the home's R, as for GNU R, so `R_LIBS`, `R_LIBS_USER` and the site library
+/// decide it in the same order.
+pub fn default_library(home: &Path) -> Result<PathBuf> {
+    let mut command = Command::new(home.join("bin").join("Rscript"));
+    command.args(["--no-echo", "--no-restore", "-e", "cat(.libPaths()[1L])"]);
+    let output = command
+        .output()
+        .map_err(|error| Error::Command(format!("{command:?}"), error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::Command(
+            format!("{command:?}"),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let library = String::from_utf8_lossy(&output.stdout);
+    let library = library.trim();
+    if library.is_empty() {
+        return Err(Error::Package(
+            "the R session reported no library to install into".into(),
+        ));
+    }
+    Ok(PathBuf::from(library))
 }
 
 /// `R CMD config VAR`: the value `etc/Makeconf` gives the variable.

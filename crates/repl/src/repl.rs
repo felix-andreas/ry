@@ -370,6 +370,14 @@ fn runtime_entry<T: Copy>(library: &'static RuntimeLibrary, name: &str) -> Resul
         .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
+/// ry's R home, whose `bin/R` runs ry's runtime with GNU R's base packages
+/// (`rcmd::runtime_home`).
+pub fn ry_r_home() -> Result<PathBuf, ReplError> {
+    let libr = ry_runtime_library()?;
+    let gnu_r_home = libr::discover_r_home()?;
+    rcmd::runtime_home(&libr, &gnu_r_home).map_err(|error| ReplError(error.to_string()))
+}
+
 fn ry_runtime_library() -> Result<PathBuf, ReplError> {
     if let Some(path) = std::env::var_os("RY_LIBR") {
         return Ok(PathBuf::from(path));

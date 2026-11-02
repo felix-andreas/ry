@@ -15,6 +15,7 @@ crossterm = "0.28"
 dirs = "6"
 libloading = "0.8"
 nu-ansi-term.workspace = true
+rcmd = { path = "../rcmd" }
 reedline.workspace = true
 syntax = { path = "../syntax" }
 
