@@ -2099,6 +2099,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
         line_index += 1;
     };
     start_line(&mut output, &mut line_width);
+    let settings = crate::format::Settings::current();
     let mut separator_index = 0usize;
     for item_index in 0..values::length(items) {
         let item = items.element(item_index);
@@ -2118,7 +2119,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             | SexpType::Raw => {
                 let item = values::materialize(item)?;
                 (0..values::length(item))
-                    .map(|index| cat_element(item, index))
+                    .map(|index| cat_element(item, index, settings))
                     .collect()
             }
             SexpType::List
@@ -2128,7 +2129,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 }) =>
             {
                 (0..values::length(item))
-                    .map(|index| cat_element(item.element(index), 0))
+                    .map(|index| cat_element(item.element(index), 0, settings))
                     .collect()
             }
             SexpType::Language => vec![crate::deparse::deparse_one_line(item)],
@@ -2192,16 +2193,17 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// One element as `cat` prints it: numbers with up to 7 significant digits.
-unsafe fn cat_element(vector: Sexp, index: usize) -> String {
+unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Settings) -> String {
     match vector.kind() {
         SexpType::Real => {
             let value = values::reals(vector)[index];
             if values::is_na(value) {
                 "NA".into()
             } else {
-                let digits = crate::format::Settings::current().digits;
                 crate::format::localize_decimal(crate::format::format_real_alone_scipen(
-                    value, digits,
+                    value,
+                    settings.digits,
+                    settings.scipen,
                 ))
             }
         }

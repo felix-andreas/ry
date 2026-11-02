@@ -108,6 +108,11 @@ bench-why *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/bench/why/run.py {{ args }}
 
+# Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
+bench-base *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/base/run.py {{ args }}
+
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`.
 bench-table dir *args:

@@ -175,11 +175,7 @@ unsafe fn paste(
             }
         }
         let encoding = encoding_of(&parts);
-        set_elt(
-            result,
-            row,
-            values::mkchar_bytes(&join(&parts, encoding), encoding)?,
-        );
+        values::set_mkchar_bytes(result, row, &join(&parts, encoding), encoding)?;
     }
     let Some(collapse) = collapse else {
         return Ok(result);
@@ -193,11 +189,7 @@ unsafe fn paste(
     }
     let encoding = encoding_of(&parts);
     let collapsed = alloc(SexpType::String, 1)?;
-    set_elt(
-        collapsed,
-        0,
-        values::mkchar_bytes(&join(&parts, encoding), encoding)?,
-    );
+    values::set_mkchar_bytes(collapsed, 0, &join(&parts, encoding), encoding)?;
     Ok(collapsed)
 }
 
@@ -304,15 +296,23 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
                 set_elt(result, index, na_string());
                 continue;
             }
+            // The intern table marks ASCII strings, whose characters are bytes, so the span needs no decoding.
+            if charsxp.has_gp(gp::ASCII) {
+                let bytes = charsxp.bytes();
+                let first = (start.max(1) as usize - 1).min(bytes.len());
+                let last = (stop.max(0) as usize).min(bytes.len()).max(first);
+                if first == 0 && last == bytes.len() {
+                    set_elt(result, index, charsxp);
+                } else {
+                    values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Native)?;
+                }
+                continue;
+            }
             if Encoding::of(charsxp) == Encoding::Bytes {
                 let bytes = charsxp.bytes();
                 let first = (start.max(1) as usize - 1).min(bytes.len());
                 let last = (stop.max(0) as usize).min(bytes.len()).max(first);
-                set_elt(
-                    result,
-                    index,
-                    values::mkchar_bytes(&bytes[first..last], Encoding::Bytes)?,
-                );
+                values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Bytes)?;
                 continue;
             }
             let text = values::char_str(charsxp);
@@ -320,7 +320,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
             if first == 0 && last == text.len() {
                 set_elt(result, index, charsxp);
             } else {
-                set_elt(result, index, values::mkchar(&text[first..last])?);
+                values::set_mkchar(result, index, &text[first..last])?;
             }
         }
     }
@@ -380,7 +380,7 @@ unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
                 edited.push(character);
             }
         }
-        set_elt(result, index, values::mkchar(&edited)?);
+        values::set_mkchar(result, index, &edited)?;
     }
     Ok(result)
 }
@@ -619,7 +619,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
                 }
             }
         }
-        set_elt(result, row, values::mkchar(&text)?);
+        values::set_mkchar(result, row, &text)?;
     }
     let unused = used.iter().filter(|&&used| !used).count();
     if unused > 0 {
@@ -1179,6 +1179,9 @@ unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
     if x.kind() != SexpType::String {
         return Err(error("non-character argument"));
     }
+    if all_ascii(x) {
+        return change_ascii_case(x, upper);
+    }
     map_strings(x, |text| {
         Some(
             text.chars()
@@ -1186,6 +1189,46 @@ unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
                 .collect(),
         )
     })
+}
+
+/// Whether every non-missing string of `x` is ASCII, where case mapping is a byte map.
+unsafe fn all_ascii(x: Sexp) -> bool {
+    (0..length(x)).all(|index| {
+        let charsxp = x.element(index);
+        charsxp == na_string() || charsxp.has_gp(gp::ASCII)
+    })
+}
+
+unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
+    let count = length(x);
+    let result = alloc(SexpType::String, count)?;
+    let mut buffer = Vec::new();
+    for index in 0..count {
+        let charsxp = x.element(index);
+        let bytes = charsxp.bytes();
+        let changes = |byte: &u8| {
+            if upper {
+                byte.is_ascii_lowercase()
+            } else {
+                byte.is_ascii_uppercase()
+            }
+        };
+        if charsxp == na_string() || !bytes.iter().any(changes) {
+            set_elt(result, index, charsxp);
+            continue;
+        }
+        buffer.clear();
+        buffer.extend(bytes.iter().map(|byte| {
+            if upper {
+                byte.to_ascii_uppercase()
+            } else {
+                byte.to_ascii_lowercase()
+            }
+        }));
+        values::set_mkchar_bytes(result, index, &buffer, Encoding::Native)?;
+    }
+    values::copy_attributes(x, result)?;
+    Ok(result)
 }
 
 /// `towupper` and `towlower` map one character to one character, so a character whose case
@@ -1290,7 +1333,7 @@ unsafe fn do_strtrim(call: &Call<'_>) -> R<Sexp> {
         if end == text.len() {
             set_elt(result, index, charsxp);
         } else {
-            set_elt(result, index, values::mkchar(&text[..end])?);
+            values::set_mkchar(result, index, &text[..end])?;
         }
     }
     values::copy_attributes(x, result)?;
@@ -1352,11 +1395,11 @@ unsafe fn do_strrep(call: &Call<'_>) -> R<Sexp> {
         if repeat < 0 {
             return Err(error("invalid 'times' value"));
         }
-        set_elt(
+        values::set_mkchar(
             result,
             index,
-            values::mkchar(&values::char_str(charsxp).repeat(repeat as usize))?,
-        );
+            &values::char_str(charsxp).repeat(repeat as usize),
+        )?;
     }
     if text_count >= times_count {
         let names = get_attr(x, symbols().names);
@@ -1546,7 +1589,7 @@ unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
             warned = true;
         }
         let abbreviation = abbreviate(&text, minimum.max(0) as usize, use_classes);
-        set_elt(result, index, values::mkchar(&abbreviation)?);
+        values::set_mkchar(result, index, &abbreviation)?;
     }
     Ok(result)
 }
@@ -1685,11 +1728,7 @@ unsafe fn do_raw_to_char(call: &Call<'_>) -> R<Sexp> {
             } else {
                 std::slice::from_ref(&byte)
             };
-            set_elt(
-                result,
-                index,
-                values::mkchar_bytes(piece, Encoding::Native)?,
-            );
+            values::set_mkchar_bytes(result, index, piece, Encoding::Native)?;
         }
         return Ok(result);
     }
@@ -3396,7 +3435,7 @@ unsafe fn map_strings(x: Sexp, edit: impl Fn(&str) -> Option<String>) -> R<Sexp>
         let text = values::char_str(charsxp);
         match edit(&text) {
             Some(edited) if edited == *text => set_elt(result, index, charsxp),
-            Some(edited) => set_elt(result, index, values::mkchar(&edited)?),
+            Some(edited) => values::set_mkchar(result, index, &edited)?,
             None => set_elt(result, index, na_string()),
         }
     }

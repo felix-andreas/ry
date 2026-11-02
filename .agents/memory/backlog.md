@@ -26,11 +26,19 @@ The quality bar is four things.
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
-- **`rowSums` and `colSums` accumulate in a software long double model** to match GNU R's last digit, which makes them slower than GNU R on large matrices. A faster exact accumulator (two-sum, or 128-bit fixed point) would keep the digits.
 - **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__device_files` (the PostScript header lacks `%%DocumentMedia`, and the bounding box swaps width and height), and `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
-- **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 115k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: compiled promise code, since a promise's expression is evaluated by the AST walker (about 9 promises per `sd`, with their builtin arguments evaluated through `evaluate_args_into` and uncached `find_called_fun`, roughly 15k instructions); GNU R compiles it to bytecode and reads the expression back through `R_PromiseExpr`, so the 83 readers of a promise's code would go through one accessor. Then fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call, and the callers of `mk_char` in the test code.
+
+## Open: base R kernels against GNU R
+
+`just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). At 1e6 rows, 31 of 52 kernels run at or below GNU R's time and three more within 5%. Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. These are still slower:
+
+- **Strings:** `formatC` 1.5x, `substr` 1.5x (interning an already-interned piece still costs about 200 instructions in `Heap::mk_char`), `grepl(fixed = TRUE)` 1.3x, `sub` and `gsub(perl = TRUE)` 1.1x.
+- **Grouping and tabulation:** `match` on integers 2.7x (a hash table where GNU R uses a direct-address table for small ranges), `order` on two keys 1.6x, `split` 1.5x, `cut` 1.5x, `table` on two factors 1.25x, `sort` on integers and strings 1.1 to 1.2x.
+- **Matrix and time series:** `apply` over rows 1.8x (per-call interpreter cost, which the tier-0 work owns), xts `period.apply` 1.7x, zoo `na.locf` 1.5x.
+- **Correctness gaps found beside the kernels** (unverified against every GNU R version): `sum` over several arguments keeps one long double total, so `sum(1e308, 1e308, -1e308)` is `1e+308` where GNU R, which adds each argument's sum in double, gives `Inf`. A logical subscript longer than the vector does not stretch it on assignment (`y <- NA; y[c(TRUE, TRUE, FALSE, TRUE, FALSE)] <- 1:3` gives length 4, GNU R 5), which breaks `rank(c(2, 1, NA, 2, NaN), ties.method = "first")`. `format(-0)` under `options(scipen = -5)` writes `-0e+00` (GNU R `0e+00`). `order(<raw>, method = "radix")` succeeds where GNU R errors.
+- **Peak memory** (`run.py --memory`) is 1.1 to 1.45 times GNU R's at 1e6 rows, about 30 MB above it on kernels that allocate little. ry starts 10 MB higher (60 MB against 50 MB for an empty script). Most of the rest is freed large vectors that mimalloc keeps resident for its purge delay while the next allocation takes fresh pages; GNU R's large vectors come from glibc `malloc`, which unmaps them on `free`. `MIMALLOC_PURGE_DELAY=0` brings the setup of `tools/bench/base/kernels.R` level with GNU R but slows several kernels by about 20%, so the fix is a reuse policy for large vectors rather than that setting. Tightening the collector's young budget (a quarter of the old generation instead of half) did not lower the peak.
 
 ## Open: the package loader
 
@@ -387,24 +395,13 @@ protects construction but nothing after it.
   so each call copies. Ending only when the closure can reach the moved value would need an
   escape check on the closure's body; closures the helper creates itself are already covered
   (`decisions.md`, "Moving a collection into a helper's parameter").
-- In a helper that creates a closure, the tail form `List.append(xs, f(i))` copies, because
-  `Op::CallTailUpdate` stays off when the body may capture its frame. Allowing it needs proof
-  that no created closure can read the parameter after the update.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
-- Tuple `t[[1L]]` and tag payload reads through `match` have no shape cache or JIT fast path;
-  `[[` on a tuple goes through `subset2`, and a JIT intrinsic needs per-site evidence that the
-  subject is a tuple of a known layout (the way `Op::Field` caches one for `$`).
-- The tail update covers only a body's last statement; `if (c) Dict.insert(d, k, 1) else d` and
-  `return(Dict.insert(d, ...))` still copy.
+- `l[[i]]` on a list compiles to `Intrinsic::Element` with a boxed result, so arithmetic on the
+  element runs in tier 0. Tuple items and record fields speculate on the site's type feedback
+  (`Analysis::slot_read`) and stay native; a list element read should do the same, with a type
+  check that hands off to tier 0 on a mismatch.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- A type parameter shared by two arguments binds to the first and does not widen to a wider
-  second: with `light: :Red | :Green`, `Bool.is_eq(light, :Red)` checks but
-  `Bool.is_eq(:Red, light)` reports "expected `:Red`, found `:Red | :Green`". The same holds for
-  any `<T> fn(T, T)` signature. Belongs to the checker's call inference.
-- Some functions still return `NaN` for infinite input (`Num.sin(Inf)`, `Num.pow(-1, 0.5)`,
-  `Num.div_trunc_checked(Inf, Inf)` as `:Ok(NaN)`). The unchecked operations error on a `NaN`
-  result; decide whether these should too, or return a tag.
 - The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
   saves its state around each call. Adding them is safe (none runs R code) once the JIT's
   intrinsic table is settled.
