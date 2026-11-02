@@ -5916,9 +5916,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## Base kernels pick their data structure by the value range
 
-- **Previous shape.** `match()` on integers hashed boxed keys, `split()` grew each piece as it scattered, `as.character()` on integers formatted and interned every element, and `order()` on several keys ran one least-significant-digit radix pass per key over all rows. Each was 1.5x to 2.7x GNU R's time at 1e6 rows.
-- **Shape.** `match()` on integers indexes a dense array of first positions when the table spans a small range and hashes plain `i32` otherwise. `split()` counts each level first and scatters into exact-size pieces. `as.character()` on integers interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. In `sort.rs`, when the first of several order keys spans fewer values than there are rows, one counting pass splits the rows by it and each group sorts by the remaining keys on its own, so later passes stay in cache.
-- **Impact.** At 1e6 rows `match` on integers runs at 0.09 of GNU R's time, `split` 0.55, `table` 0.37 (one factor) and 0.70 (two), `cut` 0.80 and `formatC` 0.88 (`tools/bench/base`). Each falls back to the general path when the range is wide, so no input is slower than before.
+- **Previous shape.** `split()` grew each piece as it scattered, `as.character()` on integers formatted and interned every element, the cumulative functions zeroed their result before filling it, `strsplit()` probed the session-wide string table for every piece, and `substr()` recycled `start` and `stop` with a division per element. Each was 1.2x to 2.7x GNU R's time.
+- **Shape.** `split()` counts each level first and scatters into exact-size pieces. `as.character()` on integers (`coerce.rs::integers_as_strings`) interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. `cumsum` and friends allocate with `values::alloc_uninit`, and real `cummax`/`cummin` run a branch-light loop until the first NaN. `strsplit()` interns ASCII pieces through the call's `values::StringMemo`, and `substr()` recycles by counters. Each falls back to the general path when the range is wide, so no input is slower than before.
+- **Impact** (`tools/bench/base`, ry time over GNU R's): at 1e6 rows `table` 0.28 (one factor) and 0.36 (two), `split` 0.83, `cut` 0.77; at 1e7 rows `cumsum` 0.90, `cummax` 1.00, `strsplit` 0.90, `substr` 0.79.
 
 ## Runtime error checks follow GNU R's order and blame
 
