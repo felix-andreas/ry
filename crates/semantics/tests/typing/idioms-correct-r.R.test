@@ -2331,3 +2331,12 @@ added <- function(plot) undeclared::plot_of(plot) + list(1)
 #++++
 added: <T> fn(plot: T) -> Unknown
 24..43 warning[unresolved] unknown package namespace `undeclared`.
+
+#---- a_sequence_between_computed_bounds_is_numeric
+# `seq` dispatches on `from`, so bounds computed from an unannotated parameter are numbers, not dates.
+grid <- function(n, tails = c(0.1, 0.1)) {
+  i <- seq(0.5 * tails[1], 1 - 0.5 * tails[2], length.out = n)
+  ifelse(i < .25, 0, 1)
+}
+#++++
+grid: <T, U> fn(n: T, [tails]: U) -> Any
