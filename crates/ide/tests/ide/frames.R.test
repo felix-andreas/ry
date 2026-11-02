@@ -146,10 +146,10 @@ parameters: [x: character] | [as.factor]: logical
 signature: fn(x: Any, [as.factor]: logical) -> Any
 parameters: [x: Any] | [as.factor]: logical
 action: Add inferred type annotation for `doubled`
-  edit 57..57 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
-  edit 57..57 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
 hint @64: DataFrame{team: character[], amount: double[]}
