@@ -4859,6 +4859,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
   pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
   no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
+- **The S4 metadata cache** (`DeferredS4::cache_key`, `s4_cache_path` in `loader.rs`;
+  `.ry_restore_s4`, `.ry_save_s4` in `runtime.R`). Previously every process ran the held-back
+  definitions through the `methods` package (about 330 ms on the bench package, 1.7x GNU R, the gap
+  being interpreter speed in `slot<-`, `list()` and `possibleExtends`). A full force now restores the
+  bindings the unit made (`.__C__*`, `.__T__*`, generics, generators) from an RDS file and runs
+  `cacheMetaData` through the usual sync, which is exactly how GNU R loads an installed package's S4
+  objects, so the restored state is the same one an installed package would have. That is valid only
+  when the bindings are a pure function of the definitions' text: the key is set only when every
+  definition reads its own names or `PURE_S4_READS` (constructors and literals), and it covers the
+  definitions' text, package name and version, and the build id; the R version and imported packages'
+  versions are checked at restore. A run that signalled a message or warning is not saved, so a
+  diagnostic is never silenced. A force during the load never uses the cache, because only a full
+  force produces the whole unit's bindings. Cache-hit force plus first dispatch is about 100 ms,
+  below GNU R's ~150 ms from source; a miss still costs the full run.
 - **The load-index cache** (`index_cache`, `read_index_cache`, `write_index_cache` in `loader.rs`).
   Previously every cold start parsed all files and derived their facts (about 280 ms on 4 cores).
   The whole `PackageIndex` is now cached per package root, keyed by an xxh3-128 over the build id

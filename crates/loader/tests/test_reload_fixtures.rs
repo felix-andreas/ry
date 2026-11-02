@@ -118,6 +118,9 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
     }
     if let Some(deferred) = &plan.deferred_s4 {
         output.push_str(&format!("placeholders {}\n", deferred.names.join(" ")));
+        if deferred.cache_key.is_none() {
+            output.push_str("metadata not cached: a definition reads other code\n");
+        }
     }
     if plan.sysdata != SysdataChange::Keep {
         output.push_str(&format!("sysdata {:?}\n", plan.sysdata));
