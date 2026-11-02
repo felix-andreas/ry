@@ -2955,7 +2955,7 @@ impl LanguageServer for ServerState {
                 lsp_types::CodeActionKind::REFACTOR_REWRITE,
             ]
             .iter()
-            .any(|kind| wants(kind));
+            .any(&wants);
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);

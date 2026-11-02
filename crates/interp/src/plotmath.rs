@@ -1764,11 +1764,11 @@ impl Layout {
     }
 
     unsafe fn medium_space(&self) -> R<f64> {
-        self.em_fraction(0.222_222_222_222_222_22)
+        self.em_fraction(0.222_222_222_222_222_2)
     }
 
     unsafe fn thick_space(&self) -> R<f64> {
-        self.em_fraction(0.277_777_777_777_777_77)
+        self.em_fraction(0.277_777_777_777_777_8)
     }
 
     unsafe fn mu_space(&self) -> R<f64> {
