@@ -1840,6 +1840,21 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
+**S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
+calling frames to their top environment uncached, because function frames gain and lose bindings
+without moving any epoch. The rest of the walk (the top environment, the generic's registered
+methods table, the imports, the base namespace and the search path) is cached in
+`dispatch::MethodCache`, keyed by the method name, the top environment and the generic's top
+environment. An entry holds the binding cell rather than its value, since reassigning an existing
+binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
+value is no longer a function. The whole cache is dropped when the binding epoch or the collection
+count changes: the epoch covers bindings appearing or disappearing and enclosures changing, and a
+collection may free an environment whose address a later key reuses. A walk that passed a function
+frame, an active binding, or a non-function binding of the name is not cached, because a later
+change there would not move the epoch. xts `period.apply` with 33,335 periods went from about 262k
+to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
+case `dispatch__method_cache`).
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
