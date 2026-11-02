@@ -57,7 +57,7 @@ prompt waits, and the editor shows the stop with its variables and steps from th
 These stops need a debugger attached from your editor (see
 [editors](/guides/editors#running-and-debugging)); without one, `f` runs as usual. In a script
 that `ry run file.R` runs, `browser()` does nothing, as in a non-interactive R session. The editor's connection also lets `View(df)` open the
-editor's data viewer and gives hover and completion the console's live values. Without an editor,
+editor's data viewer, shows plots in an editor panel, and gives hover and completion the console's live values. Without an editor,
 `View()` stops with an error that says how to connect one.
 
 ## Two runtimes

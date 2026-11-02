@@ -2556,6 +2556,17 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - A missing `adj` or `at` in `mtext` defaults by `las` and side (`ComputeAdjValue`,
     `ComputeAtValue`), not to `par("adj")`; `tck` below 0.5 is a fraction of the plot region's
     shorter side, above it of its extent across the axis.
+- **The editor's plot panel is fed from the engine's display list.** A console with a
+  subscribed editor makes its default device (`options(device=)`, unless the user set another)
+  a `pdf(NULL)` device with the display list enabled. At each prompt, `publish_plot` in
+  `console_server.rs` compares the current device's display-list stamp
+  (`graphics_engine::display_list_stamp`, drawn from one global counter, so a device that takes
+  a closed one's slot never repeats a stamp) with the last one sent; when it changed, it copies
+  the display list onto an svg device with `dev.copy` and sends the file's text as a `ryPlot`
+  event, which VS Code shows in one "R Plot" panel. A device of its own (httpgd-style) would
+  duplicate the engine and the devices; the display list is already the single record of what
+  was drawn. File devices keep their display list off, as in GNU R (`GErecordGraphicOperation`
+  records nothing while it is off), so `png()` output is never sent.
 - **Base graphics is checked against GNU R by a plot gallery.** `crates/oracle/gallery/*.R` holds
   about 150 figures (base graphics including the PerformanceAnalytics charts, grid, lattice,
   ggplot2), and `oracle gallery` renders each on both engines and every device, then compares.

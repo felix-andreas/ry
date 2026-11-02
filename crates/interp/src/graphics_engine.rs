@@ -28,6 +28,7 @@ use {
         cell::RefCell,
         ffi::{CString, c_char, c_int, c_uint, c_void},
         ptr::{self, null_mut},
+        sync::atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -306,6 +307,9 @@ pub struct EngineDevice {
     /// its argument pairlist.
     ops: Vec<Sexp>,
     args: Vec<Sexp>,
+    /// Stamped from [`DISPLAY_LIST_STAMPS`] whenever the display list changes, so a reader can
+    /// tell a drawing it has not seen, even on a device that took a closed one's slot.
+    stamp: u64,
 }
 
 struct Engine {
@@ -537,6 +541,7 @@ pub unsafe fn create_device(dev: *mut DevDesc) -> R<*mut GEDevDesc> {
         synced_ask: c_int::from(ask),
         ops: Vec::new(),
         args: Vec::new(),
+        stamp: next_stamp(),
     });
     let dd = Box::into_raw(device);
     sync_ask(dd.cast());
@@ -2853,14 +2858,31 @@ pub unsafe fn init_display_list(dd: *mut GEDevDesc) -> R<()> {
     let device = engine_device(dd);
     (*device).ops.clear();
     (*device).args.clear();
+    (*device).stamp = next_stamp();
     Ok(())
 }
 
-/// `GErecordGraphicOperation`.
+/// `GErecordGraphicOperation`: a no-op while the display list is off, which it is from the start
+/// on a file device such as `png()` or `pdf()` until `dev.control("enable")`.
 pub unsafe fn record_operation(op: Sexp, args: Sexp, dd: *mut GEDevDesc) {
+    if (*dd).display_list_on == 0 {
+        return;
+    }
     let device = engine_device(dd);
     (*device).ops.push(op);
     (*device).args.push(args);
+    (*device).stamp = next_stamp();
+}
+
+/// A stamp that differs from every earlier one whenever `dd`'s display list changed.
+pub unsafe fn display_list_stamp(dd: *mut GEDevDesc) -> u64 {
+    (*engine_device(dd)).stamp
+}
+
+static DISPLAY_LIST_STAMPS: AtomicU64 = AtomicU64::new(1);
+
+fn next_stamp() -> u64 {
+    DISPLAY_LIST_STAMPS.fetch_add(1, Ordering::Relaxed)
 }
 
 pub unsafe fn display_list_is_empty(dd: *mut GEDevDesc) -> bool {
@@ -2884,6 +2906,7 @@ unsafe fn set_display_list(dd: *mut GEDevDesc, list: Sexp) {
     let device = engine_device(dd);
     (*device).ops.clear();
     (*device).args.clear();
+    (*device).stamp = next_stamp();
     let mut cell = list;
     while cell.kind() == SexpType::Pairlist {
         let entry = cell.car();

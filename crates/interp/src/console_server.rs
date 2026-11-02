@@ -363,7 +363,12 @@ mod platform {
             Adapter, BrowseInput, READER, Request, SERVICE_REQUESTED, SERVING_REQUEST, Transport,
             answer_plain, lock, read_directly, response,
         },
-        crate::{help_server, interp, unwind::INTERRUPT_REQUESTED},
+        crate::{
+            debugger::evaluate_text,
+            graphics_engine, help_server, interp,
+            unwind::INTERRUPT_REQUESTED,
+            values::{self, global_env},
+        },
         serde_json::{Value, json},
         std::{
             collections::{BTreeMap, VecDeque},
@@ -376,7 +381,7 @@ mod platform {
             path::PathBuf,
             sync::{
                 Condvar, Mutex, PoisonError,
-                atomic::{AtomicBool, Ordering},
+                atomic::{AtomicBool, AtomicU64, Ordering},
             },
             time::Duration,
         },
@@ -429,6 +434,10 @@ mod platform {
     });
     static ASKED_CHANGED: Condvar = Condvar::new();
     static INPUT_THREAD: AtomicBool = AtomicBool::new(false);
+    /// Whether the editor's default device was offered, which happens once per console.
+    static PLOT_DEVICE_INSTALLED: AtomicBool = AtomicBool::new(false);
+    /// The display-list stamp of the plot last sent to the editors.
+    static PLOTTED_STAMP: AtomicU64 = AtomicU64::new(0);
 
     pub fn start() -> Option<String> {
         let directory = private_directory()?;
@@ -644,6 +653,7 @@ mod platform {
         }
         // Help requests that arrived while a command ran were left for the prompt.
         serve_help();
+        publish_plot();
         ask(prompt);
         loop {
             let event = match lock(&STASHED_INPUT).take() {
@@ -674,6 +684,87 @@ mod platform {
                 None => {}
             }
         }
+    }
+
+    /// Sends the current plot to the subscribed editors when the command just run changed it.
+    ///
+    /// The first time an editor is subscribed, the default device becomes a `pdf(NULL)` device
+    /// that keeps its display list, unless the user chose another device: it writes no file, and
+    /// the display list is what each plot is copied from onto an svg device, so the editor gets
+    /// what the engine drew. A file device such as `png()` keeps no display list and is left
+    /// alone.
+    unsafe fn publish_plot() {
+        let subscribers = subscribers();
+        if subscribers.is_empty() {
+            return;
+        }
+        let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
+        let mark = crate::heap().handle_mark();
+        match plot_svg() {
+            Ok(Some(svg)) => {
+                for connection in subscribers {
+                    send(
+                        connection,
+                        json!({ "type": "event", "event": "ryPlot", "body": { "svg": svg } }),
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(message) => crate::write_console(
+                format!("ry: sending the plot to the editor failed: {message}\n").as_bytes(),
+                true,
+            ),
+        }
+        crate::heap().release_handles(mark);
+        SERVING_REQUEST.store(serving, Ordering::Relaxed);
+    }
+
+    /// The current plot as svg text, or `None` when it is the one sent last or there is none.
+    unsafe fn plot_svg() -> Result<Option<String>, String> {
+        if !PLOT_DEVICE_INSTALLED.swap(true, Ordering::Relaxed) {
+            evaluate_text(
+                "if (is.null(getOption(\"device\")) || \
+                 identical(getOption(\"device\"), grDevices::pdf)) \
+                 options(device = function(width = 7, height = 7, ...) { \
+                 grDevices::pdf(NULL, width = width, height = height); \
+                 grDevices::dev.control(\"enable\") })",
+                global_env(),
+            )?;
+        }
+        if graphics_engine::no_devices() {
+            return Ok(None);
+        }
+        // With a device open, the current one is a real device and nothing is opened here.
+        let dd = graphics_engine::current_device()
+            .map_err(|_| "the current device is the null device".to_owned())?;
+        let stamp = graphics_engine::display_list_stamp(dd);
+        if graphics_engine::display_list_is_empty(dd)
+            || PLOTTED_STAMP.swap(stamp, Ordering::Relaxed) == stamp
+        {
+            return Ok(None);
+        }
+        let file = evaluate_text(
+            "local({ file <- tempfile(fileext = \".svg\"); from <- grDevices::dev.cur(); \
+             size <- grDevices::dev.size(); \
+             grDevices::dev.copy(grDevices::svg, file, width = size[1], height = size[2]); \
+             grDevices::dev.off(); grDevices::dev.set(from); file })",
+            global_env(),
+        )?;
+        let file = values::as_string_scalar(file)
+            .ok()
+            .flatten()
+            .ok_or_else(|| "the svg file has no name".to_owned())?;
+        let svg = fs::read_to_string(&file).map_err(|error| format!("reading {file}: {error}"));
+        fs::remove_file(&file).map_err(|error| format!("removing {file}: {error}"))?;
+        svg.map(Some)
+    }
+
+    fn subscribers() -> Vec<u64> {
+        lock(&CONNECTIONS)
+            .iter()
+            .filter(|(_, connection)| connection.subscribed)
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// Answers help requests while waiting for input. A Ctrl-C that stopped a handler has
@@ -792,11 +883,7 @@ mod platform {
     }
 
     pub unsafe fn show(object: heap::object::Sexp, title: &str) -> Result<(), String> {
-        let subscribers: Vec<u64> = lock(&CONNECTIONS)
-            .iter()
-            .filter(|(_, connection)| connection.subscribed)
-            .map(|(&id, _)| id)
-            .collect();
+        let subscribers = subscribers();
         if subscribers.is_empty() {
             return Err(
                 "View() needs an editor connected to this console: start the console with \
