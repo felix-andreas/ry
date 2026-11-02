@@ -29,7 +29,7 @@ use {
 /// A bare `return(NA)` takes the type of the other returns when inferred, while a declared
 /// return type checks it as `logical`. A callback shape inferred from calls lets a later call
 /// omit an argument an earlier call passed, while the declared shape requires it.
-const KNOWN_UNWRITABLE: [&str; 20] = [
+const KNOWN_UNWRITABLE: [&str; 21] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -44,6 +44,7 @@ const KNOWN_UNWRITABLE: [&str; 20] = [
     "semantics/tests/typing::correct_r__an_inferred_logical_callback_parameter_takes_numbers :: not",
     "semantics/tests/typing::correct_r__an_element_fills_an_inferred_logical_parameter_after_a_forwarded_name :: eulerian",
     "semantics/tests/typing::correct_r__a_flag_default_selects_the_returned_branch :: p_dist",
+    "semantics/tests/typing::correct_r__a_flag_default_selects_an_early_return :: iam",
     "semantics/tests/typing::correct_r__a_formal_read_as_a_value_may_name_the_function_it_passes :: spread",
     "semantics/tests/typing::correct_r__a_formal_read_as_a_value_may_name_the_function_it_passes :: trim",
     "semantics/tests/typing::correct_r__an_argument_the_callee_only_substitutes_is_not_checked_in_the_caller :: wrap",

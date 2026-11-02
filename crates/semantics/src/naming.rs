@@ -5,12 +5,13 @@
 use {
     crate::{
         hir::{
-            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module,
-            NameSite, PatId, PatternKind, Symbol, UnaryOperator, destructure_leaves,
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
+            MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
     },
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
     std::{
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
@@ -73,6 +74,9 @@ pub struct ItemNaming {
     pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
     pub captured_slots: SortedSet<BindingId>,
+    /// The variables of top-level `for` loops. They stay bound in the global environment like
+    /// a top-level assignment, so the item exports their type.
+    pub loop_bound_slots: SortedSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
@@ -138,6 +142,7 @@ struct NamingDraft {
     unused_parameters: Vec<UnusedAssignment>,
     used_top_level_names: BTreeSet<Symbol>,
     captured_slots: BTreeSet<BindingId>,
+    loop_bound_slots: BTreeSet<BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
     run_time_writes: BTreeMap<ExprId, BindingId>,
@@ -165,6 +170,7 @@ impl NamingDraft {
             unused_parameters: ThinVec::from(self.unused_parameters),
             used_top_level_names: self.used_top_level_names.into(),
             captured_slots: self.captured_slots.into(),
+            loop_bound_slots: self.loop_bound_slots.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
             run_time_writes: self.run_time_writes.into(),
@@ -228,6 +234,10 @@ pub fn resolve_item(
         in_defaults: false,
         quoted_depth: 0,
         bracket_depth: 0,
+        tail_assignments: FxHashSet::default(),
+        escaped_frames: FxHashSet::default(),
+        explicit_frame_arguments: FxHashSet::default(),
+        quoting_aliases: FxHashSet::default(),
         naming: NamingDraft::default(),
     };
     if let Some(root) = module.root {
@@ -314,6 +324,18 @@ struct Context<'a> {
     /// Inside a single `[`'s index arguments, where data.table reads `..name` as the variable
     /// `name` from the enclosing scope.
     bracket_depth: u32,
+    /// Assignments whose value a function returns, as its last expression or the tail of an
+    /// `if` branch or `switch` arm: the value is read by the caller, so a fix that removed the
+    /// assignment would change what the function returns.
+    tail_assignments: FxHashSet<ExprId>,
+    /// Frames that hand themselves on with `environment()`, so code outside the walk can read
+    /// any of their variables.
+    escaped_frames: FxHashSet<u32>,
+    /// `environment()` calls passed to a function that reads only the names it is given, such
+    /// as `get` or `clusterExport`, which therefore do not expose the whole frame.
+    explicit_frame_arguments: FxHashSet<ExprId>,
+    /// Slots bound to a quoting function itself (`e <- expression`), whose calls quote too.
+    quoting_aliases: FxHashSet<BindingId>,
     naming: NamingDraft,
 }
 
@@ -427,24 +449,32 @@ impl Context<'_> {
                 {
                     self.resolve(*value);
                     self.resolve_assignment_target(id, *target, *spelling);
+                    if let Some(&slot) = self.naming.resolutions.get(target) {
+                        let quoting = matches!(module.kind(*value), ExpressionKind::NameRef(name)
+                            if QUOTING_FORMS.contains(&name.as_str()))
+                            && !self.naming.resolutions.contains_key(value);
+                        if quoting {
+                            self.quoting_aliases.insert(slot);
+                        } else {
+                            self.quoting_aliases.remove(&slot);
+                        }
+                    }
                 } else {
                     self.resolve_assignment_target(id, *target, *spelling);
                     self.resolve(*value);
                 }
             }
-            ExpressionKind::Unary { operand, operator } => {
-                // A formula quotes its operand: names inside are model syntax.
-                if *operator != UnaryOperator::Tilde && *operator != UnaryOperator::Help {
-                    self.resolve(*operand);
-                }
-            }
+            ExpressionKind::Unary { operand, operator } => match operator {
+                UnaryOperator::Help => {}
+                UnaryOperator::Tilde => self.resolve_formula(&[*operand]),
+                _ => self.resolve(*operand),
+            },
             ExpressionKind::Binary {
                 operator,
                 special_name,
                 lhs,
                 rhs,
             } => {
-                use crate::hir::BinaryOperator;
                 // `a %op% b` calls `%op%`: a quiet read that keeps a project definition alive.
                 if let Some(name) = special_name {
                     self.naming.quiet_operator_reads.insert(*name);
@@ -452,7 +482,8 @@ impl Context<'_> {
                     self.mark_slot_read(*name);
                 }
                 match operator {
-                    BinaryOperator::Tilde | BinaryOperator::Help => {}
+                    BinaryOperator::Help => {}
+                    BinaryOperator::Tilde => self.resolve_formula(&[*lhs, *rhs]),
                     // Operands of unmodeled operators still resolve (for IDE navigation), but
                     // unresolved reads stay quiet: the construct is opaque to the checker.
                     BinaryOperator::Pipe | BinaryOperator::Special => {
@@ -499,6 +530,129 @@ impl Context<'_> {
                 // ordinary call.
                 let builtin_callee =
                     callee_name.filter(|_| !self.naming.resolutions.contains_key(callee));
+                let quoting = builtin_callee.is_some_and(|name| QUOTING_FORMS.contains(&name))
+                    || self
+                        .naming
+                        .resolutions
+                        .get(callee)
+                        .is_some_and(|slot| self.quoting_aliases.contains(slot));
+                // A quoting form binds nothing inside it. Reads are still walked, as deferred,
+                // because `eval` may run the expression later. Quiet too: a quoted name need
+                // not exist yet, as in `quote(x <- 1)`.
+                if quoting {
+                    self.quoted_depth += 1;
+                    self.deferred_depth += 1;
+                    self.quiet_depth += 1;
+                    self.resolve_arguments(&module[arguments]);
+                    self.quiet_depth -= 1;
+                    self.deferred_depth -= 1;
+                    self.quoted_depth -= 1;
+                    return;
+                }
+                let accessor = match module.kind(*callee) {
+                    ExpressionKind::Namespace {
+                        name: Some(name), ..
+                    } => Some(name.as_str()),
+                    _ => builtin_callee,
+                };
+                if accessor.is_some_and(|name| EXPLICIT_NAME_ACCESSORS.contains(&name)) {
+                    for value in module[arguments]
+                        .iter()
+                        .filter_map(|argument| argument.value)
+                    {
+                        if is_frame_query(module, value) {
+                            self.explicit_frame_arguments.insert(value);
+                        }
+                    }
+                }
+                // `clusterExport(cl, c("a", "b"))` sends the named variables to the workers.
+                if accessor == Some("clusterExport")
+                    && let Some(varlist) = module[arguments]
+                        .iter()
+                        .find(|argument| {
+                            module.argument_name(argument).as_deref() == Some("varlist")
+                        })
+                        .or_else(|| {
+                            module[arguments]
+                                .iter()
+                                .filter(|argument| argument.name.is_none())
+                                .nth(1)
+                        })
+                        .and_then(|argument| argument.value)
+                {
+                    let names: Vec<ExprId> = match module.kind(varlist) {
+                        ExpressionKind::Call { callee, arguments }
+                            if matches!(module.kind(*callee), ExpressionKind::NameRef(name)
+                                if name.as_str() == "c") =>
+                        {
+                            module[arguments]
+                                .iter()
+                                .filter_map(|argument| argument.value)
+                                .collect()
+                        }
+                        _ => vec![varlist],
+                    };
+                    for value in names {
+                        if let ExpressionKind::Literal(LiteralKind::String(text)) =
+                            module.kind(value)
+                        {
+                            self.resolve_function_name_string(value, Symbol::new(&module[text]));
+                        }
+                    }
+                }
+                // `environment()` hands the running frame to code ry does not follow (a
+                // returned object, a `.Call`, a helper that evaluates in it), so every variable
+                // of the frame stays reachable.
+                if self.quoted_depth == 0
+                    && is_frame_query(module, id)
+                    && !self.explicit_frame_arguments.contains(&id)
+                {
+                    let depth = self.current_function_depth();
+                    let frames: Vec<u32> = self
+                        .scopes
+                        .get(depth..)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|scope| scope.id)
+                        .collect();
+                    self.escaped_frames.extend(frames);
+                }
+                // `NextMethod()` passes the formals as they are now, and so does a bare
+                // `callGeneric()`, so a formal reassigned before the call is read by the
+                // dispatched method.
+                if builtin_callee == Some("NextMethod")
+                    || (builtin_callee == Some("callGeneric") && module[arguments].is_empty())
+                {
+                    self.mark_formals_read();
+                }
+                // `get("x")` and `exists("x")` read the variable the string names.
+                if builtin_callee.is_some_and(|name| NAME_STRING_READERS.contains(&name))
+                    && let Some(first) = module[arguments].first()
+                    && module.argument_name(first).is_none_or(|name| name == "x")
+                    && let Some(value) = first.value
+                    && let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(value)
+                {
+                    self.resolve_function_name_string(value, Symbol::new(&module[text]));
+                }
+                // `eval(parse(text = "plot(m2)"))` runs the string as code, so the names in a
+                // literal source string are reads.
+                if let Some(name @ ("parse" | "str2lang" | "str2expression")) = builtin_callee {
+                    for argument in &module[arguments] {
+                        let is_text = match module.argument_name(argument).as_deref() {
+                            Some(argument_name) => argument_name == "text",
+                            None => name != "parse",
+                        };
+                        if is_text
+                            && let Some(value) = argument.value
+                            && let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(value)
+                        {
+                            for read in code_names(&module[text]) {
+                                self.mark_slot_read(Symbol::new(read));
+                            }
+                        }
+                    }
+                }
                 // `match.fun` looks a string up as a function name, so `vapply(xs, "g", ...)`
                 // reads `g`.
                 if builtin_callee.is_some_and(|name| MATCH_FUN_CALLERS.contains(&name)) {
@@ -578,19 +732,6 @@ impl Context<'_> {
                         {
                             self.record_column_update(id, subject);
                         }
-                        return;
-                    }
-                    // A quoting form binds nothing inside it. Reads are still walked, as deferred,
-                    // because `eval` may run the expression later. Quiet too: a quoted name need
-                    // not exist yet, as in `quote(x <- 1)`.
-                    Some("quote" | "substitute" | "bquote" | "expression") => {
-                        self.quoted_depth += 1;
-                        self.deferred_depth += 1;
-                        self.quiet_depth += 1;
-                        self.resolve_arguments(&module[arguments]);
-                        self.quiet_depth -= 1;
-                        self.deferred_depth -= 1;
-                        self.quoted_depth -= 1;
                         return;
                     }
                     _ => {}
@@ -712,6 +853,7 @@ impl Context<'_> {
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.premint_frame_assignments(*body);
+                collect_tail_assignments(module, *body, &mut self.tail_assignments);
                 let saved_in_defaults = mem::replace(&mut self.in_defaults, true);
                 for parameter in &module[parameters] {
                     if let Some(default) = parameter.default {
@@ -752,10 +894,12 @@ impl Context<'_> {
                         name: variable,
                         range,
                     } = self.module[variable];
+                    // A top-level loop leaves its variable bound in the global environment, so
+                    // later statements read the type it exports.
                     let slot = self.mint_binding(variable, range, BindingKind::ForVariable);
-                    // A top-level loop leaves its variable bound in the global environment.
                     if self.current_scope().kind == ScopeKind::TopLevel {
                         self.naming.super_globals.insert(variable);
+                        self.naming.loop_bound_slots.insert(slot);
                     }
                     self.current_scope().slots.insert(variable, slot);
                     self.record_write(slot, Reach::Implicit);
@@ -963,6 +1107,45 @@ impl Context<'_> {
         }
     }
 
+    /// A model function such as `lm(ly ~ lx)` evaluates its formula in the frame that created
+    /// it, so the formula's names read that frame's variables. They are quiet because a name may
+    /// also be a column of the model's data.
+    fn resolve_formula(&mut self, operands: &[ExprId]) {
+        self.quoted_depth += 1;
+        self.quiet_depth += 1;
+        for &operand in operands {
+            self.resolve(operand);
+        }
+        self.quiet_depth -= 1;
+        self.quoted_depth -= 1;
+    }
+
+    fn mark_formals_read(&mut self) {
+        let depth = self.current_function_depth();
+        let Some(scope) = self
+            .scopes
+            .get(depth)
+            .filter(|scope| scope.kind == ScopeKind::Function)
+        else {
+            return;
+        };
+        let mut formals: Vec<(Symbol, BindingId)> = scope
+            .slots
+            .iter()
+            .filter(|(_, slot)| {
+                self.naming
+                    .bindings
+                    .get(slot)
+                    .is_some_and(|binding| binding.kind == BindingKind::Parameter)
+            })
+            .map(|(name, slot)| (*name, *slot))
+            .collect();
+        formals.sort_unstable_by_key(|(_, slot)| *slot);
+        for (name, slot) in formals {
+            self.mark_slot_reached(name, depth, slot, depth);
+        }
+    }
+
     /// Re-walks to a fixed point (the reach lattice is finite and joins only grow), then
     /// records effects on one final pass. `may_skip` joins the never-entered path back in.
     fn loop_body(&mut self, body: ExprId, may_skip: bool) {
@@ -1049,6 +1232,16 @@ impl Context<'_> {
                     self.premint_frame_assignments(arm.body);
                 }
             }
+            // R never evaluates a formula's or a help request's operands, and resolution skips
+            // them, so an assignment inside binds nothing in this frame.
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Tilde | BinaryOperator::Help,
+                ..
+            }
+            | ExpressionKind::Unary {
+                operator: UnaryOperator::Tilde | UnaryOperator::Help,
+                ..
+            } => {}
             // A masked argument gets its own scope when it is resolved, so its assignments
             // mint nothing in this frame.
             ExpressionKind::Call { callee, arguments }
@@ -1403,7 +1596,7 @@ impl Context<'_> {
                     name,
                     range,
                     scope,
-                    used: false,
+                    used: self.tail_assignments.contains(&assignment),
                     reportable,
                 });
                 self.write_by_expression.insert(assignment, index);
@@ -1420,7 +1613,11 @@ impl Context<'_> {
         // A `.`- or `_`-prefixed name is conventionally an intentional hold-over.
         let throwaway = |name: &str| name.starts_with('.') || name.starts_with('_');
         for write in &self.writes {
-            if write.reportable && !write.used && !throwaway(&write.name) {
+            if write.reportable
+                && !write.used
+                && !throwaway(&write.name)
+                && !self.escaped_frames.contains(&write.scope)
+            {
                 self.naming.unused_assignments.push(UnusedAssignment {
                     name: write.name,
                     range: write.range,
@@ -1812,6 +2009,104 @@ pub(crate) const MATCH_FUN_CALLERS: [&str; 20] = [
 /// The base functions that call a compiled routine named by their `.NAME` argument.
 const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];
 
+const QUOTING_FORMS: [&str; 4] = ["quote", "substitute", "bquote", "expression"];
+
+/// Functions that read the variable a string names.
+const NAME_STRING_READERS: [&str; 3] = ["get", "get0", "exists"];
+
+/// Functions that touch only the variables they are told about in the environment they get.
+const EXPLICIT_NAME_ACCESSORS: [&str; 13] = [
+    "assign",
+    "delayedAssign",
+    "get",
+    "get0",
+    "mget",
+    "exists",
+    "rm",
+    "remove",
+    "clusterExport",
+    "lockBinding",
+    "unlockBinding",
+    "makeActiveBinding",
+    "parent.env",
+];
+
+/// A bare `environment()`, which returns the frame it runs in.
+fn is_frame_query(module: &Module, id: ExprId) -> bool {
+    matches!(module.kind(id), ExpressionKind::Call { callee, arguments }
+        if module[arguments].is_empty()
+            && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name.as_str() == "environment"))
+}
+
+/// The assignments whose value `id` evaluates to, collected through blocks, `if` branches,
+/// `switch` arms, `match` arms, `local()` and `invisible()`.
+fn collect_tail_assignments(module: &Module, id: ExprId, tails: &mut FxHashSet<ExprId>) {
+    match module.kind(id) {
+        ExpressionKind::Assign { value, .. } => {
+            tails.insert(id);
+            collect_tail_assignments(module, *value, tails);
+        }
+        ExpressionKind::Block { statements } => {
+            if let Some(&last) = module[statements].last() {
+                collect_tail_assignments(module, last, tails);
+            }
+        }
+        ExpressionKind::Paren(inner) => collect_tail_assignments(module, *inner, tails),
+        ExpressionKind::Local { body } => collect_tail_assignments(module, *body, tails),
+        ExpressionKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_tail_assignments(module, *then_branch, tails);
+            if let Some(else_branch) = else_branch {
+                collect_tail_assignments(module, *else_branch, tails);
+            }
+        }
+        ExpressionKind::Match { arms, .. } => {
+            for arm in &module[arms] {
+                collect_tail_assignments(module, arm.body, tails);
+            }
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            let ExpressionKind::NameRef(name) = module.kind(*callee) else {
+                return;
+            };
+            match name.as_str() {
+                "invisible" => {
+                    if let [argument] = &module[arguments][..]
+                        && let Some(value) = argument.value
+                    {
+                        collect_tail_assignments(module, value, tails);
+                    }
+                }
+                // The subject is `EXPR` or the first unnamed argument; the rest are arms.
+                "switch" => {
+                    let subject = module[arguments]
+                        .iter()
+                        .position(|argument| {
+                            module.argument_name(argument).as_deref() == Some("EXPR")
+                        })
+                        .or_else(|| {
+                            module[arguments]
+                                .iter()
+                                .position(|argument| argument.name.is_none())
+                        });
+                    for (index, argument) in module[arguments].iter().enumerate() {
+                        if Some(index) != subject
+                            && let Some(value) = argument.value
+                        {
+                            collect_tail_assignments(module, value, tails);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The formals that hold the data; every other argument evaluates in the data's frame.
 pub(crate) fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
     match name {
@@ -1888,11 +2183,22 @@ fn interpolated_names(text: &str) -> Vec<&str> {
     names
 }
 
+/// The variable names R code in `source` reads, skipping field and namespace names.
+fn code_names(source: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    collect_code_names(source, false, &mut names);
+    names
+}
+
 fn collect_segment_names<'a>(segment: &'a str, names: &mut Vec<&'a str>) {
     if segment.starts_with('?') {
         return;
     }
-    let markup = segment.starts_with('.');
+    collect_code_names(segment, segment.starts_with('.'), names);
+}
+
+/// `markup` skips the leading class name of cli markup such as `{.code x}`.
+fn collect_code_names<'a>(segment: &'a str, markup: bool, names: &mut Vec<&'a str>) {
     let (tokens, _) = lex(segment);
     let mut offset = 0usize;
     let mut previous = None;

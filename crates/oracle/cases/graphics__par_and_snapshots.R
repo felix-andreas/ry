@@ -14,3 +14,14 @@ dev.off()
 pdf(NULL, width = 4, height = 5); print(par("din")); print(dev.size()); dev.off()
 print(dev.cur())
 pdf(NULL); par(mfrow=c(2,2)); print(par("cex","csi","mai","omi","mex")); par(mfrow=c(3,1)); print(par("cex")); par(mfrow=c(1,2)); print(par("cex")); par(cex=2); print(par("mai","csi")); par(mex=2); print(par("mai")); par(mai=c(1,1,1,1)); print(par("mar")); par(oma=c(1,1,1,1)); print(par("omi")); dev.off()
+# A file device starts with its display list off, so it records nothing until
+# dev.control("enable"), and recordPlot() then holds the drawing.
+file <- tempfile(fileext = ".png")
+png(file)
+plot(1:3)
+length(recordPlot()[[1]])
+dev.control("enable")
+plot(1:3)
+length(recordPlot()[[1]]) > 0
+invisible(dev.off())
+unlink(file)

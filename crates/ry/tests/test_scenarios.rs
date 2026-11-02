@@ -9,6 +9,8 @@
 //!
 //! `SCENARIO=<name>` runs one scenario.
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use {
     async_lsp::lsp_types::{self, Url},
     ry::server::simulation::{
@@ -19,14 +21,14 @@ use {
     std::{
         collections::{BTreeMap, VecDeque},
         fs,
-        io::BufReader,
+        io::{BufRead, BufReader, Read},
         path::{Path, PathBuf},
         process::{Child, ChildStdin, Command, Stdio},
         sync::{
             OnceLock,
             mpsc::{self, Receiver},
         },
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -107,6 +109,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         open: BTreeMap::new(),
         last_run: None,
         debugger: None,
+        spawned: None,
     };
     for step in &steps {
         journey.run(step).map_err(|problem| {
@@ -328,7 +331,30 @@ struct Journey {
     open: BTreeMap<String, (i32, String)>,
     last_run: Option<Run>,
     debugger: Option<DebugSession>,
+    spawned: Option<Spawned>,
 }
+
+/// A `ry` process the journey started with `spawn` and has not stopped yet, such as a watcher.
+/// Threads forward its output as it arrives, and `await` reads it up to the line it waits for.
+struct Spawned {
+    child: Child,
+    /// Whether `stop` already killed the group and waited for the child.
+    reaped: bool,
+    lines: Receiver<(Stream, String)>,
+    /// What each stream printed so far, which `stop` keeps as the last run's output.
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// How long `await` waits for a line before the journey fails. It only bounds a hang: a line
+/// that arrives sooner is seen at once.
+const AWAIT_LIMIT: Duration = Duration::from_secs(120);
 
 impl Journey {
     fn run(&mut self, step: &Step) -> Result<(), String> {
@@ -821,6 +847,125 @@ impl Journey {
                     code: output.status.code().unwrap_or(-1),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+                Ok(())
+            }
+            ["spawn", "ry", arguments @ ..] => {
+                if self.spawned.is_some() {
+                    return Err("a spawned process is still running; `stop` it first".to_owned());
+                }
+                let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
+                command
+                    .args(arguments)
+                    .current_dir(&self.root)
+                    .env("XDG_CACHE_HOME", self.root.join(".cache"))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                // Its own group, so `stop` can end the R session it starts along with it.
+                #[cfg(unix)]
+                command.process_group(0);
+                let mut child = command
+                    .spawn()
+                    .map_err(|error| format!("spawning ry: {error}"))?;
+                let (sender, lines) = mpsc::channel();
+                let stdout = child.stdout.take().ok_or("ry has no stdout")?;
+                let stderr = child.stderr.take().ok_or("ry has no stderr")?;
+                for (stream, reader) in [
+                    (Stream::Stdout, Box::new(stdout) as Box<dyn Read + Send>),
+                    (Stream::Stderr, Box::new(stderr)),
+                ] {
+                    let sender = sender.clone();
+                    std::thread::spawn(move || {
+                        for line in BufReader::new(reader).lines() {
+                            let Ok(line) = line else { break };
+                            if sender.send((stream, line)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                self.spawned = Some(Spawned {
+                    child,
+                    reaped: false,
+                    lines,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+                Ok(())
+            }
+            ["await", stream @ ("stdout" | "stderr"), needle, rest @ ..] => {
+                let not_first = match rest {
+                    [] => None,
+                    ["before", other] => Some(*other),
+                    _ => {
+                        return Err(
+                            "expected `await STREAM \"needle\" [before \"other\"]`".to_owned()
+                        );
+                    }
+                };
+                let spawned = self.spawned.as_mut().ok_or("no `spawn` step came before")?;
+                let wanted = if *stream == "stdout" {
+                    Stream::Stdout
+                } else {
+                    Stream::Stderr
+                };
+                let deadline = Instant::now() + AWAIT_LIMIT;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let (from, line) = spawned.lines.recv_timeout(remaining).map_err(|_| {
+                        format!(
+                            "{stream} never printed `{needle}`\nstdout:\n{}\nstderr:\n{}",
+                            spawned.stdout, spawned.stderr
+                        )
+                    })?;
+                    let output = match from {
+                        Stream::Stdout => &mut spawned.stdout,
+                        Stream::Stderr => &mut spawned.stderr,
+                    };
+                    output.push_str(&line);
+                    output.push('\n');
+                    if from == wanted && line.contains(needle) {
+                        return Ok(());
+                    }
+                    if from == wanted
+                        && let Some(other) = not_first
+                        && line.contains(other)
+                    {
+                        return Err(format!("{stream} printed `{line}` before `{needle}`"));
+                    }
+                }
+            }
+            ["stop"] => {
+                let mut spawned = self.spawned.take().ok_or("no `spawn` step came before")?;
+                kill_group(&mut spawned.child)?;
+                spawned.reaped = true;
+                // The readers end once every process of the group has closed the pipes, so this
+                // drains everything they printed; a process that left the group would hold them
+                // open, which the limit turns into a failure instead of a hang.
+                let deadline = Instant::now() + AWAIT_LIMIT;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let (from, line) = match spawned.lines.recv_timeout(remaining) {
+                        Ok(received) => received,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            return Err(
+                                "a process ry started kept its output open after `stop`".to_owned()
+                            );
+                        }
+                    };
+                    let output = match from {
+                        Stream::Stdout => &mut spawned.stdout,
+                        Stream::Stderr => &mut spawned.stderr,
+                    };
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+                self.last_run = Some(Run {
+                    code: -1,
+                    stdout: std::mem::take(&mut spawned.stdout),
+                    stderr: std::mem::take(&mut spawned.stderr),
                 });
                 Ok(())
             }
@@ -1471,6 +1616,41 @@ impl DebugSession {
                 .push_str(message["body"]["output"].as_str().unwrap_or_default());
         } else if message["type"] == "event" {
             self.events.push_back(message);
+        }
+    }
+}
+
+/// Kills `child` and every process it started, such as the R session a runtime runs in, which
+/// would otherwise keep the output pipes open.
+fn kill_group(child: &mut Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .status()
+            .map_err(|error| format!("running kill: {error}"))?;
+        if !status.success() {
+            return Err(format!("kill failed: {status}"));
+        }
+    }
+    #[cfg(not(unix))]
+    child
+        .kill()
+        .map_err(|error| format!("killing ry: {error}"))?;
+    child
+        .wait()
+        .map_err(|error| format!("waiting for ry: {error}"))?;
+    Ok(())
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        // A journey that failed while the process ran must not leave it, or the R session it
+        // started, running; the group outlives a `ry` that already exited on its own.
+        if !self.reaped
+            && let Err(error) = kill_group(&mut self.child)
+        {
+            eprintln!("stopping the spawned ry: {error}");
         }
     }
 }

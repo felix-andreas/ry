@@ -165,7 +165,7 @@ x <- c(foo = 1L, bar = 2L)
 x[["foo"]]
 #++++
 x: integer[named]
-integer | NULL
+integer
 
 #---- range_array_operand_rejected
 c(1L, 2L):3L

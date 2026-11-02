@@ -69,10 +69,6 @@ x: integer
 integer
 x: character
 character
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 10..11 the later binding is here.
-10..11 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
 
 #---- assignment_rhs_resolves_to_the_earlier_binding
 #~~~~ R/main.R
@@ -84,10 +80,78 @@ x
 x: integer
 x: integer
 integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 8..9 the later binding is here.
-8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+
+#==== read_between_definitions
+# A rebinding whose earlier value is read in between is a deliberate update,
+# not a lost definition, so neither binding is reported as a duplicate.
+#---- an_update_that_reads_the_earlier_value_is_not_a_duplicate
+#~~~~ R/main.R
+x <- c(1, 2)
+x <- c(x, 3)
+helper <- function() x
+#++++
+== R/main.R
+x: double[]
+x: double[]
+helper: fn() -> double[]
+
+#---- a_temporary_read_between_rebindings_is_not_a_duplicate
+#~~~~ R/main.R
+tmp <- 1
+first <- tmp * 2
+tmp <- 5
+second <- tmp * 2
+#++++
+== R/main.R
+tmp: double
+first: double
+tmp: double
+second: double
+
+#---- a_read_only_inside_a_function_does_not_count
+# The function body runs later, after the second binding replaced the first.
+#~~~~ R/main.R
+tmp <- 1
+f <- function() tmp
+tmp <- 5
+#++++
+== R/main.R
+tmp: double
+f: fn() -> double
+tmp: double
+0..3 warning[duplicate] Top-level binding `tmp` is overwritten by a later top-level binding in this package.
+  = 29..32 the later binding is here.
+29..32 warning[duplicate] Top-level binding `tmp` overwrites an earlier top-level binding in this package.
+  = 0..3 the earlier binding is here.
+
+#---- a_loop_that_updates_the_binding_reads_it
+#~~~~ R/main.R
+rownum <- 0
+for (i in 1:3) rownum <- rownum + 1
+rownum <- 10
+#++++
+== R/main.R
+rownum: double
+NULL
+rownum: double
+
+#---- set_generic_turns_the_existing_function_into_the_generic
+#~~~~ R/main.R
+area <- function(shape) 0
+setGeneric("area")
+#++++
+== R/main.R
+area: <T> fn([shape]: T) -> double
+character
+
+#---- set_generic_with_a_def_keeps_the_existing_function_as_default
+#~~~~ R/main.R
+area <- function(shape) 0
+setGeneric("area", function(shape) standardGeneric("area"))
+#++++
+== R/main.R
+area: <T> fn([shape]: T) -> double
+character
 
 #==== chained_definitions
 #---- every_target_of_a_chain_is_a_top_level_function

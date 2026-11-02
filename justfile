@@ -75,9 +75,12 @@ docs-test page="":
 docs-bless page="":
     RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
 
-# The seeded deep fuzz run; `FUZZ_ITERS` scales the budget.
-fuzz-deep:
-    cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
+# Every seeded harness at `depth` times its default seeds (`FUZZ_DEPTH`) for `minutes`, each round
+# starting at a fresh seed from `base`, plus the
+# libr package suites under collection stress; failures are logged with their replay commands to
+# target/fuzz-deep.log. A scheduled run passes a fresh base, e.g. `just fuzz-deep 480 $(date +%s)`.
+fuzz-deep minutes="120" base="1000000" depth="10" *args:
+    python3 -I tools/fuzz-deep.py --minutes {{ minutes }} --base {{ base }} --depth {{ depth }} {{ args }}
 
 # One libFuzzer target (`cargo fuzz list` names them all); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
@@ -116,6 +119,12 @@ bench-why *args:
 bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/base/run.py {{ args }}
+
+# Times each List, Str, Dict and Result function on ry against its fastest GNU R equivalent (base R, purrr, stringr, stringi from R_LIBS_USER), e.g.
+# `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/stdlib/results.md`.
+bench-stdlib filter="" n="1e6" *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
 
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`

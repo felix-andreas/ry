@@ -1,0 +1,22 @@
+# Hmisc, VGAM and boot keep package code in `R/*.q` and `R/*.s`, which R CMD INSTALL sources like
+# `R/*.R`. The NAMESPACE exports resolve against them, and a `.s` file outside the package's `R/`
+# (the one beside DESCRIPTION) is not R.
+
+file DESCRIPTION
+| Package: resample
+| Version: 0.1.0
+file NAMESPACE
+| export(boot)
+| export(jack)
+file R/boot.q
+| boot <- function(x) x
+file R/jack.s
+| jack <- function(x) x
+file src/fast.s
+| .text
+file src/R/vendored.s
+| this is ( not R
+
+run ry check
+expect exit 0
+expect stdout "2 files checked, no problems"

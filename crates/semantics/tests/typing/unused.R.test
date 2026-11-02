@@ -195,3 +195,120 @@ f <- function() {
 }
 #++++
 f: fn() -> list{}
+
+#==== implicit_reads
+# A local can be read without its name appearing as a plain read: as the
+# function's value, by a method dispatch that forwards the formals, inside a
+# formula, through the frame itself, or by a string naming it.
+#---- an_assignment_in_tail_position_is_the_function_s_value
+f <- function(x, value) {
+  x <- x + value
+}
+h <- function(k) {
+  if (k) {
+    y <- 1
+  } else 2
+}
+#++++
+f: <T: numeric> fn(x: T, value: T) -> T
+h: fn(k: logical) -> double
+
+#---- an_assignment_before_the_tail_is_still_reported
+f <- function(x) {
+  z <- x + 1
+  x
+}
+#++++
+f: <T: numeric> fn(x: T) -> T
+21..22 warning[unused] `z` is assigned but never used.
+
+#---- next_method_forwards_a_reassigned_formal
+print.myc <- function(x, ...) {
+  x <- unclass(x)
+  NextMethod()
+}
+#++++
+print.myc: <T> fn(x: T, ...: Any) -> Any
+
+#---- next_method_does_not_read_an_ordinary_local
+print.myc <- function(x, ...) {
+  y <- unclass(x)
+  NextMethod()
+}
+#++++
+print.myc: <T> fn(x: T, ...: Any) -> Any
+34..35 warning[unused] `y` is assigned but never used.
+
+#---- call_generic_without_arguments_forwards_the_formals
+setClass("A", representation(x = "numeric"))
+setGeneric("g", function(x, i) standardGeneric("g"))
+setMethod("g", c("A", "missing"), function(x, i) {
+  i <- 1L
+  callGeneric()
+})
+#++++
+fn(...: Any) -> Any
+character
+character
+
+#---- a_formula_reads_the_locals_it_names
+f <- function(a, b) {
+  lx <- log(a)
+  ly <- log(b)
+  coef(lm(ly ~ lx))
+}
+#++++
+f: <T, U> fn(a: T, b: U) -> Any
+
+#---- a_captured_frame_keeps_every_local
+make <- function() {
+  helper <- function() 1
+  counter <- 0
+  structure(environment(), class = "obj")
+}
+mod <- local({
+  util <- function() 2
+  environment()
+})
+#++++
+make: fn() -> environment
+mod: environment
+
+#---- a_frame_passed_to_an_explicit_accessor_does_not_escape
+f <- function(cl) {
+  a <- 1
+  b <- 2
+  parallel::clusterExport(cl, "a", envir = environment())
+}
+#++++
+f: <T> fn(cl: T) -> Unknown
+31..32 warning[unused] `b` is assigned but never used.
+
+#---- get_and_exists_read_a_literal_name
+f <- function() {
+  tmp <- 3
+  get("tmp")
+}
+g <- function() {
+  flag <- TRUE
+  exists("flag")
+}
+#++++
+f: fn() -> Any
+g: fn() -> logical
+
+#---- parse_text_reads_the_names_in_its_code
+f <- function(z) {
+  m2 <- z * 2
+  eval(parse(text = "plot(m2)"))
+}
+#++++
+f: <T: numeric> fn(z: T) -> Any
+
+#---- a_quoting_alias_quotes_its_arguments
+f <- function() {
+  e <- expression
+  list(e(days < 30), e(hours > 2))
+}
+#++++
+f: fn() -> list{Unknown, Unknown}

@@ -149,13 +149,18 @@ The VS Code extension runs your code on ry's runtime.
   the rows where some cell contains the text, ignoring case. Both apply to the whole table in the
   console, not only to the rows on screen; missing values sort first and match no filter, and each
   row keeps its original row name or number.
+- **Plots**: a plot drawn in the console opens in an "R Plot" panel beside the editor, and each
+  command that changes it (a new `plot()`, or `points()` added to the last one) replaces the
+  picture. The console draws to a device that writes no file, and the panel shows it as svg, so it
+  scales with the panel. A device you open yourself, such as `png("out.png")`, keeps writing its
+  file and is not shown.
 
 While a console runs in the workspace, hover and completion also use its live values: hovering
 `df` shows its class and size, and `df$` completes the columns of the data frame you actually
 loaded, which the type checker cannot know when the data comes from a file.
 
-On Windows, the console has no editor connection yet, so attaching, `View()` and live values
-are not available there.
+On Windows, the console has no editor connection yet, so attaching, `View()`, the plot panel and
+live values are not available there.
 
 Other editors can launch the same debugger as `ry debug-adapter`, a
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) server on standard

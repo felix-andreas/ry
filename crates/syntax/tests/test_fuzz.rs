@@ -1,4 +1,5 @@
-//! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
+//! Each generated case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure and
+//! `FUZZ_ITERS` sets the budget. The edit stream is one stateful sequence and keeps its own seed.
 
 use {
     std::panic::catch_unwind,
@@ -7,7 +8,7 @@ use {
         literate::r_source_of_literate,
         parse, reparse,
         testing::{
-            SplitMix64, check_parse_invariants as check_invariants, corpus_sample, fuzz_iterations,
+            SplitMix64, check_parse_invariants as check_invariants, corpus_sample, for_each_seed,
             mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
         },
     },
@@ -171,9 +172,7 @@ const ALPHABET: &[&str] = &[
 /// errors; only the invariants must hold.
 const REGRESSIONS: &[&str] = &[];
 
-fn iterations() -> usize {
-    fuzz_iterations(1500)
-}
+const ITERATIONS: usize = 1500;
 
 #[test]
 fn seeds_hold_invariants() {
@@ -207,6 +206,22 @@ const SPLICE_REGRESSIONS: &[(&str, &str, (u32, u32), u32)] = &[
         "halve <- function(value(: double) -> double value / 2\nif (TRU<-E)<-alibrary(stats)\nts)\nrea(1, 2) else NUL)L\n",
         (23, 67),
         60,
+    ),
+    (
+        // The third line's `(` is never closed, so recovery ends its group at the line break;
+        // the `)` the edit adds four lines later closes it in a full parse.
+        "m\ne\n (ict\narea(\"a\", 3totaltotal <é👋library(stats)\n- NULL\n <- NULL\naract👋é👋👋,tiltotal <- NULL\ns)# comment\n 2)\nilibr日本ary(stats{)medi\nea(1,melibrary(stat\"s)\n\t$weightsN👋ULL\n",
+        "m\ne\n (ict\narea(\"a\", 3totaltotal <é👋library(stats)\n- NUL)L\n <- NULL\naract👋é👋👋,tiltotal <- NULL\ns)# comment\n 2)\nilibr日本ary(stats{)medi\nea(1,melibrary(stat\"s)\n\t$weightsN👋ULL\n",
+        (59, 59),
+        1,
+    ),
+    (
+        // The first line's `[[` is closed by one `]` only, which the parser reports at the `[[`
+        // rather than as an unclosed group, so the splice guard must recognize that message too.
+        "x[[1]\ny <- 2\nz <- 3\n",
+        "x[[1]\ny <- 2\nz <- 3]\n",
+        (19, 19),
+        1,
     ),
 ];
 
@@ -254,8 +269,8 @@ fn literate_conversion_never_moves_a_byte() {
         "\r\n",
         "#| echo: false\n",
     ];
-    let mut rng = SplitMix64(0x11_7E_A7);
-    for _ in 0..iterations() {
+    for_each_seed(ITERATIONS, |seed| {
+        let mut rng = SplitMix64(0x11_7E_A7 ^ seed);
         let mut document = String::new();
         for _ in 0..rng.below(12) {
             document.push_str(PIECES[rng.below(PIECES.len())]);
@@ -274,27 +289,27 @@ fn literate_conversion_never_moves_a_byte() {
             "newlines moved for {document:?} -> {converted:?}"
         );
         check_invariants(&converted);
-    }
+    });
 }
 
 #[test]
 fn fuzz_random_bytes() {
-    run_random_bytes(iterations());
+    run_random_bytes(ITERATIONS);
 }
 
 #[test]
 fn fuzz_token_soup() {
-    run_token_soup(iterations());
+    run_token_soup(ITERATIONS);
 }
 
 #[test]
 fn fuzz_seed_mutations() {
-    run_seed_mutations(iterations());
+    run_seed_mutations(ITERATIONS);
 }
 
 #[test]
 fn fuzz_token_level_mutations() {
-    run_token_level_mutations(iterations());
+    run_token_level_mutations(ITERATIONS);
 }
 
 #[test]
@@ -308,21 +323,21 @@ fn fuzz_corpus_seeded() {
         eprintln!("fuzz_corpus_seeded: corpus not fetched; skipping");
         return;
     };
-    let mut rng = SplitMix64(0xC0_2B_05);
-    for _ in 0..iterations() / 3 {
+    for_each_seed(ITERATIONS / 3, |seed| {
+        let mut rng = SplitMix64(0xC0_2B_05 ^ seed);
         let source = &files[rng.below(files.len())];
         let mut bytes = mutate_bytes(&mut rng, source);
         if rng.below(2) == 0 && !bytes.is_empty() {
             bytes.truncate(rng.below(bytes.len()));
         }
         check_invariants(&String::from_utf8_lossy(&bytes));
-    }
+    });
 }
 
 #[test]
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
-    let budget = iterations().max(20_000);
+    let budget = 20_000;
     run_random_bytes(budget);
     run_token_soup(budget);
     run_seed_mutations(budget);
@@ -347,39 +362,39 @@ fn deep_nesting_is_refused_not_fatal() {
 }
 
 fn run_random_bytes(budget: usize) {
-    let mut rng = SplitMix64(0xDEC0_DE01);
-    for _ in 0..budget {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0xDEC0_DE01 ^ seed);
         check_invariants(&random_bytes(&mut rng));
-    }
+    });
 }
 
 fn run_token_soup(budget: usize) {
-    let mut rng = SplitMix64(0x50_D4_11);
-    for _ in 0..budget {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0x50_D4_11 ^ seed);
         check_invariants(&token_soup(&mut rng, ALPHABET));
-    }
+    });
 }
 
 fn run_seed_mutations(budget: usize) {
-    let mut rng = SplitMix64(0x5EED_F00D);
-    for _ in 0..budget {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0x5EED_F00D ^ seed);
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
-    }
+    });
 }
 
 fn run_token_level_mutations(budget: usize) {
-    let mut rng = SplitMix64(0x70C3_2015);
-    for _ in 0..budget {
-        let seed = SEEDS[rng.below(SEEDS.len())];
-        let (tokens, _) = lex(seed);
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0x70C3_2015 ^ seed);
+        let sample = SEEDS[rng.below(SEEDS.len())];
+        let (tokens, _) = lex(sample);
         if tokens.is_empty() {
-            continue;
+            return;
         }
         let mut spans: Vec<&str> = Vec::with_capacity(tokens.len());
         let mut offset = 0usize;
         for token in &tokens {
             let len = u32::from(token.len) as usize;
-            spans.push(&seed[offset..offset + len]);
+            spans.push(&sample[offset..offset + len]);
             offset += len;
         }
         for _ in 0..(1 + rng.below(3)) {
@@ -401,7 +416,7 @@ fn run_token_level_mutations(budget: usize) {
             }
         }
         check_invariants(&spans.concat());
-    }
+    });
 }
 
 fn run_edit_stream(steps: usize) {
