@@ -27,7 +27,7 @@ use {
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
-        annotations::{self, Entry},
+        annotations::{self, Declared, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
         values,
     },
@@ -149,6 +149,19 @@ impl Ty {
             (a, b) if a.vector() == b.vector() && a.vector().is_vector() => a.vector(),
             _ => Ty::Boxed,
         }
+    }
+}
+
+/// The type to expect of a value whose annotation declares `declared`.
+fn declared_ty(declared: Declared) -> Ty {
+    match (declared.kind, declared.scalar) {
+        (SexpType::Logical, true) => Ty::Lgl,
+        (SexpType::Integer, true) => Ty::Int,
+        (SexpType::Real, true) => Ty::Dbl,
+        (SexpType::Logical, false) => Ty::LglVec,
+        (SexpType::Integer, false) => Ty::IntVec,
+        (SexpType::Real, false) => Ty::DblVec,
+        _ => Ty::Boxed,
     }
 }
 
@@ -626,6 +639,21 @@ pub enum Action<'a> {
     BranchIfObject {
         src: usize,
     },
+    /// Branches unless `src` is a plain record, tuple or tag of `layout`.
+    BranchUnlessShape {
+        src: usize,
+        layout: u32,
+    },
+    /// Branches unless `src` is a plain tag named `tag`.
+    BranchUnlessTag {
+        src: usize,
+        tag: u32,
+    },
+    /// Branches unless `src` matches the literal pattern constant `pattern`.
+    BranchUnlessLiteral {
+        src: usize,
+        pattern: Sexp,
+    },
     Jump,
     JumpUnless {
         src: usize,
@@ -880,12 +908,13 @@ pub unsafe fn plan<'a>(
         defaulted: defaulted_formals(formals, arena),
         locals,
         hints: List::new_in(arena),
+        declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
         patient,
     };
-    builder.collect_slots();
+    builder.collect_slots(formals);
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
     let live = builder.liveness(&blocks, &successors);
@@ -1076,6 +1105,8 @@ struct Builder<'a> {
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: List<'a, Ty>,
+    /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
+    declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
     frame_safe: Map<'a, Sexp, bool>,
     patient: bool,
@@ -1090,7 +1121,7 @@ impl<'a> Builder<'a> {
         self.code.cdr().element(index)
     }
 
-    unsafe fn collect_slots(&mut self) {
+    unsafe fn collect_slots(&mut self, formals: Sexp) {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
@@ -1106,6 +1137,7 @@ impl<'a> Builder<'a> {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
+                    self.declared.push(Ty::Boxed);
                 }
                 let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
                 if inst.op == Op::GetVar && bits != 0 {
@@ -1114,6 +1146,22 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        let source = self.code.cdr().element(bytecode::SOURCE);
+        let (declared, _) = annotations::declared_formals(formals, source);
+        let mut formal = formals;
+        for declared in declared {
+            if formal.kind() != SexpType::Pairlist {
+                break;
+            }
+            if let (Some(declared), Some(&slot)) = (declared, self.slot_of.get(&formal.tag())) {
+                let ty = declared_ty(declared);
+                self.declared[slot] = ty;
+                if self.hints[slot] == Ty::Bottom {
+                    self.hints[slot] = ty;
+                }
+            }
+            formal = formal.cdr();
+        }
     }
 
     fn slot(&self, symbol: Sexp) -> usize {
@@ -1121,6 +1169,31 @@ impl<'a> Builder<'a> {
     }
 
     /// The layout and slot a `$` site's shape cache holds, once tier 0 has seen a record there.
+    /// Reads slot `index` of the record of `layout` in `src`. A boxed slot is loaded as it is,
+    /// so only an unboxed scalar's type is something the read itself checks.
+    fn slot_read(
+        &mut self,
+        state: &mut State<'a>,
+        dst: usize,
+        src: usize,
+        layout: u32,
+        index: u32,
+        feedback: Ty,
+    ) -> Action<'a> {
+        let result = if feedback.is_unboxed() {
+            feedback
+        } else {
+            Ty::Boxed
+        };
+        state.registers[dst] = result;
+        Action::Intrinsic {
+            intrinsic: Intrinsic::Field { layout, index },
+            dst,
+            args: self.slice([src]),
+            result,
+        }
+    }
+
     fn cached_field(&self, shape: Sexp) -> Option<(u32, u32)> {
         // SAFETY: the shape constant is the two-element integer vector the compiler made.
         let &[layout, index] = (unsafe { values::ints(shape) }) else {
@@ -1144,11 +1217,16 @@ impl<'a> Builder<'a> {
         if !self.never_ran(pc) {
             return self.feedback_at(pc);
         }
-        match annotations::declared_return_type(function) {
-            Some(SexpType::Real) => Ty::Dbl,
-            Some(SexpType::Integer) => Ty::Int,
-            Some(SexpType::Logical) => Ty::Lgl,
-            _ => Ty::Boxed,
+        annotations::declared_return_type(function).map_or(Ty::Boxed, declared_ty)
+    }
+
+    /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
+    /// before it has read anything, the type the closure's signature declares for that formal.
+    fn load_ty(&self, pc: usize, slot: usize) -> Ty {
+        if self.never_ran(pc) {
+            self.declared[slot]
+        } else {
+            self.feedback_at(pc)
         }
     }
 
@@ -1388,7 +1466,7 @@ impl<'a> Builder<'a> {
                         // tier 0 for good.
                         current.ty
                     } else {
-                        self.feedback_at(inst.pc)
+                        self.load_ty(inst.pc, slot)
                     };
                     Some(if ty == Ty::Bottom { Ty::Boxed } else { ty })
                 } else {
@@ -1531,24 +1609,73 @@ impl<'a> Builder<'a> {
                     Some((layout, index))
                         if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
                     {
-                        // A boxed field is loaded as it is, so only an unboxed scalar's type is
-                        // something the read itself checks.
-                        let feedback = if feedback.is_unboxed() {
-                            feedback
-                        } else {
-                            Ty::Boxed
-                        };
-                        state.registers[operand(0)] = feedback;
                         state.visible = Some(true);
-                        Action::Intrinsic {
-                            intrinsic: Intrinsic::Field { layout, index },
-                            dst: operand(0),
-                            args: self.slice([operand(1)]),
-                            result: feedback,
-                        }
+                        self.slot_read(state, operand(0), operand(1), layout, index, feedback)
                     }
                     _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
                 }
+            }
+            Op::Item => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(3))) {
+                    // A subject of another layout hands the read to tier 0, which takes the
+                    // jump when it is not a record or tuple with that item.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
+                        state.visible = Some(true);
+                        self.slot_read(state, operand(0), operand(1), layout, index, feedback)
+                    }
+                    // A site that never read an item is a vector or list read, which `[[`'s
+                    // path compiles.
+                    _ => {
+                        self.push_edge(operand(4), state);
+                        return Ok(Action::Branch);
+                    }
+                }
+            }
+            Op::Slot => {
+                let feedback = self.feedback_at(inst.pc);
+                if feedback == Ty::Bottom || state.registers[operand(1)] != Ty::Boxed {
+                    self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Pure)
+                } else {
+                    let index = operand(2) as u32;
+                    self.slot_read(
+                        state,
+                        operand(0),
+                        operand(1),
+                        operand(3) as u32,
+                        index,
+                        feedback,
+                    )
+                }
+            }
+            Op::MatchShape | Op::MatchTag | Op::MatchLiteral => {
+                let src = operand(0);
+                self.push_edge(operand(2), state);
+                let ty = state.registers[src];
+                // A value the analysis knows is a vector, a scalar or a function is no record.
+                if inst.op != Op::MatchLiteral && (ty.is_plain() || matches!(ty, Ty::Closure(..))) {
+                    return Ok(Action::Branch);
+                }
+                match inst.op {
+                    Op::MatchShape => Action::BranchUnlessShape {
+                        src,
+                        layout: operand(1) as u32,
+                    },
+                    Op::MatchTag => Action::BranchUnlessTag {
+                        src,
+                        tag: operand(1) as u32,
+                    },
+                    _ => Action::BranchUnlessLiteral {
+                        src,
+                        pattern: self.constant(operand(1)),
+                    },
+                }
+            }
+            Op::MatchFail => self.opaque_step(state, None, &[], Effect::Opaque),
+            Op::Construct => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Pure)
             }
             Op::CallTailUpdate => self.opaque_step(
                 state,
@@ -2810,6 +2937,8 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::Jump => Some(inst.operand(0)),
         Op::JumpUnless => Some(inst.operand(2)),
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
+        Op::Item => Some(inst.operand(4)),
         Op::BranchUnlessPrimitive => Some(inst.operand(2)),
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
@@ -2826,6 +2955,10 @@ fn ends_block(op: Op) -> bool {
             | Op::BranchUnlessBuiltin
             | Op::BranchUnlessPrimitive
             | Op::BranchIfObject
+            | Op::MatchShape
+            | Op::MatchTag
+            | Op::MatchLiteral
+            | Op::Item
             | Op::ForStep
             | Op::LogicLeft
             | Op::Guard
@@ -2860,9 +2993,21 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => {
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => {
             kill(operand(0), live);
             gen_(operand(1), live);
+        }
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => gen_(operand(0), live),
+        Op::Construct => {
+            kill(operand(0), live);
+            for register in operand(2)..operand(2) + operand(3) {
+                gen_(register, live);
+            }
         }
         Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::EndStatement => {

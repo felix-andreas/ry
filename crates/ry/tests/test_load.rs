@@ -25,6 +25,20 @@ fn r_available() -> bool {
     available
 }
 
+fn installed(package: &str) -> bool {
+    let installed = Command::new("Rscript")
+        .arg("-e")
+        .arg(format!(
+            "quit(status = !requireNamespace('{package}', quietly = TRUE))"
+        ))
+        .status()
+        .is_ok_and(|status| status.success());
+    if !installed {
+        eprintln!("skipped: {package} is not installed");
+    }
+    installed
+}
+
 /// A package directory holding `files` (paths relative to its root).
 fn package(files: &[(&str, &str)]) -> TempDir {
     let directory = tempfile::tempdir().expect("temp dir");
@@ -277,6 +291,49 @@ fn a_strict_project_binds_pure_constants_lazily_on_both_runtimes() {
         assert!(output.status.success(), "{runtime}: {printed}");
         assert!(
             printed.contains("2 definitions bound lazily, 0 top-level statements run"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
+fn r6_generators_bind_lazily_and_build_the_same_classes_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    if !installed("R6") {
+        return;
+    }
+    // `Child` inherits from a class of an earlier file, and a method calls a function that
+    // comes later, which only the method's call reads.
+    let root = package(&[
+        (
+            "DESCRIPTION",
+            "Package: counters\nVersion: 1.0\nImports: R6\n",
+        ),
+        ("NAMESPACE", "importFrom(R6, R6Class)\n"),
+        (
+            "R/a.R",
+            "Base <- R6Class(\"Base\", public = list(n = 0, add = function() { self$n <- self$n + step(); invisible(self) }))\n",
+        ),
+        (
+            "R/b.R",
+            "Child <- R6::R6Class(\"Child\", inherit = Base, public = list(twice = function() { self$add(); self$add() }))\n\
+             step <- function() 10\n",
+        ),
+    ]);
+    let probe =
+        "x <- Child$new(); x$twice(); cat(x$n, class(x), environmentName(Child$parent_env), '\\n')";
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &[probe]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("3 definitions bound lazily, 0 top-level statements run"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("20 Child Base R6 counters"),
             "{runtime}: {printed}"
         );
     }
@@ -657,4 +714,53 @@ fn source_references_point_into_the_file() {
     let printed = text(&output);
     assert!(output.status.success(), "{printed}");
     assert!(printed.contains("at 4 a.R"), "{printed}");
+}
+
+#[test]
+fn ry_test_runs_testthat_against_the_loaded_package_on_both_runtimes() {
+    if !r_available() || !installed("testthat") {
+        return;
+    }
+    // `scale` is internal, so only a test run inside the namespace sees it, and `make` comes
+    // from a helper file.
+    let root = package(&[
+        ("DESCRIPTION", "Package: counters\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(step)\n"),
+        ("R/a.R", "step <- function(k = 1) k * scale\nscale <- 10\n"),
+        (
+            "tests/testthat/helper-make.R",
+            "make <- function() step(2)\n",
+        ),
+        (
+            "tests/testthat/test-step.R",
+            "test_that(\"step scales\", expect_equal(make(), 20))\n",
+        ),
+        (
+            "tests/testthat/test-broken.R",
+            "test_that(\"a failure\", expect_equal(scale, 11))\n",
+        ),
+    ]);
+    for runtime in RUNTIMES {
+        let run = |filter: Option<&str>| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
+            command.args(["test", "--reporter", "summary", "--runtime", runtime]);
+            if let Some(filter) = filter {
+                command.args(["--filter", filter]);
+            }
+            command.arg(root.path()).output().expect("run ry test")
+        };
+        let output = run(None);
+        let printed = text(&output);
+        assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
+        assert!(printed.contains("broken: 1"), "{runtime}: {printed}");
+        assert!(printed.contains("step: ."), "{runtime}: {printed}");
+        assert!(
+            printed.contains("Expected `scale` to equal 11."),
+            "{runtime}: {printed}"
+        );
+        let output = run(Some("step"));
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(!printed.contains("broken"), "{runtime}: {printed}");
+    }
 }

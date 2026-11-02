@@ -27,7 +27,7 @@ cache <- memoise::memoise(cache)
 #++++
 package demo 0.1.0
 == R/a.R
-1:0 eager binds [cache]
+1:0 eager effect-free binds [cache]
 == R/b.R
 1:0 eager binds [cache] reads [cache]
 
@@ -131,7 +131,7 @@ package demo 0.1.0
 2:0 lazy version constant at 2:11
 3:0 lazy labels constant at 3:10
 4:0 lazy squares constant at 4:11
-9:0 eager reads [representation setClass] registers S4Class { class: "Account" }
+9:0 eager effect-free reads [representation setClass] registers S4Class { class: "Account" }
 
 #---- an_impure_constant_a_chain_and_a_rewritten_name_stay_eager
 #~~~~ R/a.R
@@ -144,9 +144,9 @@ limit <- 2
 package demo 0.1.0
 == R/a.R
 2:0 eager binds [home] reads [Sys.getenv]
-3:0 eager binds [a b]
-4:0 eager binds [limit]
-5:0 eager binds [limit]
+3:0 eager effect-free binds [a b]
+4:0 eager effect-free binds [limit]
+5:0 eager effect-free binds [limit]
 
 #---- a_constant_calling_a_project_pure_function
 #~~~~ R/a.R

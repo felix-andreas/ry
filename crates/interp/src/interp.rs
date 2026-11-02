@@ -47,6 +47,7 @@ pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_engine;
 pub mod graphics_render;
+pub mod help_server;
 pub mod http;
 pub mod latex;
 pub mod linalg;
@@ -182,6 +183,9 @@ pub struct Interp {
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
+    /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
+    /// the collector still sees them.
+    pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
@@ -322,6 +326,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         handlers: None,
         restarts: None,
         global_handlers: None,
+        suspended_handlers: Vec::new(),
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
@@ -473,6 +478,10 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.handlers, marker);
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
+            for (handlers, restarts) in &interp.suspended_handlers {
+                conditions::trace_handlers(handlers, marker);
+                conditions::trace_restarts(restarts, marker);
+            }
             marker.mark(interp.srcref);
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
@@ -489,12 +498,6 @@ impl RootSource for InterpRoots {
                 marker.mark(call);
             }
             interp.globals.trace(marker);
-            interp.symbols.trace(marker);
-            for definition in &interp.builtins {
-                if let Some(object) = definition.object {
-                    marker.mark(object);
-                }
-            }
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);

@@ -9,10 +9,11 @@ ry fmt [PATHS]     # format files in place
 ry run [FILE]      # run an R script on ry's runtime; without one, open ry's console
 ry R [FILE]        # the same on GNU R
 ry load [PATH]     # load an R package from source, run code against it, and exit
+ry test [PATH]     # run a package's testthat tests against the loaded package
 ry server          # the language server, over stdio; your editor starts it
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, and `load` need R. They use
+`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, and `test` need R. They use
 the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
 built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
 own runtime needs that installation too, because it still reads base R's R code and the default
@@ -27,6 +28,7 @@ ry check --output json         # one JSON object per finding, on stdout
 ry check --min-severity error  # ignore warnings, also for the exit code
 ry check --fix                 # apply the safe fixes, then report what remains
 ry check --fix --unsafe-fixes  # also apply fixes that guess, such as a spelling suggestion
+ry check --annotate            # write inferred types as annotations, then report what remains
 ```
 
 Naming a file limits what is reported, not what is analyzed: ry always reads the whole
@@ -54,6 +56,12 @@ guesses what you meant, such as changing a misspelled `totl` to `total`, is unsa
 `--unsafe-fixes` as well. One fix can expose another, so ry repeats the pass until nothing changes. A file with a syntax
 error is left unchanged, because its fixes were worked out on a guess at what the broken code means.
 The editor offers the same fixes as quick fixes.
+
+`--annotate` writes the inferred type of each unannotated top-level function and binding in the
+named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
+says, prints how many it added, and then reports what is left.
+[Strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode) shows it at work. A binding
+whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
 
@@ -152,6 +160,19 @@ and consoles of `ry run` and `ry R`.
 No feature is experimental right now, so `--experimental-features` ignores every name with a warning
 (`range_formatting` is always on).
 
+## test
+
+`ry test` loads the package at `PATH` the way `ry load` does and runs its `tests/testthat` files
+with testthat, as `devtools::test()` does. testthat must be installed. The output is testthat's own
+reporter's, and the command exits with `1` when a test fails or errors.
+
+- `--filter REGEX` runs only the test files whose names match, as `devtools::test(filter =)` does.
+- `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
+- `--watch` keeps running: after every edit under `R/` or `tests/testthat/` it reloads only what
+  changed, runs first the test files the edit can affect, and then the rest. A file is affected
+  when you edited it, or when it mentions a function whose definition reaches a changed one. An
+  edit to a helper or setup file, or a reload that has to run top-level code, reruns everything.
+
 ## debug-adapter
 
 `ry debug-adapter` serves one debug session over the
@@ -168,12 +189,12 @@ a workspace and reports where time and memory go. Both are developer aids for wo
 
 - **0**: nothing found, or nothing to reformat.
 - **1**: `check` counted a finding (warnings count, unless `--min-severity error`), `fmt --check` or
-  `--diff` found a file to change, `run`, `R` or `load` hit an error in the script or the package,
+  `--diff` found a file to change, `run`, `R` or `load` hit an error in the script or the package, `test` saw a test fail,
   strict mode refused a script, or the server stopped after an analysis panic. A script that calls
   `q(status = n)` exits with `n`.
 - **2**: ry could not do its job. That is a usage error, invalid TOML in `ry.toml`, a path that does
-  not exist, a file, script or stub it cannot read, an invalid `exclude` pattern, for `load` a path
-  inside no package, or, for `run`, `R`, and `load`, no usable R or no ry runtime library. A `2` overrides a `1`, so a broken
+  not exist, a file, script or stub it cannot read, an invalid `exclude` pattern, for `load` and `test` a path
+  inside no package, or, for `run`, `R`, `load`, and `test`, no usable R or no ry runtime library. A `2` overrides a `1`, so a broken
   setup never looks like ordinary findings.
 
 A [misspelled key](/reference/configuration#mistakes-in-rytoml) in `ry.toml` is only a warning, not

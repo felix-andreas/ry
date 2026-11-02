@@ -205,6 +205,25 @@ fn seeds_agree_across_tiers() {
             "(n = 8L)",
             false,
         ),
+        // Tuple items with constant indices reach the slot intrinsic; a list where the tuple was
+        // hands the read back to `[[`'s path.
+        (
+            "t <- (1.5, 2L, \"s\")\ns <- 0\nfor (i in 1:n) { if (i == 6L) t <- list(10, 20L, \"l\"); s <- s + t[[1L]] * t[[2]] }\nlist(s, t[[3L]])",
+            "(n = 9L)",
+            false,
+        ),
+        // A compiled `match` over tags, tuples, records and literals, with nested payloads.
+        (
+            "s <- 0\nfor (i in 1:n) { v <- if (i %% 4L == 0L) :Some((i, 2)) else if (i %% 4L == 1L) :None else if (i %% 4L == 2L) (x = i, y = 1L) else \"k\"\ns <- s + match (v) { :Some((a, b)) => a * b, :None => 1, (x = a, y = 1L) => a, \"k\" | \"j\" => 0.5, _ => 100 } }\ns",
+            "(n = 40L)",
+            false,
+        ),
+        // A tag pattern with `..`, constructors in the loop, and no arm matching at the end.
+        (
+            "s <- 0L\nfor (i in 1:n) { r <- if (i < n) :Ok(i) else :Other(i)\ns <- s + match (r) { :Ok(..) => 1L, :Err(e) => e } }\ns",
+            "(n = 12L)",
+            true,
+        ),
         // A boxed field, then a missing one, which is an error.
         (
             "r <- (x = c(1, 2), y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 5L) r <- (y = 1,); s <- s + r$x[[1L]] }\ns",
@@ -482,6 +501,70 @@ fn formal_shadows_enclosing_function() {
         jit::install_mode(Mode::Off);
         for outcome in outcomes {
             assert_eq!(outcome, "99");
+        }
+    });
+}
+
+#[test]
+fn fully_typed_closure_compiles_at_its_first_call() {
+    // The signature stands in for the profile, so the first call runs compiled code, and a
+    // call whose values the declared types do not predict still gets tier 0's answer.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let cases = [
+            (
+                "ft <- function(x: double, y: double) -> double x * y + 1",
+                "ft(2, 3)",
+                "7",
+                Some(true),
+            ),
+            (
+                "fi <- function(x: double) -> double x * 2",
+                "fi(2L)",
+                "4",
+                None,
+            ),
+            (
+                "fv <- function(v: double[], k: integer) -> double v[2L] * k",
+                "fv(c(1, 2.5), 2L)",
+                "5",
+                Some(true),
+            ),
+            (
+                "fe <- function(x: double) -> double x + 1",
+                "fe(\"a\")",
+                "error",
+                None,
+            ),
+            (
+                "fu <- function(x: double, y) -> double x + y",
+                "fu(1, 2)",
+                "3",
+                Some(false),
+            ),
+        ];
+        let mut outcomes = Vec::new();
+        for (index, (definition, call, _, _)) in cases.iter().enumerate() {
+            run(definition);
+            let outcome = run(call);
+            let name = format!("f{}", ["t", "i", "v", "e", "u"][index]);
+            let function = lower::parse_text(&name, "<test>")
+                .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+            let compiled = function.is_ok_and(|function| {
+                function.cdr().kind() == heap::object::SexpType::Bytecode
+                    && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
+            });
+            outcomes.push((outcome, compiled));
+        }
+        jit::install_mode(Mode::Off);
+        for ((definition, call, expected, eager), (outcome, compiled)) in cases.iter().zip(outcomes)
+        {
+            assert_eq!(outcome, *expected, "{definition}; {call}");
+            // A call the seeds mispredict deoptimizes and discards the code, so only the others
+            // say whether the first call compiled.
+            if let Some(eager) = eager {
+                assert_eq!(compiled, *eager, "{definition}; {call}");
+            }
         }
     });
 }

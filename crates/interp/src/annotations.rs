@@ -100,6 +100,10 @@ const FUNCTION: Mask = bit(SexpType::Closure) | bit(SexpType::Builtin) | bit(Sex
 /// `Array<T>`: the value must carry the Array bit, and its storage must be one the item type
 /// admits (any storage when the item type is not decidable from storage).
 const ARRAY: Mask = 1 << 31;
+/// The annotation is scalar-like (`double`, not `double[]`). No check tests a value's length,
+/// because the typing reference lets a value typed scalar hold several elements, so the bit only
+/// tells a compiler what to expect before it has seen a value.
+const SCALAR: Mask = 1 << 30;
 
 /// A signature is a list: the masks by slot, the annotation texts by slot, the formal names by
 /// formal position, and the definition's body.
@@ -354,18 +358,48 @@ pub unsafe fn check_forced(promise: Sexp, value: Sexp) -> R<()> {
     Ok(())
 }
 
-/// The vector type a typed closure declares it returns, when its return annotation admits
-/// exactly one of `logical`, `integer` or `double` (each of which also admits the narrower ones,
-/// as R's coercions do). The JIT takes it as the expected type of a call's result before the
-/// call has ever returned.
-pub unsafe fn declared_return_type(function: Sexp) -> Option<SexpType> {
+/// What an annotation that admits exactly one of `logical`, `integer` or `double` declares
+/// (each of these also admits the narrower ones, as R's coercions do), for a compiler that
+/// takes it as the type to expect before it has seen a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Declared {
+    pub kind: SexpType,
+    /// Scalar-like, such as `double` rather than `double[]`.
+    pub scalar: bool,
+}
+
+/// The type a typed closure declares it returns.
+pub unsafe fn declared_return_type(function: Sexp) -> Option<Declared> {
     let signature = signature_of(function)?;
-    match mask_at(signature.element(MASKS), RETURN_SLOT) {
-        LOGICAL => Some(SexpType::Logical),
-        INTEGER => Some(SexpType::Integer),
-        DOUBLE => Some(SexpType::Real),
-        _ => None,
-    }
+    declared(mask_at(signature.element(MASKS), RETURN_SLOT))
+}
+
+/// The declared type of each formal of the definition `formals`/`body`, by position, and
+/// whether every formal carries a checked annotation. An untyped definition declares nothing.
+pub unsafe fn declared_formals(formals: Sexp, body: Sexp) -> (Vec<Option<Declared>>, bool) {
+    let Some(signature) = signature_for(formals, body) else {
+        return (Vec::new(), false);
+    };
+    let masks = values::ints(signature.element(MASKS));
+    let formal_masks = masks.get(FIRST_FORMAL_SLOT..).unwrap_or(&[]);
+    let types = formal_masks
+        .iter()
+        .map(|&mask| declared(mask as Mask))
+        .collect();
+    (types, formal_masks.iter().all(|&mask| mask != 0))
+}
+
+fn declared(mask: Mask) -> Option<Declared> {
+    let kind = match mask & !SCALAR {
+        LOGICAL => SexpType::Logical,
+        INTEGER => SexpType::Integer,
+        DOUBLE => SexpType::Real,
+        _ => return None,
+    };
+    Some(Declared {
+        kind,
+        scalar: mask & SCALAR != 0,
+    })
 }
 
 /// Whether a call that binds plain values of storage types `arguments` to the formals of the
@@ -408,6 +442,18 @@ pub unsafe fn return_admits(function: Sexp, kind: SexpType) -> bool {
 /// Whether a check admits a value of storage type `kind` that is not an `Array`.
 fn plain_admits(mask: Mask, kind: SexpType) -> bool {
     mask & ARRAY == 0 && mask & bit(kind) != 0
+}
+
+/// Whether `function`'s definition may carry a signature: one bit test, which [`declared_formals`]
+/// and the checks confirm.
+pub unsafe fn is_typed(function: Sexp) -> bool {
+    let formals = function.car();
+    let key = if formals.kind() == SexpType::Pairlist {
+        formals
+    } else {
+        crate::bytecode::closure_body(function)
+    };
+    key.has_gp(gp::TYPED_DEFINITION)
 }
 
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
@@ -520,30 +566,34 @@ fn type_child(node: &SyntaxNode) -> Option<SyntaxNode> {
 fn mask_of(node: &SyntaxNode) -> Mask {
     match node.kind() {
         SyntaxKind::TYPE_REF => match node.first_token().as_ref().map(|token| token.text()) {
-            Some("logical") => LOGICAL,
-            Some("integer") => INTEGER,
-            Some("double") => DOUBLE,
-            Some("complex") => COMPLEX,
-            Some("character") => CHARACTER,
-            Some("raw") => RAW,
+            Some("logical") => LOGICAL | SCALAR,
+            Some("integer") => INTEGER | SCALAR,
+            Some("double") => DOUBLE | SCALAR,
+            Some("complex") => COMPLEX | SCALAR,
+            Some("character") => CHARACTER | SCALAR,
+            Some("raw") => RAW | SCALAR,
             Some("NULL") | Some("null") => NULL,
             _ => 0,
         },
         // A vector shape (`integer[]`, `integer[named]`) is not checked, only its storage.
-        SyntaxKind::TYPE_VECTOR | SyntaxKind::TYPE_PAREN => {
-            node.children().next().map_or(0, |inner| mask_of(&inner))
-        }
+        SyntaxKind::TYPE_VECTOR => node
+            .children()
+            .next()
+            .map_or(0, |inner| mask_of(&inner) & !SCALAR),
+        SyntaxKind::TYPE_PAREN => node.children().next().map_or(0, |inner| mask_of(&inner)),
         SyntaxKind::TYPE_UNION => {
             let mut mask = 0;
+            let mut scalar = SCALAR;
             for member in node.children() {
                 let member = mask_of(&member);
                 // An Array member's storage overlaps a vector's, so a mixed union stays unchecked.
                 if member == 0 || member & ARRAY != 0 {
                     return 0;
                 }
-                mask |= member;
+                scalar &= member;
+                mask |= member & !SCALAR;
             }
-            mask
+            mask | scalar
         }
         // A DataFrame is an external pointer to a table, so its columns are not in its storage,
         // and a plan or a grouping is no list either.
@@ -565,7 +615,12 @@ fn mask_of(node: &SyntaxNode) -> Mask {
                 .find(|child| child.kind() == SyntaxKind::TYPE_ARG_LIST)
                 .and_then(|arguments| arguments.children().next())
                 .map_or(0, |item| mask_of(&item));
-            ARRAY | if item & ARRAY != 0 { LIST } else { item }
+            ARRAY
+                | if item & ARRAY != 0 {
+                    LIST
+                } else {
+                    item & !SCALAR
+                }
         }
         _ => 0,
     }

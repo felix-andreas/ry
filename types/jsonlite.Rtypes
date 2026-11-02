@@ -1,7 +1,8 @@
 # jsonlite: JSON encoding and decoding.
 #
-# `toJSON()` returns a character string of class "json". `fromJSON()` returns whatever the document
-# holds, and its `txt` may also be a file path or a URL it reads.
+# `toJSON()` returns a character string of class "json", which works wherever a string does.
+# `fromJSON()` returns whatever the document holds, and its `txt` may also be a file path or a URL
+# it reads.
 
 @type json {character}
 

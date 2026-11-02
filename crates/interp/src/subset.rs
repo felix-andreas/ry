@@ -227,6 +227,99 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     Ok(result)
 }
 
+/// `object[index]` for a plain logical, integer or double vector and an attribute-free integer,
+/// double or logical subscript, gathered straight from the subscript without first resolving
+/// it to a position list. `None` defers to the general path, which handles every other shape
+/// (negative or zero subscripts, recycled logical subscripts, other element types).
+unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if index == missing_arg() || values::has_attributes(index) || values::has_attributes(object) {
+        return Ok(None);
+    }
+    let kind = object.kind();
+    if !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real) {
+        return Ok(None);
+    }
+    let index = values::materialize(index)?;
+    match index.kind() {
+        SexpType::Integer => {
+            let positions = values::ints(index);
+            // Every subscript must be NA or positive; anything else needs the general rules.
+            if positions
+                .iter()
+                .any(|&position| position <= 0 && position != NA_INTEGER)
+            {
+                return Ok(None);
+            }
+            let position_of = |position: &i32| (*position as u32 as usize).wrapping_sub(1);
+            Ok(Some(gather_kind(
+                object,
+                positions.iter().map(position_of),
+                positions.len(),
+            )?))
+        }
+        SexpType::Real => {
+            let positions = values::reals(index);
+            if positions
+                .iter()
+                .any(|&position| !(position >= 1.0) && !position.is_nan())
+            {
+                return Ok(None);
+            }
+            let position_of = |position: &f64| {
+                if position.is_nan() {
+                    NA_POSITION
+                } else {
+                    position.trunc() as usize - 1
+                }
+            };
+            Ok(Some(gather_kind(
+                object,
+                positions.iter().map(position_of),
+                positions.len(),
+            )?))
+        }
+        SexpType::Logical => {
+            let flags = values::ints(index);
+            if flags.len() != length(object) {
+                return Ok(None);
+            }
+            let selected = flags.iter().filter(|&&flag| flag != 0).count();
+            let positions = flags
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &flag)| match flag {
+                    0 => None,
+                    NA_LOGICAL => Some(NA_POSITION),
+                    _ => Some(position),
+                });
+            Ok(Some(gather_kind(object, positions, selected)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `object[positions]` for a logical, integer or double vector, NA past the end.
+unsafe fn gather_kind(
+    object: Sexp,
+    positions: impl Iterator<Item = usize>,
+    count: usize,
+) -> R<Sexp> {
+    let kind = object.kind();
+    let result = values::alloc_uninit(kind, count)?;
+    if kind == SexpType::Real {
+        let source = values::reals(object);
+        for (slot, position) in values::reals_mut(result).iter_mut().zip(positions) {
+            *slot = source.get(position).copied().unwrap_or(NA_REAL);
+        }
+    } else {
+        let source = values::ints(object);
+        for (slot, position) in values::ints_mut(result).iter_mut().zip(positions) {
+            *slot = source.get(position).copied().unwrap_or(NA_INTEGER);
+        }
+    }
+    Ok(result)
+}
+
 /// `source[indices]` for an atomic vector of plain elements, with NA past the end.
 unsafe fn gather<T: Copy + 'static>(
     kind: SexpType,
@@ -572,6 +665,12 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     let count = length(object);
     let names = values::names(object);
+    if dims.is_none()
+        && names == nil()
+        && let Some(result) = gather_plain(object, index)?
+    {
+        return Ok(result);
+    }
     let (indices, _) = resolve(index, count, names, false, call)?;
     let result = select_elements(object, &indices)?;
     if names != nil() {
@@ -629,6 +728,31 @@ unsafe fn array_subset(
     call: Sexp,
 ) -> R<Sexp> {
     let dimnames = get_attr(object, symbols().dimnames);
+    // `m[i, ]` on a plain numeric matrix is a strided copy of one row, the shape of a
+    // simulation that keeps one row per step. A single column drops to a scalar whose name
+    // depends on both dimnames, which the general path works out.
+    if drop
+        && let ([row, column], &[rows, columns]) = (indices, dims)
+        && *column == missing_arg()
+        && columns != 1
+        && let Some(row) = matrix_row(*row, rows)
+        && matches!(
+            object.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+        )
+    {
+        let result = values::alloc_uninit(object.kind(), columns)?;
+        if object.kind() == SexpType::Real {
+            gather_row(values::reals_mut(result), values::reals(object), row, rows);
+        } else {
+            gather_row(values::ints_mut(result), values::ints(object), row, rows);
+        }
+        if dimnames.kind() == SexpType::List && dimnames.element(1) != nil() {
+            let names = values::duplicate(dimnames.element(1))?;
+            values::set_attr(result, symbols().names, names)?;
+        }
+        return Ok(result);
+    }
     let mut selections: Vec<Vec<usize>> = Vec::with_capacity(dims.len());
     for (dimension, (&index, &extent)) in indices.iter().zip(dims).enumerate() {
         let names = if dimnames.kind() == SexpType::List {
@@ -712,6 +836,43 @@ unsafe fn array_subset(
         values::set_attr(result, symbols().dimnames, list)?;
     }
     Ok(result)
+}
+
+/// The zero-based row a scalar subscript selects in a matrix of `rows` rows, when it is a plain
+/// positive in-range number; anything else takes the general path, which also reports errors.
+unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
+    if index.is_altrep() || length(index) != 1 || values::has_attributes(index) {
+        return None;
+    }
+    let position = match index.kind() {
+        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
+            f64::from(index.slice::<i32>()[0])
+        }
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NaN fails both comparisons, and `m[2.7, ]` truncates to the second row.
+    (position >= 1.0 && position < rows as f64 + 1.0).then(|| position as usize - 1)
+}
+
+/// Copies row `row` of a column-major matrix with `rows` rows into `target`, one element per
+/// column.
+fn gather_row<T: Copy>(target: &mut [T], matrix: &[T], row: usize, rows: usize) {
+    for (slot, &element) in target.iter_mut().zip(matrix.iter().skip(row).step_by(rows)) {
+        *slot = element;
+    }
+}
+
+/// Writes `value`, recycled, over row `row` of a column-major matrix with `rows` rows.
+fn scatter_row<T: Copy>(matrix: &mut [T], value: &[T], row: usize, rows: usize) {
+    for (slot, &element) in matrix
+        .iter_mut()
+        .skip(row)
+        .step_by(rows)
+        .zip(value.iter().cycle())
+    {
+        *slot = element;
+    }
 }
 
 /// The column-major offsets of every combination of `selections`, the first dimension varying
@@ -1580,6 +1741,27 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 call,
                 "incorrect number of subscripts",
             ));
+        }
+        // `m[i, ] <- value` on a plain numeric matrix writes one strided row in place.
+        if let ([row, column], &[rows, columns]) = (indices, &dims[..])
+            && *column == missing_arg()
+            && let Some(row) = matrix_row(*row, rows)
+            && value != result
+            && value.kind() == result.kind()
+            && value_count > 0
+            && columns.is_multiple_of(value_count)
+        {
+            match result.kind() {
+                SexpType::Real => {
+                    scatter_row(values::reals_mut(result), values::reals(value), row, rows);
+                    return Ok(result);
+                }
+                SexpType::Integer | SexpType::Logical => {
+                    scatter_row(values::ints_mut(result), values::ints(value), row, rows);
+                    return Ok(result);
+                }
+                _ => {}
+            }
         }
         let dimnames = get_attr(result, symbols().dimnames);
         let mut selections = Vec::new();
