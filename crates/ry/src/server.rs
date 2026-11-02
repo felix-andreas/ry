@@ -855,7 +855,7 @@ impl Worker {
         let namespace = fs::read_to_string(root.join("NAMESPACE")).ok();
         let description = fs::read_to_string(root.join("DESCRIPTION")).ok();
         let key = check_cache::key(
-            executable,
+            &check_cache::build_identity(executable),
             &self.config,
             &root,
             &scan_data_files(&root),
@@ -895,7 +895,7 @@ impl Worker {
             None => check_cache::Fingerprint::default(),
         };
         let (record, stale) =
-            match check_cache::plan(Some(record), key, &paths, &contents, surface_of) {
+            match check_cache::plan(Some(record), key, &paths, &contents, |_| true, surface_of) {
                 check_cache::Plan::Fresh => return HashMap::new(),
                 check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
                 check_cache::Plan::Partial { previous, stale } => (previous, stale),
@@ -2322,6 +2322,9 @@ fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult 
                 lsp_types::CodeActionOptions {
                     code_action_kinds: Some(vec![
                         lsp_types::CodeActionKind::QUICKFIX,
+                        lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                        lsp_types::CodeActionKind::REFACTOR_INLINE,
+                        lsp_types::CodeActionKind::REFACTOR_REWRITE,
                         lsp_types::CodeActionKind::SOURCE_FIX_ALL,
                     ]),
                     ..Default::default()
@@ -2946,6 +2949,13 @@ impl LanguageServer for ServerState {
             };
             let wants_quick_fixes = wants(&lsp_types::CodeActionKind::QUICKFIX);
             let wants_fix_all = wants(&lsp_types::CodeActionKind::SOURCE_FIX_ALL);
+            let wants_refactors = [
+                lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                lsp_types::CodeActionKind::REFACTOR_INLINE,
+                lsp_types::CodeActionKind::REFACTOR_REWRITE,
+            ]
+            .iter()
+            .any(|kind| wants(kind));
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);
@@ -2960,6 +2970,15 @@ impl LanguageServer for ServerState {
                             &mut worker.installed,
                         ));
                         actions.extend(ide::code_actions(&worker.db, file, range));
+                    }
+                    if wants_refactors {
+                        // `only: ["refactor.extract"]` (an extract keybinding) asks for one
+                        // kind, so each refactoring is filtered by its own.
+                        actions.extend(
+                            ide::refactors(&worker.db, file, range)
+                                .into_iter()
+                                .filter(|action| wants(&lsp_action_kind(action.kind))),
+                        );
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
                     let worth_listing =
@@ -2994,15 +3013,9 @@ impl LanguageServer for ServerState {
                         let is_preferred = (action.kind
                             == ide::CodeActionKind::DiagnosticFix(Applicability::Safe))
                         .then_some(true);
-                        let kind = match action.kind {
-                            ide::CodeActionKind::FixAll => {
-                                lsp_types::CodeActionKind::SOURCE_FIX_ALL
-                            }
-                            _ => lsp_types::CodeActionKind::QUICKFIX,
-                        };
                         lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+                            kind: Some(lsp_action_kind(action.kind)),
                             title: action.title,
-                            kind: Some(kind),
                             is_preferred,
                             edit: Some(lsp_types::WorkspaceEdit {
                                 changes: Some(HashMap::from([(uri.clone(), edits)])),
@@ -4040,4 +4053,16 @@ fn stub_type_definition(text: &str, offset: TextSize) -> Option<TextRange> {
         }
     }
     None
+}
+
+fn lsp_action_kind(kind: ide::CodeActionKind) -> lsp_types::CodeActionKind {
+    match kind {
+        ide::CodeActionKind::FixAll => lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+        ide::CodeActionKind::ExtractVariable | ide::CodeActionKind::ExtractFunction => {
+            lsp_types::CodeActionKind::REFACTOR_EXTRACT
+        }
+        ide::CodeActionKind::InlineVariable => lsp_types::CodeActionKind::REFACTOR_INLINE,
+        ide::CodeActionKind::ConvertAnnotation => lsp_types::CodeActionKind::REFACTOR_REWRITE,
+        _ => lsp_types::CodeActionKind::QUICKFIX,
+    }
 }

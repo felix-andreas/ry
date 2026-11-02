@@ -6,7 +6,7 @@ use {
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
-        conditions,
+        conditions, interp,
         long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
@@ -2424,9 +2424,24 @@ fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
+    // GNU R counts the arguments before matching them, and blames the calling closure for a
+    // wrong count or a lone argument that is not `x`.
+    if call.is_empty() || call.len() > 2 {
+        let name = if significant { "signif" } else { "round" };
+        return Err(error(format!(
+            "{} arguments passed to '{name}' which requires 1 or 2 arguments",
+            call.len()
+        )));
+    }
+    let missing_operand = "argument \"x\" is missing, with no default";
+    if let [only] = call.args
+        && only.tag != nil()
+        && values::symbol_name(only.tag) != "x"
+    {
+        return Err(error(missing_operand));
+    }
     let (matched, _) = call.match_args(&["x", "digits"])?;
-    let operand = present(matched[0])
-        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let operand = present(matched[0]).ok_or_else(|| call.error(missing_operand))?;
     if let Some(digits) = present(matched[1])
         && !matches!(
             digits.kind(),
@@ -2588,7 +2603,9 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             SexpType::Integer | SexpType::Logical,
             Cumulative::Sum | Cumulative::Max | Cumulative::Min,
         ) => {
-            let result = alloc(SexpType::Integer, count)?;
+            // Every slot is written below, so the result skips zeroing, which costs as much as the
+            // loop on a long vector.
+            let result = values::alloc_uninit(SexpType::Integer, count)?;
             let mut accumulator: Option<i64> = None;
             let mut overflow = false;
             for index in 0..count {
@@ -2621,7 +2638,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             result
         }
         (SexpType::Real, Cumulative::Sum) => {
-            let result = alloc(SexpType::Real, count)?;
+            let result = values::alloc_uninit(SexpType::Real, count)?;
             let out = values::reals_mut(result);
             long_double::running_sums(values::reals(operand), out);
             // NA's payload outranks a plain NaN's on the x87 unit GNU R sums on, so from the
@@ -2636,7 +2653,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             result
         }
         (SexpType::Real, Cumulative::Max | Cumulative::Min) => {
-            let result = alloc(SexpType::Real, count)?;
+            let result = values::alloc_uninit(SexpType::Real, count)?;
             let data = values::reals(operand);
             let out = values::reals_mut(result);
             let mut accumulator = if kind == Cumulative::Max {
@@ -2644,15 +2661,16 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             } else {
                 f64::INFINITY
             };
-            // From the first NaN on every result is NaN, and from the first NA on it is NA. The
-            // comparisons are GNU R's, which keep the new element on a tie, so a signed zero
-            // follows it on every target.
-            for (&value, out) in data.iter().zip(out.iter_mut()) {
-                accumulator = if is_na_real(value) || is_na_real(accumulator) {
-                    NA_REAL
-                } else if value.is_nan() || accumulator.is_nan() {
-                    f64::NAN
-                } else if kind == Cumulative::Max {
+            // The comparisons are GNU R's, which keep the new element on a tie, so a signed zero
+            // follows it on every target. The loop only tests for NaN, and the first one hands
+            // over to the tail below.
+            let mut first_nan = data.len();
+            for (index, (&value, out)) in data.iter().zip(out.iter_mut()).enumerate() {
+                if value.is_nan() {
+                    first_nan = index;
+                    break;
+                }
+                accumulator = if kind == Cumulative::Max {
                     if accumulator > value {
                         accumulator
                     } else {
@@ -2664,6 +2682,12 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                     value
                 };
                 *out = accumulator;
+            }
+            // From the first NaN on every result is NaN, and from the first NA on it is NA.
+            let mut seen_na = false;
+            for (&value, out) in data[first_nan..].iter().zip(&mut out[first_nan..]) {
+                seen_na |= is_na_real(value);
+                *out = if seen_na { NA_REAL } else { f64::NAN };
             }
             result
         }
@@ -3039,6 +3063,14 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     for arg in call.args {
         if arg.tag != nil() && values::symbol_name(arg.tag) == "finite" {
             finite = values::as_logical_scalar(arg.value) == 1;
+        } else if arg.value.kind() == SexpType::List && arg.tag != symbols().na_rm {
+            // GNU R's `range.default` flattens its arguments with `c(..., recursive = TRUE)`,
+            // so a list of numbers has a range where `min` and `max` refuse it.
+            let unlist = values::call(values::install("unlist")?, &[arg.value])?;
+            args.push(Arg {
+                tag: arg.tag,
+                value: crate::eval::eval(unlist, values::base_namespace())?,
+            });
         } else {
             args.push(*arg);
         }
@@ -3370,11 +3402,12 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
     if length(from) == 0 || length(to) == 0 {
         return Err(call.error("argument of length 0"));
     }
-    // GNU R reads the variable on every call, so a script can switch the check on and off.
-    let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
-        .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
     for operand in [from, to] {
         if length(operand) > 1 {
+            // GNU R reads the variable on every such call, so a script can switch the check on
+            // and off; reading it only here keeps the common scalar call free of the lookup.
+            let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
+                .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
             if strict {
                 return Err(call.error("numerical expression has length > 1"));
             }
@@ -3442,6 +3475,10 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
         && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
             <= i32::MAX as f64;
     if use_integer {
+        let increment = if start <= end { 1 } else { -1 };
+        if let Some(sequence) = compact_intseq(count, start as i32, increment)? {
+            return Ok(sequence);
+        }
         let result = alloc(SexpType::Integer, count)?;
         let start = start as i64;
         let output = values::ints_mut(result);
@@ -3464,6 +3501,32 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
     Ok(result)
 }
 
+/// Sequences at least this long are compact ALTREP objects, as GNU R makes every `1:n`, so
+/// `seq_len(2^31 - 1)` costs nothing until its elements are read. Shorter ones stay ordinary
+/// vectors, which the evaluator's hot loops read without an indirection.
+const COMPACT_SEQUENCE_MIN: usize = 1 << 20;
+
+/// A compact integer sequence when `count` reaches [`COMPACT_SEQUENCE_MIN`] and the host
+/// provides ALTREP classes.
+unsafe fn compact_intseq(count: usize, first: i32, increment: i32) -> R<Option<Sexp>> {
+    if count < COMPACT_SEQUENCE_MIN {
+        return Ok(None);
+    }
+    (interp().hooks.compact_intseq)(count, first, increment)
+}
+
+/// `1, 2, ..., count` as integers.
+unsafe fn one_to(count: usize) -> R<Sexp> {
+    if let Some(sequence) = compact_intseq(count, 1, 1)? {
+        return Ok(sequence);
+    }
+    let result = alloc(SexpType::Integer, count)?;
+    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+        *slot = index as i32 + 1;
+    }
+    Ok(result)
+}
+
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
@@ -3477,11 +3540,7 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
     let count = count as usize;
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
+    one_to(count)
 }
 
 unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
@@ -3491,11 +3550,7 @@ unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
     } else {
         length(object)
     };
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
+    one_to(count)
 }
 
 /// `seq.int(from, to, by, length.out, along.with, ...)`.
@@ -3722,6 +3777,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .unwrap_or(1)
         .max(0) as usize;
     let object = values::materialize(object)?;
+    if !replicable(object) && object.kind() != SexpType::Pairlist {
+        return Err(call.error(&format!(
+            "attempt to replicate an object of type '{}'",
+            object.kind().name()
+        )));
+    }
     let count = length(object);
     // An empty `x` returns before `times` is checked, as in GNU R, so `rep(NULL, c(1, 1))` is
     // NULL; only `length.out` can lengthen a non-NULL empty vector, with NAs.
@@ -3807,6 +3868,12 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
         return Ok(value);
     }
     let object = values::materialize(call.arg(0))?;
+    if !replicable(object) {
+        return Err(call.error(&format!(
+            "attempt to replicate an object of type '{}'",
+            object.kind().name()
+        )));
+    }
     let times = coerce_vector(call.arg(1), SexpType::Real)?;
     let count = length(object);
     let mut indices = Vec::new();
@@ -3835,6 +3902,9 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
         return Ok(value);
     }
     let object = values::materialize(call.arg(0))?;
+    if !replicable(object) {
+        return Err(call.error("attempt to replicate non-vector"));
+    }
     let out = values::as_integer_scalar(call.arg(1));
     if out == NA_INTEGER || out < 0 {
         return Err(call.error("invalid 'length.out' value"));
@@ -3850,6 +3920,14 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
         })
         .collect();
     keep_factor(object, crate::subset::select_elements(object, &indices)?)
+}
+
+/// Whether `rep` can repeat `object`: GNU R's vectors and `NULL`, so a function or an S4
+/// object is refused rather than given a vector allocation of its type.
+unsafe fn replicable(object: Sexp) -> bool {
+    object == nil()
+        || object.kind().is_atomic()
+        || matches!(object.kind(), SexpType::List | SexpType::Expression)
 }
 
 // Two-argument math.

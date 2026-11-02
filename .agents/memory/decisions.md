@@ -1840,6 +1840,23 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
+**S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
+calling frames to their top environment uncached, because function frames gain and lose bindings
+without moving any epoch. The rest of the walk (the top environment, the generic's registered
+methods table, the imports, the base namespace and the search path) is cached in
+`dispatch::MethodCache`, keyed by the method name, the top environment, the generic's
+registered-methods table (resolved first, since replacing an existing binding's value does not
+move the epoch) and whether the top environment's own frame is searched (it is not when the
+calling frames end at the empty environment). An entry holds the binding cell rather than its value, since reassigning an existing
+binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
+value is no longer a function. The whole cache is dropped when the binding epoch or the collection
+count changes: the epoch covers bindings appearing or disappearing and enclosures changing, and a
+collection may free an environment whose address a later key reuses. A walk that passed a function
+frame, an active binding, or a non-function binding of the name is not cached, because a later
+change there would not move the epoch. xts `period.apply` with 33,335 periods went from about 262k
+to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
+case `dispatch__method_cache`).
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
@@ -1918,10 +1935,9 @@ kernels' peak RSS was 1.1 to 1.6 times GNU R's (`format` was the 1.6), and three
   them unused did not lower any peak (rowSums rose from 168 to 173 MB), and
   `MIMALLOC_PURGE_DELAY=0` lowered the setup peak by only 4 MB. The same peaks with glibc
   `malloc` in libR confirm that the allocator's retention is not the gap.
-- **Not heap:** ry starts about 13 MB above GNU R, and smaps puts all of it in clean, file-backed
-  code pages (about 18 MB of `libR.so` and 9 MB of the `ry` binary faulted in, against 3 MB of
-  GNU R's `libR.so`); anonymous memory is at parity. RELR relocations would cut `.rela.dyn` but
-  need glibc 2.36.
+- **Not heap:** ry started about 13 MB above GNU R, all in clean, file-backed pages; anonymous
+  memory is at parity. Releasing the relocation tables and the preflight's code pages cut the gap
+  to about 3 MB ("Start-up memory: release relocation tables and preflight code pages").
 
 **Removing a binding is O(1) amortized** (`crates/heap/src/env.rs`). The slot stays in place with a
 sentinel symbol, the hash index drops its key, and the frame compacts once half its slots are
@@ -2502,10 +2518,36 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     `dst + src * min(1, (1 - Da) / Sa)`, which matches cairo's pixels exactly.
 - **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
   `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
-  offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
-  whole points. Base graphics computes positions in inches rather than through GNU R's NDC
-  pipeline, so the last bit of a coordinate can differ. Contour labels use a clean-room
-  "flattest window" placement, so they can sit in a different spot than GNU R's.
+  offset by `ylbias`, and symbols are sized from half the character height. Base graphics
+  computes positions in inches rather than through GNU R's NDC pipeline, so the last bit of a
+  coordinate can differ. The rules below were found by diffing the plot gallery against GNU R:
+  - The point size and `cex` reach the device separately (`text_context`), so rounding a size to
+    whole points is the device's business, as in GNU R; base graphics rounding it first put
+    ragg's text a pixel off at fractional `cex`. An inline `cex` scales text the same way.
+  - User coordinates map through the plot region `usr` was set on (GNU R's `win2fig`, the
+    `window` field of the parameters), not the current one, so changing `mar` after
+    `plot.window` moves nothing until the next `plot.window`.
+  - `mtext` and margin titles clip to the device, not the figure; `clip()` keeps its region only
+    while `xpd` equals its value when `clip()` ran, as GNU R's `GClip` drops it.
+  - Contour labels are a port of GNU R's `contour()` placement (the simple, edge and flattest
+    methods, label-box intersection, and its quirks: the cumulative gradient variance, the angle
+    computed with `180 / 3.14`), because any other placement lands labels elsewhere.
+  - Labels are a `Label` (string lines, or an expression laid out by `plotmath.rs`), and every
+    text path (`text`, `mtext`, `title`, `axis`, `strwidth`) goes through `push_label`, so
+    plotmath is one code path rather than a deparse fallback per caller.
+- **Base graphics is checked against GNU R by a plot gallery.** `crates/oracle/gallery/*.R` holds
+  about 150 figures (base graphics including the PerformanceAnalytics charts, grid, lattice,
+  ggplot2), and `oracle gallery` renders each on both engines and every device, then compares.
+  ragg (`agg`) rasterizes identically on both engines, so it is the sharp check, with a 0.2%
+  differing-pixel tolerance; `png` and pdf (rasterized with `pdftoppm`) get 5%, and a pixel
+  there differs only when nothing within one pixel in the other image matches it, because GNU R's
+  cairo and ry's tiny-skia antialias differently (a dense tangle of thin lines, such as a lattice
+  parallel plot, otherwise differs in 18% of its pixels while looking identical). The harness
+  auto-prints a figure's visible value, since lattice, ggplot2 and xts draw only when printed. `svg` is rendered and timed but not compared,
+  since cairo writes glyphs as paths. The figure sample is drawn from one seed, and
+  `test_gallery.rs` runs a bounded sample of it in the default suite; a bug class the gallery
+  finds is pinned by a `graphics__*` oracle case, which states the value (a `par`, a metric, a
+  return) rather than a pixel.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
@@ -2519,8 +2561,13 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   `mex` or the layout changes, so `par(mai = ...)` followed by `par(cex = 2)` keeps the inches and
   moves `mar`, and storing all units would let them drift apart.
 - **Text metrics are Helvetica's published AFM widths** (regular and bold; the oblique faces share
-  them) at the nearest whole point size, with the cap height for `strheight`. That matches the pdf
-  device's numbers exactly; bitmap devices in GNU R measure with cairo fonts and can differ.
+  them) at the nearest whole point size, with the cap height for `strheight`, and the symbol
+  face (`font` 5, which plotmath uses for operators, Greek and delimiters) uses the Symbol AFM.
+  That matches the pdf device's numbers exactly; bitmap devices in GNU R measure with cairo fonts
+  and can differ. The device's metric callback receives a glyph as its Adobe Symbol code, but a
+  string arrives as the Unicode characters plotmath translated it to, so only the string path
+  maps back (`symbol_metrics`, `adobe_symbol_code`): mapping both ways confuses raw code 174
+  (an arrow) with U+00AE, the translation of code 210.
 - **`cairoProps` reports cairo**, so `capabilities()` lists png, jpeg and tiff and the bitmap
   devices take the cairo path, which needs no display.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
@@ -5876,13 +5923,33 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
 - A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.
 - `FunctionType.missing_tested` (inferred only) lists the formals a body tests with `missing()`. `optional_argument_targets` treats such a parameter as one the callee may leave unread even when it has a default, so a missing formal forwarded there (knitr's `kable_format(format)`) stays optional in the caller.
+- **Previous shape (facts).** A refinement only narrowed a slot's type, so nothing outside a type could be remembered on an edge: a call like `is_loaded(package)` proved nothing, and two `is.null()` tests on different slots stayed independent. pkgload's `parent.env(ns_env(package))` after `if (!is_loaded(package)) stop()` and pracma's `if (!is.null(A)) b <- -b` after an "A and b both or neither" check were reported.
+- **Shape (facts).** `check::Environment` carries `facts: Vec<Fact>` beside its slot entries, with `Fact::Holds(slot, predicate)` (a project predicate tested true) and `Fact::NullTogether(a, b)`. They live in the same undo log as entries (`Undo::Established`, `Undo::Dropped`), so forks and joins treat them like any refinement, and a write to a slot drops every fact that mentions it. `join_writes` drops them for every slot a branch or loop body wrote even when the joined entry is unchanged (a rollback restores the fact, and a same-typed write is still a different value), and a loop counts that as a change so its body is rechecked. An open, `Any` or `Unknown` member of another return counts as possibly `NULL` for `null_unless`. A `NULL` guard on one slot also refines its null partners. `FunctionType.null_unless` (inferred only) records a callee whose only `NULL` return is an opening `if (!pred(formal)) return(NULL)` on a formal it never writes; `null_excluded_return` strips `NULL` at a call whose argument holds `pred`. Facts are not on the type because they are about variables, not values.
+- **`FunctionType.reduces`** (inferred only) records a body ending in `Reduce(f, x, init =)` over its formals, possibly through a local `function(a, b) formal(a, b, ...)`, with no early return. `forwarded_reduce` folds the caller's callback through `fold_reduce`, the loop `infer_reduce_fold` uses, so purrr-style wrappers get the fold that a direct `Reduce` gets without the shared-variable hazard above: the callback is the caller's, not a closure over the wrapper's variables.
+- **`FunctionType.from_calls`** marks a callback type synthesized from the calls in a body. Its later calls may omit an argument an earlier call passed (fewer arguments, a missing one), because the real callee supplies a default. Making the synthesized named parameters optional was rejected: the type-system contract says an optional parameter in an expected callback type requires the actual callback to have a default, which would report the callers.
+- **Bare `NA` returns** (`Checker::bare_na_returns`) take the type of the other returns when all of them, the trailing value included, share one atomic kind; otherwise `NA` joins as `logical`. Only the inferred return is lenient: a declared `-> character` still reports `return(NA)`, so the round-trip test lists the case.
+- **Branch joins keep a bounded variable open** when the closed side is not a plain scalar or vector (mgcv's `rho + rho0` against `L %*% rho`), extending the rule that an unconstrained variable is never pinned by the other branch. A bound such as `numeric` does not make a matrix the parameter's type.
+- **An `exists("name")` probe** for a function an attached package ships and the project does not define makes the `else` diverge (codetools' `if (exists("emptyenv")) emptyenv() else NULL`). The fallback serves older R versions that ry never presents.
 
 ## `ry test` is `ry load` plus testthat, with affected tests first
 
 - **Previous shape.** `load_all()` loaded a package, but running its tests meant `devtools::test()` under GNU R, which reloads the whole package (about a minute on finbench) before every run.
 - **Shape.** `ry test` is `ry load` running an R driver (`crates/ry/src/test.R`) that calls `testthat::test_dir(load_package = "none", package =)` against the namespace `load_all()` built, so testthat's own reporters print the output and helpers, setup files and the package environment behave as under `devtools::test()`. Nothing in the reporter path is reimplemented, which keeps the output identical for CI.
-- **Watch.** `--watch` polls size and mtime of the sources under `R/` and of `tests/testthat/*.R` (not other files: testthat creates and deletes `_snaps/` during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
+- **Watch.** `--watch` waits on operating-system notifications for `R/`, `data/`, `src/`, `inst/`, `tests/`, `DESCRIPTION` and `NAMESPACE` (`loader::watch`, `Loader::wait_edits`; edits under `_snaps/` are dropped because testthat writes there during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
 - **Why not a test index in the loader.** Test files are parsed with `all.names()` and cached by stamp; that is a few milliseconds per file and keeps the loader ignorant of testthat.
+
+## Source edits arrive by OS notification, ordered by a barrier file
+
+- **Previous shape.** The console compared a fingerprint of names, sizes and mtimes of `R/`, `data/` and the metadata before every command, and `ry test --watch` polled stamps every 0.2 s. Neither saw `src/` or `inst/`.
+- **Shape.** One `notify` watcher per loaded package (`crates/loader/src/watch.rs`) files relevant paths into an inbox. `SourceWatcher::take` writes a barrier file into a private watched directory and waits for its event; since one watcher delivers events in order, every edit made before the call is then in the inbox, so a reload depends on the order of writes and calls, not on thread timing, and the reload fuzz test stays deterministic. The fingerprint stays as the fallback when notifications are unavailable or lost.
+- **Compiled code.** A `src/` edit makes the console and `--watch` reload, and `load_all()` rebuilds. On ry's runtime `dyn.unload` retires the library record into `unloaded_dlls` (kept mapped, so a stale pointer cannot crash), and the next `dyn.load` of the same path maps a fresh copy from a temp directory, because `dlopen` returns the already open handle for a path it has seen.
+
+## `ry document` is roxygen2 with a block cache and linear topic ordering
+
+- **Previous shape.** Documentation meant `devtools::document()`, which reloads the package and reparses every block; on a 22,000-topic package roxygen2's `RoxyTopics$topo_order` (run 15 times by `@inherit` processing) and `RoxyTopics$add` are quadratic and dominate.
+- **Shape.** `crates/ry/src/document.R` calls `roxygen2::roxygenise(load_code = )` with ry's `load_all()`, so output is roxygen2's own, byte for byte. For the run it swaps `roxygen2:::parse_package` for a version that caches each file's tokenized blocks by md5 (keyed by roxygen2 version, R version and roxygen options; `package_cache_path(root, "roxygen")`), and replaces roxygen2's quadratic steps with linear equivalents (`roclet_process.roclet_rd`, whose topic list grows by copying, and `RoxyTopics$topo_apply`, `topo_order` and `drop_invalid`, which find topics by scanning names), each only when the installed function's deparsed body equals the embedded original, so another roxygen2 version runs unpatched. Everything is restored on exit. The session runs with `keep.source = TRUE` because roxygen2 reads R6 methods' srcrefs.
+- **Why not regenerate only affected Rd files.** roxygen2's `@inherit*`, `@family`, `@describeIn` and `@rdname` merging make one block's Rd depend on others, and `roclet_output` already writes only files whose content changed. Reimplementing that dependency tracking would fork roxygen2's semantics; caching the parse and fixing the quadratic steps gets the speed without that risk.
+- **Known staleness.** A cached block keeps markdown links resolved against installed packages at parse time.
 
 ## A primitive's S4 cache lookup matches arguments by name first
 
@@ -5894,8 +5961,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Warnings always go through `.signalSimpleWarning`.** GNU R's `vsignalWarning` calls `.signalSimpleWarning(msg, base::quote(call))` whenever that function is bound, even with no handler established, and rlang reads the frames it leaves. ry used to call it only when a handler existed (`crates/interp/src/conditions.rs`, `warning_call`).
 - **Compiled closure calls pass constant arguments as values.** GNU R's byte code pushes a constant argument with `PUSHCONSTARG`, without a promise, and rlang's `env_dot_type` tells the two apart. `compiler::cmpfun` compiles at once, as GNU R's does (`crates/interp/src/bytecode.rs`, `bcClose`; `eval::compiled_args_into`).
+- **`dyn.load` refuses GNU R's `tcltk.so`.** GNU R builds its base packages' shared objects with R's internals, so they read `SEXPREC` fields directly and crash on ry's heap layout; the other base packages' code is built into libR (`builtin_libraries.rs`), and tcltk is refused with "Tcl/Tk support is not available on this system", which sessioninfo's `external_info()` catches. `capabilities("tcltk")` is `FALSE` to match.
+- **Parse errors use GNU R's exact text.** testthat and other packages match on it ("unexpected symbol", the quoted line). The message names the token GNU R's LALR parser stops on (`SyntaxError::found`) with bison's token names, the location is that token's 1-based column with tabs to multiples of 8 (end of input is column 0 on the line after the last), and the context is the last 255 bytes read, split into lines, the last two quoted with a caret. `Rscript` and the console quote only the failing top-level expression, `Error: ... in "..."`, and nothing at the end of input (`lower.rs`, `grammar_error_report`; oracle case `parse__error_messages`).
+- **`list.dirs` names the directory itself only when `recursive = TRUE`.** testthat reads snapshot variants with `list.dirs(recursive = FALSE, full.names = FALSE)`, and a stray `""` entry became a phantom variant.
 - **Base binds the missing argument in the C API.** `R_MissingArg` is a symbol whose base value is itself, so `R_existsVarInFrame`, `R_GetBindingType`, `R_BindingIsActive` and `R_BindingIsLocked` answer for it in the base frames instead of erroring (`crates/libr/src/environments.rs`, `base_binds_missing_arg`).
 - **A compiled `local(expr)` is `(function() expr)()` with a four-element `function` call**, whose srcref slot is NULL, as GNU R's compiler writes it. rlang's `trace_back` writes into that slot of every frame call.
+- **`stdout()` is the current sink target.** GNU R's `stdout()` returns `R_OutputCon`, so a call inside `sink()` names the sink, while a `stdout()` kept from before writes past it to the console (connection 1 is the console itself, never redirected). vctrs' reporter tests broke on a stray `.` the reporter wrote through a saved `stdout()` (`crates/interp/src/connections.rs`, `stdout`, `device_write`, `print`).
+- **A connection's `conn_id` address is never compared.** GNU R only checks that the external pointer is not NULL (closing clears it); curl stores its own handle there, so comparing addresses made `isOpen` and `close` reject curl connections (`connections.rs`, `resolve_number`).
+- **TRE's lazy quantifiers with capture groups take the leftmost-first match.** Without groups TRE returns the shortest overall end; with groups its tagged matcher follows the leftmost-first rule (`x(.+?)(a+)` on `xaaab` is `xaaa`, `x.+?a+` is `xaa`). openssl's PEM splitting depends on it (`crates/interp/src/strings.rs`, `Matcher::find_at`). `\Q...\E` quotes a literal run.
+- **`attach(env)` attaches a copy.** GNU R copies the bindings into a fresh environment and leaves the original's enclosure alone; attaching the environment itself cut shiny's namespace off from its imports (`crates/interp/src/envir.rs`, `do_attach`).
+- **A user interrupt is signalled as a condition first.** `Rf_onintr` and `R_CheckUserInterrupt` run the handler stack for class `c("interrupt", "condition")`: calling handlers run, an exiting handler (`tryCatch(interrupt = )`) catches it, and only an unhandled interrupt unwinds to top level. later and rlang's `interrupt()` rely on it (`crates/interp/src/conditions.rs`, `signal_interrupt`).
+- **`rmultinom` carries the remaining probability as a double-double.** GNU R uses a `long double`; in plain `f64` ten probabilities of 0.1 leave a conditional probability just above 0.5, `rbinom` then draws the complement, and the counts differ from GNU R's for the same seed. RcppArmadillo compares R's draws with its own (`crates/interp/src/distributions.rs`, `rmultinom`).
+- **`[` subsets a parsed expression's `srcref` list.** plumber locates each endpoint's comment block with `attr(exprs[i], "srcref")` (`crates/interp/src/subset.rs`, `subset`).
+- **`Rf_setAttrib(R_NilValue, name, R_NilValue)` succeeds.** GNU R checks for removal before it rejects a `NULL` target, and data.table's `C_unlock` runs on a `j` result that is often `NULL` (`crates/libr/src/attributes.rs`, `set_attrib`).
+- **Integer sequences of at least 2^20 elements are compact ALTREP objects** (`colon`, `seq_len`, `seq_along` in `crates/interp/src/arith.rs`, through the `compact_intseq` interpreter hook). GNU R compacts every `1:n`; ry keeps short ones ordinary because the evaluator reads them without an indirection, and only long ones matter for memory. vctrs' tests build `seq_len(2^31 - 1)` twice and ran out of memory when it was materialized.
+- **`row.names<-` stores a real compact form `c(NA, n)` as integers**, as GNU R's `row_names_gets` does. cpp11's `data_frame::nrow` reads only the integer form, and readr's chunked reader loops forever on the real one.
 - **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
 
 ## Records, tuples and tags compile natively
@@ -5952,6 +6032,31 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Who reads it unboxed.** Only `Move`, `SetVar` and arithmetic whose result is a double whatever the flag says: a comparison, `/`, `^`, or `+ - *` with a double operand. `Builder::box_operands` retypes every other reader's `Num` operand as boxed and `Plan::boxings` tells code generation to box it first, so no other action ever sees a `Num`. An inlined body refuses a `Num` slot, and a direct call passes one boxed from its slot cell after the flush.
 - **Impact.** The mixed `match` loop runs compiled; correctness is pinned by `test_tiers` seeds that observe `typeof`, `NA` and integer arithmetic after the join, and the fuzzer's final statement can print the types.
 
+## A hashed frame counts complex assignment's `*tmp*`
+
+- GNU R binds `*tmp*` in the frame for the length of a complex assignment, and in a hashed frame that insert and removal move the chain count (`env.profile` as the black box), which can grow the table and so change the order `ls(sorted = FALSE)` lists. ry never binds `*tmp*`, so `complex_assign` calls `Heap::count_transient_binding`, which applies the insert and the removal to the frame's `HashTable` without a slot (`crates/heap/src/env.rs`, `HashTable::count_transient`). Pinned by `crates/oracle/cases/environments__hashed_order_after_removal.R`.
+
+## Base kernels pick their data structure by the value range
+
+- **Previous shape.** `as.character()` on integers formatted and interned every element, the cumulative functions zeroed their result before filling it, `strsplit()` probed the session-wide string table for every piece, and `substr()` recycled `start` and `stop` with a division per element. Each was 1.2x to 2.7x GNU R's time.
+- **Shape.** `as.character()` on integers (`coerce.rs::integers_as_strings`) interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. `cumsum` and friends allocate with `values::alloc_uninit`, and real `cummax`/`cummin` run a branch-light loop until the first NaN. `strsplit()` interns ASCII pieces through the call's `values::StringMemo`, and `substr()` recycles by counters. Each falls back to the general path when the range is wide, so no input is slower than before.
+- **Impact** (`tools/bench/base`, ry time over GNU R's): at 1e6 rows `table` 0.28 (one factor) and 0.36 (two), `cut` 0.77; at 1e7 rows `cumsum` 0.90, `cummax` 1.00, `strsplit` 0.90, `substr` 0.79.
+
+## Runtime error checks follow GNU R's order and blame
+
+- **Rule.** Where GNU R checks a condition before matching arguments or dispatching, ry checks it at the same point and blames the same call. `NextMethod()` errors through the innermost closure call ("called from outside a function", "called from an anonymous function", "object not specified" when `.Class` is unbound and the object has no class, "generic function not specified", "no method to invoke"), with no fallback to the call's name. `round()` and `signif()` count their arguments before matching them and blame the calling closure, so `eval.rs` leaves their formals check to them.
+- **Why.** Packages and GNU R's own tests compare these messages, and a lenient fallback hid real bugs (a `NextMethod` that silently picked the wrong generic).
+
+## A formula's dot expands to the sum GNU R prints
+
+- `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
+
+## The strict load check analyses only the package
+
+- **Previous shape.** `ry load`'s strict check asked about `R/` but built the whole project: every test and script file was parsed and folded, about a quarter of the derive work on the benches, and the verdict thread then freed the analysis (85 ms on typed finbench at 60K lines) before the loader could proceed. The check record's key hashed the ry executable on the same thread before any analysis started.
+- **Shape.** A run whose requested files are all package files (`ry check R`, the load's check) analyses only package files, because tests and scripts read the namespace but add nothing to it. The record keeps the unanalysed files: an unchanged one keeps its recorded content, surface, findings and imports used, and when one changed, the record stores no surface for it (`RecordedFile.surface` is an `Option`) and marks every unanalysed file unchecked, so the next full run checks them. `check_cache::plan` compares surfaces only for analysed files. The `NAMESPACE` findings are recomputed on every run that builds an analysis (a few milliseconds) from the analysed files' imports used, and a replay recomputes them when the package files' imports differ from all files' imports, since the record does not say which kind of run wrote it. `preflight::check_package` frees the analysis on its own thread, and the build identity is hashed on a thread that overlaps the project walk.
+- **Impact.** The verdict-cold typed load on finbench at 60K lines fell from 0.52-0.55 s to 0.43-0.45 s; the rest of the gap is checker CPU. Package findings are unchanged by construction, and the seeded simulation in `cli.rs` now mixes package-only runs into its edits, comparing each with a fresh run (`tests/scenarios/check-cache-package-only.scenario` pins the two traps it found: a test helper edited between a load and a full check, and the `NAMESPACE` verdict across the two kinds of run).
+
 ## The data.table migration is one engine in `ide`, read off the checker's types
 
 - **Where it lives.** `crates/ide/src/migrate.rs` (`data_table_rewrites`, `apply_data_table_rewrites`) is a pure read of the analysis database, like every editor feature. `code_actions` offers each rewrite that overlaps the viewport plus one whole-file action, and `ry migrate data-table` (`cli::migrate_data_table`) analyzes the requested files exactly as `ry check` does and applies the same list, so the editor and the CLI cannot disagree. It is not a lint fix: a lint's fix is local to its diagnostic and needs no types, while a rewrite needs the target's type and the columns it knows.
@@ -6003,6 +6108,35 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - `Heap::reserve(bytes, keep)` runs one collection check for a batch, and the `_uncollected` allocators (`alloc_triple_uncollected`, `cons_uncollected`, `alloc_environment_uncollected`, `define_formals_uncollected`, `alloc_compiled_promise_uncollected`) never collect, so a closure call that knows its counts after argument matching pays one check and roots nothing while it builds the frame. `TRIPLE_BYTES` and `ENVIRONMENT_BYTES` size the request. The reservation is a budget, not memory: going past it only moves the next collection earlier.
 - **Pools per object type.** The data-oriented mandate asks for a pool per object type, and the size classes already are that: every triple-shaped type (pairlist cells, promises, closures, binding cells, language objects) has one 40-byte layout and shares the 40-byte class, environments are the only 192-byte objects, and scalar vectors fill the 32- and 48-byte classes. Splitting the triple class by `SEXPTYPE` would give each type its own cursor and pages without changing any layout, and it would cost locality: a call allocates promises, cells and conses interleaved, and one cursor puts them in consecutive slots.
 - **Impact.** The microbenchmark loop costs 116 instructions per iteration (298 before): the inlined `cons` about 54, a scalar `alloc_vector` 46 plus a 12-instruction zeroing. `sd` costs 110.3k instructions per call (121.5k before), measured as the callgrind difference between 150 and 50 calls on the profiling build. `root`, `allocate_with` and `write_barrier_slow` dropped out of the profile; `refill` runs about eight times per call for about 1k instructions. What is left of the gap to GNU R is the interpreter's call path (`frame_cell`, `Frame::insert`, argument matching), which the batch `reserve` lets it shrink further. `crates/heap/tests/test_gc.rs` pins that bump runs refill the holes a minor collection leaves and that a reserved batch survives the collections after it.
+
+## The string intern table is a packed open-addressed array
+
+- **Previous shape.** `heap::strings` kept interned `CHARSXP`s in a `hashbrown` table of pointers, and every probe compared the candidate's bytes through its pointer, so a lookup cost one cache miss per candidate into objects scattered over the heap. With 1e7 live strings `formatC` went from 5.9 s to 7.8 s while GNU R stayed level. `values::StringMemo` hid this per call in `substr` and `formatC` only. A `young: Vec<Sexp>` listed every string interned since the last collection, so a minor collection could remove the dead ones, which cost 8 bytes per new string at the peak.
+- **Shape** (`crates/heap/src/strings.rs`). One `Vec<u64>` of slots, linear probing over a power-of-two length. A slot packs the object's address divided by 8 (44 bits, so 47-bit user addresses fit) with 20 bits of its hash, so a probe compares the tag inside the slot and touches the object only on a tag match, about once per million wrong candidates. Deletion leaves tombstones. The table grows at 7/8 load counting tombstones and rebuilds to between 5/16 and 5/8 load, which keeps probe sequences short and its memory near GNU R's (whose table resizes at 0.85).
+- **Which young strings to check.** The small-object space keeps an `interned` bitmap beside its mark bits (`Space::set_interned`). A minor collection removes `interned & !marks` on the pages it touched, and the sweep clears the bit with the slot, so no list of new strings is kept. Strings too large for the space (over the largest size class) still go on `young_large`, which is short.
+- **A `CHARSXP` is aligned to 8, not 16.** Its header plus up to 7 bytes fits the 40-byte class instead of 48, which most short strings (`paste0("id", i)`, formatted numbers) are.
+- **Impact.** `formatC` at 1e7 rows spends about 0.8 s outside the collector with no live strings and with 1e7 of them, so the time no longer depends on heap state. `values::StringMemo` stays in `substr` and `formatC`, whose results repeat, because a small per-call table stays in cache where even one probe into the session-wide slot array misses it; it is not needed for the time to stay level. `test_gc.rs`'s intern fuzz test mixes in large strings so `young_large` is exercised.
+
+## `gc()`, `gcinfo()` and `gc.time()` report the collector's real counters
+
+- **Previous shape.** `gc.time()` returned zeros and `gc()`'s table was made up, so collector time could not be attributed from R.
+- **Shape.** `heap::GcStats` keeps live objects (GNU R's `Ncells`), live vector data in 8-byte cells (`Vcells`; a major collection counts it afresh, a minor one adds what it marked), their maxima since `gc(reset = TRUE)`, and user, system and elapsed collection time while `GcPolicy::timing` is on, which `gc.time(TRUE)` sets as in GNU R. `Heap::usage` gives `gc()`'s table, with the trigger columns scaled from the heap's single byte limit, since ry triggers on total bytes rather than on two separate counts. `gcinfo(TRUE)` installs `GcPolicy::reporter`, which prints GNU R's one-line report after each collection while collection is still inhibited.
+
+## `as.character` of a long number vector is deferred
+
+- **Shape.** As in GNU R, `as.character` of an integer or double vector of at least 256 elements without attributes returns a deferred string vector (libr's `deferred_string` ALTREP class through the `defer_strings` hook), holding the source and the `scipen` in force at the call. Reading one element formats only that element; materializing with no element read formats the whole vector in one batch, as the eager path would, and then drops the source. Subsetting reads elements without materializing.
+- **Why it fits.** ALTREP is already a first-class part of the object model, so no new object kind was needed. Below 256 elements the deferred vector's own allocations cost more than converting.
+
+## Start-up memory: release relocation tables and preflight code pages
+
+- **Previous shape.** ry started about 13 MB above GNU R, all in clean file-backed pages: `libR.so`'s `.rela.dyn` (3.7 MB) stays resident after the dynamic loader has applied it, and the `ry` executable's code for the preflight analysis (about 6.7 MB) stays resident while the script runs.
+- **Shape.** An `.init_array` constructor in `crates/libr/src/embed.rs` walks `dl_iterate_phdr` and applies `MADV_DONTNEED` to every loaded object's `DT_RELA` table of 64 KiB or more, aligned inward to pages. `ry run` drops the preflight's state and applies `MADV_DONTNEED` to the executable's executable segments (`release_executable_code` in `crates/ry/src/main.rs`). Both are file-backed and clean, so anything touched again faults back in from the file; nothing reads the relocation tables after load except lazy `DT_JMPREL` binding, which is left alone.
+- **Rejected:** RELR relocations (`-z pack-relative-relocs`) would shrink `.rela.dyn` at link time, but they need glibc 2.36 and release binaries promise glibc 2.35.
+- **Impact.** Start-up peak 63.7 MB to 53.7 MB against GNU R's 50.4 MB. What remains is `libR.so`'s larger text and read-only data.
+
+## `format()` of numbers streams into the result
+
+- `do_format` formats logical, integer and double vectors element by element straight into the result's `CHARSXP`s once the common width is known (`format_numbers` in `crates/interp/src/format.rs`), instead of building a `Vec<String>` of every element first, which held about 40 MB of Rust strings at 1e6 elements. Complex numbers and doubles whose items differ in width fall back to the general path.
 
 ## BLAS and LAPACK come from the system, then from GNU R's Makeconf
 
@@ -6143,6 +6277,72 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
+
+## Alias cycles are reported at the declaration, and short names get narrow suggestions
+
+- **Previous shape.** An alias cycle was found only when an annotation used the alias, and reported on that use with a whole-statement range; an unused cyclic alias was never reported. `nearest_name` returned nothing for a name under four characters, so `person$nam` got no suggestion.
+- **Shape.** `alias_cycle_diagnostics` (`crates/semantics/src/diagnostics.rs`) walks each alias the file declares with `check::alias_cycle_walk`, seeded with the alias itself, and reports every alias on a cycle at its declaration. A use of a cyclic alias drops the annotation silently, so one mistake is reported once, where the fix goes. A name of two or three characters is suggested a candidate only when exactly one candidate is that name with one character inserted (`nam` and `nme` find `name`; `df` never finds `dt`), because a substitution budget on a short name matches unrelated names.
+- **Impact.** The fix site is the declaration, and the check runs per file over that file's declarations, so it adds no project-wide read.
+
+## Refactorings refuse rather than guess, and a seeded property check holds them to it
+
+- `ide::refactors` (`crates/ide/src/refactor.rs`) offers extract variable, extract function,
+  inline variable and annotation conversion. Each one is offered only where the rewrite keeps
+  evaluation: extract variable refuses a statement that would evaluate the expression repeatedly,
+  conditionally or never (loop or function bodies, `if` branches, the right of `&&`/`||`), and
+  `is_quoted` refuses code under a formula or a quoting call. Extract function refuses `return()`,
+  `<<-`, `...` and frame-inspecting calls. Inline refuses when a read name is reassigned before the
+  last use or a call would run more than once.
+- Calls that do not evaluate their arguments once, in order, in the caller are classified by
+  `argument_evaluation`: *captured* (quoting, data masking such as `with()` and `dplyr` verbs,
+  and the index of a `[`, for data.table) blocks every refactoring; *guarded* (condition
+  handlers, `switch`, `withr::with_*`) blocks hoisting a variable out but allows extracting a
+  function that is called in place. `evaluated_first` is the one rule for hoisting and for
+  inlining a value with a call: every node between the expression and its statement evaluates it
+  exactly once, and nothing before it in the statement calls or assigns. A value that assigns is
+  never inlined (`x <- y <- 0`). Extract function treats a read anywhere in the enclosing loop as
+  later code, because the next pass runs it. These came from review, and the property check
+  cannot see them (the result parses and resolves), so each is pinned in
+  `crates/ide/tests/refactor`.
+- Text that only parses as one expression inside its old context is parenthesized
+  (`needs_grouping`: a `?`, or a reparse that is not exactly one node), because `value <- d?f`
+  and a multi-line operand chain change meaning when moved out.
+- Two edits at one offset are merged into one: LSP clients disagree on the order of same-offset
+  inserts, so a definition inserted at the statement start plus a replacement there must be one
+  edit.
+- `ide::testing::check_refactor_invariants` (driven by `crates/ide/tests/test_fuzz.rs`) applies
+  every action at every node range and asserts determinism, non-overlapping edits, a clean reparse
+  and no new unresolved names. It runs without stubs: with them one seed took 17 s instead of
+  1.3 s, and unresolved-name reporting does not need them. The parse and resolution invariants run
+  only on input that parsed cleanly, because mutated input already has errors the rewrite cannot
+  be blamed for.
+
+## Call-head completion ranks by call counts, without test files
+
+- **Before.** Completion ranked equally good matches by how often the name is spelled in the
+  project, so at two characters on a call head testthat's `expect_*` (spelled in every test)
+  beat the package's own functions, and S3 methods (`print.purrr_rate`) crowded out functions.
+- **Shape.** The per-file name-use fold (`SpelledNames`) also counts names in call-head position
+  (directly or as `pkg::name`). A call-head completion ranks project S3 methods (a `generic.class`
+  beside a `generic` candidate) last, then by calls, then spellings. Call counts leave out test
+  files unless the cursor is in one (`chunk_uses` takes `with_tests`); spelling counts keep them,
+  since tests show which `pkg::` members a project uses (dropping them cost httr2's `pkg::name`
+  role 9 points). Two characters on call heads went from 68% to 72% on httr2 and 74% to 76% on
+  purrr.
+- **Rejected:** ranking by words shared with the enclosing function (`check_rate` in code that
+  has a `rate`). It gained a point or two at half the name and lost six to eight at two
+  characters, where long names share some word with almost any function.
+
+## Call hierarchy and workspace symbols are measured against the reference oracle
+
+- `ry debug analysis-stats` checks incoming and outgoing calls of a sample of project top-level
+  functions (defined exactly once) against the independent lexical resolver that already checks
+  references: every oracle global site that is a call head is an expected call, grouped by the
+  enclosing top-level definition. Workspace symbols are checked by querying each sampled
+  definition's exact name and a half-length prefix (at least 3 characters); a prefix that
+  matches more names than a search lists is left out of the share, since a user types on.
+- Workspace search reads a memoized per-file list (`searchable_symbols`), because rebuilding
+  every file's outline per query took about half a second on finbench.
 
 # Decision record: the syntax tree is ry's own flat preorder arena
 

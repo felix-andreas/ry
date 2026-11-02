@@ -48,6 +48,17 @@ pub unsafe fn frame_lookup(env: Sexp, symbol: Sexp) -> ApiResult<Sexp> {
     }
 }
 
+/// A frame lookup that, like GNU R's `findVarInFrame3`, finds nothing in an object that is not
+/// an environment instead of failing. vctrs looks methods up in `R_UnboundValue` when a
+/// closure's environment has no S3 methods table, and relies on getting `R_UnboundValue` back.
+unsafe fn frame_lookup_unchecked(env: Sexp, symbol: Sexp) -> ApiResult<Sexp> {
+    match env.kind() {
+        SexpType::Environment => frame_lookup(env, symbol),
+        SexpType::Nil => Err(error("use of NULL environment is defunct")),
+        _ => Ok(runtime().heap.known().unbound),
+    }
+}
+
 /// A binding cell's value. An active binding's value is what its function returns when called
 /// with no arguments.
 pub unsafe fn cell_value(cell: Sexp) -> ApiResult<Sexp> {
@@ -198,13 +209,13 @@ pub unsafe extern "C" fn Rf_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// With `do_get` false GNU R only checks for existence; the value is cheap to return either way.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame3(env: Sexp, symbol: Sexp, _do_get: Rboolean) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame3")?, symbol))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// `R_findVar` and `R_findVarInFrame`: the names GNU R's own code uses for `Rf_findVar` and
@@ -216,7 +227,7 @@ pub unsafe extern "C" fn R_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// `R_varloc_t`: a binding cell, or null when there is no binding. It is a one-pointer struct

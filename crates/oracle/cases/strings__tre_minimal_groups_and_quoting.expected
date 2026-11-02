@@ -1,0 +1,12 @@
+[stdout]
+| [1] "xaaa"
+| [1] "xaa"
+| [1] "-----BEGIN KEY-----"
+| [1]  TRUE FALSE
+| [1] "x!y!"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "x!y!"

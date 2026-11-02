@@ -226,6 +226,15 @@ impl Frame {
         }
     }
 
+    /// Counts a binding of `symbol` held only for the length of one operation, as GNU R's
+    /// complex assignment binds `*tmp*`, in the table that orders a hashed frame.
+    pub(crate) fn count_transient(&mut self, symbol: Sexp) {
+        if let Some(table) = &mut self.table {
+            // SAFETY: a bound symbol is interned, and its name lives as long as the symbol.
+            table.count_transient(unsafe { pjw_hash(symbol.car().bytes()) });
+        }
+    }
+
     /// Removes the cell for `symbol` and returns it, in O(1) amortized time.
     pub(crate) fn remove(&mut self, symbol: Sexp) -> Option<Sexp> {
         if self.filter & filter_bit(symbol) == 0 {
@@ -324,9 +333,28 @@ impl HashTable {
         self.next[position] = self.heads[bucket];
         self.heads[bucket] = position as u32;
         self.count += 1;
-        if self.count as f64 <= self.heads.len() as f64 * 0.85 {
-            return;
+        if self.count as f64 > self.heads.len() as f64 * 0.85 {
+            self.grow();
         }
+    }
+
+    /// Counts a binding of a symbol with this hash that is inserted and removed again within one
+    /// operation, as GNU R's complex assignment binds `*tmp*`. It never enters a chain, but its
+    /// insert can grow the table, and its removal lowers the count only if it was alone in its
+    /// bucket.
+    fn count_transient(&mut self, hash: u32) {
+        self.count += 1;
+        if self.count as f64 > self.heads.len() as f64 * 0.85 {
+            // The regrown count leaves the transient out, which is where its removal would leave it.
+            self.grow();
+        } else if self.heads[hash as usize % self.heads.len()] == EMPTY_CHAIN {
+            self.count -= 1;
+        }
+    }
+
+    /// Grows to `size * 1.2 + 1`, moving the old buckets in ascending order with each entry
+    /// prepended, after which the count is the number of occupied buckets.
+    fn grow(&mut self) {
         let size = (self.heads.len() as f64 * 1.2) as usize + 1;
         let mut grown = vec![EMPTY_CHAIN; size];
         for &head in &self.heads {

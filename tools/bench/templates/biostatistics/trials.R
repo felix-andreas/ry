@@ -53,7 +53,7 @@ randomise_@ID@ <- function(n: integer, block: integer = 4L, seed: integer = 3L) 
   unlist(replicate(blocks, sample(rep(c("placebo", "active"), length.out = block)), simplify = FALSE))[seq_len(n)]
 }
 
-allocation_codes_@ID@ <- function(n: integer) -> character[] vapply(seq_len(n), function(i) substr(uuid::UUIDgenerate(use.time = FALSE), 1, 8), character(1))
+allocation_codes_@ID@ <- function(n: integer) -> character[] vapply(seq_len(n), function(i: integer) -> character substr(uuid::UUIDgenerate(use.time = FALSE), 1, 8), character(1))
 #@ test
 test_that("trial schedule @ID@ is complete", {
   enrolment <- enrol_@ID@()
