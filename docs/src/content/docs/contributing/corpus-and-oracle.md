@@ -185,7 +185,7 @@ count (by default one file per 600 lines). The templates are written with inline
 a strict-mode dogfood corpus and ry's runtime checks and compiles its typed functions. Without it,
 the generator erases the package with `ry debug erase` (so `target/release/ry` must exist, or pass
 `--ry`), which gives plain R. Both runs count the same text toward the line target, so a typed and
-an untyped run with the same seed generate the same program. Where a record or a tag union models the data better than S4, R6 or a named list, a template keeps both versions in `#@ typed` and `#@ untyped` blocks, so the typed program uses ry's own data types while the untyped one stays plain R (the finance `ledger` and data-science `readings` templates model their data as tags, tuples and records this way); the templates' `README.md` has the details. `--only` limits
+an untyped run with the same seed generate the same program. Where a record or a tag union models the data better than S4, R6 or a named list, a template keeps both versions in `#@ typed` and `#@ untyped` blocks, so the typed program uses ry's own data types while the untyped one stays plain R (the finance `ledger`, data-science `readings` and biostatistics `followup` templates model their data as tags, tuples and records this way); the templates' `README.md` has the details. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
 
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
