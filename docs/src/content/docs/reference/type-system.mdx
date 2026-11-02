@@ -1951,8 +1951,11 @@ type `integer`. When the assignment carries an annotation, `expr` is checked by 
   function joins `v` with its own writes, because a closure may run at any time after it is created. A write whose type is still
   undetermined, such as a callback's result, joins as a union member instead of binding the other
   writes, so a reset `cache <<- TRUE` beside `cache <<- fun()` leaves `fun` generic. A write to a
-  top-level variable is not read back yet: after `cache <- 1L`, the body
-  `cache <<- "a"; cache` still reads `cache` as `integer`.
+  top-level variable is read back in the rest of the writing body: after `cache <- 1L`, the body
+  `cache <<- "a"; cache` reads `cache` as `character`. A write on one path joins with the
+  top-level binding, so `if (flag) cache <<- "a"; cache` reads `integer | character`, except
+  that a top-level `NULL` is a placeholder the write fills and does not join. Other items still
+  read the top-level binding, and so does the enclosing body of a nested function that writes it.
 - A closure may run many times, so on entry an enclosing variable that may still be `NULL` holds
   either that or what the closure's own first `<<-` writes. The lazily filled cache
   `if (is.null(cached)) cached <<- dir("css"); cached` therefore reads as `character[]`. A read

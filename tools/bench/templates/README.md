@@ -36,6 +36,12 @@ Header lines, all before the code:
 | `#@ test` | Everything after this line is the test code. |
 | `#@ typed`, `#@ untyped`, `#@ end` | A variant block, in the code or the test. An `#@ ns` line inside one belongs to that variant only. |
 
+Templates are written with inline annotations, which the untyped program erases. Where ry's
+records, tuples or tags model the data better than plain R can, the template keeps both spellings
+in a variant block: `#@ typed` opens the typed program's lines, `#@ untyped` the plain-R lines that
+must run under GNU R, and `#@ end` closes the block. The line target counts the untyped variant, so
+a typed and an untyped run with the same seed draw the same instances.
+
 `@ID@` is always available and is unique per instance across the package, so every function
 name must end in `@ID@` (or contain it). Top-level `name <- function` and `name <- R6::R6Class`
 assignments are exported automatically.
