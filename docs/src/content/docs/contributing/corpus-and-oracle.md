@@ -105,7 +105,9 @@ killed. `ORACLE_RY` picks the ry binary; copy it, with `libR.so` beside it, to a
 first if you rebuild while a long run is going.
 
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
-measures the container, not ry. `MEMORY.md` records the current rate.
+measures the container, not ry. With the packages ry installed itself, ry passes 135 of the 164
+that GNU R passes (82.3%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
+`MEMORY.md` records the current rate.
 
 ## Installing on ry
 
