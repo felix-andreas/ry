@@ -12,7 +12,7 @@ title_@ID@ <- function(x: character[]) -> character[] tools::toTitleCase(tolower
 
 tokens_@ID@ <- function(text: character, min_length: integer = 2L) -> character[] {
   words <- stringr::str_split(stringr::str_to_lower(text), "[^a-z0-9]+")[[1]]
-  purrr::keep(words, function(word) nchar(word) >= min_length)
+  purrr::keep(words, function(word: character) -> logical nchar(word) >= min_length)
 }
 
 word_counts_@ID@ <- function(text: character) -> integer[] {
@@ -21,7 +21,7 @@ word_counts_@ID@ <- function(text: character) -> integer[] {
 }
 
 safe_ratio_@ID@ <- function(x: double[], y: double[]) -> double[] {
-  safe <- purrr::possibly(function(a, b) {
+  safe <- purrr::possibly(function(a: double, b: double) -> double {
     if (b == 0) rlang::abort("zero denominator")
     a / b
   }, otherwise = NA_real_)

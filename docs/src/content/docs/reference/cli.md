@@ -110,6 +110,20 @@ the fences, inline `` `r expr` `` code, and indented chunks (such as one inside 
 as written. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
+## migrate
+
+```sh
+ry migrate data-table             # print the rewrites for the project as a diff
+ry migrate data-table R/ --write  # rewrite the files under R/ in place
+```
+
+`ry migrate data-table` rewrites data.table code as [DataFrame](/guides/dataframes) code, applying
+the same rewrites the editor offers as code actions. It takes files and directories, or the whole
+project when given none. Without `--write`, it prints a diff of each file to stderr and leaves the
+files alone. Either way it prints a one-line summary to stdout and exits 0. Each form it rewrites,
+and each it leaves alone, is listed in
+[Moving from data.table](/guides/from-data-table#rewriting-automatically).
+
 ## run and R
 
 ```sh

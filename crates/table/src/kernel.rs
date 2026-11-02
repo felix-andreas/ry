@@ -192,7 +192,7 @@ impl Vector {
                 values: Buffer::from(vec![0.0; len]),
                 validity,
             },
-            ColumnType::Character | ColumnType::Factor => return None,
+            ColumnType::Character | ColumnType::Factor | ColumnType::Date => return None,
         })
     }
 }
@@ -306,7 +306,7 @@ impl Evaluator<'_> {
             Expr::Na(ColumnType::Logical) => Value::Scalar(Scalar::Logical(None)),
             Expr::Na(ColumnType::Integer) => Value::Scalar(Scalar::Integer(None)),
             Expr::Na(ColumnType::Double) => Value::Scalar(Scalar::Double(None)),
-            Expr::Na(_) | Expr::Character(_) => return None,
+            Expr::Na(_) | Expr::Character(_) | Expr::Date(_) => return None,
             Expr::Unary(UnaryOp::Not, arg) => not(logicals(self.eval(arg)?, len)?),
             Expr::Unary(UnaryOp::IsNa, arg) => is_na(self.eval(arg)?, len),
             Expr::Unary(UnaryOp::Negate, arg) => {
@@ -331,7 +331,12 @@ impl Evaluator<'_> {
                 let no = self.eval(no)?.cast(kind)?.into_vector(len)?;
                 if_else(test, yes, no, len)?
             }
-            Expr::Aggregate { .. } | Expr::Count | Expr::Head(..) | Expr::Correlation(..) => {
+            Expr::Aggregate { .. }
+            | Expr::Count
+            | Expr::Head(..)
+            | Expr::Correlation(..)
+            | Expr::Rank { .. }
+            | Expr::Window(..) => {
                 return None;
             }
         })

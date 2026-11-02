@@ -266,9 +266,158 @@ pub fn check_render_drawing(entropy: &mut impl Entropy) {
                 );
                 let expected = if single { 1 } else { drawing.pages.len() };
                 assert_eq!(first.len(), expected, "one file per page");
+                for file in first {
+                    check_file_structure(format, file, drawing.pages.len());
+                }
             }
             (Err(first), Err(second)) => assert_eq!(first.to_string(), second.to_string()),
             _ => panic!("rendering succeeded only once"),
+        }
+    }
+}
+
+/// Checks that `file` is a well-formed file of `format`, as a reader would parse it: a PDF's
+/// cross-reference table points at its objects and its page tree counts every page, an SVG's
+/// tags nest, a PNG decodes, and the other formats carry their framing and sizes.
+fn check_file_structure(format: Format, file: &[u8], pages: usize) {
+    let text = String::from_utf8_lossy(file);
+    match format {
+        Format::Pdf => {
+            assert!(file.starts_with(b"%PDF-"), "a PDF starts with its header");
+            assert!(text.trim_end().ends_with("%%EOF"), "a PDF ends with %%EOF");
+            let start = text.rfind("startxref").expect("a PDF names its xref table");
+            let offset: usize = text[start + "startxref".len()..]
+                .split_whitespace()
+                .next()
+                .and_then(|offset| offset.parse().ok())
+                .expect("startxref gives an offset");
+            assert!(
+                file.get(offset..)
+                    .is_some_and(|rest| rest.starts_with(b"xref")),
+                "startxref points at the xref table"
+            );
+            // The lossy text replaces binary stream bytes, so offsets index the bytes.
+            let table = String::from_utf8_lossy(&file[offset..]);
+            let mut lines = table.lines().skip(1);
+            let header = lines.next().expect("the xref table has a subsection");
+            let mut header = header
+                .split_whitespace()
+                .map(|number| number.parse::<usize>());
+            let (Some(Ok(first)), Some(Ok(count))) = (header.next(), header.next()) else {
+                panic!("the xref subsection header is two numbers");
+            };
+            for (number, entry) in (first..first + count).zip(lines) {
+                let mut fields = entry.split_whitespace();
+                let (Some(position), Some(_), Some(kind)) =
+                    (fields.next(), fields.next(), fields.next())
+                else {
+                    panic!("xref entry {number} has three fields: {entry:?}");
+                };
+                if kind != "n" {
+                    continue;
+                }
+                let position: usize = position.parse().expect("an xref offset is a number");
+                let object = format!("{number} 0 obj");
+                assert!(
+                    file.get(position..)
+                        .is_some_and(|rest| rest.starts_with(object.as_bytes())),
+                    "xref entry {number} points at `{object}`"
+                );
+            }
+            let counted = text
+                .split("/Count ")
+                .nth(1)
+                .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|count| count.parse::<usize>().ok());
+            assert_eq!(counted, Some(pages), "the page tree counts every page");
+        }
+        Format::Svg => {
+            assert!(text.contains("<svg"), "an SVG has an svg element");
+            let mut open: Vec<&str> = Vec::new();
+            let mut rest = text.as_ref();
+            while let Some(start) = rest.find('<') {
+                rest = &rest[start + 1..];
+                let end = rest.find('>').expect("every tag closes");
+                let tag = &rest[..end];
+                rest = &rest[end + 1..];
+                if tag.starts_with('?') || tag.starts_with('!') {
+                    continue;
+                }
+                let name = |tag: &'_ str| {
+                    tag.split(|c: char| c.is_whitespace() || c == '/')
+                        .find(|part| !part.is_empty())
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                if let Some(closing) = tag.strip_prefix('/') {
+                    let opened = open.pop().expect("a closing tag has an opening one");
+                    assert_eq!(name(opened), name(closing), "SVG tags nest");
+                } else if !tag.ends_with('/') {
+                    open.push(tag);
+                }
+            }
+            assert!(open.is_empty(), "every SVG element closes: {open:?}");
+            for (index, _) in text.match_indices('&') {
+                let entity = &text[index..text.len().min(index + 8)];
+                assert!(
+                    ["&amp;", "&lt;", "&gt;", "&quot;", "&apos;", "&#"]
+                        .iter()
+                        .any(|known| entity.starts_with(known)),
+                    "an SVG escapes every ampersand: {entity:?}"
+                );
+            }
+        }
+        Format::Png => {
+            let pixmap = tiny_skia::Pixmap::decode_png(file).expect("the PNG decodes");
+            assert!(
+                pixmap.width() > 0 && pixmap.height() > 0,
+                "a PNG has pixels"
+            );
+        }
+        Format::Bmp => {
+            assert!(file.starts_with(b"BM"), "a BMP starts with BM");
+            let field = |at: usize| {
+                file.get(at..at + 4)
+                    .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                    .expect("the BMP header is whole")
+            };
+            assert_eq!(
+                field(2) as usize,
+                file.len(),
+                "a BMP's header gives its size"
+            );
+            assert!(
+                (field(10) as usize) < file.len(),
+                "a BMP's pixels start inside it"
+            );
+        }
+        Format::Tiff => assert!(
+            file.starts_with(b"II*\0") || file.starts_with(b"MM\0*"),
+            "a TIFF starts with its byte order and magic number"
+        ),
+        Format::Jpeg => {
+            assert!(file.starts_with(&[0xff, 0xd8]), "a JPEG starts with SOI");
+            assert!(file.ends_with(&[0xff, 0xd9]), "a JPEG ends with EOI");
+        }
+        Format::Postscript { onefile, .. } => {
+            assert!(
+                file.starts_with(b"%!PS-Adobe-"),
+                "PostScript starts with its header"
+            );
+            assert!(
+                text.trim_end().ends_with("%%EOF"),
+                "PostScript ends with %%EOF"
+            );
+            let showpages = text.matches("showpage").count();
+            let expected = if onefile { pages } else { 1 };
+            assert!(showpages >= expected, "every page is shown");
+            if onefile {
+                let declared = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("%%Pages: "))
+                    .and_then(|count| count.trim().parse::<usize>().ok());
+                assert_eq!(declared, Some(pages), "%%Pages counts every page");
+            }
         }
     }
 }

@@ -17,14 +17,14 @@ legacy_url_@ID@ <- function(base_url: character, resource: character, page: inte
   httr::build_url(parts)
 }
 
-fetch_json_@ID@ <- function(request: httr2_request, transport: fn(req: httr2_request) -> httr2_response = function(req) httr2::req_perform(req)) -> Any {
+fetch_json_@ID@ <- function(request: httr2_request, transport: fn(req: httr2_request) -> httr2_response = function(req: httr2_request) -> httr2_response httr2::req_perform(req)) -> Any {
   response <- transport(request)
   httr2::resp_body_json(response)
 }
 
 service_@ID@ <- function() -> Plumber {
   router <- plumber::pr()
-  router <- plumber::pr_get(router, "/health@ID@", function() list(status = "ok"))
+  router <- plumber::pr_get(router, "/health@ID@", function() -> list{status: character} list(status = "ok"))
   echo <- function(req: environment) -> list{length: integer} {
     args: @if-unknown list[named: Any] <- req$args
     list(length = length(args))

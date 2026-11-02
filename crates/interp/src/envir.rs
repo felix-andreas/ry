@@ -971,15 +971,18 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     let what = call.arg(0);
     let position = values::as_integer_scalar(call.arg(1)).max(2) as usize;
     let name = call.arg(2);
-    let env = if what.kind() == SexpType::Environment {
-        what
-    } else {
-        let env = new_env(empty_env())?;
-        if what.kind() == SexpType::List {
-            fill_env(env, what)?;
+    // An environment is attached as a copy of its bindings, as in GNU R, so its own enclosure
+    // (a namespace's imports, for one) stays as it was.
+    let env = new_env(empty_env())?;
+    match what.kind() {
+        SexpType::List => fill_env(env, what)?,
+        SexpType::Environment => {
+            for symbol in env_symbols(what, true, false) {
+                define(symbol, find_var_in_frame(symbol, what)?, env)?;
+            }
         }
-        env
-    };
+        _ => {}
+    }
     let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
     let mut previous = global_env();
@@ -1423,7 +1426,7 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
             if name.bytes().is_empty() || name == values::na_string() {
                 nil()
             } else {
-                crate::heap().install_char(name)?
+                values::install_charsxp(name)?
             }
         } else {
             nil()

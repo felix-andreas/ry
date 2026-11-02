@@ -2,7 +2,7 @@ use {
     clap::Parser,
     ry::{
         cli::{self, CommandError, Outcome},
-        command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime},
+        command_line::{Cli, Command, Debug, Keybindings, Migrate, Mode, Runtime, resolve_runtime},
         config::Config,
         debug_adapter, load,
         preflight::{self, ConsoleFilter, Erase, Preflight, Verdict},
@@ -209,6 +209,9 @@ fn main() -> ExitCode {
             range,
             verbose,
         } => exit_code(cli::fmt(files.as_deref(), check, diff, range, verbose)),
+        Command::Migrate(Migrate::DataTable { files, write }) => {
+            exit_code(cli::migrate_data_table(files.as_deref(), write))
+        }
         Command::Server {
             stdio: _,
             verbose: _,

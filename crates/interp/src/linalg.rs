@@ -3211,10 +3211,10 @@ fn library_candidates(search: &LibrarySearch, r_home: &Path) -> Vec<String> {
     }
     // An installation without a readable `Makeconf` names no libraries, which leaves the others.
     if let Ok(text) = std::fs::read_to_string(r_home.join("etc").join("Makeconf")) {
-        let variables = make_assignments(&text);
+        let variables = make_assignments(&text, &home);
         for variable in search.makeconf {
             let value = variables.get(*variable).map_or("", String::as_str);
-            let link = link_line(&expand_make(value, &variables, &home, 0));
+            let link = link_line(&expand_make(value, &variables));
             link.files.into_iter().for_each(&mut add);
             for library in &link.libraries {
                 for directory in &link.directories {

@@ -1034,11 +1034,11 @@ pub unsafe fn plan<'a>(
             continue;
         };
         builder.states.load(entry, &mut state);
-        for position in block.start..block.end {
+        for (slot, position) in before[block.start..block.end].iter_mut().zip(block.start..) {
             let start = boxings.len() as u32;
             boxings.extend(builder.box_operands(position, &mut state));
             boxing_ranges.push(start);
-            before[position] = Some(builder.states.push(&state));
+            *slot = Some(builder.states.push(&state));
             builder.edges.clear();
             actions.push(builder.transfer(position, &mut state)?);
             edge_ranges.push(edges.len() as u32);
@@ -2903,17 +2903,22 @@ impl<'a> Builder<'a> {
                 right,
             });
         }
-        // An operand of unknown type is typically the result of a call that has not returned
-        // yet, as in a recursive function compiled on its way down.
-        if self.patient && (a == Ty::Boxed || b == Ty::Boxed) && self.never_ran(inst.pc) {
+        let ty = if !self.never_ran(inst.pc) {
+            self.feedback_at(inst.pc)
+        } else if let Some(ty) = vector_arithmetic(arith, a, b) {
+            ty
+        } else if self.patient && (a == Ty::Boxed || b == Ty::Boxed) {
+            // An operand of unknown type is typically the result of a call that has not
+            // returned yet, as in a recursive function compiled on its way down.
             return Err(Refusal(COLD));
-        }
+        } else {
+            Ty::Boxed
+        };
         let effect = if a.is_plain() && b.is_plain() {
             Effect::PureUnlessObserved
         } else {
             Effect::Opaque
         };
-        let ty = self.feedback_at(inst.pc);
         let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
         state.visible = Some(true);
         Ok(action)
@@ -2929,8 +2934,8 @@ impl<'a> Builder<'a> {
         let call = self.constant(operand(2));
         let (first, count) = (operand(3), operand(4));
         let args = self.slice(first..first + count);
-        let feedback = self.feedback_at(inst.pc);
         let Ty::Fun(function) = state.registers[operand(1)] else {
+            let feedback = self.feedback_at(inst.pc);
             return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
         };
         let definition = interp::eval::builtin_def(function)
@@ -2953,6 +2958,7 @@ impl<'a> Builder<'a> {
         if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
             // A list element is boxed, so its type comes from what the site has read so far,
             // which the compiled read checks before it unboxes the element.
+            let feedback = self.feedback_at(inst.pc);
             if intrinsic == Intrinsic::Element && types[0] == Ty::List && feedback.is_unboxed() {
                 result = feedback;
             }
@@ -2965,6 +2971,14 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
+        // Before the call has returned, its result type comes from what the builtin computes
+        // for these argument types, so a first-call compile need not wait for feedback. The
+        // refinement after the call checks the guess like any other.
+        let feedback = if untagged && self.never_ran(inst.pc) {
+            builtin_result(name, &types).unwrap_or(Ty::Boxed)
+        } else {
+            self.feedback_at(inst.pc)
+        };
         // A library leaf never dispatches, but reading an ALTREP argument runs its class's
         // methods, which a package may write in R, so every boxed argument is observed.
         if definition.accepts_native && interp::standard_library::is_leaf(name) {
@@ -3190,7 +3204,8 @@ pub(crate) unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String
 }
 
 /// Walks from `enclosure` to the binding a function lookup of `symbol` finds, as tier 0 does,
-/// but gives up instead of forcing a promise or calling an active binding.
+/// but gives up instead of forcing a promise, calling an active binding, or passing a binding
+/// that holds something other than a function.
 pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let mut env = start;
@@ -3207,14 +3222,18 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
                 }
                 value = value.car();
             }
-            if values::is_function(value) {
-                return Some(Speculation {
-                    symbol,
-                    env: start,
-                    cell,
-                    function: value,
-                });
+            // A binding passed over for holding a non-function could later hold a function
+            // without moving any epoch or stamp, because only the binding found is watched, so
+            // such a lookup is not speculated on.
+            if !values::is_function(value) {
+                return None;
             }
+            return Some(Speculation {
+                symbol,
+                env: start,
+                cell,
+                function: value,
+            });
         }
         env = env.enclosure();
     }
@@ -3317,9 +3336,7 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         ("[[", [array, index]) if array.is_array() && matches!(index, Ty::Int | Ty::Dbl) => {
             (Intrinsic::Element, array.element())
         }
-        ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => {
-            (Intrinsic::Element, Ty::Boxed)
-        }
+        ("[[", [Ty::List, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Boxed),
         ("length", [ty])
             if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
         {
@@ -3373,6 +3390,95 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             )
         }
         _ => return None,
+    })
+}
+
+/// The type a base builtin returns for plain arguments of these types, for a call that has not
+/// returned yet. A guess can be wrong (`max` of an empty integer vector is the double `-Inf`,
+/// `1.5:3` makes doubles), which the check after the call catches.
+fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
+    let numeric = |ty: &Ty| ty.is_vector() || ty.is_numeric_scalar();
+    let all = |test: &dyn Fn(&Ty) -> bool| !types.is_empty() && types.iter().all(test);
+    let storage = |ty: &Ty| ty.element();
+    let widest = || {
+        if all(&|ty| storage(ty) == Ty::Lgl) {
+            Ty::Lgl
+        } else if all(&|ty| storage(ty) != Ty::Dbl) {
+            Ty::Int
+        } else {
+            Ty::Dbl
+        }
+    };
+    Some(match (name, types) {
+        ("seq_len", [length]) if length.is_numeric_scalar() => Ty::IntVec,
+        ("seq_along", [along]) if along.is_plain() => Ty::IntVec,
+        // `1:n` makes integers even from double literals whenever the start is a whole number.
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => Ty::IntVec,
+        ("sum", _) if all(&numeric) => match widest() {
+            Ty::Dbl => Ty::Dbl,
+            _ => Ty::Int,
+        },
+        ("prod", _) if all(&numeric) => Ty::Dbl,
+        ("max" | "min", _) if all(&numeric) => match widest() {
+            Ty::Lgl => Ty::Int,
+            other => other,
+        },
+        ("c", _) if all(&numeric) => widest().vector(),
+        ("sqrt" | "exp" | "log" | "floor" | "ceiling" | "cumprod", [vector])
+            if vector.is_vector() =>
+        {
+            Ty::DblVec
+        }
+        ("abs" | "cumsum", [vector]) if vector.is_vector() => match vector.element() {
+            Ty::Dbl => Ty::DblVec,
+            _ => Ty::IntVec,
+        },
+        ("is.na", [vector]) if vector.is_vector() => Ty::LglVec,
+        ("as.integer", [ty]) if numeric(ty) => {
+            if ty.is_numeric_scalar() {
+                Ty::Int
+            } else {
+                Ty::IntVec
+            }
+        }
+        ("as.double" | "as.numeric", [ty]) if numeric(ty) => {
+            if ty.is_numeric_scalar() {
+                Ty::Dbl
+            } else {
+                Ty::DblVec
+            }
+        }
+        ("as.logical", [ty]) if numeric(ty) => {
+            if ty.is_numeric_scalar() {
+                Ty::Lgl
+            } else {
+                Ty::LglVec
+            }
+        }
+        ("[", [vector, index]) if vector.is_vector() && index.is_vector() => {
+            vector.element().vector()
+        }
+        _ => return None,
+    })
+}
+
+/// The type of an element-wise operation that has not run yet on plain operands, at least one of
+/// them a vector: plain operands carry no attributes, so neither does the result.
+fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
+    let operand = |ty: Ty| ty.is_vector() || ty.is_numeric_scalar();
+    if !(operand(a) && operand(b)) || !(a.is_vector() || b.is_vector()) {
+        return None;
+    }
+    let doubles = a.element() == Ty::Dbl || b.element() == Ty::Dbl;
+    Some(match arith {
+        Arith::Equal
+        | Arith::NotEqual
+        | Arith::Less
+        | Arith::Greater
+        | Arith::LessEqual
+        | Arith::GreaterEqual => Ty::LglVec,
+        Arith::Add | Arith::Subtract | Arith::Multiply if !doubles => Ty::IntVec,
+        _ => Ty::DblVec,
     })
 }
 

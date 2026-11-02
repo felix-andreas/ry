@@ -2,7 +2,7 @@
 //! order, suffixes, group order) follow Polars, which the `DataFrame` API mirrors.
 
 use {
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
     table::{
         Table,
         convert::{RVector, is_na_real, to_r},
@@ -268,8 +268,8 @@ fn the_optimizer_pushes_filters_and_projections() {
 /// Random chains of verbs give the same table with and without the optimizer.
 #[test]
 fn optimizing_never_changes_the_result() {
-    let mut rng = SplitMix64(0x5eed_1a2f);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let height = rng.below(12);
         let groups = ["a", "b", "c"];
         let table = frame(vec![
@@ -348,5 +348,166 @@ fn optimizing_never_changes_the_result() {
                 plain.err()
             ),
         }
-    }
+    });
+}
+
+#[test]
+fn a_window_gives_each_row_its_groups_value() {
+    let plan = Plan::new(Source::Table(sales())).with(Step::WithColumns(vec![
+        named(
+            "region_units",
+            Expr::Window(Box::new(sum("units")), vec![PlSmallStr::from("region")]),
+        ),
+        named(
+            "price_rank",
+            Expr::Rank {
+                arg: Box::new(column("price")),
+                descending: true,
+            },
+        ),
+    ]));
+    let result = collect(plan);
+    assert_eq!(
+        column_values(&result, "region_units"),
+        ints(&[5, 6, 5, 7, 6])
+    );
+    assert_eq!(column_values(&result, "price_rank"), ints(&[4, 3, 2, 5, 1]));
+}
+
+/// Ties keep row order and `NA` ranks last, as `frank(x, ties.method = "first", na.last = TRUE)`.
+#[test]
+fn rank_breaks_ties_by_row_and_puts_na_last() {
+    let table = frame(vec![(
+        "x",
+        doubles(&[2.0, table::convert::NA_REAL, 1.0, 2.0]),
+    )]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named(
+            "up",
+            Expr::Rank {
+                arg: Box::new(column("x")),
+                descending: false,
+            },
+        ),
+        named(
+            "down",
+            Expr::Rank {
+                arg: Box::new(column("x")),
+                descending: true,
+            },
+        ),
+    ]));
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "up"), ints(&[2, 4, 1, 3]));
+    assert_eq!(column_values(&result, "down"), ints(&[1, 4, 3, 2]));
+}
+
+#[test]
+fn dates_shift_by_days_and_subtract_to_days() {
+    let table = frame(vec![(
+        "day",
+        RVector::Date(vec![19753.0, 19768.0, table::convert::NA_REAL]),
+    )]);
+    let plan = Plan::new(Source::Table(table))
+        .with(Step::WithColumns(vec![
+            named(
+                "later",
+                binary(BinaryOp::Add, column("day"), Expr::Double(30.0)),
+            ),
+            named(
+                "since",
+                binary(BinaryOp::Subtract, column("day"), Expr::Date(19700)),
+            ),
+        ]))
+        .with(Step::Filter(binary(
+            BinaryOp::GreaterEqual,
+            column("day"),
+            Expr::Date(19760),
+        )));
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "day"), RVector::Date(vec![19768.0]));
+    assert_eq!(
+        column_values(&result, "later"),
+        RVector::Date(vec![19798.0])
+    );
+    assert_eq!(column_values(&result, "since"), ints(&[68]));
+}
+
+#[test]
+fn a_date_only_adds_days() {
+    let table = frame(vec![("day", RVector::Date(vec![19753.0]))]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![named(
+        "twice",
+        binary(BinaryOp::Multiply, column("day"), Expr::Integer(2)),
+    )]));
+    let error = lazy::collect(plan).err().map(|error| error.to_string());
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("a date only takes `+` and `-`")),
+        "{error:?}"
+    );
+}
+
+/// Without the check, a date against a number would meet at character and compare as text.
+#[test]
+fn a_date_compares_only_with_a_date() {
+    let table = frame(vec![("day", RVector::Date(vec![19753.0]))]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Filter(binary(
+        BinaryOp::Greater,
+        column("day"),
+        Expr::Integer(19000),
+    )));
+    let error = lazy::collect(plan).err().map(|error| error.to_string());
+    assert!(
+        error.as_deref().is_some_and(
+            |error| error.contains("a Date compares only with a Date, not with integer[]")
+        ),
+        "{error:?}"
+    );
+}
+
+/// A filter that reads which rows come first must not move below the sort that orders them.
+#[test]
+fn a_filter_on_rank_stays_above_the_sort() {
+    let plan = Plan::new(Source::Table(sales()))
+        .with(Step::Sort(vec![SortKey {
+            expr: column("units"),
+            descending: false,
+        }]))
+        .with(Step::Filter(binary(
+            BinaryOp::LessEqual,
+            Expr::Rank {
+                arg: Box::new(column("price")),
+                descending: false,
+            },
+            Expr::Integer(2),
+        )));
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "units"), ints(&[3, 7]));
+}
+
+#[test]
+fn a_cross_join_pairs_every_row_left_major() {
+    let visits = frame(vec![("visit", ints(&[1, 2])), ("units", ints(&[0, 0]))]);
+    let plan = Plan::new(Source::Table(sales())).with(Step::Join {
+        other: Box::new(Plan::new(Source::Table(visits))),
+        left_on: Vec::new(),
+        right_on: Vec::new(),
+        how: How::Cross,
+        suffix: PlSmallStr::from("_right"),
+    });
+    let result = collect(plan);
+    assert_eq!(
+        names(&result),
+        ["region", "units", "price", "visit", "units_right"]
+    );
+    assert_eq!(
+        column_values(&result, "visit"),
+        ints(&[1, 2, 1, 2, 1, 2, 1, 2, 1, 2])
+    );
+    assert_eq!(
+        column_values(&result, "units"),
+        ints(&[3, 3, 5, 5, 2, 2, 7, 7, 1, 1])
+    );
 }

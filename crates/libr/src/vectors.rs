@@ -1519,6 +1519,8 @@ pub unsafe extern "C" fn Rf_ncols(object: Sexp) -> c_int {
 macro_rules! predicate {
     ($name:ident, |$object:ident| $body:expr) => {
         #[unsafe(no_mangle)]
+        // The immediately called closure is a try block: it scopes the `?` inside `$body`.
+        #[allow(clippy::redundant_closure_call)]
         pub unsafe extern "C" fn $name($object: Sexp) -> Rboolean {
             // C code tests every element it walks, and a predicate only reads, so it runs outside
             // the boundary and enters it again only to raise its error.
@@ -2014,7 +2016,7 @@ pub unsafe extern "C" fn Rf_asComplex(object: Sexp) -> Rcomplex {
             return Ok(na);
         }
         let first = coerce_vector(object, SexpType::Complex)?;
-        Ok(altrep::elt::<Rcomplex>(first, 0)?)
+        altrep::elt::<Rcomplex>(first, 0)
     })
 }
 
