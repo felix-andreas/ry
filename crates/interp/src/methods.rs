@@ -87,6 +87,11 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
             values::first_string(class).unwrap_or_default()
         )));
     }
+    // A package loader may hold back methods for this generic, which must be in its tables
+    // before it selects one.
+    if !interp().globals.deferred_definitions.is_empty() {
+        force_deferred(generic_name.as_bytes(), Lookup::Generic)?;
+    }
     let generic_env = generic.tag();
     let table = all_methods_table(generic, generic_env)?;
     let signature = signature_symbols(generic_env)?;

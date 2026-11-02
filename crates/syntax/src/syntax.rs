@@ -505,8 +505,7 @@ pub enum GreenEvent<'a> {
 /// The nodes under `root`, `root` included, in preorder, read from the green tree, so the
 /// walk builds no [`SyntaxNode`]s. Pair it with [`node_at`] to build red nodes only for the
 /// few sites a pass needs. Tokens other than comments, strings and numbers only advance the
-/// offset: most elements of a tree are tokens, and the whole-file passes read only nodes and
-/// those tokens.
+/// offset: most elements of a tree are tokens, and the whole-file passes read only nodes and those.
 #[inline]
 pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
     let root_green = root.green();

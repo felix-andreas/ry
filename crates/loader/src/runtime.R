@@ -302,12 +302,49 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 # loader's `DeferredS4` documents) until code first reaches one of them: each name they bind is
 # a promise that runs them all, and so is looking up one of their classes or generics by name.
 .ry_defer_s4 <- function(state, deferred) {
+  # A method for another package's generic is stored under that package's name, which only the
+  # generic itself knows.
+  # Their methods are found through the tables in the generic's own environment, which
+  # `getMethod()` and `existsMethod()` read without any lookup the interpreter sees, so each
+  # table becomes a promise that runs the definitions too.
+  tables <- list()
+  for (name in deferred$foreign_generics) {
+    generic <- get(name, envir = state$ns, mode = "function")
+    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, attr(generic, "package")))
+    environment <- environment(generic)
+    for (table in intersect(c(".MTable", ".AllMTable"), names(environment))) {
+      tables[[length(tables) + 1L]] <- list(
+        environment = environment, name = table, value = get(table, envir = environment)
+      )
+    }
+  }
   state$s4_deferred <- deferred
+  state$s4_tables <- tables
+  for (table in tables) {
+    .ry_s4_table_placeholder(state, table)
+  }
   force <- function() .ry_force_s4(state)
-  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, deferred$generics, force))
+  generics <- c(deferred$generics, deferred$foreign_generics)
+  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, generics, force))
   for (name in deferred$names) {
     .ry_s4_placeholder(state, name)
   }
+}
+
+.ry_s4_table_placeholder <- function(state, table) {
+  delayedAssign(table$name, {
+    .ry_force_s4(state)
+    get(table$name, envir = table$environment, inherits = FALSE)
+  }, assign.env = table$environment)
+}
+
+# Puts back the method tables of other packages' generics that the held-back definitions
+# replaced with promises.
+.ry_restore_s4_tables <- function(state) {
+  for (table in state$s4_tables) {
+    assign(table$name, table$value, envir = table$environment)
+  }
+  state$s4_tables <- NULL
 }
 
 .ry_s4_placeholder <- function(state, name) {
@@ -325,14 +362,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     return(invisible())
   }
   state$s4_deferred <- NULL
+  .ry_restore_s4_tables(state)
   ns <- state$ns
-  rm(list = deferred$names[deferred$names %in% names(ns)], envir = ns)
-  # The attached package environment shares the placeholder bindings, and the methods package
-  # searches it too, so a copy left there would make the definitions read their own placeholder.
-  if (!is.null(state$package_env)) {
-    environment <- state$package_env
-    rm(list = deferred$names[deferred$names %in% names(environment)], envir = environment)
-  }
   held <- .Internal(ryLoaderDeferred(state$root))
   loading <- !is.null(state$s4_cursor)
   previous <- options(topLevelEnvironment = ns)
@@ -345,7 +376,16 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   cache <- if (!loading && !is.null(deferred$cache_key)) {
     .ry_s4_cache(ns, deferred$cache_key, held$cache)
   }
-  if (!.ry_restore_s4(ns, cache)) {
+  # Restoring overwrites the placeholders, and one left in the attached package environment
+  # now finds the restored value, so only a run, or a name the restored file lacks, needs them
+  # gone. Removing a binding from a large frame is slow, which is why a restore skips it.
+  restored <- .ry_restore_s4(ns, cache)
+  .ry_remove_s4_placeholders(state, if (isTRUE(restored)) {
+    setdiff(deferred$names, attr(restored, "names_bound"))
+  } else {
+    deferred$names
+  })
+  if (!isTRUE(restored)) {
     before <- names(ns)
     signalled <- FALSE
     withCallingHandlers(
@@ -406,7 +446,17 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     return(FALSE)
   }
   list2env(saved$values, envir = ns)
-  TRUE
+  structure(TRUE, names_bound = names(saved$values))
+}
+
+# The attached package environment shares the placeholder bindings, and the methods package
+# searches it too, so a copy left there would make the definitions read their own placeholder.
+.ry_remove_s4_placeholders <- function(state, names) {
+  for (environment in list(state$ns, state$package_env)) {
+    if (length(names) && !is.null(environment)) {
+      rm(list = names[names %in% names(environment)], envir = environment)
+    }
+  }
 }
 
 # Saves the bindings the held-back definitions made, replacing the file atomically so that a
@@ -444,6 +494,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     return(invisible())
   }
   state$s4_deferred <- NULL
+  .ry_restore_s4_tables(state)
   .Internal(ryLoaderUndefer(state$root))
   rm(list = deferred$names[deferred$names %in% names(state$ns)], envir = state$ns)
 }
