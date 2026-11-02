@@ -2186,3 +2186,16 @@ wrap: <T: numeric> fn([pre]: T) -> double
 use: Unknown
 77..78 warning[unused] `s` is assigned but never used.
 137..140 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_reference_class_method_calls_its_sibling_not_the_top_level_namesake
+# openxlsx defines both `getBaseFont(wb)` and a `getBaseFont()` method; inside a method R
+# finds the method first, so the call without `wb` is correct.
+getBaseFont <- function(wb) wb$font
+Workbook <- setRefClass("Workbook", fields = c(font = "character"))
+Workbook$methods(getBaseFont = function() font)
+Workbook$methods(widths = function() nchar(getBaseFont()))
+#++++
+getBaseFont: <T> fn(wb: T) -> Unknown
+Workbook: Unknown
+Unknown
+Unknown

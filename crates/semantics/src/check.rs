@@ -15589,7 +15589,7 @@ mod tests {
             .find(|child| is_expression_kind(child.kind()))
             .expect("one top-level item");
         let module = lower_item(&item);
-        let naming = resolve_item(&module, &FxHashMap::default());
+        let naming = resolve_item(&module, &FxHashMap::default(), &|_, _| false);
         check_item_with_annotation(db, &module, &naming, annotation.as_ref(), &[], None, true)
     }
 

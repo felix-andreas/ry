@@ -151,8 +151,8 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is down to 63. About 22 of the rest are true bugs in the packages (NlcOptim calls the
-matrices `indall` and `A` as functions); the other 41
+lifecycle, and is down to 62. About 22 of the rest are true bugs in the packages (NlcOptim calls the
+matrices `indall` and `A` as functions); the other 40
 or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
 packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call
 reads (`decisions.md`, "Inferred signatures carry body facts that a call reads"), which cleared the
@@ -169,8 +169,7 @@ forwarding to a `missing()`-tested parameter. The classes:
   argument type" (2), gmp `if (log)` with no `log` formal, httr `revoke_oauth2.0(x)` without
   `credentials`.
 - **Metaprogrammed bodies read names from a frame the checker cannot see.** R6's `generator_funs$new` reads `class` from the generator environment it is
-  copied into. openxlsx's Reference Class methods call sibling methods (`getBaseFont()`) that the
-  checker resolves to a same-named top-level function.
+  copied into.
 - **A conditional library read is taken as a force.** PerformanceAnalytics passes a missing
   `angle` to `rect(angle = angle)`, which reads it only when `density` is not `NULL`.
 - **A defaulted callback pins its slot to the first call's argument.** ks has

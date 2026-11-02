@@ -2981,9 +2981,30 @@ with_transaction <- function(con, body) {
 #### Names bound at run time
 
 In a file that calls `R6Class`, the names `self`, `private`, and `super` resolve and type as
-`Unknown`, because R6 creates those bindings when an object is constructed. The recognition is
-syntactic, so a local binding that shadows `R6Class` is not honored, and it is scoped to the file, so
-a file that defines no R6 class still warns about `self`.
+`Unknown`, because R6 creates those bindings when an object is constructed. So do they inside a
+method added with `Gen$set("public", "name", function(...) ...)` in any file. Elsewhere, a file
+that defines no R6 class still warns about `self`. The recognition is syntactic, so a local binding
+that shadows `R6Class` is not honored.
+
+A Reference Class method runs in its object's frame, which sits between the method body and the
+package namespace. Inside a method that `setRefClass(methods = list(...))` or
+`Gen$methods(...)` defines, a field or method of the class therefore resolves and types as
+`Unknown`, and it shadows a top-level function of the same name:
+
+```r
+getBaseFont <- function(wb) wb$font
+Workbook <- setRefClass("Workbook", fields = c(font = "character"))
+Workbook$methods(getBaseFont = function() font)
+Workbook$methods(widths = function() nchar(getBaseFont()))  # the method, so no `wb` is needed
+```
+
+The members are the names in `fields` and `methods`, the names that `Gen$fields(...)` and
+`Gen$methods(...)` add anywhere in the project, those of every superclass in `contains` that the
+project defines, `.self`, and the methods every object inherits (`callSuper`, `initFields`, `copy`,
+`field`, `show` and the rest of `envRefClass`). A misspelled member is still an unresolved name. A
+class with a superclass the project does not define, or a `Gen$methods(...)` call on a generator
+the project does not bind to `setRefClass`, has members ry cannot see, so its methods resolve every
+name.
 
 Inside any function body, the S3 dispatch variables `.Generic`, `.Method`, `.Class`, `.Group`,
 `.GenericCallEnv`, and `.GenericDefEnv` resolve and type as `Unknown`, because `UseMethod`,

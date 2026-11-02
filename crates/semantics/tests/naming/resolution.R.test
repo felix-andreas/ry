@@ -162,3 +162,111 @@ f <- function(flag) {
   28..32 flag -> b0
   34..39 value <- b1
   48..53 value -> b1 maybe-undefined
+
+#==== reference_class_members
+#---- a_method_reads_its_fields_and_sibling_methods_through_the_object
+# R runs a method in the object's frame, so `name`, `.self` and `bump` resolve there;
+# `nmae` is a member of nothing and stays a non-local read.
+Person <- setRefClass("Person",
+  fields = list(name = "character", age = "numeric"),
+  methods = list(
+    greet = function() {
+      cat(name, .self$age)
+      bump()
+      nmae
+    },
+    bump = function() invisible(.self)
+  )
+)
+#++++
+# Person
+  b0 Person top-level 0..6
+  0..6 Person <- b0
+  10..21 setRefClass -> non-local
+  43..47 list -> non-local
+  98..102 list -> non-local
+  135..138 cat -> non-local deferred
+  175..179 nmae -> non-local deferred
+  209..218 invisible -> non-local deferred
+
+#---- a_superclass_defined_in_the_project_lends_its_members
+Base <- setRefClass("Base", fields = c(sheets = "list"))
+Child <- setRefClass("Child", contains = "Base",
+  methods = list(count = function() length(sheets) + callSuper())
+)
+#++++
+# Base
+  b0 Base top-level 0..4
+  0..4 Base <- b0
+  8..19 setRefClass -> non-local
+  37..38 c -> non-local
+# Child
+  b0 Child top-level 0..5
+  0..5 Child <- b0
+  9..20 setRefClass -> non-local
+  61..65 list -> non-local
+  85..91 length -> non-local deferred
+
+#---- a_superclass_from_elsewhere_hides_the_members_so_every_name_binds
+Open <- setRefClass("Open", contains = "ForeignClass",
+  methods = list(go = function() inherited_method())
+)
+#++++
+# Open
+  b0 Open top-level 0..4
+  0..4 Open <- b0
+  8..19 setRefClass -> non-local
+  67..71 list -> non-local
+
+#---- a_generator_methods_call_reads_the_members_of_its_class
+Workbook <- setRefClass("Workbook", fields = c(font = "character"))
+Workbook$methods(getBaseFont = function() font)
+Workbook$methods(widths = function() {
+  getBaseFont()
+  fnot
+})
+#++++
+# Workbook
+  b0 Workbook top-level 0..8
+  0..8 Workbook <- b0
+  12..23 setRefClass -> non-local
+  45..46 c -> non-local
+# <statement>
+  0..8 Workbook -> non-local
+# <statement>
+  0..8 Workbook -> non-local
+  57..61 fnot -> non-local deferred
+
+#---- a_shadowed_top_level_function_is_not_what_a_method_calls
+getBaseFont <- function(wb) wb
+Workbook <- setRefClass("Workbook",
+  methods = list(getBaseFont = function() "Calibri", widths = function() getBaseFont())
+)
+#++++
+# getBaseFont
+  b0 wb parameter 24..26
+  b1 getBaseFont top-level 0..11
+  0..11 getBaseFont <- b1
+  28..30 wb -> b0
+# Workbook
+  b0 Workbook top-level 0..8
+  0..8 Workbook <- b0
+  12..23 setRefClass -> non-local
+  48..52 list -> non-local
+
+#---- an_r6_method_added_with_set_reads_self_and_private
+Acc$set("public", "reset", function() {
+  private$log <- NULL
+  invisible(self)
+})
+outside <- function() self
+#++++
+# <statement>
+  b0 private local 42..49
+  0..3 Acc -> non-local
+  42..49 private -> b0
+  64..73 invisible -> non-local deferred
+# outside
+  b0 outside top-level 0..7
+  0..7 outside <- b0
+  22..26 self -> non-local deferred

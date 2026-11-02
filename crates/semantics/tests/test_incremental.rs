@@ -870,3 +870,31 @@ fn one_shot_invariants_child() {
         "the cross-check consulted the incremental projections"
     );
 }
+
+#[test]
+fn a_reference_class_edit_rechecks_only_methods_whose_member_answers_change() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\"))\n",
+        "Sheet <- setRefClass(\"Sheet\", contains = \"Workbook\",\n  methods = list(widths = function() nchar(font) + size))\n",
+        "other <- function() 3L\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(
+        files[0],
+        "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\", unread = \"list\"))\n"
+            .to_owned(),
+    );
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["Workbook"]);
+
+    db.edit(
+        files[0],
+        "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\", size = \"numeric\"))\n"
+            .to_owned(),
+    );
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["Sheet", "Workbook"]);
+}

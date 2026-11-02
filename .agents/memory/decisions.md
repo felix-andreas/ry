@@ -5527,3 +5527,25 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
 - **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
 - **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger` and data-science `readings` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
+
+## Reference Class and R6 method bodies resolve object members in naming
+
+- **Before.** A file that called `R6Class` accepted `self`, `private` and `super` anywhere in it
+  (`diagnostics::file_defines_r6_class`), and a Reference Class method's fields, `.self` and sibling
+  methods were unresolved reads. A sibling method sharing a top-level function's name typed as that
+  function, so openxlsx's `getBaseFont()` method call was reported for leaving out `wb`.
+- **Shape.** `naming::ref_class_definition` recognizes `setRefClass(...)`, `Gen$methods(...)`,
+  `Gen$fields(...)`, `R6Class(...)` and `Gen$set("public", ...)` syntactically, and
+  `naming::resolve_item` takes an `is_member(RefClassKey, Symbol)` oracle. A read inside a method
+  body (or a closure in one) that has no lexical slot and that the oracle accepts records nothing:
+  it is neither a non-local nor a resolution, so diagnostics report nothing and the checker reads
+  `Unknown`. R6 methods answer only `self`, `private`, `super`.
+- **Membership is a per-name projection.** `semantics::file_ref_classes` indexes one file from HIR
+  alone, `project_ref_classes` unions them, and `item_naming` asks
+  `project_ref_class_binds(files, class, member)`, so a class edit re-runs only the methods whose
+  answers change (`test_incremental`,
+  `a_reference_class_edit_rechecks_only_methods_whose_member_answers_change`). The index reads
+  `item_hir` only, never naming, so there is no cycle.
+- **Unknown classes bind everything.** A superclass the project does not define, or a generator the
+  project does not bind to `setRefClass`, hides the members, so every name binds rather than
+  guessing. The file-level R6 guard stays for helper functions placed in an R6 list by name.
