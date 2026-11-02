@@ -17,6 +17,7 @@ use {
             CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
             INLINE_ANNOTATIONS_OFF, suggested_table,
         },
+        console_link::{ConsoleLink, identifier_at},
         diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
         namespace::namespace_import_problems,
         position::{LineColumn, LineIndex},
@@ -57,7 +58,7 @@ use {
     simulation::Outgoing,
     std::{
         cmp::Reverse,
-        collections::{BTreeSet, HashMap},
+        collections::{BTreeSet, HashMap, HashSet},
         env, fs,
         hash::{DefaultHasher, Hash, Hasher},
         mem,
@@ -98,6 +99,7 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
             },
             experimental_features,
             debug,
+            consoles: true,
             cancel: cancel.clone(),
         };
         thread::Builder::new()
@@ -244,6 +246,9 @@ struct WorkerSeed {
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
+    /// Whether hover and completion may ask a running console in the workspace. Off in the
+    /// simulator, which must not depend on processes outside it.
+    consoles: bool,
 }
 
 /// Where the worker's server-to-client traffic goes. Every message the worker originates
@@ -420,6 +425,7 @@ struct Worker {
     supports_label_offsets: bool,
     supports_snippets: bool,
     workspace_root: PathBuf,
+    console: ConsoleLink,
     config: Config,
     pending_config_error: Option<String>,
     db: RootDatabase,
@@ -564,6 +570,7 @@ impl Worker {
             supports_diagnostic_refresh,
             supports_label_offsets,
             supports_snippets,
+            console: ConsoleLink::new(seed.consoles.then_some(workspace_root.as_path())),
             workspace_root,
             config,
             pending_config_error: pending_config_error.as_ref().map(config_message),
@@ -2163,8 +2170,24 @@ impl LanguageServer for ServerState {
             } else {
                 Vec::new()
             };
+            let live = console_value(worker, &text, usize::from(offset));
+            if hover.is_none()
+                && let Some(live) = live
+            {
+                return Ok(Some(lsp_types::Hover {
+                    contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                        kind: lsp_types::MarkupKind::Markdown,
+                        value: live,
+                    }),
+                    range: None,
+                }));
+            }
             Ok(hover.map(|hover| {
                 let mut value = format!("```r\n{}\n```", hover.lines.join("\n"));
+                if let Some(live) = &live {
+                    value.push_str("\n\n---\n\n");
+                    value.push_str(live);
+                }
                 if let Some(summary) = hover
                     .definition
                     .as_ref()
@@ -2465,17 +2488,29 @@ impl LanguageServer for ServerState {
             let result = worker
                 .cancellable(|worker| ide::completion(&worker.db, files, file, offset))
                 .unwrap_or_default();
-            Ok(result.map(|result| {
-                let items = result
-                    .items
-                    .into_iter()
-                    .enumerate()
-                    .map(|(rank, item)| {
-                        convert_completion_item(item, rank, worker.supports_snippets)
-                    })
-                    .collect();
+            let (mut items, is_incomplete) = match result {
+                Some(result) => (
+                    result
+                        .items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(rank, item)| {
+                            convert_completion_item(item, rank, worker.supports_snippets)
+                        })
+                        .collect::<Vec<_>>(),
+                    result.is_incomplete,
+                ),
+                None => (Vec::new(), false),
+            };
+            items.extend(console_completions(
+                worker,
+                &text,
+                usize::from(offset),
+                &items,
+            ));
+            Ok((!items.is_empty()).then(|| {
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
-                    is_incomplete: result.is_incomplete,
+                    is_incomplete,
                     items,
                 })
             }))
@@ -3176,6 +3211,99 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
 
 /// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
 /// label, which puts `break` ahead of the local the user is about to type.
+/// The live value of the variable at `offset` in the workspace's running console, as hover text.
+fn console_value(worker: &mut Worker, text: &str, offset: usize) -> Option<String> {
+    let (name, owner) = identifier_at(text, offset)?;
+    if name.is_empty() || owner.is_some() {
+        return None;
+    }
+    let globals = worker.console.globals()?;
+    let global = globals.get(name)?;
+    let class = global.class.as_deref().unwrap_or(&global.kind);
+    let mut value = format!("In the console: `{class}`");
+    if let Some(summary) = &global.summary {
+        value.push_str(&format!("\n\n```r\n{summary}\n```"));
+    }
+    if !global.columns.is_empty() {
+        let columns: Vec<String> = global
+            .columns
+            .iter()
+            .map(|(name, kind)| format!("`{name}` {kind}"))
+            .collect();
+        value.push_str(&format!("\n\nColumns: {}", columns.join(", ")));
+    }
+    Some(value)
+}
+
+/// Completions only the running console knows: after `name$`, the columns of the data frame
+/// `name` holds there; otherwise the console's variables that analysis did not already offer.
+fn console_completions(
+    worker: &mut Worker,
+    text: &str,
+    offset: usize,
+    existing: &[lsp_types::CompletionItem],
+) -> Vec<lsp_types::CompletionItem> {
+    let Some((_, owner)) = identifier_at(text, offset) else {
+        return Vec::new();
+    };
+    // `identifier_at` checked that `offset` is a char boundary within the text.
+    let before = &text[..offset.min(text.len())];
+    let prefix = &before[before
+        .trim_end_matches(|character: char| {
+            character.is_alphanumeric() || character == '.' || character == '_'
+        })
+        .len()..];
+    if owner.is_none() && prefix.is_empty() {
+        return Vec::new();
+    }
+    let Some(globals) = worker.console.globals() else {
+        return Vec::new();
+    };
+    let offered: HashSet<&str> = existing.iter().map(|item| item.label.as_str()).collect();
+    let item = |label: &str, kind, detail: String| lsp_types::CompletionItem {
+        label: label.to_owned(),
+        kind: Some(kind),
+        detail: Some(detail),
+        sort_text: Some(format!("~{label}")),
+        ..Default::default()
+    };
+    match owner {
+        Some(owner) => globals
+            .get(owner)
+            .map(|global| {
+                global
+                    .columns
+                    .iter()
+                    .filter(|(column, _)| {
+                        column.starts_with(prefix) && !offered.contains(column.as_str())
+                    })
+                    .map(|(column, kind)| {
+                        item(
+                            column,
+                            lsp_types::CompletionItemKind::FIELD,
+                            format!("{kind} (console)"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => globals
+            .values()
+            .filter(|global| {
+                global.name.starts_with(prefix) && !offered.contains(global.name.as_str())
+            })
+            .map(|global| {
+                let class = global.class.as_deref().unwrap_or(&global.kind);
+                item(
+                    &global.name,
+                    lsp_types::CompletionItemKind::VARIABLE,
+                    format!("{class} (console)"),
+                )
+            })
+            .collect(),
+    }
+}
+
 fn convert_completion_item(
     item: CompletionItem,
     rank: usize,

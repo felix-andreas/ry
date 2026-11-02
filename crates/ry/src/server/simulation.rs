@@ -142,6 +142,7 @@ impl Simulation {
             experimental_features: ExperimentalFeatures::default(),
             debug: false,
             cancel: cancel.clone(),
+            consoles: false,
         };
         let mut simulation = Simulation {
             state: ServerState { sender, cancel },
