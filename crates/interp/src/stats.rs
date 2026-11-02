@@ -423,13 +423,12 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     }
     let x = real_values(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
-    // As in GNU R, only the policies that drop observations reject an empty `x`; the
-    // propagating ones return an empty result.
-    let empty_allowed = matches!(
-        policy,
-        MissingPolicy::Everything | MissingPolicy::NaOrComplete
-    );
-    if length(x_argument) == 0 && !empty_allowed {
+    if length(x_argument) == 0
+        && matches!(
+            policy,
+            MissingPolicy::AllObservations | MissingPolicy::Pairwise
+        )
+    {
         return Err(call.error("'x' is empty"));
     }
     let has_y = y_argument != values::nil();

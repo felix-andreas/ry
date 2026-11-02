@@ -2259,8 +2259,8 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
             if decades.iter().any(|end| !end.is_finite()) {
                 warnings.push(format!(
                     "nonfinite axis={axis} limits [GScale({},{},..); log=TRUE] -- corrected now",
-                    crate::linalg::format_g(decades[0]),
-                    crate::linalg::format_g(decades[1]),
+                    crate::format::format_g(decades[0]),
+                    crate::format::format_g(decades[1]),
                 ));
             }
             decades.map(|end| if end.is_finite() { end } else { -320.0 })

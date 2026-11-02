@@ -2641,7 +2641,7 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         }
         values::set_elt(result, dimension, component);
     }
-    let mut names = values::names(dimnames);
+    let names = values::names(dimnames);
     if names != nil() {
         let padded = alloc(SexpType::String, dims.len())?;
         for index in 0..dims.len() {
@@ -3632,7 +3632,7 @@ pub unsafe fn max_col(
 ) -> R<()> {
     let random = method == 1;
     if random {
-        random::get_rng_state()?;
+        crate::random::get_rng_state()?;
     }
     let entry = |row: usize, column: usize| matrix.get(row + column * rows).copied();
     for (row, slot) in maxes.iter_mut().enumerate().take(rows) {
@@ -3667,7 +3667,7 @@ pub unsafe fn max_col(
                     // Reservoir sampling: each tied column ends up chosen with equal
                     // probability.
                     ties += 1;
-                    if f64::from(ties) * random::unif_rand()? < 1.0 {
+                    if f64::from(ties) * crate::random::unif_rand()? < 1.0 {
                         chosen = column;
                     }
                 }
@@ -3685,7 +3685,7 @@ pub unsafe fn max_col(
         *slot = chosen as i32 + 1;
     }
     if random {
-        random::put_rng_state()?;
+        crate::random::put_rng_state()?;
     }
     Ok(())
 }

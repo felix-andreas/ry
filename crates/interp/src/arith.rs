@@ -573,15 +573,15 @@ pub fn pretty(
     if cell < smallest {
         warning = Some(format!(
             "R_pretty(): very small range 'cell'={}, corrected to {}",
-            crate::linalg::format_g(cell),
-            crate::linalg::format_g(smallest)
+            crate::format::format_g(cell),
+            crate::format::format_g(smallest)
         ));
         cell = smallest;
     } else if cell > largest {
         warning = Some(format!(
             "R_pretty(): very large range 'cell'={}, corrected to {}",
-            crate::linalg::format_g(cell),
-            crate::linalg::format_g(largest)
+            crate::format::format_g(cell),
+            crate::format::format_g(largest)
         ));
         cell = largest;
     }
@@ -3403,7 +3403,7 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             match (from, to, by) {
                 (Some(from), Some(to), None) => {
                     if count == 1 {
-                        return values::real_vector(&[from]);
+                        return whole_sequence(&[from]);
                     }
                     let intervals = count as f64 - 1.0;
                     let by = (to - from) / intervals;
