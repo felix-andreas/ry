@@ -33,8 +33,8 @@ The quality bar is four things.
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
 
-- **Strings:** `paste(collapse =)` 1.7x, `format` 1.25x, `sub` 1.2x. `gsub(perl = TRUE)` runs at about half GNU R's time now that PCRE2 capture locations are reused per pattern. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings takes 1.1 s against GNU R's 0.46 s (one thread), whatever the collection budget.
-- **Grouping:** `order` on two keys is at parity. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
+- **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings took 1.1 s against GNU R's 0.46 s (one thread); re-measure.
+- **Grouping:** `order` on two keys runs at 0.88 of GNU R's time at 1e6 rows. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
 - **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes about 1.3 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s, so code layout is the lever here: profile-guided optimization or BOLT on the release binary, and keeping cold paths out of `execute_code` and the call path. The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
 - **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.1 times GNU R's for `paste0` (1.07), `format` (1.10), `sprintf`, `formatC` and most kernels, and kernels that allocate little sit about 4 MB above GNU R (`decisions.md`, "Start-up memory: release relocation tables and preflight code pages"). Still above 1.15:
   - `paste(collapse =)` 1.37, `xts period.apply` 1.36, `order(chr)` 1.26, `gsub(perl = TRUE)` 1.20, `sort`/`order` on doubles 1.18 to 1.19, `unsplit` 1.18, `merge` and `as.character(double)` 1.17.
@@ -2343,11 +2343,24 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     win. Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
     path), not a graphics fix.
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
-  build: 63 of 66 end with GNU R's exit status, 26 print exactly its output). Two divergences are
-  accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`
-  bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
-  out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
-  with a release build.
+  build: 64 of 66 end with GNU R's exit status, 35 print exactly its output). Two divergences are
+  accepted. d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e stops at a
+  `fisher.test` table where GNU R's FEXACT overflows its hash keys and errors but ry computes the
+  exact p-value; it also prints `env.profile` bucket counts that depend on GNU R's string hash.
+  reg-large needs tens of gigabytes and times out at debug speed, and utf8 and reg-examples1
+  come close to the 300 s limit, so confirm them with a release build. The remaining output
+  differences are mostly accepted noise (timings, unseeded random numbers, `runmed` and `kmeans`
+  debug traces) plus these gaps:
+  - A parse error message lacks GNU R's `<text>:1:3: unexpected ...` layout with the source line
+    and caret.
+  - A finalizer error prints no `Calls:` traceback, and `gc()` errors name `gc(...)` where GNU R
+    names `.Internal(gc(...))`.
+  - Deparsing a long pairlist breaks lines at different places, and `dput` of an S4 generator
+    call prints the class name with its `package` attribute.
+  - `memCompress(type = "gzip")` output differs byte for byte at level 9 (zlib-rs picks
+    different matches than zlib), though it decompresses to the same data.
+  - `serialize` writes a compact integer sequence (`1:n`) expanded, where GNU R writes the
+    ALTREP form, so the bytes differ though both unserialize to the same vector.
 - **The help server is not implemented** (`tools::startDynamicHelp`). `Rprof` samples only the
   call stack, without memory, GC or line profiling.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
@@ -2360,9 +2373,13 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   asymptotic expansions or argument limits when a package hits them.
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
-- **`pgamma` is a few ulps off GNU R for small shapes** (for example shape 0.5 or 0.01, where
-  GNU R is exact against mpmath), and `qgamma` inherits that error times `1/shape`. This, not
-  `qgamma` itself, is why about half of `qgamma`'s answers differ from GNU R in the last bits.
+- **`pgamma` loses up to about 200 ulps for a large shape far above `x`** (shape 15 at `x` below
+  0.1, where GNU R loses 14): `exp(-stirlerr - deviance)` amplifies the exponent's rounding by
+  its size, and below shape 9 the direct product `x^shape e^-x / Gamma(shape + 1)` avoids it,
+  but above, `gammafn` itself is an exponential. A double-double deviance would fix it. For
+  small shapes ry is now closer to mpmath than GNU R (mean 4.5 ulps against 2.8 over a grid
+  that includes these large-shape cases, and 26 points above 2 ulps against GNU R's 39); the
+  remaining `qgamma` differences from GNU R are GNU R's own last-bit errors times `1/shape`.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
   follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
   `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on

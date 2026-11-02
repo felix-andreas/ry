@@ -6031,6 +6031,25 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Who reads it unboxed.** Only `Move`, `SetVar` and arithmetic whose result is a double whatever the flag says: a comparison, `/`, `^`, or `+ - *` with a double operand. `Builder::box_operands` retypes every other reader's `Num` operand as boxed and `Plan::boxings` tells code generation to box it first, so no other action ever sees a `Num`. An inlined body refuses a `Num` slot, and a direct call passes one boxed from its slot cell after the flush.
 - **Impact.** The mixed `match` loop runs compiled; correctness is pinned by `test_tiers` seeds that observe `typeof`, `NA` and integer arithmetic after the join, and the fuzzer's final statement can print the types.
 
+## A hashed frame counts complex assignment's `*tmp*`
+
+- GNU R binds `*tmp*` in the frame for the length of a complex assignment, and in a hashed frame that insert and removal move the chain count (`env.profile` as the black box), which can grow the table and so change the order `ls(sorted = FALSE)` lists. ry never binds `*tmp*`, so `complex_assign` calls `Heap::count_transient_binding`, which applies the insert and the removal to the frame's `HashTable` without a slot (`crates/heap/src/env.rs`, `HashTable::count_transient`). Pinned by `crates/oracle/cases/environments__hashed_order_after_removal.R`.
+
+## Base kernels pick their data structure by the value range
+
+- **Previous shape.** `as.character()` on integers formatted and interned every element, the cumulative functions zeroed their result before filling it, `strsplit()` probed the session-wide string table for every piece, and `substr()` recycled `start` and `stop` with a division per element. Each was 1.2x to 2.7x GNU R's time.
+- **Shape.** `as.character()` on integers (`coerce.rs::integers_as_strings`) interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. `cumsum` and friends allocate with `values::alloc_uninit`, and real `cummax`/`cummin` run a branch-light loop until the first NaN. `strsplit()` interns ASCII pieces through the call's `values::StringMemo`, and `substr()` recycles by counters. Each falls back to the general path when the range is wide, so no input is slower than before.
+- **Impact** (`tools/bench/base`, ry time over GNU R's): at 1e6 rows `table` 0.28 (one factor) and 0.36 (two), `cut` 0.77; at 1e7 rows `cumsum` 0.90, `cummax` 1.00, `strsplit` 0.90, `substr` 0.79.
+
+## Runtime error checks follow GNU R's order and blame
+
+- **Rule.** Where GNU R checks a condition before matching arguments or dispatching, ry checks it at the same point and blames the same call. `NextMethod()` errors through the innermost closure call ("called from outside a function", "called from an anonymous function", "object not specified" when `.Class` is unbound and the object has no class, "generic function not specified", "no method to invoke"), with no fallback to the call's name. `round()` and `signif()` count their arguments before matching them and blame the calling closure, so `eval.rs` leaves their formals check to them.
+- **Why.** Packages and GNU R's own tests compare these messages, and a lenient fallback hid real bugs (a `NextMethod` that silently picked the wrong generic).
+
+## A formula's dot expands to the sum GNU R prints
+
+- `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
+
 ## The strict load check analyses only the package
 
 - **Previous shape.** `ry load`'s strict check asked about `R/` but built the whole project: every test and script file was parsed and folded, about a quarter of the derive work on the benches, and the verdict thread then freed the analysis (85 ms on typed finbench at 60K lines) before the loader could proceed. The check record's key hashed the ry executable on the same thread before any analysis started.

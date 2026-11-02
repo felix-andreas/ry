@@ -52,9 +52,13 @@ impl Settings {
     pub unsafe fn current_scipen() -> i32 {
         let scipen = crate::envir::get_option("scipen");
         if scipen == nil() {
-            0
-        } else {
-            values::as_integer_scalar(scipen)
+            return 0;
+        }
+        // A `scipen` that is not a number (`options(scipen = "a")`) reads as NA, which GNU R's
+        // width comparison then treats like 0.
+        match values::as_integer_scalar(scipen) {
+            NA_INTEGER => 0,
+            value => value,
         }
     }
 
@@ -176,8 +180,18 @@ pub fn format_real_common(values: &[f64], settings: Settings) -> RealFormat {
             exponent: 0,
         },
     };
+    widen_to_nsmall(&mut format, settings.nsmall);
     format.width = format.width.max(candidates.special_width);
     format
+}
+
+/// Gives a fixed format at least `nsmall` decimals. `nsmall` widens the format only after the
+/// choice between fixed and scientific notation, so it never tips a value into scientific.
+fn widen_to_nsmall(format: &mut RealFormat, nsmall: usize) {
+    if format.exponent == 0 && format.width > 0 && nsmall > format.decimals {
+        format.width += nsmall - format.decimals + (format.decimals == 0) as usize;
+        format.decimals = nsmall;
+    }
 }
 
 /// The fixed and the scientific format `values` would share, `None` when no value is finite,
@@ -240,10 +254,7 @@ fn real_format_candidates(values: &[f64], settings: Settings) -> RealCandidates 
         + mantissa_decimals
         + 3
         + exponent_digits;
-    let mut right = right_max.max(0) as usize;
-    if settings.nsmall > right {
-        right = settings.nsmall;
-    }
+    let right = right_max.max(0) as usize;
     let fixed_width = max_sleft as usize + right + (right != 0) as usize;
     RealCandidates {
         notations: Some((
@@ -459,14 +470,15 @@ pub fn format_complex_with(
     if is_na_real(value.r) || is_na_real(value.i) {
         return "NA".into();
     }
-    // GNU R rounds only to decide which parts print as zero and which sign the imaginary part
-    // shows; a nonzero part prints from its unrounded value.
+    // GNU R rounds only to decide which parts print as zero; a nonzero part prints from its
+    // unrounded value.
     let rounded = round_complex(value, digits);
     let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
     let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
     let real_text = format_real_with(real_part, real, "NA");
     let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
-    let sign = if imaginary_part < 0.0 && imaginary_text != "0" {
+    // A negative part rounded to zero keeps its sign unless it prints as a bare `0`.
+    let sign = if value.i < 0.0 && imaginary_text != "0" {
         '-'
     } else {
         '+'
@@ -520,6 +532,8 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
     } else {
         (real_scientific, imaginary_scientific)
     };
+    widen_to_nsmall(&mut real, settings.nsmall);
+    widen_to_nsmall(&mut imaginary, settings.nsmall);
     real.width = real.width.max(real_candidates.special_width);
     imaginary.width = imaginary.width.max(imaginary_candidates.special_width);
     (real, imaginary)
@@ -1227,6 +1241,9 @@ fn fixed_fast(out: &mut String, value: f64, precision: usize) -> bool {
 }
 
 /// C's `%g`: the shorter of `%e` and `%f` at `significant` digits, without trailing zeros.
+///
+/// `keep_zeros` is C's `#` flag: trailing zeros stay, and the decimal point stays even with no
+/// digits after it.
 pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     if value == 0.0 && !keep_zeros {
         // C keeps the sign of a negative zero.
@@ -1238,7 +1255,9 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
     if exponent < -4 || exponent >= significant as i32 {
         let text = scientific_text(value, significant.saturating_sub(1));
-        if keep_zeros {
+        if keep_zeros && significant <= 1 {
+            text.replacen('e', ".e", 1)
+        } else if keep_zeros {
             text
         } else {
             let (mantissa, rest) = text.split_once('e').unwrap_or((&text, ""));
@@ -1248,7 +1267,9 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     } else {
         let decimals = (significant as i32 - 1 - exponent).max(0) as usize;
         let text = format!("{value:.decimals$}");
-        if keep_zeros {
+        if keep_zeros && decimals == 0 {
+            format!("{text}.")
+        } else if keep_zeros {
             text
         } else {
             trim_zeros(&text).to_owned()

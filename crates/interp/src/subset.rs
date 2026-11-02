@@ -632,7 +632,8 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
         | SexpType::Closure
         | SexpType::Builtin
         | SexpType::Special
-        | SexpType::Symbol => return Err(not_subsettable(call, object)),
+        | SexpType::Symbol
+        | SexpType::Dots => return Err(not_subsettable(call, object)),
         SexpType::Pairlist | SexpType::Language => {
             let list = values::pairlist_to_list(object)?;
             let result = subset(list, indices, drop, call)?;
@@ -1143,10 +1144,7 @@ unsafe fn subset2_level(
         }
         return value_of(value);
     }
-    if matches!(
-        object.kind(),
-        SexpType::Pairlist | SexpType::Language | SexpType::Dots
-    ) {
+    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
         let list = values::pairlist_to_list(object)?;
         crate::heap().root(list);
         return subset2_level(list, indices, exact, call, Some(object), recursive);
@@ -1540,6 +1538,8 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
     }
 }
 
+/// `object@name`. Only S4 objects have slots: on any other object `@` reads `.Data` (the
+/// object itself) or dispatches an S3 `@` method, and otherwise is an error.
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
@@ -1862,7 +1862,9 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else if value.kind() == SexpType::Object {
         conditions::warning_call(call, "implicit list embedding of S4 objects is deprecated")?;
     }
-    let value = if value.kind() == SexpType::Pairlist {
+    // GNU R assigns a call's elements, as it does a pairlist's, so `f[2] <- quote(g(h))` stores
+    // the symbol `g`.
+    let value = if matches!(value.kind(), SexpType::Pairlist | SexpType::Language) {
         if !matches!(
             object.kind(),
             SexpType::List
@@ -1872,7 +1874,8 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 | SexpType::Nil
         ) {
             return Err(error(format!(
-                "incompatible types (from pairlist to {}) in subassignment type fix",
+                "incompatible types (from {} to {}) in subassignment type fix",
+                crate::coerce::type_name(value),
                 crate::coerce::type_name(object)
             )));
         }
@@ -1894,9 +1897,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if object.kind() == SexpType::Pairlist || object.kind() == SexpType::Language {
         let list = values::pairlist_to_list(object)?;
         let result = subassign(list, indices, value, call)?;
-        // A call stays a call, but a pairlist becomes a list, as in GNU R.
+        // A call stays a call with its attributes (a formula keeps its class and environment),
+        // but a pairlist becomes a list, as in GNU R.
         return if object.kind() == SexpType::Language {
-            values::list_to_pairlist(result, SexpType::Language)
+            let rebuilt = values::list_to_pairlist(result, SexpType::Language)?;
+            values::copy_attributes(object, rebuilt)?;
+            Ok(rebuilt)
         } else {
             Ok(result)
         };
@@ -1930,9 +1936,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         && matches!(object.kind(), SexpType::List | SexpType::Expression)
         && indices.len() <= 1
     {
+        let index = indices.first().copied().unwrap_or(missing_arg());
+        let object = if logical_stretch(index) > length(object) {
+            grow(object, logical_stretch(index))?
+        } else {
+            object
+        };
         let count = length(object);
         let names = values::names(object);
-        let index = indices.first().copied().unwrap_or(missing_arg());
         let (positions, _) = resolve(index, count, names, true, call)?;
         let remove: std::collections::HashSet<usize> = positions
             .into_iter()
@@ -2110,13 +2121,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .into_iter()
         .filter(|&position| position != NA_POSITION)
         .collect();
-    // A logical subscript longer than the vector stretches it to the subscript's length, even
-    // where the trailing flags are FALSE or select nothing at all.
-    let stretch = if index.kind() == SexpType::Logical {
-        length(index)
-    } else {
-        0
-    };
+    let stretch = logical_stretch(index);
     if positions.is_empty() && stretch <= count {
         return Ok(result);
     }
@@ -2156,6 +2161,16 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         assign_element(result, target, value, position % value_count)?;
     }
     Ok(result)
+}
+
+/// A logical subscript longer than the vector stretches it on assignment to the subscript's
+/// length, whatever the subscript selects, as GNU R does.
+unsafe fn logical_stretch(index: Sexp) -> usize {
+    if index.kind() == SexpType::Logical {
+        length(index)
+    } else {
+        0
+    }
 }
 
 /// `vector` extended to `length`, padded with NA, keeping its attributes but not its dims.
@@ -2742,15 +2757,18 @@ struct Flattener {
 /// among all the leaves under that base.
 struct NameScope {
     base: String,
+    /// The base is an NA name, which a lone unnamed leaf keeps as NA.
+    base_is_na: bool,
     count: usize,
     position: usize,
 }
 
 impl Flattener {
-    unsafe fn add(&mut self, value: Sexp, tag: &str) -> R<()> {
+    unsafe fn add(&mut self, value: Sexp, tag: &str, tag_is_na: bool) -> R<()> {
         let value = flattenable(value)?;
         let mut scope = NameScope {
             base: tag.to_owned(),
+            base_is_na: tag_is_na,
             count: if tag.is_empty() {
                 0
             } else {
@@ -2779,6 +2797,7 @@ impl Flattener {
                     name => {
                         // A named element starts a new base, so its leaves count afresh, but
                         // they still take their places in the enclosing base's numbering.
+                        let base_is_na = name.is_none() && scope.base.is_empty();
                         let name = name.unwrap_or_else(|| "NA".to_owned());
                         let base = match scope.base.as_str() {
                             "" => name,
@@ -2787,6 +2806,7 @@ impl Flattener {
                         let count = self.unnamed_leaves(element)?;
                         let mut inner = NameScope {
                             base,
+                            base_is_na,
                             count,
                             position: 0,
                         };
@@ -2826,6 +2846,9 @@ impl Flattener {
         Some(if !own.is_empty() {
             format!("{}.{own}", scope.base)
         } else if scope.count == 1 {
+            if scope.base_is_na {
+                return None;
+            }
             scope.base.clone()
         } else {
             format!("{}{}", scope.base, scope.position)
@@ -2922,10 +2945,16 @@ pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    combine_args(&args, false, true)
+    combine_args(&args, &[], false, true)
 }
 
-unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp> {
+/// `na_tags` marks the arguments whose tag stands for an NA name; it may be shorter than `args`.
+unsafe fn combine_args(
+    args: &[Arg],
+    na_tags: &[bool],
+    recursive: bool,
+    use_names: bool,
+) -> R<Sexp> {
     let mut flattener = Flattener {
         kind: SexpType::Nil,
         values: Vec::new(),
@@ -2945,7 +2974,8 @@ unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp
     } else if let Some(result) = combine_unnamed_atomic(args, flattener.kind)? {
         return Ok(result);
     }
-    for arg in args {
+    for (index, arg) in args.iter().enumerate() {
+        let tag_is_na = na_tags.get(index).copied().unwrap_or(false);
         let tag = if arg.tag == nil() {
             String::new()
         } else {
@@ -2960,10 +2990,10 @@ unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp
             && arg.value.kind().is_atomic()
         {
             // Atomic vectors are split into elements of the list.
-            flattener.add(arg.value, &tag)?;
+            flattener.add(arg.value, &tag, tag_is_na)?;
             continue;
         }
-        flattener.add(arg.value, &tag)?;
+        flattener.add(arg.value, &tag, tag_is_na)?;
     }
     flattener.build()
 }
@@ -3022,7 +3052,7 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
             args.push(*arg);
         }
     }
-    combine_args(&args, recursive, use_names)
+    combine_args(&args, &[], recursive, use_names)
 }
 
 unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
@@ -3056,10 +3086,10 @@ unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
             }
         })
         .collect();
-    if !recursive {
-        return combine_args(&args, false, use_names);
-    }
-    combine_args(&args, true, use_names)
+    let na_tags: Vec<bool> = (0..length(list))
+        .map(|index| names != nil() && names.element(index) == values::na_string())
+        .collect();
+    combine_args(&args, &na_tags, recursive, use_names)
 }
 
 unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {
@@ -3317,11 +3347,16 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&value| value as i64)
         .product();
-    if values::ints(dims)
+    // The first offending extent names the problem.
+    if let Some(&bad) = values::ints(dims)
         .iter()
-        .any(|&value| value == NA_INTEGER || value < 0)
+        .find(|&&value| value == NA_INTEGER || value < 0)
     {
-        return Err(call.error("the dims contain missing or negative values"));
+        return Err(call.error(if bad == NA_INTEGER {
+            "the dims contain missing values"
+        } else {
+            "the dims contain negative values"
+        }));
     }
     if product != length(object) as i64 {
         return Err(call.error(format!(
