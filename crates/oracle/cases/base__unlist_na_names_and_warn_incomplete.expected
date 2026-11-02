@@ -1,0 +1,19 @@
+[stdout]
+| [1] "a"   "NA1" "NA2"
+| [1] "a1" "a2" "b" 
+| structure(list(, ), names = c("", NA))
+| structure(list(, ), names = c("", NA))
+| deparse may be incomplete
+| deparse may be incomplete
+| deparse may be incomplete
+| 1
+| deparse may be incomplete
+| f(x)
+| function (x) 
+| x
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
