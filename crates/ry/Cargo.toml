@@ -20,12 +20,11 @@ path = "src/main.rs"
 [features]
 # Heap profilers such as massif only see the system allocator, so profiling builds drop it.
 default = ["mimalloc"]
-mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+mimalloc = ["dep:libmimalloc-sys"]
 
 [dependencies]
 clap.workspace = true
 dirs = "6"
-mimalloc = { version = "0.1", optional = true }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"], optional = true }
 console.workspace = true
 ignore.workspace = true
@@ -55,6 +54,9 @@ syntax = { path = "../syntax" }
 async-lsp.workspace = true
 tower.workspace = true
 futures.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(not(unix))'.dependencies]
 tokio-util.workspace = true

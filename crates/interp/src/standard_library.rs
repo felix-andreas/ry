@@ -1,5 +1,5 @@
-//! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, modeled
-//! on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
+//! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules,
+//! modeled on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
 //! live in the docs (`contributing/design/standard-library.md`, `reference/standard-library.mdx`).
 //!
 //! The functions are bound in a `package:ry` environment just above `package:base`, so any
@@ -22,7 +22,7 @@ use {
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         records, scope,
         sort::{IdenticalFlags, identical},
         unwind::{R, error},
@@ -55,6 +55,7 @@ const LEAVES: &[&str] = &[
     "List.is_empty",
     "List.get",
     "List.contains",
+    "List.range",
     "Dict.len",
     "Dict.is_empty",
     "Dict.get",
@@ -64,9 +65,14 @@ const LEAVES: &[&str] = &[
     "Set.contains",
 ];
 
-/// Whether the library builtin `name` is one of [`LEAVES`].
+/// Whether the library builtin `name` is one of [`LEAVES`], or a `Num`, `Bool` or `Str`
+/// function, all of which compute natively except the two `Str` walks that call back into R.
 pub fn is_leaf(name: &str) -> bool {
     LEAVES.contains(&name)
+        || ["Num.", "Bool.", "Str."]
+            .iter()
+            .any(|module| name.starts_with(module))
+            && !name.starts_with("Str.walk")
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -91,6 +97,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.concat", list_concat).reusing_first_argument(),
     library("List.single", list_single),
     library("List.repeat", list_repeat),
+    library("List.range", list_range),
     library("List.reverse", list_reverse),
     library("List.join", list_join),
     library("List.map", list_map),
@@ -100,6 +107,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.map4", list_map4),
     library("List.join_map", list_join_map),
     library("List.keep_if", list_keep_if),
+    library("List.keep_if_try", list_keep_if_try),
     library("List.drop_if", list_drop_if),
     library("List.keep_oks", list_keep_oks),
     library("List.keep_errs", list_keep_errs),
@@ -154,6 +162,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.concat_utf8", list_concat_utf8).reusing_first_argument(),
     library("List.with_capacity", list_with_capacity),
     library("List.reserve", list_reserve).reusing_first_argument(),
+    library("List.release_excess_capacity", list_release_excess_capacity),
     library("Str.is_empty", str_is_empty),
     library("Str.concat", str_concat),
     library("Str.join_with", str_join_with),
@@ -184,6 +193,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Str.walk_utf8", str_walk_utf8),
     library("Str.walk_utf8_with_index", str_walk_utf8_with_index),
     library("Str.from_utf8_lossy", str_from_utf8_lossy),
+    library("Str.to_utf16", str_to_utf16),
+    library("Str.from_utf16", str_from_utf16),
+    library("Str.from_utf16_lossy", str_from_utf16_lossy),
+    library("Str.to_utf32", str_to_utf32),
+    library("Str.from_utf32", str_from_utf32),
+    library("Str.from_utf32_lossy", str_from_utf32_lossy),
     library("Num.to_str", num_to_str),
     library("Num.compare", num_compare),
     library("Num.min", num_min),
@@ -226,6 +241,35 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.div_ceil_checked", num_div_ceil_checked),
     library("Num.to_double", num_to_double),
     library("Num.to_integer_checked", num_to_integer_checked),
+    library("Num.to_integer", num_to_integer),
+    library("Num.add", num_add),
+    library("Num.sub", num_sub),
+    library("Num.mul", num_mul),
+    library("Num.div", num_div),
+    library("Num.div_trunc", num_div_trunc),
+    library("Num.div_ceil", num_div_ceil),
+    library("Num.rem", num_rem),
+    library("Num.pow_int", num_pow_int),
+    library("Num.sqrt", num_sqrt),
+    library("Num.log", num_log),
+    library("Num.asin", num_asin),
+    library("Num.acos", num_acos),
+    library("Num.is_nan", num_is_nan),
+    library("Num.bitwise_and", num_bitwise_and),
+    library("Num.bitwise_or", num_bitwise_or),
+    library("Num.bitwise_xor", num_bitwise_xor),
+    library("Num.bitwise_not", num_bitwise_not),
+    library("Num.shift_left_by", num_shift_left_by),
+    library("Num.shift_right_by", num_shift_right_by),
+    library("Num.shift_right_zf_by", num_shift_right_zf_by),
+    library("Num.count_one_bits", num_count_one_bits),
+    library("Num.count_leading_zero_bits", num_count_leading_zero_bits),
+    library("Num.count_trailing_zero_bits", num_count_trailing_zero_bits),
+    library("Bool.and", bool_and),
+    library("Bool.or", bool_or),
+    library("Bool.not", bool_not),
+    library("Bool.is_eq", bool_is_eq),
+    library("Bool.is_not_eq", bool_is_not_eq),
     library("Dict.empty", dict_empty),
     library("Dict.single", dict_single),
     library("Dict.from_list", dict_from_list),
@@ -249,6 +293,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.walk_until", dict_walk_until),
     library("Dict.join_map", dict_join_map),
     library("Dict.reserve", dict_reserve).reusing_first_argument(),
+    library("Dict.capacity", dict_capacity),
+    library("Dict.release_excess_capacity", dict_release_excess_capacity),
     library("Dict.clear", dict_clear),
     library("Set.empty", set_empty),
     library("Set.single", set_single),
@@ -269,7 +315,31 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.walk_until", set_walk_until),
     library("Set.join_map", set_join_map),
     library("Set.reserve", set_reserve).reusing_first_argument(),
+    library("Set.capacity", set_capacity),
+    library("Set.release_excess_capacity", set_release_excess_capacity),
 ];
+
+/// The library's values that are not functions, which `attach` binds beside the builtins.
+pub const CONSTANTS: &[(&str, Constant)] = &[
+    ("Bool.true", Constant::Logical(true)),
+    ("Bool.false", Constant::Logical(false)),
+    ("Num.pi", Constant::Double(std::f64::consts::PI)),
+    ("Num.tau", Constant::Double(std::f64::consts::TAU)),
+    ("Num.e", Constant::Double(std::f64::consts::E)),
+    // `i32::MIN` is `NA`, so the smallest integer R holds is one above it.
+    ("Num.max_integer", Constant::Integer(i32::MAX)),
+    ("Num.min_integer", Constant::Integer(-i32::MAX)),
+    ("Num.max_double", Constant::Double(f64::MAX)),
+    ("Num.min_double", Constant::Double(f64::MIN)),
+    ("Num.infinity", Constant::Double(f64::INFINITY)),
+];
+
+#[derive(Clone, Copy)]
+pub enum Constant {
+    Logical(bool),
+    Integer(i32),
+    Double(f64),
+}
 
 thread_local! {
     static BUILTINS_ENV: std::cell::Cell<Option<Sexp>> = const { std::cell::Cell::new(None) };
@@ -300,6 +370,21 @@ pub(crate) unsafe fn attach() -> Sexp {
         .and_then(|(symbol, value)| values::set_attr(env, symbol, value));
     if name.is_err() {
         panic!("cannot name the `package:ry` environment");
+    }
+    for &(name, constant) in CONSTANTS {
+        let bound = scope(|| {
+            let symbol = values::install(name)?;
+            let value = match constant {
+                Constant::Logical(flag) => scalar_bool(flag)?,
+                Constant::Integer(number) => scalar_integer(number)?,
+                Constant::Double(number) => scalar_real(number)?,
+            };
+            eval::define(symbol, value, env)?;
+            Ok(nil())
+        });
+        if bound.is_err() {
+            panic!("cannot bind `{name}` in `package:ry`");
+        }
     }
     env
 }
@@ -830,6 +915,7 @@ unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
     if owned_list(call, list) {
         let index = whole(call, "index", index)?;
         if let Some(at) = position(index, length(list)) {
+            crate::moves::replacing(list, at, list.element(at));
             crate::heap().set_element(list, at, value);
         }
         return Ok(list);
@@ -888,13 +974,43 @@ unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_repeat(call: &Call<'_>) -> R<Sexp> {
     let [value, times] = arguments(call, ["value", "count"])?;
-    let times = count(call, "count", times)?;
+    let times = list_size(call, count(call, "count", times)?)?;
     let mut items = Vec::new();
     items
         .try_reserve_exact(times)
         .map_err(|_| error(format!("cannot allocate a list of {times} elements")))?;
     items.resize(times, value);
     list_vector(&items)
+}
+
+/// The integers from `start` up to and including `end`, or an empty list when `end` is smaller.
+unsafe fn list_range(call: &Call<'_>) -> R<Sexp> {
+    let [start, end] = arguments(call, ["start", "end"])?;
+    let start = whole(call, "start", start)?;
+    let end = whole(call, "end", end)?;
+    let size = list_size(call, usize::try_from(end - start + 1).unwrap_or(0))?;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(size)
+        .map_err(|_| error(format!("cannot allocate a list of {size} elements")))?;
+    // `whole` admits only integers R can hold, so every step fits an `i32`.
+    for number in start..=end {
+        items.push(scalar_integer(number as i32)?);
+    }
+    list_vector(&items)
+}
+
+/// The longest list `List.repeat` and `List.range` build: R's longest vector that an integer index
+/// still reaches, so `l[[i]]` with an integer `i` can read every element.
+const MAX_LIST_SIZE: usize = i32::MAX as usize;
+
+fn list_size(call: &Call<'_>, size: usize) -> R<usize> {
+    if size > MAX_LIST_SIZE {
+        return Err(call.error(format!(
+            "the list would have {size} elements, more than the limit of {MAX_LIST_SIZE}"
+        )));
+    }
+    Ok(size)
 }
 
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
@@ -1020,6 +1136,26 @@ unsafe fn list_keep_if(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_drop_if(call: &Call<'_>) -> R<Sexp> {
     filter(call, false)
+}
+
+/// The elements for which `predicate` returns `:Ok(TRUE)`, stopping at the first `:Err`.
+unsafe fn list_keep_if_try(call: &Call<'_>) -> R<Sexp> {
+    let [list, predicate] = arguments(call, ["list", "predicate"])?;
+    let items = list_elements(call, "list", list)?;
+    let predicate = function(call, "predicate", predicate)?;
+    let mut kept = Vec::new();
+    for item in items {
+        let result = scope(|| invoke(call, predicate, &[item]))?;
+        match returned_result(call, "predicate", result)? {
+            (true, answer) => {
+                if verdict(call, "predicate", answer)? {
+                    kept.push(item);
+                }
+            }
+            (false, _) => return Ok(result),
+        }
+    }
+    ok(sequence(call, list, &kept)?)
 }
 
 /// The payloads of the results `f` returns that are `:Ok` (when `oks`) or `:Err`.
@@ -1591,7 +1727,7 @@ unsafe fn fold_numbers(
     // numbers for a million-item Array.
     let [list] = arguments(call, ["list"])?;
     if list.is_array() && list.kind() == SexpType::Real {
-        return scalar_real(double(f64::from(start), values::reals(list)));
+        return defined(call, double(f64::from(start), values::reals(list)));
     }
     let numbers = list_numbers(call)?;
     if numbers
@@ -1599,7 +1735,7 @@ unsafe fn fold_numbers(
         .any(|number| matches!(number, Number::Double(_)))
     {
         let doubles: Vec<f64> = numbers.iter().map(|number| number.as_double()).collect();
-        return scalar_real(double(f64::from(start), &doubles));
+        return defined(call, double(f64::from(start), &doubles));
     }
     let mut total = start;
     for number in numbers {
@@ -1621,12 +1757,7 @@ unsafe fn fold_numbers(
 // with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     fold_numbers(call, 0, i32::checked_add, |start, items| {
-        let mut total = LongDouble::ZERO;
-        total += start;
-        for &item in items {
-            total += item;
-        }
-        total.to_f64()
+        long_double::add_all(LongDouble::from(start), items).to_f64()
     })
 }
 
@@ -1720,6 +1851,8 @@ unsafe fn list_swap(call: &Call<'_>) -> R<Sexp> {
         let count = length(list);
         if let (Some(left), Some(right)) = (position(first, count), position(second, count)) {
             let (left_value, right_value) = (list.element(left), list.element(right));
+            crate::moves::replacing(list, left, left_value);
+            crate::moves::replacing(list, right, right_value);
             let heap = crate::heap();
             heap.set_element(list, left, right_value);
             heap.set_element(list, right, left_value);
@@ -1882,6 +2015,23 @@ unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
         crate::heap().set_element(grown, at, item);
     }
     Ok(grown)
+}
+
+/// The list with no room beyond its elements: the list itself when it has none to give back.
+unsafe fn list_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [list] = arguments(call, ["list"])?;
+    let items = list_elements(call, "list", list)?;
+    if list.is_array()
+        || !crate::heap().is_resizable(list)
+        || list.capacity() as usize <= items.len()
+    {
+        return Ok(list);
+    }
+    let exact = resizable(SexpType::List, items.len(), items.len())?;
+    for (at, &item) in items.iter().enumerate() {
+        crate::heap().set_element(exact, at, item);
+    }
+    Ok(exact)
 }
 
 // Str.
@@ -2161,6 +2311,95 @@ unsafe fn str_from_utf8_lossy(call: &Call<'_>) -> R<Sexp> {
     scalar_string(&string)
 }
 
+unsafe fn str_to_utf16(call: &Call<'_>) -> R<Sexp> {
+    let string = one_string(call)?;
+    let mut units = Vec::with_capacity(string.len());
+    for unit in string.encode_utf16() {
+        units.push(scalar_integer(i32::from(unit))?);
+    }
+    list_vector(&units)
+}
+
+unsafe fn str_from_utf16(call: &Call<'_>) -> R<Sexp> {
+    let [units] = arguments(call, ["units"])?;
+    let units = utf16_units(call, units)?;
+    match String::from_utf16(&units) {
+        Ok(string) if !string.contains('\0') => ok(scalar_string(&string)?),
+        _ => err("BadUtf16"),
+    }
+}
+
+unsafe fn str_from_utf16_lossy(call: &Call<'_>) -> R<Sexp> {
+    let [units] = arguments(call, ["units"])?;
+    let units = utf16_units(call, units)?;
+    let string = String::from_utf16_lossy(&units).replace('\0', "\u{FFFD}");
+    scalar_string(&string)
+}
+
+/// The code units of a list of numbers from 0 to 65535.
+unsafe fn utf16_units(call: &Call<'_>, units: Sexp) -> R<Vec<u16>> {
+    let mut decoded = Vec::new();
+    for item in list_elements(call, "units", units)? {
+        match u16::try_from(whole(call, "units", item)?) {
+            Ok(unit) => decoded.push(unit),
+            Err(_) => {
+                return Err(wrong(
+                    call,
+                    "units",
+                    "a list of numbers from 0 to 65535",
+                    item,
+                ));
+            }
+        }
+    }
+    Ok(decoded)
+}
+
+unsafe fn str_to_utf32(call: &Call<'_>) -> R<Sexp> {
+    let string = one_string(call)?;
+    let mut code_points = Vec::with_capacity(string.len());
+    for character in string.chars() {
+        code_points.push(scalar_integer(character as i32)?);
+    }
+    list_vector(&code_points)
+}
+
+unsafe fn str_from_utf32(call: &Call<'_>) -> R<Sexp> {
+    let [code_points] = arguments(call, ["code_points"])?;
+    let mut string = String::new();
+    for code_point in utf32_code_points(call, code_points)? {
+        match code_point {
+            Some(character) => string.push(character),
+            None => return err("BadUtf32"),
+        }
+    }
+    ok(scalar_string(&string)?)
+}
+
+unsafe fn str_from_utf32_lossy(call: &Call<'_>) -> R<Sexp> {
+    let [code_points] = arguments(call, ["code_points"])?;
+    let string: String = utf32_code_points(call, code_points)?
+        .into_iter()
+        .map(|code_point| code_point.unwrap_or('\u{FFFD}'))
+        .collect();
+    scalar_string(&string)
+}
+
+/// The characters of a list of whole numbers, `None` for a number that is not a Unicode scalar
+/// value. NUL counts as one, because an R string cannot hold it.
+unsafe fn utf32_code_points(call: &Call<'_>, code_points: Sexp) -> R<Vec<Option<char>>> {
+    let mut decoded = Vec::new();
+    for item in list_elements(call, "code_points", code_points)? {
+        let number = whole(call, "code_points", item)?;
+        let character = u32::try_from(number)
+            .ok()
+            .and_then(char::from_u32)
+            .filter(|&character| character != '\0');
+        decoded.push(character);
+    }
+    Ok(decoded)
+}
+
 // Num.
 
 unsafe fn one_number(call: &Call<'_>) -> R<Number> {
@@ -2242,8 +2481,9 @@ unsafe fn num_is_odd(call: &Call<'_>) -> R<Sexp> {
     parity(call, 1.0)
 }
 
-/// `:Ok(result)` of an arithmetic operation, or `:Err(:Overflow)` when an integer result does
-/// not fit or a double result of finite operands is infinite.
+/// `:Ok(result)` of an arithmetic operation, `:Err(:Overflow)` when an integer result does
+/// not fit or a double result of finite operands is infinite, and `:Err(:Undefined)` for a
+/// `NaN` result (`Inf - Inf`).
 unsafe fn checked(
     call: &Call<'_>,
     integer: fn(i32, i32) -> Option<i32>,
@@ -2262,7 +2502,7 @@ unsafe fn checked(
             if value.is_infinite() && first.is_finite() && second.is_finite() {
                 err("Overflow")
             } else {
-                ok(scalar_real(value)?)
+                defined_ok(value)
             }
         }
     }
@@ -2285,34 +2525,87 @@ unsafe fn num_div_checked(call: &Call<'_>) -> R<Sexp> {
     if second.as_double() == 0.0 {
         return err("DivByZero");
     }
-    ok(scalar_real(first.as_double() / second.as_double())?)
+    defined_ok(first.as_double() / second.as_double())
 }
 
-/// Division by a nonzero divisor, which keeps the operands' number type.
-unsafe fn checked_division(
+/// A checked operation's double result as `:Ok(value)`, or `:Err(:Undefined)` when it is `NaN`
+/// (`Inf / Inf`), since no library function returns `NaN`.
+unsafe fn defined_ok(value: f64) -> R<Sexp> {
+    if value.is_nan() {
+        return err("Undefined");
+    }
+    ok(scalar_real(value)?)
+}
+
+/// A division by a nonzero divisor, which keeps the operands' number type, or `None` for a zero
+/// divisor. The integer operation cannot overflow: only `i32::MIN / -1` does, and `i32::MIN` is
+/// `NA`.
+unsafe fn divide(
     call: &Call<'_>,
-    integer: fn(i32, i32) -> Option<i32>,
+    integer: fn(i32, i32) -> i32,
     double: fn(f64, f64) -> f64,
-) -> R<Sexp> {
+) -> R<Option<Number>> {
     let (first, second) = two_numbers(call)?;
     if second.as_double() == 0.0 {
-        return err("DivByZero");
+        return Ok(None);
     }
-    match (first, second) {
-        (Number::Integer(first), Number::Integer(second)) => match integer(first, second) {
-            Some(value) => ok(scalar_integer(value)?),
-            None => err("Overflow"),
-        },
-        (first, second) => ok(scalar_real(double(first.as_double(), second.as_double()))?),
+    Ok(Some(match (first, second) {
+        (Number::Integer(first), Number::Integer(second)) => {
+            Number::Integer(integer(first, second))
+        }
+        (first, second) => Number::Double(double(first.as_double(), second.as_double())),
+    }))
+}
+
+/// [`divide`] with a zero divisor as `:Err(:DivByZero)` and a `NaN` quotient as
+/// `:Err(:Undefined)`.
+unsafe fn checked_division(
+    call: &Call<'_>,
+    integer: fn(i32, i32) -> i32,
+    double: fn(f64, f64) -> f64,
+) -> R<Sexp> {
+    match divide(call, integer, double)? {
+        Some(Number::Double(quotient)) => defined_ok(quotient),
+        Some(quotient) => ok(number_value(quotient)?),
+        None => err("DivByZero"),
     }
+}
+
+/// [`divide`] with a zero divisor as an error that points at the checked variant.
+unsafe fn unchecked_division(
+    call: &Call<'_>,
+    checked: &str,
+    integer: fn(i32, i32) -> i32,
+    double: fn(f64, f64) -> f64,
+) -> R<Sexp> {
+    match divide(call, integer, double)? {
+        Some(Number::Integer(quotient)) => scalar_integer(quotient),
+        Some(Number::Double(quotient)) => defined(call, quotient),
+        None => Err(call.error(format!(
+            "`second` is zero; `{checked}()` returns `:Err(:DivByZero)` instead"
+        ))),
+    }
+}
+
+fn truncating_division(left: f64, right: f64) -> f64 {
+    (left / right).trunc()
+}
+
+fn ceiling_division(left: i32, right: i32) -> i32 {
+    let rounds_up = left % right != 0 && (left < 0) == (right < 0);
+    left / right + i32::from(rounds_up)
+}
+
+fn real_ceiling_division(left: f64, right: f64) -> f64 {
+    (left / right).ceil()
 }
 
 unsafe fn num_div_trunc_checked(call: &Call<'_>) -> R<Sexp> {
-    checked_division(call, i32::checked_div, |left, right| (left / right).trunc())
+    checked_division(call, i32::wrapping_div, truncating_division)
 }
 
 unsafe fn num_rem_checked(call: &Call<'_>) -> R<Sexp> {
-    checked_division(call, i32::checked_rem, |left, right| left % right)
+    checked_division(call, i32::wrapping_rem, |left, right| left % right)
 }
 
 unsafe fn num_sqrt_checked(call: &Call<'_>) -> R<Sexp> {
@@ -2436,20 +2729,21 @@ unsafe fn num_abs_diff(call: &Call<'_>) -> R<Sexp> {
                     .error("the integer result overflows; convert the numbers to doubles first")),
             }
         }
-        (first, second) => scalar_real((first.as_double() - second.as_double()).abs()),
+        (first, second) => defined(call, (first.as_double() - second.as_double()).abs()),
     }
 }
 
-/// A function of one number whose result is a double.
+/// A function of one number whose result is a double; a `NaN` result (`Num.sin(Inf)`) is an
+/// error.
 unsafe fn real_function(call: &Call<'_>, function: fn(f64) -> f64) -> R<Sexp> {
-    scalar_real(function(one_number(call)?.as_double()))
+    defined(call, function(one_number(call)?.as_double()))
 }
 
 unsafe fn num_pow(call: &Call<'_>) -> R<Sexp> {
     let [base, exponent] = arguments(call, ["base", "exponent"])?;
     let base = number(call, "base", base)?.as_double();
     let exponent = number(call, "exponent", exponent)?.as_double();
-    scalar_real(base.powf(exponent))
+    defined(call, base.powf(exponent))
 }
 
 unsafe fn num_sin(call: &Call<'_>) -> R<Sexp> {
@@ -2469,7 +2763,7 @@ unsafe fn num_atan(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// An operation whose integer result is clamped to the integers R can hold, `-2147483647` to
-/// `2147483647`, and whose double result is the plain one.
+/// `2147483647`, and whose double result is the plain one, with `NaN` (`Inf - Inf`) an error.
 unsafe fn saturated(
     call: &Call<'_>,
     integer: fn(i64, i64) -> i64,
@@ -2481,7 +2775,7 @@ unsafe fn saturated(
             let limit = i64::from(i32::MAX);
             scalar_integer(value.clamp(-limit, limit) as i32)
         }
-        (first, second) => scalar_real(double(first.as_double(), second.as_double())),
+        (first, second) => defined(call, double(first.as_double(), second.as_double())),
     }
 }
 
@@ -2498,19 +2792,28 @@ unsafe fn num_mul_saturated(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn num_div_ceil_checked(call: &Call<'_>) -> R<Sexp> {
-    checked_division(
-        call,
-        |left, right| {
-            let quotient = left.checked_div(right)?;
-            let rounds_up = left % right != 0 && (left < 0) == (right < 0);
-            Some(if rounds_up { quotient + 1 } else { quotient })
-        },
-        |left, right| (left / right).ceil(),
-    )
+    checked_division(call, ceiling_division, real_ceiling_division)
 }
 
 unsafe fn num_to_double(call: &Call<'_>) -> R<Sexp> {
     scalar_real(one_number(call)?.as_double())
+}
+
+unsafe fn num_to_integer(call: &Call<'_>) -> R<Sexp> {
+    match one_number(call)? {
+        Number::Integer(value) => scalar_integer(value),
+        Number::Double(value) => {
+            let truncated = value.trunc();
+            if truncated.is_finite() && truncated.abs() <= f64::from(i32::MAX) {
+                scalar_integer(truncated as i32)
+            } else {
+                Err(call.error(format!(
+                    "`number` must fit an integer, not {}; `Num.to_integer_checked()` returns `:Err(:OutOfBounds)` instead",
+                    crate::format::format_real_alone(value, 15)
+                )))
+            }
+        }
+    }
 }
 
 unsafe fn num_to_integer_checked(call: &Call<'_>) -> R<Sexp> {
@@ -2525,6 +2828,290 @@ unsafe fn num_to_integer_checked(call: &Call<'_>) -> R<Sexp> {
             }
         }
     }
+}
+
+/// An operation that fails loudly where its checked variant returns a tag, as Roc's unchecked
+/// arithmetic crashes: an integer result that does not fit is an error naming `checked`.
+unsafe fn unchecked(
+    call: &Call<'_>,
+    checked: &str,
+    integer: fn(i32, i32) -> Option<i32>,
+    double: fn(f64, f64) -> f64,
+) -> R<Sexp> {
+    match two_numbers(call)? {
+        (Number::Integer(first), Number::Integer(second)) => {
+            match integer(first, second).filter(|value| *value != NA_INTEGER) {
+                Some(value) => scalar_integer(value),
+                None => Err(call.error(format!(
+                    "the integer result overflows; `{checked}()` returns `:Err(:Overflow)` instead"
+                ))),
+            }
+        }
+        (first, second) => defined(call, double(first.as_double(), second.as_double())),
+    }
+}
+
+/// An unchecked operation's double result, where `NaN` (as from `Inf - Inf`) is an error: no
+/// library function returns `NaN`, and a checked twin returns `:Err(:Undefined)` instead.
+unsafe fn defined(call: &Call<'_>, value: f64) -> R<Sexp> {
+    if value.is_nan() {
+        return Err(call.error("the result is undefined (`NaN`)"));
+    }
+    scalar_real(value)
+}
+
+unsafe fn num_add(call: &Call<'_>) -> R<Sexp> {
+    unchecked(call, "Num.add_checked", i32::checked_add, |left, right| {
+        left + right
+    })
+}
+
+unsafe fn num_sub(call: &Call<'_>) -> R<Sexp> {
+    unchecked(call, "Num.sub_checked", i32::checked_sub, |left, right| {
+        left - right
+    })
+}
+
+unsafe fn num_mul(call: &Call<'_>) -> R<Sexp> {
+    unchecked(call, "Num.mul_checked", i32::checked_mul, |left, right| {
+        left * right
+    })
+}
+
+unsafe fn num_div(call: &Call<'_>) -> R<Sexp> {
+    let (first, second) = two_numbers(call)?;
+    if second.as_double() == 0.0 {
+        return Err(
+            call.error("`second` is zero; `Num.div_checked()` returns `:Err(:DivByZero)` instead")
+        );
+    }
+    defined(call, first.as_double() / second.as_double())
+}
+
+unsafe fn num_div_trunc(call: &Call<'_>) -> R<Sexp> {
+    unchecked_division(
+        call,
+        "Num.div_trunc_checked",
+        i32::wrapping_div,
+        truncating_division,
+    )
+}
+
+unsafe fn num_div_ceil(call: &Call<'_>) -> R<Sexp> {
+    unchecked_division(
+        call,
+        "Num.div_ceil_checked",
+        ceiling_division,
+        real_ceiling_division,
+    )
+}
+
+unsafe fn num_rem(call: &Call<'_>) -> R<Sexp> {
+    unchecked_division(call, "Num.rem_checked", i32::wrapping_rem, |left, right| {
+        left % right
+    })
+}
+
+unsafe fn num_pow_int(call: &Call<'_>) -> R<Sexp> {
+    let [base, exponent] = arguments(call, ["base", "exponent"])?;
+    let base = whole(call, "base", base)? as i32;
+    let exponent = whole(call, "exponent", exponent)?;
+    let Ok(exponent) = u32::try_from(exponent) else {
+        return Err(call.error(format!(
+            "`exponent` must be zero or more, not {exponent}; `Num.pow()` takes any exponent"
+        )));
+    };
+    match base
+        .checked_pow(exponent)
+        .filter(|value| *value != NA_INTEGER)
+    {
+        Some(value) => scalar_integer(value),
+        None => {
+            Err(call.error("the integer result overflows; `Num.pow()` returns a double instead"))
+        }
+    }
+}
+
+unsafe fn num_sqrt(call: &Call<'_>) -> R<Sexp> {
+    let value = one_number(call)?.as_double();
+    if value < 0.0 {
+        return Err(call.error(format!(
+            "`number` must not be negative, not {}; `Num.sqrt_checked()` returns `:Err(:SqrtOfNegative)` instead",
+            crate::format::format_real_alone(value, 15)
+        )));
+    }
+    scalar_real(value.sqrt())
+}
+
+unsafe fn num_log(call: &Call<'_>) -> R<Sexp> {
+    let value = one_number(call)?.as_double();
+    if value <= 0.0 {
+        return Err(call.error(format!(
+            "`number` must be positive, not {}; `Num.log_checked()` returns `:Err(:LogNeedsPositive)` instead",
+            crate::format::format_real_alone(value, 15)
+        )));
+    }
+    scalar_real(value.ln())
+}
+
+/// An inverse sine or cosine, whose argument must lie in `[-1, 1]`.
+unsafe fn inverse_trigonometric(call: &Call<'_>, function: fn(f64) -> f64) -> R<Sexp> {
+    let value = one_number(call)?.as_double();
+    if !(-1.0..=1.0).contains(&value) {
+        return Err(call.error(format!(
+            "`number` must be from -1 to 1, not {}",
+            crate::format::format_real_alone(value, 15)
+        )));
+    }
+    scalar_real(function(value))
+}
+
+unsafe fn num_asin(call: &Call<'_>) -> R<Sexp> {
+    inverse_trigonometric(call, f64::asin)
+}
+
+unsafe fn num_acos(call: &Call<'_>) -> R<Sexp> {
+    inverse_trigonometric(call, f64::acos)
+}
+
+/// The one library function that takes `NaN`, since telling it apart is its job. `NA` is still
+/// refused, as everywhere.
+unsafe fn num_is_nan(call: &Call<'_>) -> R<Sexp> {
+    let [value] = arguments(call, ["number"])?;
+    if value.kind() == SexpType::Real && length(value) == 1 && !value.is_object() {
+        let number = values::as_real_scalar(value);
+        if !is_na_real(number) {
+            return scalar_bool(number.is_nan());
+        }
+    }
+    number(call, "number", value)?;
+    scalar_bool(false)
+}
+
+/// The integer argument named `parameter`, as an `i32`.
+unsafe fn integer_argument(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i32> {
+    // `whole` admits magnitudes up to `i32::MAX`, so the conversion is exact.
+    Ok(whole(call, parameter, value)? as i32)
+}
+
+/// A bit pattern as an R integer. The one pattern that does not fit is `i32::MIN`, which R
+/// reserves for `NA`.
+unsafe fn bits_value(call: &Call<'_>, value: i32) -> R<Sexp> {
+    if value == NA_INTEGER {
+        return Err(call.error(
+            "the result is -2147483648, which an R integer cannot hold because it stands for `NA`",
+        ));
+    }
+    scalar_integer(value)
+}
+
+/// A bitwise operation on two integers' two's-complement bits.
+unsafe fn bitwise(call: &Call<'_>, operation: fn(i32, i32) -> i32) -> R<Sexp> {
+    let [first, second] = arguments(call, ["first", "second"])?;
+    let first = integer_argument(call, "first", first)?;
+    let second = integer_argument(call, "second", second)?;
+    bits_value(call, operation(first, second))
+}
+
+unsafe fn num_bitwise_and(call: &Call<'_>) -> R<Sexp> {
+    bitwise(call, |left, right| left & right)
+}
+
+unsafe fn num_bitwise_or(call: &Call<'_>) -> R<Sexp> {
+    bitwise(call, |left, right| left | right)
+}
+
+unsafe fn num_bitwise_xor(call: &Call<'_>) -> R<Sexp> {
+    bitwise(call, |left, right| left ^ right)
+}
+
+unsafe fn num_bitwise_not(call: &Call<'_>) -> R<Sexp> {
+    let [number] = arguments(call, ["number"])?;
+    bits_value(call, !integer_argument(call, "number", number)?)
+}
+
+/// Shifts an integer's bits by `bits`, from 0 to 31.
+unsafe fn shift(call: &Call<'_>, operation: fn(i32, u32) -> i32) -> R<Sexp> {
+    let [number, bits] = arguments(call, ["number", "bits"])?;
+    let number = integer_argument(call, "number", number)?;
+    let bits = whole(call, "bits", bits)?;
+    match u32::try_from(bits).ok().filter(|bits| *bits < 32) {
+        Some(bits) => bits_value(call, operation(number, bits)),
+        None => Err(call.error(format!("`bits` must be from 0 to 31, not {bits}"))),
+    }
+}
+
+unsafe fn num_shift_left_by(call: &Call<'_>) -> R<Sexp> {
+    shift(call, |number, bits| number << bits)
+}
+
+unsafe fn num_shift_right_by(call: &Call<'_>) -> R<Sexp> {
+    shift(call, |number, bits| number >> bits)
+}
+
+unsafe fn num_shift_right_zf_by(call: &Call<'_>) -> R<Sexp> {
+    shift(call, |number, bits| ((number as u32) >> bits) as i32)
+}
+
+/// Counts bits of an integer's two's-complement pattern with `count`.
+unsafe fn bit_count(call: &Call<'_>, count: fn(i32) -> u32) -> R<Sexp> {
+    let [number] = arguments(call, ["number"])?;
+    scalar_integer(count(integer_argument(call, "number", number)?) as i32)
+}
+
+unsafe fn num_count_one_bits(call: &Call<'_>) -> R<Sexp> {
+    bit_count(call, i32::count_ones)
+}
+
+unsafe fn num_count_leading_zero_bits(call: &Call<'_>) -> R<Sexp> {
+    bit_count(call, i32::leading_zeros)
+}
+
+unsafe fn num_count_trailing_zero_bits(call: &Call<'_>) -> R<Sexp> {
+    bit_count(call, i32::trailing_zeros)
+}
+
+// Bool.
+
+/// A logical argument that is `TRUE` or `FALSE`.
+unsafe fn flag(call: &Call<'_>, parameter: &str, value: Sexp) -> R<bool> {
+    if value.kind() == SexpType::Logical && length(value) == 1 && !value.is_object() {
+        match values::as_logical_scalar(value) {
+            NA_LOGICAL => {}
+            flag => return Ok(flag != 0),
+        }
+    }
+    Err(wrong(call, parameter, "`TRUE` or `FALSE`", value))
+}
+
+unsafe fn two_flags(call: &Call<'_>) -> R<(bool, bool)> {
+    let [first, second] = arguments(call, ["first", "second"])?;
+    Ok((flag(call, "first", first)?, flag(call, "second", second)?))
+}
+
+unsafe fn bool_and(call: &Call<'_>) -> R<Sexp> {
+    let (first, second) = two_flags(call)?;
+    scalar_bool(first && second)
+}
+
+unsafe fn bool_or(call: &Call<'_>) -> R<Sexp> {
+    let (first, second) = two_flags(call)?;
+    scalar_bool(first || second)
+}
+
+unsafe fn bool_not(call: &Call<'_>) -> R<Sexp> {
+    let [value] = arguments(call, ["value"])?;
+    scalar_bool(!flag(call, "value", value)?)
+}
+
+unsafe fn bool_is_eq(call: &Call<'_>) -> R<Sexp> {
+    let [first, second] = arguments(call, ["first", "second"])?;
+    scalar_bool(identical(first, second, &IdenticalFlags::default()))
+}
+
+unsafe fn bool_is_not_eq(call: &Call<'_>) -> R<Sexp> {
+    let [first, second] = arguments(call, ["first", "second"])?;
+    scalar_bool(!identical(first, second, &IdenticalFlags::default()))
 }
 
 // In-place updates.
@@ -3632,7 +4219,53 @@ unsafe fn dict_clear(call: &Call<'_>) -> R<Sexp> {
     Collection::new(NativeKind::Dict).write()
 }
 
+/// How many entries the collection holds before it must grow its storage.
+unsafe fn collection_capacity(object: Sexp) -> R<Sexp> {
+    let capacity = match object.record_handle(0) {
+        Some(keys) if crate::heap().is_resizable(keys) => keys.capacity() as usize,
+        Some(keys) => length(keys),
+        None => 0,
+    };
+    scalar_integer(i32::try_from(capacity).unwrap_or(i32::MAX))
+}
+
+/// The collection with no room beyond its entries: the collection itself when it has none.
+unsafe fn release_collection(object: Sexp) -> R<Sexp> {
+    let count = entry_count(object);
+    let index = records::slot_value(object, index_slot(records::native_kind(object)))?;
+    let excess = object
+        .record_handle(0)
+        .is_some_and(|keys| crate::heap().is_resizable(keys) && keys.capacity() as usize > count)
+        || length(index) > (count * 2).next_power_of_two().max(8);
+    if !excess {
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
+    collection.rebuild_index()?;
+    collection.write()
+}
+
+unsafe fn dict_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    collection_capacity(dict(call, object)?)
+}
+
+unsafe fn dict_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    release_collection(dict(call, object)?)
+}
+
 // Set.
+
+unsafe fn set_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["set"])?;
+    collection_capacity(set(call, object)?)
+}
+
+unsafe fn set_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["set"])?;
+    release_collection(set(call, object)?)
+}
 
 unsafe fn set(call: &Call<'_>, value: Sexp) -> R<Sexp> {
     collection(call, "set", value, NativeKind::Set)
@@ -3804,5 +4437,8 @@ unsafe fn set_reserve(call: &Call<'_>) -> R<Sexp> {
 
 /// The names the library binds, for the test that keeps them equal to `types/ry.Rtypes`.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    BUILTINS.iter().map(|definition| definition.name)
+    BUILTINS
+        .iter()
+        .map(|definition| definition.name)
+        .chain(CONSTANTS.iter().map(|&(name, _)| name))
 }

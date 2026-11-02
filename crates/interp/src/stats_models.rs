@@ -276,7 +276,17 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
             }
         }
     }
-    let rows = columns.first().map_or(0, |&column| rows_of(column));
+    // Without variables the frame keeps the data's rows, which only its row names describe,
+    // compact (`c(NA, -n)`) or not.
+    let rows = match columns.first() {
+        Some(&column) => rows_of(column),
+        None if row_names.kind() == SexpType::Integer
+            && let [NA_INTEGER, count] = *row_names.slice::<i32>() =>
+        {
+            count.unsigned_abs() as usize
+        }
+        None => length(row_names),
+    };
     for (column, name) in columns.iter().zip(&names) {
         if rows_of(*column) != rows {
             return Err(call.error(format!("variable lengths differ (found for '{name}')")));
@@ -284,7 +294,7 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let data = values::list_vector(&columns)?;
     values::set_attr(data, symbols().names, values::string_vector(&names)?)?;
-    let row_names = if length(row_names) == rows && rows > 0 {
+    let row_names = if length(row_names) == rows {
         row_names
     } else {
         values::integer_vector(&[NA_INTEGER, rows as i32])?

@@ -23,10 +23,11 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 use {
+    crate::native::{self, Native},
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
-        annotations::{self, Entry},
+        annotations::{self, Declared, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
         values,
     },
@@ -58,7 +59,7 @@ unsafe impl Allocator for Arena<'_> {
 }
 
 /// What compiled code knows about a value, which decides its machine representation.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     /// No value: the register is dead or not yet written.
     Bottom,
@@ -148,6 +149,19 @@ impl Ty {
             (a, b) if a.vector() == b.vector() && a.vector().is_vector() => a.vector(),
             _ => Ty::Boxed,
         }
+    }
+}
+
+/// The type to expect of a value whose annotation declares `declared`.
+fn declared_ty(declared: Declared) -> Ty {
+    match (declared.kind, declared.scalar) {
+        (SexpType::Logical, true) => Ty::Lgl,
+        (SexpType::Integer, true) => Ty::Int,
+        (SexpType::Real, true) => Ty::Dbl,
+        (SexpType::Logical, false) => Ty::LglVec,
+        (SexpType::Integer, false) => Ty::IntVec,
+        (SexpType::Real, false) => Ty::DblVec,
+        _ => Ty::Boxed,
     }
 }
 
@@ -510,6 +524,12 @@ pub enum Intrinsic {
     },
     /// `Dict.get()`.
     DictGet,
+    /// `x$name` on a record of this layout, whose field is slot `index`, as the site's shape
+    /// cache recorded it.
+    Field {
+        layout: u32,
+        index: u32,
+    },
 }
 
 /// Where a directly called closure's argument comes from.
@@ -574,6 +594,14 @@ pub enum Action<'a> {
         slot: usize,
         ty: Ty,
     },
+    /// Builds the record, tuple or tag of `layout` from registers `base..base + count`, an
+    /// unboxed number going into its slot without being boxed.
+    Construct {
+        dst: usize,
+        layout: u32,
+        base: usize,
+        count: usize,
+    },
     /// Copies an unboxed scalar between registers.
     Move {
         dst: usize,
@@ -590,6 +618,14 @@ pub enum Action<'a> {
         /// The callee's annotation checks, decided from the arguments' compile-time types.
         entry: Entry,
         dst: (usize, Ty),
+    },
+    /// Calls a native scalar function with the unboxed arguments `steps` leave in `args`, and
+    /// puts its unboxed value in `dst`. When the function fails, tier 0 runs the call instead.
+    NativeCall {
+        steps: &'a [(Action<'a>, StateId)],
+        native: &'static Native,
+        args: &'a [usize],
+        dst: usize,
     },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
@@ -610,6 +646,21 @@ pub enum Action<'a> {
     },
     BranchIfObject {
         src: usize,
+    },
+    /// Branches unless `src` is a plain record, tuple or tag of `layout`.
+    BranchUnlessShape {
+        src: usize,
+        layout: u32,
+    },
+    /// Branches unless `src` is a plain tag named `tag`.
+    BranchUnlessTag {
+        src: usize,
+        tag: u32,
+    },
+    /// Branches unless `src` matches the literal pattern constant `pattern`.
+    BranchUnlessLiteral {
+        src: usize,
+        pattern: Sexp,
     },
     Jump,
     JumpUnless {
@@ -819,6 +870,7 @@ impl Plan<'_> {
                     action,
                     Action::Inline { .. }
                         | Action::Call { .. }
+                        | Action::NativeCall { .. }
                         | Action::Arithmetic { .. }
                         | Action::Comparison { .. }
                         | Action::Intrinsic { .. }
@@ -864,12 +916,13 @@ pub unsafe fn plan<'a>(
         defaulted: defaulted_formals(formals, arena),
         locals,
         hints: List::new_in(arena),
+        declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
         patient,
     };
-    builder.collect_slots();
+    builder.collect_slots(formals);
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
     let live = builder.liveness(&blocks, &successors);
@@ -1060,6 +1113,8 @@ struct Builder<'a> {
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: List<'a, Ty>,
+    /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
+    declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
     frame_safe: Map<'a, Sexp, bool>,
     patient: bool,
@@ -1074,7 +1129,7 @@ impl<'a> Builder<'a> {
         self.code.cdr().element(index)
     }
 
-    unsafe fn collect_slots(&mut self) {
+    unsafe fn collect_slots(&mut self, formals: Sexp) {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
@@ -1090,6 +1145,7 @@ impl<'a> Builder<'a> {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
+                    self.declared.push(Ty::Boxed);
                 }
                 let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
                 if inst.op == Op::GetVar && bits != 0 {
@@ -1098,10 +1154,60 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        let source = self.code.cdr().element(bytecode::SOURCE);
+        let (declared, _) = annotations::declared_formals(formals, source);
+        let mut formal = formals;
+        for declared in declared {
+            if formal.kind() != SexpType::Pairlist {
+                break;
+            }
+            if let (Some(declared), Some(&slot)) = (declared, self.slot_of.get(&formal.tag())) {
+                let ty = declared_ty(declared);
+                self.declared[slot] = ty;
+                if self.hints[slot] == Ty::Bottom {
+                    self.hints[slot] = ty;
+                }
+            }
+            formal = formal.cdr();
+        }
     }
 
     fn slot(&self, symbol: Sexp) -> usize {
         self.slot_of[&symbol]
+    }
+
+    /// The layout and slot a `$` site's shape cache holds, once tier 0 has seen a record there.
+    /// Reads slot `index` of the record of `layout` in `src`. A boxed slot is loaded as it is,
+    /// so only an unboxed scalar's type is something the read itself checks.
+    fn slot_read(
+        &mut self,
+        state: &mut State<'a>,
+        dst: usize,
+        src: usize,
+        layout: u32,
+        index: u32,
+        feedback: Ty,
+    ) -> Action<'a> {
+        let result = if feedback.is_unboxed() {
+            feedback
+        } else {
+            Ty::Boxed
+        };
+        state.registers[dst] = result;
+        Action::Intrinsic {
+            intrinsic: Intrinsic::Field { layout, index },
+            dst,
+            args: self.slice([src]),
+            result,
+        }
+    }
+
+    fn cached_field(&self, shape: Sexp) -> Option<(u32, u32)> {
+        // SAFETY: the shape constant is the two-element integer vector the compiler made.
+        let &[layout, index] = (unsafe { values::ints(shape) }) else {
+            return None;
+        };
+        Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
     }
 
     fn feedback_at(&self, pc: usize) -> Ty {
@@ -1119,11 +1225,16 @@ impl<'a> Builder<'a> {
         if !self.never_ran(pc) {
             return self.feedback_at(pc);
         }
-        match annotations::declared_return_type(function) {
-            Some(SexpType::Real) => Ty::Dbl,
-            Some(SexpType::Integer) => Ty::Int,
-            Some(SexpType::Logical) => Ty::Lgl,
-            _ => Ty::Boxed,
+        annotations::declared_return_type(function).map_or(Ty::Boxed, declared_ty)
+    }
+
+    /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
+    /// before it has read anything, the type the closure's signature declares for that formal.
+    fn load_ty(&self, pc: usize, slot: usize) -> Ty {
+        if self.never_ran(pc) {
+            self.declared[slot]
+        } else {
+            self.feedback_at(pc)
         }
     }
 
@@ -1363,7 +1474,7 @@ impl<'a> Builder<'a> {
                         // tier 0 for good.
                         current.ty
                     } else {
-                        self.feedback_at(inst.pc)
+                        self.load_ty(inst.pc, slot)
                     };
                     Some(if ty == Ty::Bottom { Ty::Boxed } else { ty })
                 } else {
@@ -1498,6 +1609,129 @@ impl<'a> Builder<'a> {
                     Action::BranchIfObject { src: operand(0) }
                 }
             }
+            Op::Field => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(4))) {
+                    // Only a boxed subject can be a record, and an unboxed register's window
+                    // slot may be stale, so the read could not even load its kind.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
+                        state.visible = Some(true);
+                        self.slot_read(state, operand(0), operand(1), layout, index, feedback)
+                    }
+                    _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
+                }
+            }
+            Op::Item => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(3))) {
+                    // A subject of another layout hands the read to tier 0, which takes the
+                    // jump when it is not a record or tuple with that item.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
+                        state.visible = Some(true);
+                        self.slot_read(state, operand(0), operand(1), layout, index, feedback)
+                    }
+                    // A site that never read an item is a vector or list read, which `[[`'s
+                    // path compiles.
+                    _ => {
+                        self.push_edge(operand(4), state);
+                        return Ok(Action::Branch);
+                    }
+                }
+            }
+            Op::Slot => {
+                let feedback = self.feedback_at(inst.pc);
+                if feedback == Ty::Bottom || state.registers[operand(1)] != Ty::Boxed {
+                    self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Pure)
+                } else {
+                    let index = operand(2) as u32;
+                    self.slot_read(
+                        state,
+                        operand(0),
+                        operand(1),
+                        operand(3) as u32,
+                        index,
+                        feedback,
+                    )
+                }
+            }
+            Op::MatchShape | Op::MatchTag | Op::MatchLiteral => {
+                let src = operand(0);
+                self.push_edge(operand(2), state);
+                let ty = state.registers[src];
+                // A value the analysis knows is a vector, a scalar or a function is no record.
+                if inst.op != Op::MatchLiteral && (ty.is_plain() || matches!(ty, Ty::Closure(..))) {
+                    return Ok(Action::Branch);
+                }
+                match inst.op {
+                    Op::MatchShape => Action::BranchUnlessShape {
+                        src,
+                        layout: operand(1) as u32,
+                    },
+                    Op::MatchTag => Action::BranchUnlessTag {
+                        src,
+                        tag: operand(1) as u32,
+                    },
+                    _ => Action::BranchUnlessLiteral {
+                        src,
+                        pattern: self.constant(operand(1)),
+                    },
+                }
+            }
+            // It always signals an error, so nothing runs after it, and the state it leaves
+            // must not widen the join after the `match`: no register holds a value there, and
+            // the frame's types stand.
+            Op::MatchFail => {
+                let action = self.opaque_step(state, None, &[], Effect::PureUnlessObserved);
+                state.registers.fill(Ty::Bottom);
+                action
+            }
+            Op::Construct => {
+                state.registers[operand(0)] = Ty::Boxed;
+                state.visible = Some(true);
+                Action::Construct {
+                    dst: operand(0),
+                    layout: operand(1) as u32,
+                    base: operand(2),
+                    count: operand(3),
+                }
+            }
+            Op::Move => {
+                let ty = state.registers[operand(1)];
+                state.registers[operand(0)] = ty;
+                Action::Move {
+                    dst: operand(0),
+                    src: operand(1),
+                    ty,
+                }
+            }
+            // The expression runs R code in a scratch frame, which may read any variable.
+            Op::BoundEval => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            Op::MatchCondition => match state.registers[operand(1)] {
+                Ty::Lgl => {
+                    state.registers[operand(0)] = Ty::Lgl;
+                    Action::Move {
+                        dst: operand(0),
+                        src: operand(1),
+                        ty: Ty::Lgl,
+                    }
+                }
+                // Reading a condition runs no R code, but `NA` or a record signals an error.
+                _ => self.opaque_step(
+                    state,
+                    Some((operand(0), Ty::Lgl)),
+                    &[],
+                    Effect::PureUnlessObserved,
+                ),
+            },
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
@@ -1856,9 +2090,6 @@ impl<'a> Builder<'a> {
         function: Sexp,
         dst: (usize, Ty),
     ) -> Option<Action<'a>> {
-        if !self.frame_safe(function) {
-            return None;
-        }
         let mut lowering = Lowering {
             state: state.clone(),
             steps: List::new_in(self.arena),
@@ -1890,6 +2121,36 @@ impl<'a> Builder<'a> {
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
+        }
+        let unboxed: Option<SmallVec<[(usize, Ty); 4]>> = args
+            .iter()
+            .map(|argument| match *argument {
+                Argument::Unboxed { register, ty } if ty.is_unboxed() => Some((register, ty)),
+                _ => None,
+            })
+            .collect();
+        if let Some(unboxed) = unboxed {
+            let types: SmallVec<[Ty; 4]> = unboxed.iter().map(|&(_, ty)| ty).collect();
+            if let Some(native) = native::native_for(function, &types) {
+                // The native function reads nothing of this frame, so the variables stay as
+                // they are.
+                after.visible = Some(true);
+                after.registers[dst.0] = native.result;
+                *state = after;
+                self.speculations
+                    .extend(native.speculations.iter().cloned());
+                let mut registers = List::new_in(self.arena);
+                registers.extend(unboxed.iter().map(|&(register, _)| register));
+                return Some(Action::NativeCall {
+                    steps: lowering.steps.leak(),
+                    native,
+                    args: registers.leak(),
+                    dst: dst.0,
+                });
+            }
+        }
+        if !self.frame_safe(function) {
+            return None;
         }
         // The callee may reach this frame through `parent.frame()`, so the call writes the
         // variables back and forgets them like any opaque step.
@@ -2341,7 +2602,12 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|&register| state.registers[register])
             .collect();
-        if untagged && let Some((intrinsic, result)) = intrinsic_for(name, &types) {
+        if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
+            // A list element is boxed, so its type comes from what the site has read so far,
+            // which the compiled read checks before it unboxes the element.
+            if intrinsic == Intrinsic::Element && types[0] == Ty::List && feedback.is_unboxed() {
+                result = feedback;
+            }
             state.registers[dst] = result;
             state.visible = Some(true);
             return Ok(Action::Intrinsic {
@@ -2561,7 +2827,7 @@ unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Spe
 }
 
 /// The name of the base builtin `function`, when `symbol` names it.
-unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
+pub(crate) unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
     if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
         return None;
     }
@@ -2601,7 +2867,7 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
     None
 }
 
-unsafe fn constant_type(value: Sexp) -> Ty {
+pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
     match bytecode::value_kind(value) {
         feedback::INTEGER_SCALAR => Ty::Int,
         feedback::DOUBLE_SCALAR => Ty::Dbl,
@@ -2731,6 +2997,8 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::Jump => Some(inst.operand(0)),
         Op::JumpUnless => Some(inst.operand(2)),
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
+        Op::Item => Some(inst.operand(4)),
         Op::BranchUnlessPrimitive => Some(inst.operand(2)),
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
@@ -2747,6 +3015,10 @@ fn ends_block(op: Op) -> bool {
             | Op::BranchUnlessBuiltin
             | Op::BranchUnlessPrimitive
             | Op::BranchIfObject
+            | Op::MatchShape
+            | Op::MatchTag
+            | Op::MatchLiteral
+            | Op::Item
             | Op::ForStep
             | Op::LogicLeft
             | Op::Guard
@@ -2781,7 +3053,33 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate => {
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
+        }
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => gen_(operand(0), live),
+        Op::Construct => {
+            kill(operand(0), live);
+            for register in operand(2)..operand(2) + operand(3) {
+                gen_(register, live);
+            }
+        }
+        Op::Move => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
+        }
+        Op::BoundEval => {
+            kill(operand(0), live);
+            for register in operand(3)..operand(3) + operand(4) {
+                gen_(register, live);
+            }
+        }
+        Op::MatchCondition => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

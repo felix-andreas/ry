@@ -87,8 +87,8 @@ f: fn() -> Any
 f <- function(x) unique(x, foo = TRUE)
 g <- function(x) head(x, n = 2, keepnums = FALSE)
 #++++
-f: <T> fn(x: T) -> Any
-g: <T> fn(x: T) -> Any
+f: <T> fn(x: T) -> T
+g: <T> fn(x: T) -> T
 
 #---- a_parameter_shadowing_an_unstubbed_base_function
 draw <- function(range, pretty = TRUE) {
@@ -386,7 +386,7 @@ flip <- function(phi, flag, m) {
   t(m)
 }
 #++++
-flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
+flip: <T, U> fn(phi: T, flag: logical, m: U) -> Any
 
 #---- a_condition_accepts_an_optional_logical
 pluck <- function(config, key) {
@@ -488,6 +488,38 @@ scale_rows <- function(m, weights) {
 #++++
 scale_rows: <T, U> fn(m: T, [weights]: U) -> matrix
 
+#---- an_unchecked_argument_does_not_pick_a_candidate_with_a_class_parameter
+shift <- function(period) {
+  months(period[[1]]) + 1L
+}
+#++++
+shift: <T> fn(period: T) -> Unknown
+
+#---- a_date_argument_still_picks_the_class_candidate
+shift <- function() {
+  months(Sys.Date()) + 1L
+}
+#++++
+shift: Unknown
+24..42 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_character_matrix_compares_against_a_string
+flags <- function(values) {
+  codes <- matrix(values, 1, 2)
+  codes == "c"
+}
+#++++
+flags: <T> fn(values: T) -> logical
+
+#---- a_matrix_does_not_compare_against_a_function
+flags <- function(values) {
+  codes <- matrix(values, 1, 2)
+  codes == sum
+}
+#++++
+flags: Unknown
+62..74 error[type-mismatch] `==` is not defined between `matrix` and `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+
 #---- a_data_frame_maps_over_its_columns
 summarise <- function(path) {
   frame <- read.csv(path)
@@ -524,7 +556,7 @@ smooth <- function(x, previous) {
   (current + 2) / 2
 }
 #++++
-smooth: <T, U> fn([x]: T, previous: U | NULL) -> Unknown
+smooth: <T, U> fn([x]: T, previous: U | NULL) -> double | matrix
 
 #---- arithmetic_accepts_an_open_parameter_or_a_vector
 drop_rows <- function(x, drop) {
@@ -804,7 +836,7 @@ rel <- function(is_abs, rc_ref, fo = "A1") {
 h <- function() rel(TRUE, fo = "A1")
 #++++
 rel: <T, U, V> fn([is_abs]: T, [rc_ref]: U, [fo]: V) -> character | U
-h: <T> fn() -> character | T
+h: fn() -> Unknown
 
 #---- a_formal_read_before_an_early_return_is_required
 rel <- function(is_abs, rc_ref, fo = "A1") {
@@ -847,7 +879,7 @@ container <- function(x, gap = NULL) {
 h <- function() container()
 #++++
 container: <T, U> fn([x]: T, [gap]: U) -> U | T
-h: <T> fn() -> T | NULL
+h: fn() -> Unknown
 
 #---- a_function_whose_formals_are_rewritten_takes_any_call
 make <- function(args) {
@@ -1043,8 +1075,7 @@ my_helper <- NULL
 widths <- function(words) vapply(words, my_helper, integer(1))
 #++++
 my_helper: NULL
-widths: Unknown
-44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 4 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
+widths: <T> fn(words: list[T] | T[]) -> integer[]
 
 #---- a_branch_with_an_open_variable_inside_a_list_is_not_pinned_by_the_other_branch
 split_deps <- function(dp) if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)
@@ -1258,3 +1289,645 @@ f <- function() {
 #++++
 f: fn() -> Unknown
 20..21 warning[unused] `x` is assigned but never used.
+
+#---- a_matrix_valued_vapply_callback_and_a_matrix_sum_type
+pair <- function(x) matrix(c(x, x), nrow = 1)
+#: fn(xs: character[]) -> matrix
+pairs <- function(xs) vapply(xs, pair, character(2))
+#: fn(m: matrix | double[]) -> double
+energy <- function(m) sum(m^2)
+#++++
+pair: <T> fn(x: T) -> matrix
+pairs: fn(xs: character[]) -> matrix
+energy: fn(m: matrix | double[]) -> double
+
+#---- a_union_with_a_string_member_is_a_condition
+# usethis reads `cfg$origin$is_configured` from a list whose fields mix strings and flags.
+f <- function(flag) {
+  setting <- if (flag) Sys.getenv("SETTING") else TRUE
+  if (setting) 1 else 2
+}
+#++++
+f: fn(flag: logical) -> double
+
+#---- a_union_with_a_string_member_is_still_rejected_by_and
+f <- function(flag) {
+  setting <- if (flag) Sys.getenv("SETTING") else TRUE
+  if (setting && flag) 1 else 2
+}
+#++++
+f: Unknown
+83..90 error[type-mismatch] expected `logical`, found `character | logical`
+
+#---- a_list_of_unknown_elements_may_be_a_named_list
+# rmgarch passes `fixed.pars = as.list(fit@mfit$garchcoef[, i])`, a named vector turned list.
+#: fn(pars: list[named: double]) -> double
+fit <- function(pars) 1
+refit <- function(coefficients) fit(as.list(coefficients))
+#++++
+fit: fn(pars: list[named: double]) -> double
+refit: <T> fn(coefficients: T) -> double
+
+#---- a_tuple_is_still_not_a_named_list
+#: fn(pars: list[named: double]) -> double
+fit <- function(pars) 1
+refit <- function() fit(list(1, 2))
+#++++
+fit: fn(pars: list[named: double]) -> double
+refit: Unknown
+91..101 error[type-mismatch] expected `list[named: double]`, found `list{double, double}`
+
+#---- a_variable_only_ever_written_null_is_a_placeholder
+# lifecycle writes `msg <- NULL # trick R CMD check` before filling it with `%<~%`.
+#: fn(message: character[]) -> NULL
+report <- function(message) invisible(NULL)
+msg <- NULL
+report(msg)
+flag <- NULL
+if (flag) 1 else 2
+#++++
+report: fn(message: character[]) -> NULL
+msg: NULL
+NULL
+flag: NULL
+double
+
+#---- a_null_parameter_or_literal_is_still_checked
+#: fn(message: character[]) -> NULL
+report <- function(message) invisible(NULL)
+relay <- function(value = NULL) report(value)
+report(NULL)
+#++++
+report: fn(message: character[]) -> NULL
+relay: fn([value]: character[] | NULL) -> NULL
+NULL
+133..137 error[type-mismatch] expected `character[]`, found `NULL`
+
+#---- a_vector_forwarded_to_a_callback_fits_its_inferred_scalar_parameter
+# pkgdown's `purrr::walk(tabs, tablist_content, fade = fade)`, where `fade` holds `map_lgl()`'s result.
+#: fn(x: character) -> logical[]
+has <- function(x) c(TRUE, FALSE)
+show <- function(tab, fade) c(if (fade && TRUE) "show", "x")
+render <- function(x, tabs) {
+  fade <- has(x)
+  lapply(tabs, show, fade = fade)
+}
+#++++
+has: fn(x: character) -> logical[]
+show: <T> fn([tab]: T, fade: logical) -> character[]
+render: fn(x: character, tabs: Unknown) -> Unknown
+
+#---- a_string_forwarded_to_a_callback_logical_parameter_is_reported
+show <- function(tab, fade) c(if (fade && TRUE) "show", "x")
+render <- function(tabs) lapply(tabs, show, fade = "yes")
+#++++
+show: <T> fn([tab]: T, fade: logical) -> character[]
+render: Unknown
+99..103 error[type-mismatch] expected `fn(T) -> U`, found `fn([tab]: V, fade: logical) -> character[]`
+
+#---- a_root_finder_callback_may_return_a_vector
+# GeneralizedHyperbolic's `uniroot(zeroFnLess, param = param, p = p[i], interval = xRange)`.
+#: fn(x: double) -> double[]
+cdf <- function(x) c(x, x)
+quantile_of <- function(p) {
+  gap <- function(x, p) cdf(x) - p
+  uniroot(gap, p = p, interval = c(0, 1))$root
+}
+#++++
+cdf: fn(x: double) -> double[]
+quantile_of: <T: numeric> fn(p: T) -> double
+
+#---- vapply_takes_a_callback_returning_a_vector_of_the_template_type
+# snakecase's `vapply(string, stringr::str_c, "", collapse = " ")`.
+joined <- function(words) vapply(words, function(word) paste(word, collapse = " "), "")
+flags <- function(words) vapply(words, function(word) nchar(word) > 2, logical(1))
+#++++
+joined: <T> fn(words: list[T] | T[]) -> character[]
+flags: <T> fn(words: list[T] | T[]) -> logical[]
+
+#---- vapply_still_rejects_a_callback_of_another_type
+counts <- function(words) vapply(words, function(word) paste(word, collapse = " "), numeric(1))
+#++++
+counts: Unknown
+84..94 error[type-mismatch] expected `character[] | character`, found `double[]`
+#---- a_returned_closure_with_named_parameters_fits_a_dots_only_callback
+#: <R> fn(f: fn(...: Any) -> R) -> R
+wrap <- function(f) f()
+maker <- function(tr) {
+  force(tr)
+  function(endpoint, ...) paste(endpoint, ..., tr)
+}
+use <- function(tr) {
+  gh <- maker(tr)
+  wrap(gh)
+}
+#++++
+wrap: <T> fn(f: fn(...: Any) -> T) -> T
+maker: <T, U> fn(tr: T) -> fn(endpoint: U, ...: Any) -> character
+use: <T> fn(tr: T) -> character
+
+#---- a_returned_closure_does_not_fit_a_typed_dots_callback
+#: <R> fn(f: fn(...: double) -> R) -> R
+wrap <- function(f) f(1)
+maker <- function(tr) {
+  force(tr)
+  function(endpoint, other, ...) paste(endpoint, ..., tr)
+}
+use <- function(tr) {
+  gh <- maker(tr)
+  wrap(gh)
+}
+#++++
+wrap: <T> fn(f: fn(...: double) -> T) -> T
+maker: <T, U, V> fn(tr: T) -> fn(endpoint: U, [other]: V, ...: Any) -> character
+use: Unknown
+208..210 error[type-mismatch] expected `fn(...: double) -> T`, found `fn(endpoint: U, [other]: V, ...: Any) -> character`
+#---- months_of_a_date_is_its_name_and_months_of_anything_else_is_a_package_method
+name <- months(Sys.Date())
+period <- months(3L)
+wrong <- nchar(months(Sys.Date())) + "a"
+#++++
+name: character
+period: Any
+wrong: Unknown
+85..88 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+#---- a_default_reads_a_variable_the_body_assigns_before_forcing_it
+simulate <- function(ma, innov = rnorm(q)) {
+  q <- length(ma)
+  innov
+}
+choose <- function(object, label = if (big) "big" else "small") {
+  big <- object > 1
+  label
+}
+#++++
+simulate: <T, U> fn(ma: T, [innov]: U) -> U
+choose: <T, U> fn(object: T, [label]: U) -> U
+
+#---- a_default_reads_a_package_function_when_the_body_never_assigns_the_name
+simulate <- function(n, innov = rnorm(n + q)) {
+  innov
+}
+#++++
+simulate: Unknown
+42..43 error[type-mismatch] expected a numeric value (`integer` or `double`), found `fn([save]: character, [status]: Any, [runLast]: logical) -> Any`
+#---- a_closure_write_beside_a_reset_does_not_fix_the_callback_return_type
+memoize <- function(fun) {
+  cache <- NULL
+  dec <- function() {
+    if (is.null(cache)) cache <<- fun()
+    cache
+  }
+  attr(dec, "clear") <- function() cache <<- TRUE
+  dec
+}
+#++++
+memoize: <T> fn([fun]: fn() -> T) -> fn() -> T
+
+#---- a_closure_reads_back_the_value_it_just_superassigned
+once <- function(fun) {
+  cache <- NULL
+  function() {
+    cache <<- fun()
+    cache
+  }
+}
+#++++
+once: <T> fn(fun: fn() -> T) -> fn() -> T
+
+#---- a_superassigned_value_read_back_is_still_checked
+once <- function() {
+  cache <- NULL
+  function() {
+    cache <<- "ready"
+    cache + 1L
+  }
+}
+#++++
+once: Unknown
+78..83 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_lazily_filled_cache_reads_as_its_value_after_the_null_check
+versions <- local({
+  cached <- NULL
+  function() {
+    if (is.null(cached)) {
+      cached <<- dir("css")
+    }
+    cached
+  }
+})
+#++++
+versions: fn() -> character[]
+
+#---- a_lazily_filled_cache_still_checks_how_its_value_is_used
+versions <- local({
+  cached <- NULL
+  function() {
+    if (is.null(cached)) {
+      cached <<- dir("css")
+    }
+    cached + 1L
+  }
+})
+#++++
+versions: Unknown
+117..123 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character[]`
+
+#---- concrete_closure_writes_of_different_types_still_join
+counter <- function() {
+  count <- 0L
+  attr(count, "reset") <- function() count <<- "none"
+  bump <- function() count <<- count + 1L
+  bump
+}
+#++++
+counter: Unknown
+123..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | character`
+
+#---- a_formal_passed_to_a_sibling_defined_further_down_is_not_forced
+err <- local({
+  format_advice <- function(x) {
+    if (runif(1) > 0.5) format_advice_cli(x) else format_advice_plain(x)
+  }
+  format_advice_cli <- function(x) "advice"
+  format_advice_plain <- function(x, ...) "advice"
+  list(advice = format_advice)
+})
+err$advice()
+#++++
+err: list{advice: fn([x]: Unknown) -> Unknown}
+Unknown
+
+#---- a_call_to_a_sibling_defined_further_down_still_checks_its_arity
+err <- local({
+  format_advice <- function(x) format_advice_cli(x)
+  format_advice_cli <- function(x) "advice"
+  list(advice = format_advice)
+})
+err$advice(1, 2)
+#++++
+err: list{advice: fn([x]: Unknown) -> Unknown}
+Unknown
+159..160 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- a_menu_takes_a_list_of_strings_as_its_choices
+pick <- function(urls) {
+  pretty <- lapply(urls, function(url) paste0(url, "!"))
+  utils::menu(pretty, title = "Pick one")
+}
+#++++
+pick: fn(urls: Unknown) -> integer
+
+#---- a_menu_does_not_take_a_function_as_its_choices
+pick <- function() utils::menu(sum)
+#++++
+pick: Unknown
+31..34 error[type-mismatch] expected `character | character[] | list[Any]`, found `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+
+#---- a_callback_called_with_the_arity_its_formals_report_is_not_an_arity_error
+new_source <- function(src, call, handler = NULL) {
+  if (is.null(handler)) {
+    return(src)
+  }
+  if (length(formals(handler)) == 1) {
+    handler(src)
+  } else {
+    handler(src, call)
+  }
+}
+#++++
+new_source: <T, U, V> fn(src: T, [call]: U, [handler]: (fn(T) -> V) | NULL) -> Unknown
+
+#---- a_callback_called_twice_with_one_argument_still_checks_the_argument
+run <- function(handler) {
+  handler(1L) + 1L
+  nchar(handler("a"))
+}
+#++++
+run: Unknown
+62..65 error[type-mismatch] expected `integer`, found `character`
+
+#---- a_callback_whose_first_call_passed_an_integer_takes_a_double_later
+palette <- function(levels, col.fun) {
+  if (length(levels) > 2) col.fun(n = length(levels)) else col.fun(n = length(levels) + 1)
+}
+#++++
+palette: <T, U> fn(levels: T, col.fun: fn(n: integer) -> U) -> U
+
+#---- a_callback_whose_first_call_passed_an_integer_does_not_take_a_string_later
+palette <- function(levels, col.fun) {
+  if (length(levels) > 2) col.fun(n = length(levels)) else col.fun(n = "many")
+}
+#++++
+palette: Unknown
+110..116 error[type-mismatch] expected `integer`, found `character`
+
+#---- a_switch_without_a_default_passed_straight_to_a_string_parameter_drops_its_null
+make <- function(flag) {
+  shape <- if (flag) "g" else "t"
+  new(switch(shape, g = "dge", t = "dtr"))
+}
+#++++
+make: fn(flag: logical) -> Any
+
+#---- a_switch_passed_straight_to_a_string_parameter_still_checks_its_arms
+make <- function(flag) {
+  shape <- if (flag) "g" else "t"
+  new(switch(shape, g = "dge", t = sum))
+}
+#++++
+make: Unknown
+65..98 error[type-mismatch] expected `character`, found `character | (fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex)`
+
+#---- a_null_narrowed_from_a_local_that_also_holds_a_string_is_still_checked
+#: fn(s: character) -> character
+g <- function(s) s
+f <- function(flag) {
+  x <- if (flag) "a,b" else NULL
+  if (is.null(x)) return(g(x))
+  x
+}
+#++++
+g: fn(s: character) -> character
+f: Unknown
+134..135 error[type-mismatch] expected `character`, found `NULL`
+
+#---- a_null_written_over_a_string_is_still_checked
+#: fn(s: character) -> character
+g <- function(s) s
+f <- function() {
+  x <- "a,b"
+  x <- NULL
+  g(x)
+}
+#++++
+g: fn(s: character) -> character
+f: Unknown
+72..73 warning[unused] `x` is assigned but never used.
+99..100 error[type-mismatch] expected `character`, found `NULL`
+
+#---- a_cache_read_as_a_number_before_its_first_write_rejects_a_string_write
+f <- function() {
+  x <- NULL
+  function() {
+    y <- if (is.null(x)) 0 else x + 1
+    x <<- "a"
+    y
+  }
+}
+#++++
+f: Unknown
+93..96 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_cache_read_before_its_first_write_takes_a_write_of_the_same_type
+f <- function() {
+  x <- NULL
+  function() {
+    y <- if (is.null(x)) 0 else x + 1
+    x <<- 2
+    y
+  }
+}
+#++++
+f: fn() -> fn() -> double
+
+#---- a_formal_passed_to_a_sibling_defined_further_down_stays_optional_even_when_the_sibling_reads_it
+make <- function() {
+  outer <- function(x) inner(x)
+  inner <- function(y) y + 1
+  outer
+}
+#++++
+make: <T> fn() -> fn([x]: T) -> double
+
+#---- a_formal_read_only_by_another_formals_default_stays_optional
+g <- function(x, y = x) y
+g()
+#++++
+g: <T, U> fn([x]: T, [y]: U) -> U
+T
+
+#---- a_superassignment_to_a_top_level_variable_is_read_back
+cache <- 1L
+g <- function() {
+  cache <<- "a"
+  cache
+}
+#++++
+cache: integer
+g: fn() -> character
+
+#---- a_superassignment_on_one_path_joins_with_the_top_level_binding
+cache <- NULL
+g <- function() {
+  if (is.null(cache)) cache <<- list(a = 1)
+  cache
+}
+#++++
+cache: NULL
+g: fn() -> list{a: double}
+
+#---- a_superassignment_on_one_unguarded_path_keeps_the_top_level_type
+cache <- 1L
+g <- function(flag) {
+  if (flag) cache <<- "a"
+  cache
+}
+#++++
+cache: integer
+g: fn(flag: logical) -> integer | character
+
+#---- a_superassignment_in_a_nested_function_does_not_change_the_outer_read
+cache <- 1L
+g <- function() {
+  set <- function() cache <<- "a"
+  list(set, cache + 1L)
+}
+#++++
+cache: integer
+g: fn() -> list{fn() -> character, integer}
+
+#---- a_value_read_back_from_a_superassignment_is_still_checked
+cache <- 1L
+g <- function() {
+  cache <<- "a"
+  cache + 1
+}
+#++++
+cache: integer
+g: Unknown
+48..53 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- an_accumulator_that_reads_itself_in_its_first_superassignment_is_not_reported
+collect <- function(items) {
+  acc <- NULL
+  add <- function(item) acc <<- c(acc, list(item))
+  for (item in items) add(item)
+  acc
+}
+#++++
+collect: <T> fn(items: T) -> list[Unknown] | NULL
+
+#---- a_null_filled_by_a_siblings_superassignment_is_still_a_placeholder
+timer <- function() {
+  now <- NULL
+  started <- Sys.time()
+  elapsed <- function() now - started
+  tick <- function() now <<- Sys.time()
+  list(elapsed, tick)
+}
+#++++
+timer: fn() -> list{fn() -> difftime, fn() -> POSIXct}
+
+#---- lapply_walks_the_parts_of_a_formula
+parts <- function() lapply(y ~ x + z, deparse)
+#++++
+parts: fn() -> list[character]
+
+#---- lapply_over_a_formula_still_checks_the_callback
+parts <- function() lapply(y ~ x + z, 42)
+#++++
+parts: Unknown
+38..40 error[type-mismatch] expected `fn(T) -> U`, found `double`
+
+#---- a_call_returns_the_arm_of_an_echoed_list_or_vector_parameter_it_passed
+normalize <- function(path) {
+  path[1] <- "a"
+  vapply(path, nchar, 1L)
+  path
+}
+one <- function() nchar(normalize(tempfile()))
+#++++
+normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
+one: fn() -> integer
+
+#---- a_union_argument_keeps_the_echoed_union
+normalize <- function(path) {
+  path[1] <- "a"
+  vapply(path, nchar, 1L)
+  path
+}
+either <- function(flag) normalize(if (flag) "a" else list("a"))
+#++++
+normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
+either: fn(flag: logical) -> list[character] | character[]
+
+#---- a_getter_call_to_a_getter_and_setter_closure_is_not_the_setter_value
+store <- local({
+  globals <- list(threads = NA_integer_)
+  function(key, value) {
+    if (missing(key)) return(globals)
+    if (missing(value)) globals[[key]] else globals[[key]] <<- value
+  }
+})
+infinity <- function() {
+  if (is.null(store("Inf"))) store("Inf", 1e30)
+  store("Inf")
+}
+lower <- function(n) rep.int(-infinity(), n)
+#++++
+store: <T, U> fn([key]: T, [value]: U) -> list{threads: integer} | integer | U
+infinity: fn() -> Unknown
+lower: <T> fn(n: T) -> Unknown
+
+#---- a_union_return_over_an_argument_variable_is_kept
+pick <- function(flag, x) if (flag) x else NULL
+forward <- function(y) pick(TRUE, y)
+#++++
+pick: <T> fn(flag: logical, [x]: T) -> T | NULL
+forward: <T> fn([y]: T) -> T | NULL
+
+#---- a_formal_used_as_a_vector_passes_a_scalar_parameter
+unpack <- function(file, tmpdir = tempdir()) {
+  scratch <- tempfile(tmpdir = tmpdir)
+  untar(file, exdir = tmpdir)
+  scratch
+}
+#++++
+unpack: <T> fn(file: T, [tmpdir]: character[]) -> character
+
+#---- a_local_vector_is_still_not_a_scalar
+unpack <- function(file) {
+  dirs <- c("a", "b")
+  untar(file, exdir = dirs)
+}
+#++++
+unpack: Unknown
+71..75 error[type-mismatch] expected `character`, found `character[]`
+
+#---- matrix_arithmetic_with_a_value_that_may_be_null_is_accepted
+reparam <- function(m, deriv) {
+  if (deriv > 1) det2 <- matrix(0, m, m) else det2 <- NULL
+  list(det2 = det2)
+}
+fit <- function(m, deriv, d2, a) {
+  if (a) rp <- reparam(m, deriv) else rp <- list(det2 = rep(0, 0))
+  matrix(d2, m, m) - rp$det2
+}
+#++++
+reparam: <T, U> fn([m]: T, deriv: U) -> list{det2: matrix | NULL}
+fit: <T, U, V> fn(m: T, [deriv]: U, d2: V, a: logical) -> matrix | double[]
+
+#---- matrix_arithmetic_with_a_string_is_still_an_error
+shift <- function(m) matrix(0, m, m) - "a"
+#++++
+shift: Unknown
+21..42 error[type-mismatch] `-` is not defined between `matrix` and `character`
+
+#---- lapply_over_lists_that_differ_by_path_takes_either_element
+parts <- function(f) {
+  if (is.null(f)) return(list(NULL, NULL))
+  list(matrix(1), 2)
+}
+each <- function(f) lapply(parts(f), function(part) part)
+mixed <- function(a) {
+  x <- if (a) list(1) else list("s")
+  lapply(x, nchar)
+}
+#++++
+parts: <T> fn(f: T | NULL) -> list{NULL, NULL} | list{matrix, double}
+each: <T> fn(f: T) -> list[matrix | double | NULL]
+mixed: fn(a: logical) -> list[integer]
+
+#---- lapply_over_lists_that_differ_by_path_still_checks_the_callback
+mixed <- function(a) {
+  x <- if (a) list(1) else list("s")
+  lapply(x, function(item) item + 1)
+}
+#++++
+mixed: Unknown
+72..95 error[type-mismatch] this function is passed `double | character`, but its parameter `item` is used as a numeric value (`integer` or `double`)
+
+#---- lapply_over_an_empty_list_on_one_path_is_not_null
+items <- function(a, idx) {
+  if (a) return(list())
+  lapply(idx, function(i) c(1, i))
+}
+use <- function(a) {
+  for (x in items(a, 1:3)) print(x[[1]] + 1)
+}
+#++++
+items: fn(a: logical, [idx]: Unknown) -> Unknown
+use: fn(a: logical) -> NULL
+
+#---- two_parameters_that_echo_the_same_union_each_return_what_they_were_passed
+both <- function(a, b, k) {
+  a[1] <- "a"
+  b[1] <- "a"
+  vapply(a, nchar, 1L)
+  vapply(b, nchar, 1L)
+  if (k) a else b
+}
+use_both <- function(k) both("x", list("y"), k)
+#++++
+both: <T, U> fn(a: list[T] | T[], b: list[U] | U[], k: logical) -> list[T] | T[] | list[U] | U[]
+use_both: fn(k: logical) -> character | list{character}
+
+#---- a_closure_returning_an_enclosing_value_keeps_its_type_at_the_call
+outer <- function(y) {
+  pick <- function(flag) if (flag) y else NULL
+  pick(TRUE)
+}
+#++++
+outer: <T> fn([y]: T) -> T | NULL

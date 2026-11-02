@@ -3,7 +3,7 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, Handout, enter, error},
+        boundary::{ApiResult, Handout, Reachable, enter, error},
         eval::force_promise,
         runtime,
         strings::utf8_text,
@@ -344,7 +344,12 @@ pub unsafe extern "C" fn R_removeVarFromFrame(symbol: Sexp, env: Sexp) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_NewEnv(enclosure: Sexp, hash: c_int, size: c_int) -> Sexp {
     enter(|| {
-        let enclosure = environment(enclosure, "R_NewEnv")?;
+        // GNU R stores the enclosure unchecked, and packages such as nanonext pass
+        // `R_NilValue` for a bare container. The empty environment ends lookup the same way.
+        let enclosure = match enclosure.kind() {
+            SexpType::Nil => runtime().heap.known().empty_env,
+            _ => environment(enclosure, "R_NewEnv")?,
+        };
         let env = runtime().heap.alloc_environment(enclosure)?;
         if hash != 0 {
             runtime().heap.set_frame_hashed(env, size);
@@ -360,7 +365,7 @@ pub unsafe extern "C" fn Rf_findFun(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ENCLOS(env: Sexp) -> Sexp {
-    enter(|| Ok(environment(env, "ENCLOS")?.enclosure()))
+    enter(|| Ok(Reachable(environment(env, "ENCLOS")?.enclosure()))).0
 }
 
 #[unsafe(no_mangle)]
@@ -370,8 +375,9 @@ pub unsafe extern "C" fn R_ParentEnv(env: Sexp) -> Sexp {
         if env == runtime().heap.known().empty_env {
             return Err(error("the empty environment has no parent"));
         }
-        Ok(env.enclosure())
+        Ok(Reachable(env.enclosure()))
     })
+    .0
 }
 
 #[unsafe(no_mangle)]

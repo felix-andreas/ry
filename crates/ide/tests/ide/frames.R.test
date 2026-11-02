@@ -9,8 +9,8 @@ references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
-parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[] | matrix, [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[] | matrix] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
 signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
@@ -18,7 +18,7 @@ parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
 signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -32,7 +32,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (128+): .BY, .GRP, .I, .N, .NGRP, .SD, ...elt, ...length
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -46,7 +46,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (9): as.data.frame.noquote, as.matrix.noquote, .amatch_bounds, DataFrame.columns, DataFrame.group_by, DataFrame.with_columns, LazyFrame.group_by, LazyFrame.with_columns
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -60,7 +60,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -74,7 +74,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion: none
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -88,7 +88,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -105,7 +105,7 @@ parameters: [x: character] | [as.factor]: logical
 signature: fn(x: Any, [as.factor]: logical) -> Any
 parameters: [x: Any] | [as.factor]: logical
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
 hint @84df =
@@ -121,10 +121,10 @@ rename: none
 signature: fn(df: DataFrame, ...: Expr | character) -> GroupBy
 parameters: df: DataFrame | [...: Expr | character]
 action: Add inferred type annotation for `grouped`
-  edit 57..57 -> "#: GroupBy{team: character[]; amount: double[]}\n"
+  edit 64..64 -> ": GroupBy{team: character[]; amount: double[]}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
-  edit 57..57 -> "#: GroupBy{team: character[]; amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 64..64 -> ": GroupBy{team: character[]; amount: double[]}"
 completion (1): team
 hint @5: DataFrame{team: character[], amount: double[]}
 hint @64: GroupBy{team: character[]; amount: double[]}
@@ -161,6 +161,6 @@ rename: none
 signature: fn(df: DataFrame, ...: Expr | character, [descending]: logical) -> DataFrame
 parameters: df: DataFrame | [...: Expr | character] | [descending]: logical
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (2): amount, team
 hint @5: DataFrame{team: character[], amount: double[]}

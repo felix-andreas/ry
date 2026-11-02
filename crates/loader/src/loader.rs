@@ -17,11 +17,14 @@ use {
         file_conditional_writers, file_definitions, file_typing_mode,
         load_index::{
             IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-            classify_constants, file_binds, file_items, file_load_index, fnv1a, package_index,
+            S4Definition, classify_top_level, file_binds, file_items, file_load_index, fnv1a,
+            package_index,
         },
         metadata::{
-            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
-            parse_description_collate,
+            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
+            PackageMetadata, S3MethodDirective, description_field, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::install_shipped_stubs,
     },
@@ -29,12 +32,14 @@ use {
     std::{
         collections::BTreeSet,
         fmt, fs, io,
+        panic::AssertUnwindSafe,
         path::{Path, PathBuf},
         sync::Arc,
         thread,
         time::{SystemTime, UNIX_EPOCH},
     },
     syntax::Parse,
+    xxhash_rust::xxh3::{Xxh3, xxh3_64},
 };
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
@@ -43,8 +48,9 @@ use {
 pub struct Loader {
     db: RootDatabase,
     packages: Vec<LoadedPackage>,
-    /// Size and modification time of each file as last read, per package root.
-    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>)>>,
+    /// Size, modification time and declared encoding of each file as last read, per package
+    /// root.
+    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>, SourceEncoding)>>,
     /// Whether the shipped stubs are in the database. A strict package needs them to tell
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
@@ -53,6 +59,10 @@ pub struct Loader {
     /// with [`Loader::set_strict`]: the loader reads package sources, not ry's configuration.
     /// Off, a file is strict only when its `# typing: strict` directive says so.
     strict: bool,
+    /// The packages a plan was asked for that have nothing committed, because the plan or its
+    /// application failed, with the [`source_fingerprint`] taken at that plan, so a console
+    /// retries the load once the sources change.
+    unloaded: FxHashMap<PathBuf, Option<u64>>,
 }
 
 /// A package's sources as the loader reads them.
@@ -65,6 +75,8 @@ pub struct PackageInputs {
     pub files: Vec<(String, Option<String>)>,
     /// Of `R/sysdata.rda`.
     pub sysdata: Option<u64>,
+    /// Of `data/`.
+    pub data: Option<Datasets>,
     /// Of the sources under `src/`.
     pub compiled: Option<u64>,
     /// `[check] strict`, the mode of each file without its own `# typing:` directive.
@@ -83,6 +95,28 @@ struct LoadedPackage {
     committed_fingerprint: Option<u64>,
     /// [`source_fingerprint`] of what the pending plan read.
     pending_fingerprint: Option<u64>,
+    /// Whether the analysis has derived the facts of every file, which a load index read
+    /// from the cache spares it until a plan needs them.
+    analyzed: bool,
+    /// The load index an earlier process saved for exactly these sources, until the sources
+    /// change.
+    cached: Option<CachedIndex>,
+}
+
+/// A load index read from the cache, with the R text of each file whose R text is not its
+/// source text: erasing inline annotations takes a parse, which the cache exists to avoid.
+struct CachedIndex {
+    index: Arc<PackageIndex>,
+    r_texts: FxHashMap<String, String>,
+}
+
+/// A file's code as the loader hands it to a backend: the analysis's syntax tree when the
+/// analysis parsed the file, or else its text, of which a backend parses only the code it
+/// needs. Code offsets index either one.
+#[derive(Debug, Clone)]
+pub enum Source {
+    Tree(Parse),
+    Text(Arc<str>),
 }
 
 /// What is loaded for one package: the load index plus the inputs the analysis does not read.
@@ -92,13 +126,26 @@ pub struct LoadState {
     pub index: Arc<PackageIndex>,
     /// Of `R/sysdata.rda`.
     pub sysdata: Option<u64>,
+    /// A state saved before datasets were loaded has none.
+    #[serde(default)]
+    pub data: Option<Datasets>,
     /// Of the names, sizes and modification times under `src/`.
     pub compiled: Option<u64>,
 }
 
+/// The dataset files in `data/`, which a load reads into the namespace's lazy data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Datasets {
+    /// Paths relative to the package root, in the order R CMD INSTALL reads them.
+    pub files: Vec<String>,
+    /// Of the files' names, sizes and modification times, so a changed dataset is noticed
+    /// without reading it.
+    pub fingerprint: u64,
+}
+
 /// Backend-neutral instructions, applied in field order: imports, sources, removals,
-/// unregistrations, lazy bindings, eager code, data, S3 registrations, compiled code,
-/// exports, and finally the hooks.
+/// unregistrations, lazy bindings, eager code, `sysdata.rda`, datasets, S3 registrations,
+/// compiled code, exports, and finally the hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub package: String,
@@ -122,7 +169,12 @@ pub struct Plan {
     pub bind: Vec<Code>,
     /// Top-level code to run, in collation order.
     pub run: Vec<Code>,
+    /// Statements of `run` that a backend may hold back until first use instead.
+    pub deferred_s4: Option<DeferredS4>,
     pub sysdata: SysdataChange,
+    /// `Some` when the datasets must be read again: every file of `data/` to read, in order,
+    /// into a cleared lazy data environment. Empty when the last dataset went away.
+    pub data: Option<Vec<String>>,
     /// `S3method()` registrations to (re)make.
     pub s3_register: Vec<S3MethodDirective>,
     /// `S3method()` registrations that `NAMESPACE` no longer declares.
@@ -139,9 +191,96 @@ pub struct Plan {
     /// keeps the same names and a backend need not rescan them to resync its exports.
     pub keeps_names: bool,
     pub run_on_load: bool,
+    /// Strict mode covers the package, so the host checks it before the plan runs anything.
+    pub strict: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
 }
+
+/// A package's S4 definitions when all of them can wait for first use: running them later,
+/// all together and in order, defines the same classes, generics and methods as running them
+/// at load, provided nothing reaches one of them in between. A backend that defers them binds
+/// [`DeferredS4::names`] to promises that run them, and runs them too when code looks up one of
+/// the classes or generics by name, which is how every other route to them starts: `new()`,
+/// `is()` and `validObject()` look up the class, and `getMethod()`, `existsMethod()` and
+/// `showMethods()` look up the generic. Every name the definitions read is written once,
+/// before them, so a later run reads the same values.
+///
+/// Only a fresh load defers, and only when every S4 definition qualifies:
+///
+/// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod` and
+///   `setValidity`, each with literal names, as [`S4Definition`] describes. Any other S4
+///   registration (`setRefClass`, or `setClassUnion`, which changes the classes it unites)
+///   keeps them all eager.
+/// - Each method belongs to a generic the package defines, so nothing reaches it except
+///   through that generic, or its signature names a class the package defines, so it applies
+///   only to objects of that class. A method of the second kind on another package's generic,
+///   such as `show`, is listed in [`DeferredS4::foreign_generics`]: the backend must run the
+///   definitions before that generic dispatches or is looked up, and keeps them eager unless
+///   the generic is a standard generic that does not stand for a primitive.
+/// - Each validity method is for a class the package defines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredS4 {
+    /// Positions in [`Plan::run`], in collation order.
+    pub run: Vec<usize>,
+    pub classes: Vec<String>,
+    /// The generics the definitions create.
+    pub generics: Vec<String>,
+    /// The generics of other packages the definitions add methods to.
+    pub foreign_generics: Vec<String>,
+    /// Every namespace binding the definitions make.
+    pub names: Vec<String>,
+    /// A key for the S4 metadata the definitions produce, when running them depends on nothing
+    /// but their own text, the package's imports and the version of R: each reads only names
+    /// they bind themselves and functions in [`PURE_S4_READS`]. A backend may then save what
+    /// they bind and restore it in a later process instead of running them.
+    pub cache_key: Option<String>,
+}
+
+/// The functions an S4 definition may call and still be cached: the methods package's
+/// definition functions and the base functions that build constant values, all of which
+/// return the same result for the same arguments. A definition that reads any other name, a
+/// package constant or something like `Sys.time()`, runs in every process.
+const PURE_S4_READS: &[&str] = &[
+    "setClass",
+    "setGeneric",
+    "setMethod",
+    "setReplaceMethod",
+    "setValidity",
+    "representation",
+    "signature",
+    "prototype",
+    "standardGeneric",
+    "new",
+    "methods",
+    "::",
+    "c",
+    "list",
+    "character",
+    "numeric",
+    "integer",
+    "logical",
+    "double",
+    "complex",
+    "function",
+    "-",
+    "+",
+    "*",
+    "/",
+    "^",
+    ":",
+    "(",
+    "{",
+    "<-",
+    "=",
+    "!",
+    "==",
+    "!=",
+    "&&",
+    "||",
+    "T",
+    "F",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceText {
@@ -167,6 +306,9 @@ pub struct Code {
     pub source_end: u32,
     /// Whether the code registers S4 classes or methods, after which R refreshes its S4 caches.
     pub registers_s4: bool,
+    /// Whether running it only binds names and registers classes, so it may run before the
+    /// strict check of the package has finished (see `EagerItem::effect_free`).
+    pub effect_free: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,17 +393,26 @@ impl Loader {
         let root = find_package_root(path)?;
         // Taken before reading, so an edit made while the plan is read shows as a change later.
         let fingerprint = source_fingerprint(&root);
-        let inputs = self.read(&root)?;
-        let plan = self.plan_inputs(&root, inputs, full)?;
-
-        if let Some(package) = self
+        let planned = self
+            .read(&root)
+            .and_then(|inputs| self.plan_inputs(&root, inputs, full));
+        let package = self
             .packages
             .iter_mut()
-            .find(|package| package.root == root)
-        {
-            package.pending_fingerprint = fingerprint;
+            .find(|package| package.root == root);
+        let committed = match package {
+            Some(package) => {
+                if planned.is_ok() {
+                    package.pending_fingerprint = fingerprint;
+                }
+                package.committed.is_some()
+            }
+            None => false,
+        };
+        if !committed {
+            self.unloaded.insert(root, fingerprint);
         }
-        Ok(plan)
+        planned
     }
 
     /// Derives the analysis a plan of the package at or above `path` reads, without planning,
@@ -275,8 +426,8 @@ impl Loader {
             return;
         };
         // A failure is the plan's to report: it reads the same sources.
-        if let Ok(position) = self.analyze(&root, inputs) {
-            package_index(&self.db, self.packages[position].sources);
+        if let Err(error) = self.index(&root, inputs) {
+            drop(error);
         }
     }
 
@@ -289,9 +440,9 @@ impl Loader {
     ) -> Result<Plan, LoadError> {
         let root = root.to_path_buf();
         let (sysdata, compiled) = (inputs.sysdata, inputs.compiled);
-        let position = self.analyze(&root, inputs)?;
+        let data = inputs.data.clone();
+        let (position, index) = self.index(&root, inputs)?;
         let package = &self.packages[position];
-        let index = package_index(&self.db, package.sources);
         if index.package.is_empty() {
             return Err(LoadError::NoPackageName(root));
         }
@@ -306,6 +457,7 @@ impl Loader {
             root: root.clone(),
             index: index.clone(),
             sysdata,
+            data,
             compiled,
         };
         let previous = if full {
@@ -318,6 +470,12 @@ impl Loader {
         };
         let db = &self.db;
         let plan = diff(previous, &next, &|path| {
+            if let Some(cached) = &package.cached {
+                if let Some(text) = cached.r_texts.get(path) {
+                    return text.as_str();
+                }
+                return package.files.get(path).map_or("", |&file| file.text(db));
+            }
             package
                 .files
                 .get(path)
@@ -330,35 +488,90 @@ impl Loader {
         Ok(plan)
     }
 
-    /// Syncs the package's sources into the analysis and derives every changed file's facts
-    /// across cores, returning the package's position.
-    fn analyze(&mut self, root: &Path, inputs: PackageInputs) -> Result<usize, LoadError> {
-        let (position, changed) = self.sync(
+    /// Syncs the package's sources into the analysis and returns its position and load index.
+    /// The first plan of a package in a process reads the index from the cache when an
+    /// earlier process saved one for exactly these sources, and saves the index it derives
+    /// otherwise; the index stays in use until the sources change.
+    fn index(
+        &mut self,
+        root: &Path,
+        inputs: PackageInputs,
+    ) -> Result<(usize, Arc<PackageIndex>), LoadError> {
+        let first = !self.packages.iter().any(|package| package.root == root);
+        let cache = if first {
+            index_cache(root, &inputs)
+        } else {
+            None
+        };
+        let (position, changed, inputs_changed) = self.sync(
             root,
             inputs.description,
             inputs.namespace,
             inputs.files,
             inputs.strict,
         )?;
-        self.warm(&changed, |db, file| {
+        if let Some(cache) = &cache
+            && let Some(cached) = read_index_cache(cache)
+        {
+            let index = cached.index.clone();
+            let package = &mut self.packages[position];
+            package.cached = Some(cached);
+            parse_detached(&self.db, package.files.values().copied().collect());
+            return Ok((position, index));
+        }
+        let package = &mut self.packages[position];
+        if !inputs_changed && let Some(cached) = &package.cached {
+            return Ok((position, cached.index.clone()));
+        }
+        package.cached = None;
+        let files = if package.analyzed {
+            changed
+        } else {
+            package.files.values().copied().collect()
+        };
+        self.analyze(position, &files);
+        let package = &mut self.packages[position];
+        package.analyzed = true;
+        let index = package_index(&self.db, package.sources);
+        if let Some(cache) = &cache {
+            let package = &self.packages[position];
+            let r_texts = package
+                .files
+                .iter()
+                .filter_map(|(path, &file)| {
+                    let text = &file_load_index(&self.db, file).text;
+                    (text != file.text(&self.db)).then(|| (path.clone(), text.clone()))
+                })
+                .collect();
+            // The cache only saves time, so a process that cannot write it derives the index
+            // again next time.
+            if let Err(error) = write_index_cache(cache, &index, &r_texts) {
+                drop(error);
+            }
+        }
+        Ok((position, index))
+    }
+
+    /// Derives the facts of `files` across cores.
+    fn analyze(&mut self, position: usize, files: &[SourceFile]) {
+        self.warm(files, |db, file| {
             file_items(db, file);
             file_typing_mode(db, file);
         });
         if self.prepare_purity(position) {
             // Classifying a constant resolves its callees through the project-wide definition
             // maps, which join per-file facts that are cheaper to derive across cores first.
-            self.warm(&changed, |db, file| {
+            self.warm(files, |db, file| {
                 file_definitions(db, file);
                 file_conditional_writers(db, file);
             });
             let sources = self.packages[position].sources;
-            self.warm(&changed, |db, file| classify_constants(db, sources, file));
+            self.warm(files, |db, file| classify_top_level(db, sources, file));
         }
         let sources = self.packages[position].sources;
-        self.warm(&changed, |db, file| {
+        self.warm(files, |db, file| {
             file_binds(db, sources, file);
         });
-        Ok(position)
     }
 
     /// Records that the backend applied the pending plan for the package at `root`.
@@ -374,6 +587,7 @@ impl Loader {
             Some(state) => {
                 package.committed = Some(state);
                 package.committed_fingerprint = package.pending_fingerprint.take();
+                self.unloaded.remove(root);
                 true
             }
             None => false,
@@ -381,8 +595,9 @@ impl Loader {
     }
 
     /// The roots of the loaded packages whose sources changed on disk since they were loaded,
-    /// judged from file names, sizes and modification times without reading a file. A root is
-    /// reported once per change: a reload that fails is not retried until the next change.
+    /// and of the packages whose load failed whose sources changed since that attempt, judged
+    /// from file names, sizes and modification times without reading a file. A root is reported
+    /// once per change: a reload that fails is not retried until the next change.
     pub fn changed_roots(&mut self) -> Vec<PathBuf> {
         let mut changed = Vec::new();
         for package in &mut self.packages {
@@ -395,7 +610,51 @@ impl Loader {
                 changed.push(package.root.clone());
             }
         }
+        for (root, fingerprint) in &mut self.unloaded {
+            let current = source_fingerprint(root);
+            if current != *fingerprint {
+                *fingerprint = current;
+                changed.push(root.clone());
+            }
+        }
+        changed.sort();
         changed
+    }
+
+    /// Every top-level name of the package loaded from `root` whose definition reaches one of
+    /// `changed`, through the names the definitions mention, `changed` included. A test that
+    /// mentions none of them runs exactly the code it ran before a reload that changed only
+    /// `changed`, so `ry test` reruns the tests that mention one first.
+    pub fn callers(&self, root: &Path, changed: &[String]) -> Vec<String> {
+        let Some(index) = self
+            .packages
+            .iter()
+            .find(|package| package.root == root)
+            .and_then(|package| package.committed.as_ref())
+            .map(|state| &state.index)
+        else {
+            return changed.to_vec();
+        };
+        let mut mentioned_by: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+        for (_, item) in index.items() {
+            for name in &item.binds {
+                for mention in item.mentions.iter().chain(&item.reads) {
+                    mentioned_by.entry(mention).or_default().push(name);
+                }
+            }
+        }
+        let mut reached: FxHashSet<&str> = changed.iter().map(String::as_str).collect();
+        let mut queue: Vec<&str> = reached.iter().copied().collect();
+        while let Some(name) = queue.pop() {
+            for &caller in mentioned_by.get(name).map_or(&[][..], Vec::as_slice) {
+                if reached.insert(caller) {
+                    queue.push(caller);
+                }
+            }
+        }
+        let mut names: Vec<String> = reached.into_iter().map(str::to_owned).collect();
+        names.sort_unstable();
+        names
     }
 
     /// The pending state for `root`, which a backend that persists state saves.
@@ -409,7 +668,7 @@ impl Loader {
     /// Adopts a state saved by an earlier process as what is loaded.
     pub fn restore(&mut self, state: LoadState) -> Result<(), LoadError> {
         let inputs = self.read(&state.root)?;
-        let (position, _) = self.sync(
+        let (position, _, _) = self.sync(
             &state.root,
             inputs.description,
             inputs.namespace,
@@ -420,12 +679,16 @@ impl Loader {
         Ok(())
     }
 
-    /// The analysis's syntax tree of the source file at `path` (relative to `root`), as the
-    /// last plan read it. A plan's [`Code::source_start`] and [`Code::source_end`] index it.
-    pub fn syntax(&self, root: &Path, path: &str) -> Option<Parse> {
+    /// The code of the source file at `path` (relative to `root`), as the last plan read it.
+    /// A plan's [`Code::source_start`] and [`Code::source_end`] index it.
+    pub fn source(&self, root: &Path, path: &str) -> Option<Source> {
         let package = self.packages.iter().find(|package| package.root == root)?;
         let &file = package.files.get(path)?;
-        Some(semantics::parse(&self.db, file))
+        Some(if package.analyzed {
+            Source::Tree(semantics::parse(&self.db, file))
+        } else {
+            Source::Text(Arc::from(file.text(&self.db)))
+        })
     }
 
     /// The roots of every package this loader has planned.
@@ -448,6 +711,43 @@ impl Loader {
         if !self.stubs_installed {
             install_shipped_stubs(&self.db);
             self.stubs_installed = true;
+        }
+        // Conditional stubs (a `tools::file_ext` purity, say) count only for namespaces the
+        // package imports or depends on, so the metadata must be current before any purity
+        // read.
+        let namespace_file = parse_namespace(sources.namespace(&self.db));
+        let description = sources.description(&self.db);
+        let imports = normalized_imports(&namespace_file.imports);
+        let dependencies = parse_description_dependencies(description);
+        let package = parse_description_package(description);
+        let native_symbols = namespace_file.native_symbols;
+        match PackageMetadata::try_get(&self.db) {
+            Some(metadata) => {
+                if metadata.imports(&self.db) != &imports {
+                    metadata.set_imports(&mut self.db).to(imports);
+                }
+                if metadata.dependencies(&self.db) != &dependencies {
+                    metadata.set_dependencies(&mut self.db).to(dependencies);
+                }
+                if metadata.package(&self.db) != &package {
+                    metadata.set_package(&mut self.db).to(package);
+                }
+                if metadata.native_symbols(&self.db) != &native_symbols {
+                    metadata.set_native_symbols(&mut self.db).to(native_symbols);
+                }
+            }
+            None => {
+                let _: PackageMetadata = PackageMetadata::builder(
+                    imports,
+                    dependencies,
+                    BTreeSet::new(),
+                    package,
+                    native_symbols,
+                )
+                .durability(Durability::HIGH)
+                .attached_durability(Durability::LOW)
+                .new(&self.db);
+            }
         }
         let files: Vec<SourceFile> = sources
             .files(&self.db)
@@ -493,10 +793,11 @@ impl Loader {
         });
     }
 
-    /// Reads the package's sources. A file whose size and modification time are unchanged
-    /// since the last read is not read again.
+    /// Reads the package's sources. A file whose size, modification time and declared encoding
+    /// are unchanged since the last read is not read again.
     fn read(&mut self, root: &Path) -> Result<PackageInputs, LoadError> {
-        let description = read(&root.join("DESCRIPTION"))?;
+        let description = read_description(&root.join("DESCRIPTION"))?;
+        let encoding = SourceEncoding::of(&description);
         let namespace = match fs::read_to_string(root.join("NAMESPACE")) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -508,14 +809,15 @@ impl Loader {
         let mut stamps = FxHashMap::default();
         for path in paths {
             let absolute = root.join(&path);
+            // The encoding is part of the stamp, so declaring another one decodes every file again.
             let stamp = fs::metadata(&absolute)
-                .map(|metadata| (metadata.len(), metadata.modified().ok()))
+                .map(|metadata| (metadata.len(), metadata.modified().ok(), encoding))
                 .map_err(|error| LoadError::Io(absolute.clone(), error))?;
             let unchanged = stamp.1.is_some() && known.get(&path) == Some(&stamp);
             let text = if unchanged {
                 None
             } else {
-                Some(read(&absolute)?.replace("\r\n", "\n").replace('\r', "\n"))
+                Some(read_source(&absolute, encoding)?)
             };
             stamps.insert(path.clone(), stamp);
             files.push((path, text));
@@ -526,13 +828,14 @@ impl Loader {
             namespace,
             files,
             sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
+            data: datasets(root)?,
             compiled: compiled_fingerprint(&root.join("src"))?,
             strict: self.strict,
         })
     }
 
     /// Sets the analysis inputs to `files`, writing only what changed, and returns the
-    /// package's position and the files whose text is new.
+    /// package's position, the files whose text is new, and whether any input changed.
     ///
     /// Files load at high durability and drop to low on their first edit. Salsa skips
     /// verifying a memo that depends only on inputs of a durability nothing changed at, so a
@@ -544,7 +847,7 @@ impl Loader {
         namespace: String,
         texts: Vec<(String, Option<String>)>,
         strict: bool,
-    ) -> Result<(usize, Vec<SourceFile>), LoadError> {
+    ) -> Result<(usize, Vec<SourceFile>, bool), LoadError> {
         let position = match self
             .packages
             .iter()
@@ -570,6 +873,8 @@ impl Loader {
                     committed_fingerprint: None,
                     pending_fingerprint: None,
                     pending: None,
+                    analyzed: false,
+                    cached: None,
                 });
                 self.packages.len() - 1
             }
@@ -591,9 +896,7 @@ impl Loader {
                 (None, text) => {
                     let text = match text {
                         Some(text) => text,
-                        None => read(&root.join(&path))?
-                            .replace("\r\n", "\n")
-                            .replace('\r', "\n"),
+                        None => read_source(&root.join(&path), SourceEncoding::of(&description))?,
                     };
                     let file = SourceFile::builder(text, DocumentKind::Package)
                         .durability(Durability::HIGH)
@@ -610,69 +913,153 @@ impl Loader {
             package.files.retain(|path, _| kept.contains(path.as_str()));
         }
         let sources = package.sources;
+        let mut inputs_changed = !changed.is_empty();
         if sources.files(db) != &files {
             sources.set_files(db).to(files);
+            inputs_changed = true;
         }
         if sources.namespace(db) != &namespace {
             sources
                 .set_namespace(db)
                 .with_durability(Durability::LOW)
                 .to(namespace);
+            inputs_changed = true;
         }
         if *sources.strict(db) != strict {
             sources.set_strict(db).to(strict);
+            inputs_changed = true;
         }
         if sources.description(db) != &description {
             sources
                 .set_description(db)
                 .with_durability(Durability::LOW)
                 .to(description);
+            inputs_changed = true;
         }
-        Ok((position, changed))
+        Ok((position, changed, inputs_changed))
     }
 }
 
-/// `R/` code files in R's order: the `Collate` field's files first, as listed, then any
-/// file it leaves out in C-locale order, as `devtools::load_all` does.
+/// `R/` code files in R's order, by path relative to the root: those of `R/` and then those of
+/// its operating-system subdirectory (`R/unix/` or `R/windows/`), ordered by
+/// [`collate_code_files`].
 pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, LoadError> {
     let directory = root.join("R");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(LoadError::Io(directory, error)),
-    };
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_r_code(&name) && entry.path().is_file() {
-            names.push(name);
+    let mut paths = Vec::new();
+    for (subdirectory, prefix) in [(directory.clone(), ""), (directory.join(OS_TYPE), OS_TYPE)] {
+        let entries = match fs::read_dir(&subdirectory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(LoadError::Io(subdirectory, error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| LoadError::Io(subdirectory.clone(), error))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_r_code(&name) && entry.path().is_file() {
+                paths.push(if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                });
+            }
         }
     }
-    names.sort();
-    let mut ordered: Vec<String> = collate
-        .iter()
-        .filter(|name| names.contains(name))
-        .cloned()
-        .collect();
-    let mut seen: FxHashSet<String> = ordered.iter().cloned().collect();
-    for name in names {
-        if seen.insert(name.clone()) {
-            ordered.push(name);
-        }
-    }
-    Ok(ordered
+    Ok(collate_code_files(paths, collate)
         .into_iter()
-        .map(|name| format!("R/{name}"))
+        .map(|path| format!("R/{path}"))
         .collect())
 }
 
-/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides.
+/// Orders code files given by path relative to `R/` (`a.R`, `unix/b.R`) as a load runs them:
+/// the files the collation field lists first, in its order, then the rest as R CMD INSTALL
+/// lists them, the files of `R/` before those of a subdirectory and each group in C-locale
+/// order. R CMD INSTALL refuses a package whose collation field leaves a file out, while
+/// `devtools::load_all` appends it, and so does this.
+pub fn collate_code_files(mut paths: Vec<String>, collate: &[String]) -> Vec<String> {
+    paths.sort_by(|left, right| (left.contains('/'), left).cmp(&(right.contains('/'), right)));
+    let mut ordered: Vec<String> = collate
+        .iter()
+        .filter(|path| paths.contains(path))
+        .cloned()
+        .collect();
+    let mut seen: FxHashSet<String> = ordered.iter().cloned().collect();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            ordered.push(path);
+        }
+    }
+    ordered
+}
+
+/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides: its name starts
+/// with a letter or digit, which leaves out an editor's `.a.R.swp`, and its extension is one
+/// of R's code extensions, which leaves out `a.R~`.
 fn is_r_code(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
+    name.starts_with(|character: char| character.is_ascii_alphanumeric())
+        && Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
+}
+
+/// The dataset files of `data/`, as `data()` and R CMD INSTALL find them: `.rda` and `.RData`
+/// files, which `load()` reads, `.R` files, which `sys.source()` runs, and `.csv`, `.tab` and
+/// `.txt` tables, which `read.table()` reads.
+fn datasets(root: &Path) -> Result<Option<Datasets>, LoadError> {
+    let directory = root.join("data");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(LoadError::Io(directory, error)),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_dataset(&name) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| LoadError::Io(entry.path(), error))?;
+        if metadata.is_file() {
+            records.push((name, stamp(&metadata)));
+        }
+    }
+    if records.is_empty() {
+        return Ok(None);
+    }
+    records.sort();
+    let fingerprint = fnv1a(
+        records
+            .iter()
+            .map(|(name, stamp)| format!("{name}\0{stamp}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    );
+    Ok(Some(Datasets {
+        files: records
+            .into_iter()
+            .map(|(name, _)| format!("data/{name}"))
+            .collect(),
+        fingerprint,
+    }))
+}
+
+/// Whether a file in `data/` is a dataset a load reads. The R side picks the reader by the
+/// same extensions.
+pub fn is_dataset(name: &str) -> bool {
+    !name.starts_with('.')
+        && Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension,
+                    "R" | "r" | "rda" | "RData" | "rdata" | "csv" | "CSV" | "tab" | "txt" | "TXT"
+                )
+            })
 }
 
 /// The plan that turns `previous` (nothing, for a full load) into `next`. It looks inside only
@@ -686,6 +1073,7 @@ pub fn diff<'text>(
     if let Some(previous) = previous
         && Arc::ptr_eq(&previous.index, &next.index)
         && previous.sysdata == next.sysdata
+        && previous.data == next.data
         && previous.compiled == next.compiled
     {
         return Plan::unchanged(next);
@@ -782,9 +1170,10 @@ pub fn diff<'text>(
             source_start: span.source_start,
             source_end: span.source_end,
             registers_s4: false,
+            effect_free: true,
         }
     };
-    let eager_code = |path: &str, item: &IndexedItem| Code {
+    let eager_code = |path: &str, item: &IndexedItem, effect_free: bool| Code {
         name: None,
         path: path.to_owned(),
         line: item.span.line,
@@ -794,6 +1183,7 @@ pub fn diff<'text>(
         source_start: item.span.source_start,
         source_end: item.span.source_end,
         registers_s4: registers_s4(item),
+        effect_free,
     };
 
     // Lazy definitions are keyed by name, which only one item writes.
@@ -929,22 +1319,27 @@ pub fn diff<'text>(
     // A rerun statement must also see what it saw at load: when it reads a name that it or a
     // later statement rewrites, as `f <- memoise(f)` does, the earlier writers of that name
     // rerun first. Otherwise it would read the final value and, here, memoise twice.
-    let eager: Vec<(&str, &IndexedItem, bool)> = index
+    let eager: Vec<(&str, &IndexedItem, bool, bool)> = index
         .bindings
         .eager
         .iter()
-        .filter_map(|&at| {
+        .filter_map(|eager| {
+            let at = eager.at;
             let (path, item) = index.item_at(at)?;
-            Some((path, item, fresh.contains(&(at.0 as usize, at.1 as usize))))
+            let fresh = fresh.contains(&(at.0 as usize, at.1 as usize));
+            Some((path, item, fresh, eager.effect_free))
         })
         .collect();
     let mut writers: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
-    for (position, (_, item, _)) in eager.iter().enumerate() {
+    for (position, (_, item, _, _)) in eager.iter().enumerate() {
         for name in &item.binds {
             writers.entry(name).or_default().push(position);
         }
     }
-    let mut rerun: Vec<bool> = eager.iter().map(|(_, _, fresh)| full || *fresh).collect();
+    let mut rerun: Vec<bool> = eager
+        .iter()
+        .map(|(_, _, fresh, _)| full || *fresh)
+        .collect();
     // A lazy constant holds the value its initializer computed when it was forced, so like an
     // eager statement it is bound afresh when anything its initializer reaches changed.
     let constants: Vec<(&str, &str, &IndexedItem)> = if full {
@@ -965,7 +1360,7 @@ pub fn diff<'text>(
         if !full && !changed.is_empty() {
             let roots: Vec<&str> = eager
                 .iter()
-                .flat_map(|(_, item, _)| item.reads.iter().map(String::as_str))
+                .flat_map(|(_, item, _, _)| item.reads.iter().map(String::as_str))
                 .collect();
             let reaching: Vec<String> = reaching_changed(&roots, functions, &changed)
                 .into_iter()
@@ -990,7 +1385,7 @@ pub fn diff<'text>(
                 grew = true;
             }
         }
-        for (position, (_, item, _)) in eager.iter().enumerate() {
+        for (position, (_, item, _, _)) in eager.iter().enumerate() {
             if !rerun[position]
                 && !changed.is_empty()
                 && item
@@ -1027,12 +1422,14 @@ pub fn diff<'text>(
         .iter()
         .zip(&rerun)
         .filter(|(_, rerun)| **rerun)
-        .map(|((path, item, _), _)| eager_code(path, item))
+        .map(|((path, item, _, effect_free), _)| eager_code(path, item, *effect_free))
         .collect();
+    // A fresh load runs every eager statement, so positions in `eager` are positions in `run`.
+    let deferred_s4 = if full { deferred_s4(index) } else { None };
     // Another statement may make the same registration, which then stays.
     let registered: BTreeSet<&Registration> = eager
         .iter()
-        .flat_map(|(_, item, _)| &item.registrations)
+        .flat_map(|(_, item, _, _)| &item.registrations)
         .collect();
 
     let mut remove = BTreeSet::new();
@@ -1101,6 +1498,15 @@ pub fn diff<'text>(
         (Some(_), None) => SysdataChange::Remove,
         _ => SysdataChange::Keep,
     };
+    let data = match (
+        previous.and_then(|previous| previous.data.as_ref()),
+        &next.data,
+    ) {
+        (_, Some(new)) if full => Some(new.files.clone()),
+        (old, Some(new)) if old != Some(new) => Some(new.files.clone()),
+        (Some(_), None) => Some(Vec::new()),
+        _ => None,
+    };
     let compiled_changed = previous.map(|previous| previous.compiled) != Some(next.compiled)
         || index.namespace.dynamic_libraries != old.namespace.dynamic_libraries;
 
@@ -1141,7 +1547,9 @@ pub fn diff<'text>(
         bind,
         run_on_load: full || changed.contains(".onLoad"),
         run,
+        deferred_s4,
         sysdata,
+        data,
         s3_register,
         s3_unregister,
         s3_declared: s3_changed.then(|| declared.clone()),
@@ -1150,9 +1558,131 @@ pub fn diff<'text>(
             .filter(|libraries| !libraries.is_empty() || !full),
         exports_changed,
         keeps_names,
+        strict: index.strict,
         namespace: index.namespace.clone(),
         warnings,
     }
+}
+
+/// The package's [`DeferredS4`], positioned in its eager statements, when every S4 definition
+/// qualifies.
+fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
+    // Each name's writer count and the collation position of its first writer.
+    let mut writers: FxHashMap<&str, (u32, usize)> = FxHashMap::default();
+    let mut positions: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+    let mut position = 0;
+    for (file_position, file) in index.files.iter().enumerate() {
+        for (item_position, item) in file.items.items.iter().enumerate() {
+            for name in &item.binds {
+                writers.entry(name.as_str()).or_insert((0, position)).0 += 1;
+            }
+            positions.insert((file_position as u32, item_position as u32), position);
+            position += 1;
+        }
+    }
+    for item in index.files.iter().flat_map(|file| &file.items.items) {
+        for name in &item.load_writes {
+            writers.entry(name.as_str()).or_insert((0, usize::MAX)).0 += 1;
+        }
+    }
+    let mut definitions = Vec::new();
+    for (eager_position, eager) in index.bindings.eager.iter().enumerate() {
+        let at = eager.at;
+        let Some((_, item)) = index.item_at(at) else {
+            continue;
+        };
+        let registers = item.registrations.iter().any(|registration| {
+            matches!(
+                registration,
+                Registration::S4Class { .. }
+                    | Registration::S4Generic { .. }
+                    | Registration::S4Method { .. }
+            )
+        });
+        match &item.s4 {
+            Some(definition) => {
+                definitions.push((eager_position, *positions.get(&at)?, item, definition))
+            }
+            None if registers => return None,
+            None => {}
+        }
+    }
+    if definitions.is_empty() {
+        return None;
+    }
+    let mut classes = Vec::new();
+    let mut generics = Vec::new();
+    for (_, _, _, definition) in &definitions {
+        match definition {
+            S4Definition::Class { class } => classes.push(class.clone()),
+            S4Definition::Generic { generic } => generics.push(generic.clone()),
+            S4Definition::Method { .. } | S4Definition::Validity { .. } => {}
+        }
+    }
+    let mut foreign_generics = Vec::new();
+    let mut names = Vec::new();
+    for (_, position, item, definition) in &definitions {
+        let reaches_own = match definition {
+            S4Definition::Class { .. } | S4Definition::Generic { .. } => true,
+            S4Definition::Method { generic, .. } if generics.contains(generic) => true,
+            S4Definition::Method { generic, signature } => {
+                foreign_generics.push(generic.clone());
+                signature.iter().any(|class| classes.contains(class))
+            }
+            S4Definition::Validity { class } => classes.contains(class),
+        };
+        let reads_settled = item.reads.iter().all(|name| {
+            writers
+                .get(name.as_str())
+                .is_none_or(|&(count, first)| count == 1 && first < *position)
+        });
+        let writes_alone = item.binds.iter().all(|name| {
+            writers
+                .get(name.as_str())
+                .is_some_and(|&(count, _)| count == 1)
+        });
+        if !reaches_own || !reads_settled || !writes_alone {
+            return None;
+        }
+        names.extend(item.binds.iter().cloned());
+    }
+    let pure = definitions.iter().all(|(_, _, item, _)| {
+        item.reads.iter().all(|name| {
+            PURE_S4_READS.contains(&name.as_str()) || names.iter().any(|bound| bound == name)
+        })
+    });
+    let cache_key = pure.then(|| {
+        let mut hasher = Xxh3::new();
+        let mut field = |bytes: &[u8]| {
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        };
+        field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
+        field(index.package.as_bytes());
+        field(index.version.as_bytes());
+        for (_, _, item, _) in &definitions {
+            field(&item.hash.to_le_bytes());
+        }
+        format!("{:032x}", hasher.digest128())
+    });
+    names.extend(classes.iter().map(|class| format!(".__C__{class}")));
+    names.extend(
+        generics
+            .iter()
+            .map(|generic| format!(".__T__{generic}:{}", index.package)),
+    );
+    names.sort_unstable();
+    names.dedup();
+    foreign_generics.sort_unstable();
+    foreign_generics.dedup();
+    Some(DeferredS4 {
+        run: definitions.iter().map(|(position, ..)| *position).collect(),
+        classes,
+        generics,
+        foreign_generics,
+        names,
+        cache_key,
+    })
 }
 
 /// The names among `roots` whose call may read a changed binding, through any chain of lazy
@@ -1287,7 +1817,9 @@ impl Plan {
             unregister: Vec::new(),
             bind: Vec::new(),
             run: Vec::new(),
+            deferred_s4: None,
             sysdata: SysdataChange::Keep,
+            data: None,
             s3_register: Vec::new(),
             s3_unregister: Vec::new(),
             s3_declared: None,
@@ -1296,6 +1828,7 @@ impl Plan {
             exports_changed: false,
             keeps_names: true,
             run_on_load: false,
+            strict: state.index.strict,
             warnings: Vec::new(),
         }
     }
@@ -1308,6 +1841,7 @@ impl Plan {
             || !self.run.is_empty()
             || self.imports.is_some()
             || self.sysdata != SysdataChange::Keep
+            || self.data.is_some()
             || self.dynamic_libraries.is_some()
             || self.run_on_load
         {
@@ -1333,6 +1867,7 @@ impl Plan {
             && self.bind.is_empty()
             && self.run.is_empty()
             && self.sysdata == SysdataChange::Keep
+            && self.data.is_none()
             && self.s3_register.is_empty()
             && self.s3_unregister.is_empty()
             && self.dynamic_libraries.is_none()
@@ -1340,33 +1875,166 @@ impl Plan {
     }
 }
 
-/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE` and the code
-/// files in `R/`, so a change is noticed without reading a file. `src/` is left out: hashing it
-/// would cost a walk of the compiled sources before every command, and a rebuild is slow enough
-/// that it is asked for with `load_all()`.
+/// Parses `files` on threads of their own and returns at once, so the first reload of a
+/// package whose load index came from the cache finds the parses memoized. It leaves one core
+/// to the session, and an edit that reaches the analysis first cancels it.
+fn parse_detached(db: &RootDatabase, files: Vec<SourceFile>) {
+    let db = db.clone();
+    let spawned = thread::Builder::new()
+        .name("ry-loader-parse".to_owned())
+        .spawn(move || {
+            let workers = thread::available_parallelism()
+                .map_or(1, |count| count.get().saturating_sub(1).max(1))
+                .min(files.len());
+            thread::scope(|scope| {
+                for worker in 0..workers {
+                    let db = db.clone();
+                    let files = &files;
+                    let spawned = thread::Builder::new()
+                        .name("ry-loader-parse".to_owned())
+                        .stack_size(ANALYSIS_STACK_SIZE)
+                        .spawn_scoped(scope, move || {
+                            let parsed = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                                for &file in files.iter().skip(worker).step_by(workers) {
+                                    file_items(&db, file);
+                                    file_typing_mode(&db, file);
+                                }
+                            }));
+                            // A cancelled parse is redone by the plan that cancelled it.
+                            if let Err(cancelled) = parsed {
+                                drop(cancelled);
+                            }
+                        });
+                    // Parsing ahead only saves time: a plan parses what is left.
+                    if let Err(error) = spawned {
+                        drop(error);
+                    }
+                }
+            });
+        });
+    if let Err(error) = spawned {
+        drop(error);
+    }
+}
+
+/// Where a package's load index is cached, and the key of the sources it must match.
+struct IndexCache {
+    path: PathBuf,
+    key: u128,
+}
+
+/// The cache entry for `inputs`, which must hold the text of every file. The cache lives in
+/// the user's cache directory, one file per package root, and its key covers everything the
+/// load index is derived from: the sources, the strict setting, and the build of ry.
+fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
+    let directory = cache_directory()?;
+    let mut hasher = Xxh3::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
+    field(&[u8::from(inputs.strict)]);
+    field(inputs.description.as_bytes());
+    field(inputs.namespace.as_bytes());
+    for (path, text) in &inputs.files {
+        field(path.as_bytes());
+        field(text.as_ref()?.as_bytes());
+    }
+    let key = hasher.digest128();
+    let name = format!("{:016x}.bin", xxh3_64(root.as_os_str().as_encoded_bytes()));
+    Some(IndexCache {
+        path: directory.join("ry").join("load-index").join(name),
+        key,
+    })
+}
+
+/// Where a backend keeps the S4 metadata of the package at `root` ([`DeferredS4::cache_key`]),
+/// one file per package that each save replaces.
+pub fn s4_cache_path(root: &Path) -> Option<PathBuf> {
+    let name = format!("{:016x}.rds", xxh3_64(root.as_os_str().as_encoded_bytes()));
+    Some(cache_directory()?.join("ry").join("s4").join(name))
+}
+
+fn cache_directory() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
+}
+
+/// The cached load index, when there is one for exactly the cache's key. An entry that is
+/// missing, stale or unreadable means deriving the index again.
+fn read_index_cache(cache: &IndexCache) -> Option<CachedIndex> {
+    let bytes = fs::read(&cache.path).ok()?;
+    let (key, body) = bytes.split_at_checked(16)?;
+    if u128::from_le_bytes(key.try_into().ok()?) != cache.key {
+        return None;
+    }
+    let ((index, r_texts), _): ((PackageIndex, FxHashMap<String, String>), usize) =
+        bincode::serde::decode_from_slice(body, bincode::config::standard()).ok()?;
+    Some(CachedIndex {
+        index: Arc::new(index),
+        r_texts,
+    })
+}
+
+/// Saves `index` under the cache's key. The entry is written beside its final path and
+/// renamed into place, so a process reading it never sees half of it.
+fn write_index_cache(
+    cache: &IndexCache,
+    index: &PackageIndex,
+    r_texts: &FxHashMap<String, String>,
+) -> io::Result<()> {
+    let body = bincode::serde::encode_to_vec((index, r_texts), bincode::config::standard())
+        .map_err(io::Error::other)?;
+    let mut bytes = Vec::with_capacity(16 + body.len());
+    bytes.extend_from_slice(&cache.key.to_le_bytes());
+    bytes.extend_from_slice(&body);
+    let directory = cache
+        .path
+        .parent()
+        .ok_or_else(|| io::Error::other("the cache path has no directory"))?;
+    fs::create_dir_all(directory)?;
+    let mut temporary = cache.path.clone().into_os_string();
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    fs::write(&temporary, &bytes)?;
+    fs::rename(&temporary, &cache.path)
+}
+
+/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE`, the code
+/// files in `R/` and its operating-system subdirectory, `R/sysdata.rda` and the datasets in
+/// `data/`, so a change is noticed without reading a file. `src/` is left out: hashing it would
+/// cost a walk of the compiled sources before every command, and a rebuild is slow enough that
+/// it is asked for with `load_all()`.
 fn source_fingerprint(root: &Path) -> Option<u64> {
     let mut records = Vec::new();
     let mut record = |path: &Path| {
         if let Ok(metadata) = fs::metadata(path) {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |duration| duration.as_nanos());
-            records.push(format!(
-                "{}\0{}\0{modified}",
-                path.display(),
-                metadata.len()
-            ));
+            records.push(format!("{}\0{}", path.display(), stamp(&metadata)));
         }
     };
     record(&root.join("DESCRIPTION"));
     record(&root.join("NAMESPACE"));
-    let entries = fs::read_dir(root.join("R")).ok()?;
+    record(&root.join("R").join("sysdata.rda"));
+    let code = fs::read_dir(root.join("R")).ok()?;
+    let os_code = fs::read_dir(root.join("R").join(OS_TYPE))
+        .into_iter()
+        .flatten();
     // An editor's swap and backup files (`.a.R.swp`, `a.R~`) are not code, so saving one
     // reloads nothing.
-    for entry in entries.flatten() {
+    for entry in code.chain(os_code).flatten() {
         if is_r_code(&entry.file_name().to_string_lossy()) {
+            record(&entry.path());
+        }
+    }
+    for entry in fs::read_dir(root.join("data"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if is_dataset(&entry.file_name().to_string_lossy()) {
             record(&entry.path());
         }
     }
@@ -1374,8 +2042,73 @@ fn source_fingerprint(root: &Path) -> Option<u64> {
     Some(fnv1a(records.join("\n").as_bytes()))
 }
 
-fn read(path: &Path) -> Result<String, LoadError> {
-    fs::read_to_string(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))
+/// A file's size and modification time, as one record of a fingerprint.
+fn stamp(metadata: &fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    format!("{}\0{modified}", metadata.len())
+}
+
+/// How a package's code files are encoded, which `DESCRIPTION`'s `Encoding` field declares. R
+/// reads code in the declared encoding, so a latin1 package's files are decoded byte by byte;
+/// any other declaration is read as UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEncoding {
+    Utf8,
+    Latin1,
+}
+
+impl SourceEncoding {
+    pub fn of(description: &str) -> SourceEncoding {
+        match description_field(description, "Encoding") {
+            Some(name)
+                if ["latin1", "ISO-8859-1", "ISO8859-1"]
+                    .iter()
+                    .any(|latin1| name.eq_ignore_ascii_case(latin1)) =>
+            {
+                SourceEncoding::Latin1
+            }
+            _ => SourceEncoding::Utf8,
+        }
+    }
+
+    /// The text of a code file's `bytes`, or `None` when they are not valid UTF-8 in a UTF-8
+    /// package.
+    pub fn decode(self, bytes: Vec<u8>) -> Option<String> {
+        match self {
+            SourceEncoding::Latin1 => Some(bytes.iter().map(|&byte| char::from(byte)).collect()),
+            SourceEncoding::Utf8 => String::from_utf8(bytes).ok(),
+        }
+    }
+}
+
+/// A code file's text, decoded as `encoding` and with its line endings normalized to `\n`.
+fn read_source(path: &Path, encoding: SourceEncoding) -> Result<String, LoadError> {
+    let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
+    let text = encoding.decode(bytes).ok_or_else(|| {
+        let message = "the file is not valid UTF-8; a package whose code is latin1 declares \
+                       `Encoding: latin1` in DESCRIPTION";
+        LoadError::Io(
+            path.to_path_buf(),
+            io::Error::new(io::ErrorKind::InvalidData, message),
+        )
+    })?;
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+/// `DESCRIPTION`, which R reads as latin1 when it is not valid UTF-8.
+fn read_description(path: &Path) -> Result<String, LoadError> {
+    let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
+    Ok(String::from_utf8(bytes).unwrap_or_else(|error| {
+        error
+            .into_bytes()
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect()
+    }))
 }
 
 fn file_hash(path: &Path) -> Result<Option<u64>, LoadError> {
@@ -1410,17 +2143,12 @@ fn compiled_fingerprint(directory: &Path) -> Result<Option<u64>, LoadError> {
             if is_build_product(&path) {
                 continue;
             }
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |duration| duration.as_nanos());
             let relative = path
                 .strip_prefix(directory)
                 .unwrap_or(&path)
                 .display()
                 .to_string();
-            records.push(format!("{relative}\0{}\0{modified}", metadata.len()));
+            records.push(format!("{relative}\0{}", stamp(&metadata)));
         }
     }
     records.sort();

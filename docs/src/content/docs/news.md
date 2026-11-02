@@ -23,6 +23,37 @@ that runtime runs.
   `--unsafe-fixes` also applies spelling suggestions. The editor gets the same quick fixes plus a
   fix-all action, a call hierarchy, an outline with sections, folding, selection ranges, semantic
   highlighting and parameter-name hints.
+- **More lints, including lintr's.** `equals-na`, `vector-logic`, `length-sequence`, `class-equals`
+  and `length-test` are on by default, each with an unsafe fix. Eleven more ported from lintr, such
+  as `scalar-in`, `order-subset`, `matrix-apply` and `nzchar`, are available when you turn them on,
+  like `redundant-return` and `commented-code` ([diagnostic codes](/reference/diagnostic-codes)). A project that is set up for lintr keeps its
+  choices without a `ry.toml`, because ry reads the `linters` field of its
+  [`.lintr` file](/reference/configuration#a-lintr-lintr-file).
+- **`ry check --annotate` writes the types strict mode asks for.** It adds the inferred type of
+  each unannotated top-level function and binding, then lists what is left to type by hand. The
+  editor offers the same edit for one binding or a whole file
+  ([Moving a file to strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode)).
+- **`ry fmt --range`** formats only the lines you name, the editor formats a selection or the line you
+  just finished, and `ry fmt` runs in parallel ([Formatting](/guides/formatting#formatting-part-of-a-file)).
+- **Faster recursion and more of base R.** A function that only does scalar arithmetic, such as
+  recursive `fib`, compiles to frameless machine code (`fib(30)` takes 0.005 s against 0.9 s on GNU
+  R), and sockets work, so `parallel`'s PSOCK clusters run.
+- **A debugger and a console in VS Code.** `F5` runs the current script under a debugger with
+  breakpoints, stepping and variable inspection, "Debug test" does the same for one `test_that()`
+  block, and `Ctrl+Enter` sends the selection to a ry console. Other editors can use the same
+  debugger through `ry debug-adapter`. See [Editors](/guides/editors#running-and-debugging).
+- **The editor attaches to a running console.** "ry: Attach to Console" debugs the commands you type
+  in `ry run`, `browser()` stops at a `Browse[1]>` prompt that an editor can take over, "View Data"
+  opens a paged, sortable and filterable table of a data frame, matrix or `DataFrame`, and hover and
+  completion use the console's live values. R chunks in R Markdown and Quarto documents get the
+  language-server features too (Unix only for the console connection).
+- **Named arguments navigate.** Hover, go-to-definition, references and rename follow a named
+  argument to the parameter it fills, so renaming a parameter also rewrites `rate = 0.05` at its
+  call sites, and `pkg::name` goes to the package's stub or your own definition.
+- **Faster loads.** `ry load` binds R6 class generators lazily and holds back S4 methods on other
+  packages' generics, so a session that never touches them skips their setup
+  ([package loading](/reference/package-loading)), and a strict `ry load` runs its check while the
+  runtime starts.
 
 Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
 aarch64), macOS (Apple silicon and Intel) and Windows (x86_64). The macOS and Windows runtimes have

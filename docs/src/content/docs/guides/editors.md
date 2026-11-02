@@ -17,7 +17,8 @@ You get:
 - completion, including the fields of a list such as `person$` and the argument names a call
   still accepts (`second = `), with your own names ranked ahead of keywords and the library
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
-  callees of a project function, across files
+  callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
+  own package, to the definition
 - signature help with each parameter's type and default, and inlay hints for assignments, loop
   variables, and parameter names in calls with two or more positional arguments
   (`grow(principal = 100, years = 2)`)
@@ -30,16 +31,78 @@ You get:
   from a name to its argument, call, statement and block
 - semantic highlighting of parameters, called functions and package namespaces, which an R grammar
   cannot tell apart, with functions from packages and base R marked as library functions
-- formatting with the same rules as `ry fmt`
+- formatting with the same rules as `ry fmt`, for the whole document, a selection, or as you type
+  (a line break lays out the line you finished, and `}` the block it closes, when your editor
+  formats on type)
+- code lenses: "Run file" above a script, "Run test" and "Debug test" above each testthat
+  `test_that()` block, and a reference count above each function
 
 Hover, completion and inlay hints use inferred types even when type errors are switched off, so you
 get them on any R project.
 
 Rename edits the binding you picked and nothing else: a local `total`, a global `total`, and the
-word "total" in a string are three different things.
+word "total" in a string are three different things. A parameter and the named arguments that fill
+it are one binding, so renaming `rate` in `grow <- function(principal, rate)` also rewrites
+`grow(100, rate = 0.05)` in every file, and hover, go-to-definition and references work from either
+end. An abbreviated argument that R completes by partial matching (`grow(100, ra = 0.05)`) is not
+followed, so spell arguments out before you rename their parameter.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
+
+## R Markdown and Quarto
+
+In `.Rmd`, `.qmd`, and `.Rnw` documents, the R chunks get diagnostics, hover, completion,
+go-to-definition, references, rename, and formatting. The chunks are analyzed together as one
+script, so a name defined in a setup chunk resolves in every later chunk and in inline
+`` `r expr` `` code. Formatting rewrites only the R chunks and never touches the prose, and
+completion stays quiet in the prose. VS Code sends these documents to ry whichever extension
+(vscode-R, Quarto, or none) gives them their language.
+
+## Running and debugging
+
+The VS Code extension runs your code on ry's runtime.
+
+- **Run file** runs the current script with `ry run`, or a testthat file with `testthat::test_file()`
+  after loading your package.
+- **Send to console**: `Ctrl+Enter` (`Cmd+Enter` on macOS) sends the selection, or the current line
+  and moves to the next one, to a "ry console" terminal running `ry run`. `Ctrl+Alt+F` sends the
+  function around the cursor, and "ry: Source File in Console" sends the whole file.
+- **Debugging**: press `F5` in an R file, or click "Debug test" above a test. You get breakpoints,
+  stepping in, over and out, the call stack, each frame's variables, and evaluation in the selected
+  frame. `browser()` stops in the debugger, and so does an uncaught error, where it was raised.
+  Breakpoints in your package's `R/` files work while you debug one of its tests, because the
+  package is loaded with source references for the session.
+
+- **Attaching to the console**: "ry: Attach to Console" attaches the debugger to the `ry run`
+  console running in your workspace, starting one if none runs. Breakpoints in your files then stop
+  the commands you type, and `debug(f)` or `debugonce(f)` stops when `f` is next called, even for a
+  function you typed at the prompt. Attaching while the console waits at a `browser()` stop's
+  `Browse[1]>` prompt takes that stop over. Stopping the debug session leaves the console running.
+- **Viewing data**: right-click a data frame, matrix, vector or `DataFrame` in the debugger's
+  variables view and choose "View Data", or call `View(x)` in the console. The viewer fetches
+  100 rows at a time, so a large table opens instantly. Click a column header to sort by it
+  (again for descending, a third time for the original order), and type in "Filter rows" to keep
+  the rows where some cell contains the text, ignoring case. Both apply to the whole table in the
+  console, not only to the rows on screen; missing values sort first and match no filter, and each
+  row keeps its original row name or number.
+
+While a console runs in the workspace, hover and completion also use its live values: hovering
+`df` shows its class and size, and `df$` completes the columns of the data frame you actually
+loaded, which the type checker cannot know when the data comes from a file.
+
+On Windows, the console has no editor connection yet, so attaching, `View()` and live values
+are not available there.
+
+Other editors can launch the same debugger as `ry debug-adapter`, a
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) server on standard
+input and output. Its launch arguments are `program` (the script), `args`, `stopOnEntry`, `prelude`
+(R code run first, such as `load_all("."); library(testthat)`) and `testName` (run only the
+`test_that()` block with that description). To attach to a console instead, connect to the Unix
+socket named in `$TMPDIR/ry-<uid>/console-<pid>.json` and send `initialize` and then `attach`, as
+to any debug adapter. The data viewer's `ryView` and `ryTable` requests go to the debugger
+connection while the program is stopped, and to a second connection while the console waits for
+input.
 
 ## Settings
 

@@ -183,6 +183,11 @@ wall time. Several of them are worth knowing:
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
+  borrows the item's checks and the stub schemes instead of cloning them. The parser's green
+  builder shares tokens through a thread-local table but not nodes (`TreeBuilder`): hashing every
+  node to find a twin cost more time than allocating it, at the price of about 70 MiB more peak
+  memory on the finance benchmark.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
   only before a line that opens a call and follows a line that is exactly one complete top-level
   call, so no directive straddles a boundary.
@@ -192,6 +197,46 @@ wall time. Several of them are worth knowing:
   huge pages that a short-lived process never touched. What allocation still costs is mostly
   setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
   and huge-page options measured no difference.
+
+### The check cache
+
+The cold check already uses about 3.4 of 4 cores in every pass, so more parallelism cannot bring
+it much lower. What a repeat run can skip is work whose result is already known, so `ry check`
+records each file's findings in `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`). The salsa
+memos themselves are not persisted. Salsa 0.28 exposes no dependency graph to save, and its
+persistence feature would need every memo to serialize, including the process-wide `Ty` table.
+
+The record has a key fingerprint and, for each file, four facts:
+
+- **Key**: the ry version and binary, the configuration, the project root, the data files,
+  `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
+- **Content fingerprint**: the file's text.
+- **Surface fingerprint**: two parts. The first is the text with the body of each top-level
+  function definition left out, unless the body contains `<<-`, `->>`, or a call that declares or
+  attaches something (`assign`, `library`, `setClass` and the rest of `DECLARING_CALLS`). The
+  second is the file's share of every project-wide fold, listed by
+  `diagnostics::project_fold_shares`: its definitions, conditional writers, type declarations,
+  `globalVariables` names, S3 generics and attached packages. A body can feed a fold, as a
+  `UseMethod` call or a `#: @type` inside it does, so the shares come from the queries rather
+  than from the text. A new fold over the project's files must add its share there.
+- **Dependencies**: the files whose items the check read through interface edges, transitively
+  (`semantics::file_dependency_files`), plus the files that its findings point into.
+- **Imports used**: the `NAMESPACE` imports the file's code uses, which the `NAMESPACE` findings
+  depend on.
+
+A run with no changed file replays every finding without building a tree. A run whose changed
+files all keep their surface checks the changed files and the files whose dependencies include
+one of them. Every surface then matches the record, so the attached set and, when the imports used
+are unchanged, the `NAMESPACE` findings come from the record as well. Any other change checks every
+file. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
+an edit inside a body rechecks one or two files.
+
+A partial run still parses every file, because the project-wide maps fold every file's items. So
+it warms those folds across all cores, and that parse, about 0.3 s of the 0.45 s total, is its
+floor. Removing that floor would mean persisting the item trees. When invariants are on
+(`syntax::testing::enable_invariants`), every run that reuses findings is compared with a fresh
+run and panics on any difference. The seeded edit simulation in `cli.rs`
+(`cached_checks_match_fresh_checks_across_seeded_edits`) drives that comparison.
 
 ### From item to scheme
 
@@ -293,6 +338,17 @@ walk (`item_interface_edges`) go through `package_name` too. A structural edit r
 that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
 items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 
+`ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
+cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches two lookups to a coarser shape.
+`name_layer` reads a name's winner and conditional writers straight from the project-wide maps
+instead of interning a name and going through `package_name` or `test_name`, and `item_group`
+finds every cyclic group in one walk over the project (`project_interface_groups`) instead of one
+`interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+facts; only the granularity of the recorded dependencies changes. Under
+`syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
+per-item answer. The language server and a cached `ry check` keep the firewalls.
+
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions
 into the winners and, in the same loop, the names defined more than once. The duplicate check reads
@@ -333,6 +389,25 @@ Before the console or `ry load` starts R for a package, it calls the loader's `p
 the sources and derives this whole index on its own threads while base R loads. The first
 `load_all()` then waits for that to finish and only diffs.
 
+Deriving the index means parsing every file, which is most of a cold start, so the first plan of a
+package in a process caches the index across processes. The entry lives in the user's cache
+directory (`$XDG_CACHE_HOME/ry/load-index`, one file per package root), and its key hashes the
+`DESCRIPTION`, `NAMESPACE` and `R/` texts, the strict setting, and a fingerprint of the parser, the
+analysis, the shipped stubs and the loader that `crates/loader/build.rs` computes. On a hit the
+loader syncs the texts into the database without parsing them and hands the backend each file's text
+instead of its tree; ry's runtime then parses only the code it lowers, one top-level item at a time,
+which gives the same tree as the whole file would. Meanwhile a detached thread parses every file on
+a database handle of its own, so the first reload finds the parses memoized, and an edit that reaches
+the database first cancels it.
+
+A fresh load on ry's runtime may also hold back the package's S4 definitions until first use. The
+loader decides which (`DeferredS4` in `crates/loader/src/loader.rs` states the rules), and the
+methods package's class and generic lookups in `crates/interp/src/methods.rs` force them on a miss;
+[package loading](/reference/package-loading#s4-definitions) has the contract. When the definitions
+read only S4 constructors and their own names, the loader gives the unit a cache key
+(`DeferredS4::cache_key`), and `.ry_force_s4` in `runtime.R` restores the bindings a previous process
+saved instead of running the definitions.
+
 ### Diagnostics
 
 Diagnostics come in two layers over one source of truth:
@@ -364,8 +439,21 @@ and all the documents, and the database handle deliberately never leaves it.
 - **Diagnostics are pushed in two waves.** On every sync the server immediately publishes the
   parse-stage classes and the lints, tagged with the document version. Until the startup warm-up
   (below) ends, the first wave holds only the parse-stage classes, because the lints read the
-  project-wide name maps. At idle time it publishes the settled full set, without a version. The settled set is a faithful superset of the first, so the
-  second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
+  project-wide name maps. At idle time it publishes the settled full set, without a version.
+  Without a check record, the settled set is a faithful superset of the first, so the second wave
+  only ever adds findings.
+- **The first wave can come from the check record.** At initialize the worker loads
+  `.ry_cache/check.json`, computes the record's key exactly as `ry check` does
+  (`check_cache::key`, with the server's own binary), and runs `check_cache::plan` over the
+  project's files, reading the scripts it does not load from disk. A changed file the server did
+  not load has no surface there, which plans a fresh run and restores nothing. Every loaded file
+  the plan reuses gets its recorded findings, and the first wave shows them instead of the parse
+  stage until the settled wave replaces them. The server analyses only the package files and the
+  open documents while `ry check` analyses every file, so the two can differ in a finding that
+  depends on a script, and the settled wave corrects it. Any input change (an edit, a watched-file
+  event, a stub or `NAMESPACE` buffer, a file opened with other text) drops every restored finding,
+  because a change to one file can change another's findings. Restoring the record for a
+  300,000-line package costs about what a replaying `ry check` does, about 0.2 s. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
   scans every file's `library()` and `require()` calls and applies the attached set once, then

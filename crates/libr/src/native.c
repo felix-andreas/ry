@@ -60,8 +60,15 @@ typedef jmp_buf RyJumpBuffer;
 #endif
 
 /* Implemented in Rust (crates/libr/src/boundary.rs). */
-extern void ry_state_save(size_t *protect, size_t *vmax);
-extern void ry_state_restore(size_t protect, size_t vmax);
+typedef struct RyState {
+    size_t protect;
+    size_t vmax;
+    size_t api_depth;
+    size_t handout_base;
+} RyState;
+
+extern void ry_state_save(RyState *state);
+extern void ry_state_restore(const RyState *state);
 extern void ry_record_error(SEXP call, const char *message);
 extern void ry_record_warning(SEXP call, const char *message, int immediate);
 extern void ry_write_console(const char *text, size_t length, int is_error);
@@ -77,15 +84,14 @@ extern void ry_fatal_without_context(void) __attribute__((noreturn));
 typedef struct RyContext {
     RyJumpBuffer buffer;
     struct RyContext *previous;
-    size_t protect;
-    size_t vmax;
+    RyState state;
 } RyContext;
 
 static RyContext *ry_top_context = NULL;
 
 static void ry_context_push(RyContext *context)
 {
-    ry_state_save(&context->protect, &context->vmax);
+    ry_state_save(&context->state);
     context->previous = ry_top_context;
     ry_top_context = context;
 }
@@ -99,7 +105,7 @@ static void ry_context_pop(RyContext *context)
 static void ry_context_land(RyContext *context)
 {
     ry_top_context = context->previous;
-    ry_state_restore(context->protect, context->vmax);
+    ry_state_restore(&context->state);
 }
 
 /* Transfers control to the innermost context. The pending unwind is already recorded in Rust. */
@@ -990,6 +996,8 @@ RY_EXPORT char *R_HomeDir(void)
 }
 
 extern void ry_run_exit_finalizers(void);
+extern void ry_remove_session_temp_dir(void);
+void R_CleanTempDir(void);
 
 RY_EXPORT void R_Suicide(const char *message)
 {
@@ -1006,6 +1014,7 @@ RY_EXPORT void R_CleanUp(RySaveAction save, int status, int run_last)
     if (ptr_R_CleanUp != NULL)
         ptr_R_CleanUp(save, status, run_last);
     ry_run_exit_finalizers();
+    R_CleanTempDir();
     exit(status);
 }
 
@@ -1022,7 +1031,7 @@ RY_EXPORT int R_EditFiles(int nfile, const char **file, const char **title, cons
 
 RY_EXPORT void R_CleanTempDir(void)
 {
-    /* The runtime removes its session directory itself at exit. */
+    ry_remove_session_temp_dir();
 }
 
 RY_EXPORT void R_SaveGlobalEnv(void) {}
@@ -1614,23 +1623,6 @@ int ry_call_d2fcn(d2fcn_p d2fcn, int nr, int n, double *x, double *h, void *stat
     d2fcn(nr, n, x, h, state);
     ry_context_pop(&context);
     return 0;
-}
-
-/*
- * samin draws its Gaussian steps from norm_rand, which the Rmath module defines. The weak
- * reference lets this library link without that module; samin then reports the gap as an
- * error instead of crashing.
- */
-extern double norm_rand(void) __attribute__((weak));
-
-int ry_norm_rand_available(void)
-{
-    return norm_rand != NULL;
-}
-
-double ry_norm_rand(void)
-{
-    return norm_rand();
 }
 
 /* Fortran's error and warning calls. GNU R caps the message at 255 characters. */

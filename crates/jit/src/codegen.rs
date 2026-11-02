@@ -18,6 +18,7 @@ use {
             Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef, Ty,
             jump_target, status,
         },
+        native,
         runtime::{self, Activation, offset, outcome, reason, representation},
     },
     cranelift_codegen::{
@@ -34,13 +35,18 @@ use {
     cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
     cranelift_jit::{JITBuilder, JITModule},
     cranelift_module::{Module, default_libcall_names},
-    heap::object::{NA_INTEGER, NA_REAL_BITS, REFCOUNT_MAX, Sexp, SexpType, VECTOR_DATA_OFFSET},
+    heap::object::{
+        INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
+        RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS,
+        VECTOR_DATA_OFFSET,
+    },
     interp::{
         annotations,
         bytecode::{Arith, Op},
         values,
     },
     rustc_hash::FxHashMap,
+    smallvec::SmallVec,
     std::{cell::RefCell, sync::atomic::AtomicBool},
 };
 
@@ -106,6 +112,19 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
         let pointer = module.get_finalized_function(id);
         // SAFETY: the function was built with exactly this signature.
         Ok(unsafe { std::mem::transmute::<*const u8, Entry>(pointer) })
+    })
+}
+
+/// Runs `f` with the session's code module, creating it on first use.
+pub(crate) fn with_module<T>(
+    f: impl FnOnce(&mut JITModule) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    MODULE.with(|cell| {
+        let mut module_slot = cell.borrow_mut();
+        if module_slot.is_none() {
+            *module_slot = Some(new_module()?);
+        }
+        f(module_slot.as_mut().ok_or(Refusal("no code module"))?)
     })
 }
 
@@ -489,10 +508,117 @@ impl<'p, 'b> Translator<'p, 'b> {
             } => {
                 self.direct_call(position, before, steps, function, call, &args, entry, dst)?;
             }
+            Action::NativeCall {
+                steps,
+                native,
+                args,
+                dst,
+            } => {
+                for &(step, state) in steps {
+                    self.action(position, self.plan.state(state), step)?;
+                }
+                let budget = self
+                    .call(
+                        runtime::jit_depth_budget as *const () as usize,
+                        &[],
+                        Some(I64),
+                        &[],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let mut values: SmallVec<[Value; 5]> = SmallVec::new();
+                values.push(budget);
+                for (&register, &ty) in args.iter().zip(&native.params) {
+                    values.push(self.use_register(register, ty));
+                }
+                let signature = self.builder.import_signature(native::signature(
+                    &native.params,
+                    native.result,
+                    self.call_conv,
+                ));
+                let address = self.builder.ins().iconst(I64, native.address as i64);
+                let call = self
+                    .builder
+                    .ins()
+                    .call_indirect(signature, address, &values);
+                let &[status, value] = self.builder.inst_results(call) else {
+                    return Err(Refusal("a native call without a status and a value"));
+                };
+                // Nothing the native function did is visible, so tier 0 runs the call again
+                // and reports what went wrong.
+                let failed = self.deopt(inst.pc, before.id, None, position, reason::HANDOFF);
+                let ok = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, status, native::OK);
+                self.guard(ok, failed);
+                self.def_register(dst, native.result, value);
+                self.set_visible(&before, true);
+            }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
+            Action::Construct {
+                dst,
+                layout,
+                base,
+                count,
+            } => {
+                let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (16 * count.max(1)) as u32,
+                    3,
+                ));
+                for index in 0..count {
+                    let register = base + index;
+                    let ty = before.registers[register];
+                    let (kind, bits) = match ty {
+                        Ty::Dbl => {
+                            let value = self.use_register(register, ty);
+                            (
+                                representation::DOUBLE,
+                                self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
+                            )
+                        }
+                        Ty::Int | Ty::Lgl => {
+                            let value = self.use_register(register, ty);
+                            let kind = if ty == Ty::Int {
+                                representation::INTEGER
+                            } else {
+                                representation::LOGICAL
+                            };
+                            (kind, self.builder.ins().sextend(I64, value))
+                        }
+                        _ => (representation::BOXED, self.load_register(register)),
+                    };
+                    let kind = self.builder.ins().iconst(I64, kind as i64);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, kind, buffer, (16 * index) as i32);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, bits, buffer, (16 * index + 8) as i32);
+                }
+                let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
+                let layout = self.builder.ins().iconst(I32, i64::from(layout));
+                let count = iconst(&mut self.builder, count);
+                let value = self
+                    .call(
+                        runtime::jit_construct as *const () as usize,
+                        &[I64, I32, I64, I64],
+                        Some(I64),
+                        &[self.activation, layout, pointer, count],
+                    )
+                    .ok_or(Refusal("the record helper returned nothing"))?;
+                self.store_register(dst, value);
+                self.set_visible(&before, true);
+            }
             Action::Move { dst, src, ty } => {
-                let value = self.use_register(src, ty);
-                self.def_register(dst, ty, value);
+                // Only a scalar lives in a variable; any other value lives in the window.
+                if ty.is_unboxed() {
+                    let value = self.use_register(src, ty);
+                    self.def_register(dst, ty, value);
+                } else {
+                    let value = self.load_register(src);
+                    self.store_register(dst, value);
+                }
             }
             Action::Step {
                 effect,
@@ -544,6 +670,71 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let next = self.next_pc(position)?;
                 let fall = self.edge(position, next)?;
                 self.builder.ins().brif(object, taken, &[], fall, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessShape { src, layout } => {
+                let value = self.load_register(src);
+                let usable = self.plain_record(value);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                let record = self.builder.create_block();
+                self.builder.ins().brif(usable, record, &[], taken, &[]);
+                self.builder.switch_to_block(record);
+                // Only a record has a layout word, so it is read after the kind check.
+                let id = self
+                    .builder
+                    .ins()
+                    .load(I32, flags(), value, RECORD_LAYOUT_OFFSET as i32);
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, id, i64::from(layout));
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessTag { src, tag } => {
+                let value = self.load_register(src);
+                let found = self
+                    .call(
+                        runtime::jit_plain_tag as *const () as usize,
+                        &[I64],
+                        Some(I64),
+                        &[value],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, found, i64::from(tag));
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessLiteral { src, pattern } => {
+                self.box_reads(position, &before);
+                let value = self.load_register(src);
+                let pattern = self.builder.ins().iconst(I64, pattern.as_ptr() as i64);
+                let matched = self
+                    .call(
+                        runtime::jit_literal_matches as *const () as usize,
+                        &[I64, I64],
+                        Some(I32),
+                        &[value, pattern],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(matched, fall, &[], taken, &[]);
                 self.fill_edges()?;
                 return Ok(true);
             }
@@ -1184,7 +1375,8 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let join = self.builder.create_block();
                 self.builder.ins().brif(in_range, fast, &[], slow, &[]);
                 self.builder.switch_to_block(fast);
-                let width = if matches!(result, Ty::Int | Ty::Lgl) {
+                let list = types[0] == Ty::List;
+                let width = if !list && matches!(result, Ty::Int | Ty::Lgl) {
                     4
                 } else {
                     8
@@ -1193,6 +1385,15 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let scaled = self.builder.ins().imul_imm_s(offset, width);
                 let address = self.builder.ins().iadd(vector, scaled);
                 match result {
+                    // A list element speculated to be a scalar is checked, then unboxed; any
+                    // other element hands the read to tier 0.
+                    Ty::Int | Ty::Lgl | Ty::Dbl if list => {
+                        let element = self.builder.ins().load(I64, flags(), address, DATA);
+                        let fits = self.check(element, result);
+                        self.hand_off_unless(position, before, fits);
+                        let value = self.unbox(element, result);
+                        self.def_register(dst, result, value);
+                    }
                     Ty::Int | Ty::Lgl => {
                         let value = self.builder.ins().load(I32, flags(), address, DATA);
                         self.builder.def_var(self.integers[dst], value);
@@ -1430,6 +1631,69 @@ impl<'p, 'b> Translator<'p, 'b> {
                     )
                     .ok_or(Refusal("a helper without a result"))?;
                 self.store_register(dst, value);
+            }
+            Intrinsic::Field { layout, index } => {
+                let record = self.load_register(args[0]);
+                let usable = self.plain_record(record);
+                self.hand_off_unless(position, before, usable);
+                // Only a record has a layout word, so it is read after the kind check.
+                let id = self
+                    .builder
+                    .ins()
+                    .load(I32, flags(), record, RECORD_LAYOUT_OFFSET as i32);
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, id, i64::from(layout));
+                self.hand_off_unless(position, before, same);
+                let offset = i32::try_from(RECORD_DATA_OFFSET as u64 + u64::from(index) * 8)
+                    .map_err(|_| Refusal("a record field past the addressable slots"))?;
+                let raw = self.builder.ins().load(I64, flags(), record, offset);
+                let unboxed = if (index as usize) < UNBOXED_SLOTS {
+                    let mask =
+                        self.builder
+                            .ins()
+                            .load(I64, flags(), record, RECORD_UNBOXED_OFFSET as i32);
+                    let bit = self.builder.ins().band_imm_u(mask, 1i64 << index);
+                    self.builder.ins().icmp_imm_s(IntCC::NotEqual, bit, 0)
+                } else {
+                    self.builder.ins().iconst(I8, 0)
+                };
+                match result {
+                    Ty::Int | Ty::Lgl | Ty::Dbl => {
+                        let upper = self.builder.ins().ushr_imm_u(raw, 32);
+                        let tagged = |prefix: u32, builder: &mut FunctionBuilder| {
+                            builder
+                                .ins()
+                                .icmp_imm_s(IntCC::Equal, upper, i64::from(prefix))
+                        };
+                        let fits = match result {
+                            Ty::Int => tagged(INTEGER_PREFIX, &mut self.builder),
+                            Ty::Lgl => tagged(LOGICAL_PREFIX, &mut self.builder),
+                            _ => {
+                                let integer = tagged(INTEGER_PREFIX, &mut self.builder);
+                                let logical = tagged(LOGICAL_PREFIX, &mut self.builder);
+                                let either = self.builder.ins().bor(integer, logical);
+                                self.builder.ins().icmp_imm_s(IntCC::Equal, either, 0)
+                            }
+                        };
+                        let usable = self.builder.ins().band(unboxed, fits);
+                        self.hand_off_unless(position, before, usable);
+                        if result == Ty::Dbl {
+                            let value = self.builder.ins().bitcast(F64, MemFlagsData::new(), raw);
+                            self.builder.def_var(self.doubles[dst], value);
+                        } else {
+                            let value = self.builder.ins().ireduce(I32, raw);
+                            self.builder.def_var(self.integers[dst], value);
+                        }
+                    }
+                    _ => {
+                        // A raw slot would have to be boxed, which tier 0 does.
+                        let handle = self.builder.ins().icmp_imm_s(IntCC::Equal, unboxed, 0);
+                        self.hand_off_unless(position, before, handle);
+                        self.store_register(dst, raw);
+                    }
+                }
             }
         }
         Ok(())
@@ -2289,6 +2553,19 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     // Values.
 
+    /// Whether `value` is a record (or tuple, tag, dict or set) without a class.
+    fn plain_record(&mut self, value: Value) -> Value {
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let is_record = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Record as i64);
+        let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+        let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+        let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, object, 0);
+        self.builder.ins().band(is_record, plain)
+    }
+
     fn load_register(&mut self, register: usize) -> Value {
         self.builder
             .ins()
@@ -2561,7 +2838,17 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::CallBuiltin => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))
             .collect(),
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate => vec![operand(1)],
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => vec![operand(1)],
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => vec![operand(0)],
+        Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
+        Op::Move => vec![operand(1)],
+        Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
+        Op::MatchCondition => vec![operand(1)],
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }

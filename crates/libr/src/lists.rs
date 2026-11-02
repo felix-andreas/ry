@@ -3,7 +3,7 @@
 
 use {
     crate::{
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Pinned, Reachable, enter, error},
         globals::R_NamesSymbol,
         runtime,
     },
@@ -142,53 +142,101 @@ pub unsafe fn list_of(kind: SexpType, elements: &[Sexp]) -> ApiResult<Sexp> {
     Ok(list)
 }
 
+// Every reader below returns a field of its argument, which stays reachable through it, so the
+// results are `Reachable` and take no handle. A walk over list cells, the common case, skips the
+// boundary altogether, as `Rinternals.h` does inline.
+
 macro_rules! read_path {
     ($name:ident, $($step:ident),+) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
-            enter(|| {
-                let mut value = object;
-                $( value = triple(value, stringify!($name))?.$step(); )+
-                Ok(value)
-            })
+            let steps: &[unsafe fn(Sexp) -> Sexp] = &[$(Sexp::$step),+];
+            let mut value = object;
+            for step in steps {
+                if !is_cell(value.kind()) {
+                    return read_path_slowly(object, steps, stringify!($name));
+                }
+                value = step(value);
+            }
+            value
         }
     };
 }
 
+/// A path that reaches something other than a list cell, which `triple` accepts or reports.
+unsafe fn read_path_slowly(
+    object: Sexp,
+    steps: &[unsafe fn(Sexp) -> Sexp],
+    accessor: &str,
+) -> Sexp {
+    enter(|| {
+        let mut value = object;
+        for step in steps {
+            value = step(triple(value, accessor)?);
+        }
+        Ok(Reachable(value))
+    })
+    .0
+}
+
 /// GNU R lays an external pointer out as a cell, with the address in `CAR`, the protected
-/// value in `CDR` and the tag in `TAG`, and older native code reads it that way.
+/// value in `CDR` and the tag in `TAG`, and an environment with its frame in `CAR`, enclosure in
+/// `CDR` and hash table in `TAG`. Native code reads both that way: nanonext walks `CAR(env)`
+/// to look a binding up without the non-API `findVarInFrame`.
 macro_rules! read_cell {
-    ($name:ident, $step:ident, $external:expr) => {
+    ($name:ident, $step:ident, $external:expr, $environment:expr) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
-            enter(|| {
-                if object.kind() == SexpType::ExternalPtr {
+            if is_cell(object.kind()) {
+                return object.$step();
+            }
+            enter(|| match object.kind() {
+                SexpType::ExternalPtr => {
                     let read: unsafe fn(Sexp) -> Sexp = $external;
-                    return Ok(read(object));
+                    Ok(Pinned(read(object)))
                 }
-                Ok(triple(object, stringify!($name))?.$step())
+                SexpType::Environment => {
+                    let read: unsafe fn(Sexp) -> ApiResult<Sexp> = $environment;
+                    Ok(Pinned(read(object)?))
+                }
+                _ => Ok(Pinned(triple(object, stringify!($name))?.$step())),
             })
+            .0
         }
     };
 }
 
 // The address is handed back to native code as an opaque word and never dereferenced by ry. A
 // null address has no `Sexp` form, so it reads as `R_NilValue`.
-read_cell!(CAR, car, |object| unsafe {
-    Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
-});
-read_cell!(CDR, cdr, |object| unsafe { object.external_protected() });
+read_cell!(
+    CAR,
+    car,
+    |object| unsafe {
+        Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
+    },
+    |env| unsafe { crate::legacy::frame_pairlist(env) }
+);
+read_cell!(
+    CDR,
+    cdr,
+    |object| unsafe { object.external_protected() },
+    |env| unsafe { Ok(env.enclosure()) }
+);
 
 /// GNU R leaves a bytecode object's tag unused. ry keeps the inline caches there, and their
 /// environment binding cells are internal objects that native code walking a closure (lobstr's
 /// `obj_size`, for one) must not reach.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
+    if is_cell(object.kind()) {
+        return object.tag();
+    }
     enter(|| match object.kind() {
-        SexpType::ExternalPtr => Ok(object.external_tag()),
-        SexpType::Bytecode => Ok(runtime().nil()),
-        _ => Ok(triple(object, "TAG")?.tag()),
+        SexpType::ExternalPtr => Ok(Reachable(object.external_tag())),
+        SexpType::Bytecode | SexpType::Environment => Ok(Reachable(runtime().nil())),
+        _ => Ok(Reachable(triple(object, "TAG")?.tag())),
     })
+    .0
 }
 read_path!(CAAR, car, car);
 read_path!(CDAR, car, cdr);
@@ -371,16 +419,19 @@ macro_rules! closure_reader {
     ($name:ident, $kind:expr, $slot:ident) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
-            enter(|| Ok(checked_kind(object, $kind, stringify!($name))?.$slot()))
+            enter(|| {
+                Ok(Reachable(
+                    checked_kind(object, $kind, stringify!($name))?.$slot(),
+                ))
+            })
+            .0
         }
     };
 }
 
 closure_reader!(FORMALS, SexpType::Closure, car);
-closure_reader!(BODY, SexpType::Closure, cdr);
 closure_reader!(CLOENV, SexpType::Closure, tag);
 closure_reader!(R_ClosureFormals, SexpType::Closure, car);
-closure_reader!(R_ClosureBody, SexpType::Closure, cdr);
 closure_reader!(R_ClosureEnv, SexpType::Closure, tag);
 closure_reader!(PRVALUE, SexpType::Promise, car);
 closure_reader!(PRCODE, SexpType::Promise, cdr);
@@ -429,6 +480,27 @@ pub(crate) unsafe fn bytecode_expression(body: Sexp) -> Sexp {
     } else {
         body
     }
+}
+
+// GNU R hands native code a compiled body as its `BCODESXP`, and code that walks objects
+// (`lobstr::obj_size`, serializers) recurses into it. ry's bytecode holds binding cells and
+// type feedback that have no GNU R type, so native code sees the source expression instead.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn BODY(closure: Sexp) -> Sexp {
+    enter(|| {
+        Ok(bytecode_expression(
+            checked_kind(closure, SexpType::Closure, "BODY")?.cdr(),
+        ))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ClosureBody(closure: Sexp) -> Sexp {
+    enter(|| {
+        Ok(bytecode_expression(
+            checked_kind(closure, SexpType::Closure, "R_ClosureBody")?.cdr(),
+        ))
+    })
 }
 
 /// `R_ClosureExpr(f)`: the body of a closure as an expression, even when it is compiled.

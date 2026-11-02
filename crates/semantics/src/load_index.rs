@@ -16,7 +16,7 @@ use {
             parse_namespace_spec, string_content,
         },
         parse,
-        top_level::{TopLevel, item_super_assigned_names, item_top_level},
+        top_level::{TopLevel, item_effect_free, item_super_assigned_names, item_top_level},
     },
     rowan::{GreenNodeData, Language, NodeOrToken},
     rustc_hash::FxHashMap,
@@ -63,6 +63,27 @@ pub struct ItemLoad {
     /// calling the function it defines, reads, found without name resolution.
     pub mentions: Vec<String>,
     pub registrations: Vec<Registration>,
+    pub s4: Option<S4Definition>,
+}
+
+/// A top-level S4 definition in the shape a loader may defer until the class or generic it
+/// defines is first used: the call is bare (or binds a class generator), and every name and
+/// class in it is a string literal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum S4Definition {
+    /// `setClass("Name", ...)`.
+    Class { class: String },
+    /// `setGeneric("name", function(...) standardGeneric("name"))`. Without its own
+    /// definition, `setGeneric` wraps an existing function and says so, which cannot wait.
+    Generic { generic: String },
+    /// `setMethod("generic", signature, ...)` or `setReplaceMethod`, whose generic is named as
+    /// R stores it (`name<-` for a replacement).
+    Method {
+        generic: String,
+        signature: Vec<String>,
+    },
+    /// `setValidity("Class", ...)`.
+    Validity { class: String },
 }
 
 /// A class or method an item registers as a side effect, which a reload must undo when the
@@ -100,6 +121,7 @@ fn item_load(node: Option<&SyntaxNode>, text: &str) -> ItemLoad {
             function: false,
             mentions: Vec::new(),
             registrations: Vec::new(),
+            s4: None,
         };
     };
     let definition = binding_definition(node);
@@ -119,6 +141,7 @@ fn item_load(node: Option<&SyntaxNode>, text: &str) -> ItemLoad {
         binding: definition.map(|(name, _)| name),
         mentions,
         registrations: registrations(node),
+        s4: s4_definition(node),
     }
 }
 
@@ -259,6 +282,9 @@ pub struct PackageIndex {
     /// Which names are lazy and where their definitions are. An edit inside a function body
     /// leaves it equal, so the analysis hands back the same `Arc`.
     pub bindings: Arc<PackageBindings>,
+    /// Strict mode covers some file, through the project's configuration or a file's own
+    /// `# typing: strict` comment, so a host checks the package before it runs any of it.
+    pub strict: bool,
 }
 
 /// The package's top-level names and how they load.
@@ -272,10 +298,23 @@ pub struct PackageBindings {
     /// The item that defines each lazy name, as a position in [`PackageIndex::files`] and a
     /// position among that file's items.
     pub lazy: FxHashMap<String, (u32, u32)>,
-    /// The items that run at load, in collation order, positioned as in `lazy`.
-    pub eager: Vec<(u32, u32)>,
+    /// The items that run at load, in collation order.
+    pub eager: Vec<EagerItem>,
     /// The lazy constants of strict files, in collation order, positioned as in `lazy`.
     pub constants: Vec<(u32, u32)>,
+}
+
+/// An item that runs at load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EagerItem {
+    /// Positioned as in [`PackageBindings::lazy`].
+    pub at: (u32, u32),
+    /// Running it binds names, registers classes and loads other packages, and has no other
+    /// effect: it defines a function, or it is a statement of a strict file that
+    /// [`item_effect_free`] accepts.
+    /// A host may run such an item before the strict check of the package has finished,
+    /// because nothing it does is visible outside the session the check may still refuse.
+    pub effect_free: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +357,7 @@ pub struct IndexedItem {
     /// writes can only land while `.onLoad`, or something it calls, runs.
     pub load_writes: Vec<String>,
     pub registrations: Vec<Registration>,
+    pub s4: Option<S4Definition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +496,7 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                 mentions: load.mentions,
                 load_writes,
                 registrations: load.registrations,
+                s4: load.s4,
             }
         })
         .collect();
@@ -479,6 +520,11 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         })
         .collect();
     let bindings = package_bindings(db, sources);
+    let strict = *sources.strict(db)
+        || sources
+            .files(db)
+            .iter()
+            .any(|file| *file_typing_mode(db, file.file) == Some(TypingMode::Strict));
     Arc::new(PackageIndex {
         package: description_field(description, "Package").unwrap_or_default(),
         version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
@@ -486,6 +532,7 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         namespace: namespace_spec(db, sources).clone(),
         bindings,
         files,
+        strict,
     })
 }
 
@@ -530,7 +577,7 @@ pub fn package_bindings(db: &dyn Db, sources: PackageSources) -> Arc<PackageBind
         // later or second write would change what a late evaluation reads.
         let lazy = match &item.kind {
             BindKind::Function => true,
-            BindKind::Constant { mentions } => mentions.iter().all(|name| {
+            BindKind::Constant { reads } => reads.iter().all(|name| {
                 writers
                     .get(name.as_str())
                     .is_none_or(|&(count, first)| count == 1 && first < position)
@@ -552,19 +599,20 @@ pub fn package_bindings(db: &dyn Db, sources: PackageSources) -> Arc<PackageBind
             at,
             item.binding.as_deref(),
             matches!(item.kind, BindKind::Constant { .. }),
+            item.effect_free,
         ));
     }
     // A binding is lazy when its name is, which only the whole package decides.
     let is_lazy = |name: Option<&str>| name.is_some_and(|name| names.get(name) == Some(&true));
     let eager = located
         .iter()
-        .filter(|(_, name, _)| !is_lazy(*name))
-        .map(|(at, _, _)| *at)
+        .filter(|(_, name, _, _)| !is_lazy(*name))
+        .map(|&(at, _, _, effect_free)| EagerItem { at, effect_free })
         .collect();
     let constants = located
         .iter()
-        .filter(|(_, name, constant)| *constant && is_lazy(*name))
-        .map(|(at, _, _)| *at)
+        .filter(|(_, name, constant, _)| *constant && is_lazy(*name))
+        .map(|(at, _, _, _)| *at)
         .collect();
     let lazy = lazy_items
         .into_iter()
@@ -594,15 +642,20 @@ struct ItemBinds {
     /// Names its `<<-` assignments write while `.onLoad` runs.
     load_writes: Vec<String>,
     kind: BindKind,
+    /// See [`EagerItem::effect_free`].
+    effect_free: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BindKind {
     /// A function definition, lazy unless another item writes its name.
     Function,
-    /// A constant of a strict file, lazy when the names its value mentions allow it.
+    /// A pure constant of a strict file, or an R6 generator, lazy when the names evaluating
+    /// its value reads allow it. A constant counts every name its value mentions, since a pure
+    /// function it calls may read them; a generator counts only its immediate reads, because
+    /// its methods read the namespace when they are called, lazy or not.
     Constant {
-        mentions: Vec<String>,
+        reads: Vec<String>,
     },
     Other,
 }
@@ -620,20 +673,36 @@ pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc
                 .binding
                 .as_ref()
                 .is_some_and(|binding| binding.function);
-            let constant = strict
-                && is_constant_candidate(item)
-                && loaded
-                    .get(index)
-                    .is_some_and(|loaded| *item_top_level(db, loaded.item) == TopLevel::Constant);
+            // A generator is lazy in any file, a constant only in a strict one, and the
+            // registration screens out every other item before the classification runs.
+            let generator = item
+                .registrations
+                .iter()
+                .any(|registration| matches!(registration, Registration::R6Class { .. }));
+            let top_level = (is_constant_candidate(item) && (strict || generator))
+                .then(|| loaded.get(index))
+                .flatten()
+                .map(|loaded| item_top_level(db, loaded.item));
+            let reads = match top_level {
+                Some(TopLevel::Constant) if strict => Some(&item.mentions),
+                Some(TopLevel::Generator) => Some(&item.reads),
+                _ => None,
+            };
+            let effect_free = function
+                || (strict
+                    && loaded
+                        .get(index)
+                        .is_some_and(|loaded| *item_effect_free(db, loaded.item)));
             ItemBinds {
+                effect_free,
                 binds: item.binds.clone(),
                 binding: item.binding.as_ref().map(|binding| binding.name.clone()),
                 load_writes: item.load_writes.clone(),
                 kind: if function {
                     BindKind::Function
-                } else if constant {
+                } else if let Some(reads) = reads {
                     BindKind::Constant {
-                        mentions: item.mentions.clone(),
+                        reads: reads.clone(),
                     }
                 } else {
                     BindKind::Other
@@ -653,15 +722,20 @@ pub fn file_is_strict(db: &dyn Db, sources: PackageSources, file: SourceFile) ->
     }
 }
 
-/// Classifies the items of a strict `file` that `package_index` may bind as lazy constants,
-/// so a host can derive those facts across cores before it joins them.
-pub fn classify_constants(db: &dyn Db, sources: PackageSources, file: SourceFile) {
+/// Classifies the top-level statements of a strict `file`, which decides which constants
+/// `package_index` binds lazily and which eager items are effect-free, so a host can derive
+/// those facts across cores before it joins them.
+pub fn classify_top_level(db: &dyn Db, sources: PackageSources, file: SourceFile) {
     if !file_is_strict(db, sources, file) {
         return;
     }
     let loaded = &file_load_index(db, file).items;
     for (item, loaded) in file_items(db, file).items.iter().zip(loaded) {
-        if is_constant_candidate(item) {
+        if !item
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.function)
+        {
             item_top_level(db, loaded.item);
         }
     }
@@ -808,6 +882,71 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
         _ => None,
     };
     registration.into_iter().collect()
+}
+
+/// The [`S4Definition`] `node` is, if it has that shape.
+fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
+    let (call, generator) = match binding_definition(node) {
+        Some((_, value)) => (value, true),
+        None => (node.clone(), false),
+    };
+    let Call {
+        callee, arguments, ..
+    } = call_parts(&call)?;
+    let argument = |position: usize, name: &str| -> Option<&SyntaxNode> {
+        arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some(name))
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .filter(|argument| argument.name.is_none())
+                    .nth(position)
+            })
+            .map(|argument| &argument.value)
+    };
+    let string_argument =
+        |position: usize, name: &str| argument(position, name).and_then(string_literal);
+    if generator && callee != "setClass" {
+        return None;
+    }
+    match callee.as_str() {
+        "setClass" => Some(S4Definition::Class {
+            class: string_argument(0, "Class")?,
+        }),
+        "setGeneric" => {
+            let generic = string_argument(0, "name")?;
+            (argument(1, "def")?.kind() == SyntaxKind::FUNCTION_DEF)
+                .then_some(S4Definition::Generic { generic })
+        }
+        "setMethod" | "setReplaceMethod" => {
+            let generic = string_argument(0, "f")?;
+            let signature = argument(1, "signature")?;
+            let signature = match string_literal(signature) {
+                Some(class) => vec![class],
+                None => {
+                    let call = call_parts(signature)?;
+                    if !matches!(call.callee.as_str(), "signature" | "c") {
+                        return None;
+                    }
+                    call.arguments
+                        .iter()
+                        .map(|argument| string_literal(&argument.value))
+                        .collect::<Option<Vec<String>>>()?
+                }
+            };
+            let generic = if callee == "setReplaceMethod" {
+                format!("{generic}<-")
+            } else {
+                generic
+            };
+            Some(S4Definition::Method { generic, signature })
+        }
+        "setValidity" => Some(S4Definition::Validity {
+            class: string_argument(0, "Class")?,
+        }),
+        _ => None,
+    }
 }
 
 /// The text R evaluates for `node`: inline annotations erased, with their line breaks kept so

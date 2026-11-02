@@ -5,7 +5,8 @@
 # applies a plan that touches only the items that changed.
 #
 # A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
-# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The host defines the
+# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The backend's
+# `.ry_await_verdict()` returns once the host lets the package's effects run. The host defines the
 # transport, `.ry_request(root, full)` (which returns the plan) and `.ry_commit(root)`, and
 # creates the session's state, `.ry_packages` (one entry per loaded package root) and
 # `.ry_timing`, since a host may cache the compiled functions across sessions and state must
@@ -36,9 +37,12 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (length(plan$warnings)) {
     for (warning_text in plan$warnings) warning(warning_text, call. = FALSE)
   }
-  # Switching `export_all` changes what is exported even when no file changed.
-  resync <- !identical(state$export_all, export_all)
+  helpers <- .ry_helpers(state, root, export_all, plan$full || !plan$noop)
+  # Switching `export_all` changes what is exported even when no file changed, and so does
+  # sourcing the helpers again.
+  resync <- !identical(state$export_all, export_all) || (!plan$full && !is.null(helpers))
   if (!plan$full && plan$noop && current && !resync) {
+    state$changed <- character()
     .ry_commit(root)
     if (!quiet && report_noop) {
       message(sprintf("%s is up to date.", plan$package))
@@ -47,17 +51,29 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   if (plan$full) {
     state <- .ry_new_package(plan, root)
+  } else if (.ry_reaches_deferred_s4(state, plan)) {
+    .ry_force_s4(state)
   }
   state$export_all <- export_all
+  state$namespace_spec <- plan$namespace
   # Exports are resynced by scanning every name in the namespace, which a reload that only
   # rebinds existing names cannot change.
   plan$keeps_names <- isTRUE(plan$keeps_names) && !resync
+  if (!plan$full) {
+    .ry_refuse_missing_s3(state, plan)
+  }
   # A statement that fails leaves the namespace partly updated, so the attached package
   # environment follows it either way rather than mixing two versions.
   applied <- FALSE
   on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
+  if (!is.null(helpers)) {
+    .ry_source_helpers(state, helpers)
+  }
   applied <- TRUE
+  # The names this load rebound or removed, which `ry test` reruns the tests of first. `NULL`
+  # when the load ran code, which may have changed anything.
+  state$changed <- if (plan$full) NULL else plan$touched
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
@@ -65,11 +81,78 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   .ry_phase("attach")
   .ry_commit(root)
+  .ry_update_importers(state)
   if (!quiet) {
     elapsed <- proc.time()[["elapsed"]] - started
-    message(.ry_summary(plan, elapsed))
+    held <- if (is.null(state$s4_deferred)) 0L else length(state$s4_deferred$run)
+    message(.ry_summary(plan, elapsed, held))
   }
   invisible(state$ns)
+}
+
+# A reload that would leave a declared S3 method without its function is refused before it
+# changes anything, as R refuses such a package. When the reload runs statements or reads
+# `sysdata.rda`, either may define the function, so `.ry_register_s3` checks after them instead.
+.ry_refuse_missing_s3 <- function(state, plan) {
+  if (length(plan$run_path) || !identical(plan$sysdata, "keep")) {
+    return(invisible())
+  }
+  for (method in plan$s3_register) {
+    name <- method$`function`
+    bound <- name %in% plan$bind_name ||
+      (!(name %in% plan$remove) && exists(name, envir = state$ns, inherits = FALSE))
+    if (!bound) {
+      stop(sprintf("object '%s' not found whilst loading namespace '%s'", name, state$name),
+           call. = FALSE)
+    }
+  }
+}
+
+# The testthat helpers, `tests/testthat/helper*.R`, which `load_all()` sources into the
+# namespace when it exports everything, as `pkgload` does, so they are at hand interactively.
+# A helper may compute a value from the package's code, so a reload sources them again when the
+# load changed anything or the helpers' names, sizes or modification times changed, and returns
+# NULL otherwise.
+.ry_helpers <- function(state, root, export_all, rerun) {
+  files <- if (isTRUE(export_all)) {
+    sort(list.files(file.path(root, "tests", "testthat"), pattern = "^helper.*\\.[rR]$",
+                    full.names = TRUE))
+  } else {
+    character()
+  }
+  if (!length(files)) {
+    return(if (length(state$helper_names)) list(files = character(), stamp = NULL))
+  }
+  info <- file.info(files, extra_cols = FALSE)
+  stamp <- paste(files, info$size, as.numeric(info$mtime), collapse = "\n")
+  if (!rerun && identical(state$helpers_stamp, stamp)) {
+    return(NULL)
+  }
+  list(files = files, stamp = stamp)
+}
+
+# Names a helper bound are removed before the helpers run again, so a deleted helper leaves
+# nothing behind. The stamp is recorded only once every helper ran, so a helper that failed
+# runs again on the next load.
+.ry_source_helpers <- function(state, helpers) {
+  ns <- state$ns
+  if (length(state$helper_names)) {
+    rm(list = intersect(state$helper_names, names(ns)), envir = ns)
+  }
+  state$helpers_stamp <- NULL
+  before <- names(ns)
+  on.exit(state$helper_names <- setdiff(names(ns), before))
+  keep <- isTRUE(getOption("keep.source", interactive()))
+  for (file in helpers$files) {
+    withCallingHandlers(
+      sys.source(file, envir = ns, chdir = TRUE, keep.source = keep),
+      error = function(error) {
+        message(sprintf("Error while loading %s", file))
+      }
+    )
+  }
+  state$helpers_stamp <- helpers$stamp
+  .ry_sync_exports(ns, state$namespace_spec, state$export_all)
 }
 
 # With `options(ry.load.verbose = TRUE)`, reports how long each phase of a load took.
@@ -81,20 +164,67 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   .ry_timing$last <- now
 }
 
-# Reloads every package loaded through ry whose sources changed. `ry repl` calls it before
-# each command when it sees a change on disk, and it keeps `.Last.value`.
-.ry_autoreload <- function() {
+# Reloads the packages whose sources changed, including one whose load failed, which has no
+# state yet. A console calls it before a command when the host sees a change on disk, and it
+# keeps `.Last.value`.
+.ry_autoreload <- function(roots = .ry_changed_roots()) {
   last <- .Last.value
-  for (root in ls(.ry_packages, all.names = TRUE)) {
+  for (root in roots) {
+    export_all <- .ry_packages[[root]]$export_all
     tryCatch(
-      .ry_load(root, .ry_packages[[root]]$export_all, attach = TRUE, full = FALSE,
-               quiet = FALSE, report_noop = FALSE),
+      .ry_load(root, if (is.null(export_all)) TRUE else export_all, attach = TRUE,
+               full = FALSE, quiet = FALSE, report_noop = FALSE),
       error = function(error) {
         message("ry: reloading ", root, " failed: ", conditionMessage(error))
       }
     )
   }
   invisible(last)
+}
+
+# `system.file()` as `pkgload` shims it, for a package loaded from source: a path is looked up in
+# `inst/` first and then at the root, because installing moves the contents of `inst/` to the
+# top. Package code reaches this through the namespace's imports and other code through
+# `tools:ry`; any other package gets base R's.
+system.file <- function(..., package = "base", lib.loc = NULL, mustWork = FALSE) {
+  root <- if (is.null(lib.loc)) .ry_source_root(package)
+  if (is.null(root)) {
+    return(base::system.file(..., package = package, lib.loc = lib.loc, mustWork = mustWork))
+  }
+  if (!...length()) {
+    return(root)
+  }
+  inst <- file.path(root, "inst", ...)
+  top <- file.path(root, ...)
+  in_inst <- file.exists(inst)
+  files <- ifelse(in_inst, inst, top)[in_inst | file.exists(top)]
+  if (length(files)) {
+    sub("/$", "", normalizePath(files, winslash = "/"))
+  } else if (mustWork) {
+    stop("no file found", call. = FALSE)
+  } else {
+    ""
+  }
+}
+
+# The root of the package named `package` when the loaded namespace of that name is one ry
+# loaded from source.
+.ry_source_root <- function(package) {
+  if (!is.character(package) || length(package) != 1L || !isNamespaceLoaded(package)) {
+    return(NULL)
+  }
+  ns <- asNamespace(package)
+  for (root in ls(.ry_packages, all.names = TRUE)) {
+    if (identical(.ry_packages[[root]]$ns, ns)) return(root)
+  }
+  NULL
+}
+
+# A lazy `View()`: the editor connected to the console pages through `x` and formats only the
+# rows it shows, where utils' version formats the whole object first.
+View <- function(x, title) {
+  if (missing(title)) title <- paste("Data:", deparse(substitute(x))[1])
+  invisible(.ry_view(x, title))
 }
 
 .ry_find_root <- function(path) {
@@ -122,6 +252,10 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 
 .ry_new_package <- function(plan, root) {
   name <- plan$package
+  previous <- .ry_packages[[root]]
+  if (!is.null(previous)) {
+    .ry_drop_deferred_s4(previous)
+  }
   .ry_teardown(name)
   for (package in plan$depends) {
     if (!(paste0("package:", package) %in% search())) {
@@ -161,9 +295,37 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   state
 }
 
+# Another package loaded from source that imports this one holds copies of its bindings, which
+# this load replaced, so its imports are rebuilt from its own `NAMESPACE` directives, and its
+# attached environment follows, since it may re-export an import. This load has already
+# succeeded, so an importer whose directives no longer fit (it imports a name this load
+# removed) keeps its old imports and gets a warning rather than failing the load.
+.ry_update_importers <- function(state) {
+  for (root in ls(.ry_packages, all.names = TRUE)) {
+    importer <- .ry_packages[[root]]
+    if (identical(importer$name, state$name) || is.null(importer$import_directives) ||
+        !isNamespaceLoaded(importer$name) ||
+        !identical(asNamespace(importer$name), importer$ns) ||
+        !(state$name %in% names(getNamespaceInfo(importer$ns, "imports")))) {
+      next
+    }
+    rebuilt <- tryCatch({
+      .ry_import(importer$ns, importer$name, importer$import_directives)
+      TRUE
+    }, error = function(error) {
+      warning(sprintf("%s's imports could not be rebuilt, so it keeps the old ones: %s",
+                      importer$name, conditionMessage(error)), call. = FALSE)
+      FALSE
+    })
+    if (rebuilt && !is.null(importer$package_env)) {
+      .ry_sync_package_env(importer)
+    }
+  }
+}
+
 # A namespace that other namespaces import cannot be unloaded, which is the normal case when
-# several development packages import each other, so it is unregistered instead and its
-# importers keep their copies until they reload.
+# several development packages import each other, so it is unregistered instead, and
+# the load that follows rebuilds its importers' copies (see `.ry_update_importers`).
 .ry_teardown <- function(name) {
   package <- paste0("package:", name)
   if (package %in% search()) {
@@ -185,6 +347,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   keep <- isTRUE(getOption("keep.source", interactive()))
   if (!is.null(plan$imports)) {
     .ry_import(ns, state$name, plan$imports)
+    state$import_directives <- plan$imports
   }
   .ry_phase("imports")
   .ry_sources(state, plan)
@@ -199,10 +362,19 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_bind_lazily(state, plan, keep)
   }
   .ry_phase("bind lazily")
+  if (plan$full && !is.null(plan$deferred_s4) && .ry_may_defer_s4(state, plan$deferred_s4)) {
+    .ry_defer_s4(state, plan$deferred_s4)
+  }
   if (length(plan$run_path)) {
     previous <- options(topLevelEnvironment = ns)
     on.exit(options(previous), add = TRUE)
     for (i in seq_along(plan$run_path)) {
+      # Code that runs at load may reach a deferred class or generic, which runs the
+      # definitions placed before it, and the rest then run here in their places.
+      if (!is.null(state$s4_deferred) && i %in% state$s4_deferred$run) {
+        next
+      }
+      state$s4_cursor <- i
       withCallingHandlers(
         .ry_run(state, plan, i, keep),
         error = function(error) {
@@ -211,7 +383,12 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       )
     }
   }
+  state$s4_cursor <- NULL
   .ry_phase("run")
+  # Everything above only binds names, registers classes and loads imported packages, unless a
+  # statement the plan did not mark effect-free ran, and that one waited. `data/*.R`, compiled
+  # code and hooks may have effects.
+  .ry_await_verdict()
   if (!identical(plan$sysdata, "keep")) {
     if (length(state$sysdata)) {
       rm(list = intersect(state$sysdata, ls(ns, all.names = TRUE)), envir = ns)
@@ -222,8 +399,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       character()
     }
   }
+  if (!is.null(plan$data)) {
+    .ry_load_data(state, plan$data)
+  }
   if (isNamespaceLoaded("methods") && (plan$full || isTRUE(plan$registers_s4)) &&
-      .ry_has_s4_metadata(ns)) {
+      .ry_has_s4_metadata(ns, state$s4_deferred$names)) {
     methods::cacheMetaData(ns, TRUE, ns)
   }
   .ry_phase("S4 caches")
@@ -257,9 +437,241 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
 }
 
+# Reads the datasets of `data/` into the namespace's lazy data the way `data()` reads them, as
+# pkgload does: `::` finds them there, and attaching copies them onto the search path.
+.ry_load_data <- function(state, files) {
+  lazydata <- getNamespaceInfo(state$ns, "lazydata")
+  rm(list = ls(lazydata, all.names = TRUE), envir = lazydata)
+  for (path in files) {
+    file <- file.path(state$root, path)
+    name <- sub("\\.[^.]*$", "", basename(path))
+    table <- function(...) {
+      assign(name, utils::read.table(file, header = TRUE, as.is = FALSE, ...), envir = lazydata)
+    }
+    switch(tolower(sub("^.*\\.", "", path)),
+      r = sys.source(file, envir = lazydata, chdir = TRUE),
+      rda = , rdata = load(file, envir = lazydata),
+      csv = table(sep = ";"),
+      tab = , txt = table()
+    )
+  }
+}
+
+# A fresh load may hold back the package's S4 definitions (`plan$deferred_s4`, which the
+# loader's `DeferredS4` documents) until code first reaches one of them: each name they bind is
+# a promise that runs them all, and so is looking up one of their classes or generics by name.
+.ry_defer_s4 <- function(state, deferred) {
+  # A method for another package's generic is stored under that package's name, which only the
+  # generic itself knows.
+  # Their methods are found through the tables in the generic's own environment, which
+  # `getMethod()` and `existsMethod()` read without any lookup the interpreter sees, so each
+  # table becomes a promise that runs the definitions too.
+  tables <- list()
+  for (name in deferred$foreign_generics) {
+    generic <- get(name, envir = state$ns, mode = "function")
+    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, attr(generic, "package")))
+    environment <- environment(generic)
+    for (table in intersect(c(".MTable", ".AllMTable"), names(environment))) {
+      tables[[length(tables) + 1L]] <- list(
+        environment = environment, name = table, value = get(table, envir = environment)
+      )
+    }
+  }
+  state$s4_deferred <- deferred
+  state$s4_tables <- tables
+  for (table in tables) {
+    .ry_s4_table_placeholder(state, table)
+  }
+  force <- function() .ry_force_s4(state)
+  generics <- c(deferred$generics, deferred$foreign_generics)
+  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, generics, force))
+  for (name in deferred$names) {
+    .ry_s4_placeholder(state, name)
+  }
+}
+
+.ry_s4_table_placeholder <- function(state, table) {
+  delayedAssign(table$name, {
+    .ry_force_s4(state)
+    get(table$name, envir = table$environment, inherits = FALSE)
+  }, assign.env = table$environment)
+}
+
+# Puts back the method tables of other packages' generics that the held-back definitions
+# replaced with promises.
+.ry_restore_s4_tables <- function(state) {
+  for (table in state$s4_tables) {
+    assign(table$name, table$value, envir = table$environment)
+  }
+  state$s4_tables <- NULL
+}
+
+.ry_s4_placeholder <- function(state, name) {
+  delayedAssign(name, {
+    .ry_force_s4(state)
+    get(name, envir = state$ns, inherits = FALSE)
+  }, assign.env = state$ns)
+}
+
+# Runs the held-back definitions. During the load that deferred them, only those placed before
+# the statement now running run here, and that statement's loop runs the rest in their places.
+.ry_force_s4 <- function(state) {
+  deferred <- state$s4_deferred
+  if (is.null(deferred)) {
+    return(invisible())
+  }
+  state$s4_deferred <- NULL
+  .ry_restore_s4_tables(state)
+  ns <- state$ns
+  held <- .Internal(ryLoaderDeferred(state$root))
+  loading <- !is.null(state$s4_cursor)
+  previous <- options(topLevelEnvironment = ns)
+  on.exit({
+    options(previous)
+    .Internal(ryLoaderUndefer(state$root))
+  }, add = TRUE)
+  # Only a run of all the definitions at once is the same in every process, so only that one
+  # is saved or restored.
+  cache <- if (!loading && !is.null(deferred$cache_key)) {
+    .ry_s4_cache(ns, deferred$cache_key, held$cache)
+  }
+  # Restoring overwrites the placeholders, and one left in the attached package environment
+  # now finds the restored value, so only a run, or a name the restored file lacks, needs them
+  # gone. Removing a binding from a large frame is slow, which is why a restore skips it.
+  restored <- .ry_restore_s4(ns, cache)
+  .ry_remove_s4_placeholders(state, if (isTRUE(restored)) {
+    setdiff(deferred$names, attr(restored, "names_bound"))
+  } else {
+    deferred$names
+  })
+  if (!isTRUE(restored)) {
+    before <- names(ns)
+    signalled <- FALSE
+    withCallingHandlers(
+      for (k in seq_along(held$position)) {
+        if (loading && held$position[[k]] >= state$s4_cursor) {
+          break
+        }
+        withCallingHandlers(
+          .Internal(ryLoaderRunDeferred(state$root, ns, k)),
+          error = function(error) {
+            message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
+          }
+        )
+      },
+      message = function(condition) signalled <<- TRUE,
+      warning = function(condition) signalled <<- TRUE
+    )
+    # A message or warning must show again in the next process, so a run that signalled one
+    # is not saved.
+    if (!is.null(cache) && !signalled) {
+      .ry_save_s4(ns, cache, setdiff(names(ns), before))
+    }
+  }
+  if (!loading) {
+    methods::cacheMetaData(ns, TRUE, ns)
+    .ry_sync_exports(ns, state$namespace_spec, state$export_all)
+    if (!is.null(state$package_env)) {
+      .ry_sync_package_env(state)
+    }
+  }
+  invisible()
+}
+
+# Where the held-back definitions' bindings are saved, and what must match for a later process
+# to restore them: the definitions' own text (`key`), the version of R, which fixes the methods
+# package, and the versions of the packages the namespace imports, whose classes and generics
+# the definitions may extend.
+.ry_s4_cache <- function(ns, key, path) {
+  if (is.null(path)) {
+    return(NULL)
+  }
+  imports <- setdiff(unique(names(getNamespaceImports(ns))), "base")
+  versions <- vapply(imports, function(package) {
+    as.character(getNamespaceVersion(asNamespace(package)))
+  }, "")
+  list(path = path, key = key, r = R.version.string, imports = versions)
+}
+
+# Binds what an earlier process saved for exactly these definitions, which then need not run,
+# and reports whether it did. A saved file that is missing, stale or unreadable means running
+# them, as it does on the first load.
+.ry_restore_s4 <- function(ns, cache) {
+  if (is.null(cache) || !file.exists(cache$path)) {
+    return(FALSE)
+  }
+  saved <- tryCatch(readRDS(cache$path), error = function(error) NULL)
+  if (!identical(saved[c("key", "r", "imports")], cache[c("key", "r", "imports")])) {
+    return(FALSE)
+  }
+  list2env(saved$values, envir = ns)
+  structure(TRUE, names_bound = names(saved$values))
+}
+
+# The attached package environment shares the placeholder bindings, and the methods package
+# searches it too, so a copy left there would make the definitions read their own placeholder.
+.ry_remove_s4_placeholders <- function(state, names) {
+  for (environment in list(state$ns, state$package_env)) {
+    if (length(names) && !is.null(environment)) {
+      rm(list = names[names %in% names(environment)], envir = environment)
+    }
+  }
+}
+
+# Saves the bindings the held-back definitions made, replacing the file atomically so that a
+# concurrent load reads either the old file or the new one. Failing to save only costs the
+# next process the run, so a failure is reported as a warning and the load goes on.
+.ry_save_s4 <- function(ns, cache, names) {
+  saved <- c(cache[c("key", "r", "imports")], list(values = mget(names, envir = ns)))
+  directory <- dirname(cache$path)
+  temporary <- paste0(cache$path, ".", Sys.getpid())
+  tryCatch({
+    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
+    saveRDS(saved, temporary)
+    file.rename(temporary, cache$path)
+  }, error = function(error) {
+    unlink(temporary)
+    warning(sprintf("could not save the S4 metadata cache: %s", conditionMessage(error)),
+      call. = FALSE)
+  })
+  invisible()
+}
+
+# A reload that reruns or undoes an S4 registration, or rebinds a name the held-back
+# definitions bind, applies to them as already run.
+.ry_reaches_deferred_s4 <- function(state, plan) {
+  deferred <- state$s4_deferred
+  !is.null(deferred) && (isTRUE(plan$registers_s4) || length(plan$unregister) > 0L ||
+    any(c(plan$remove, plan$bind_name) %in% deferred$names))
+}
+
+# A fresh load replaces the namespace, so what the old one held back is never needed: running
+# it would only register classes that the teardown removes again.
+.ry_drop_deferred_s4 <- function(state) {
+  deferred <- state$s4_deferred
+  if (is.null(deferred)) {
+    return(invisible())
+  }
+  state$s4_deferred <- NULL
+  .ry_restore_s4_tables(state)
+  .Internal(ryLoaderUndefer(state$root))
+  rm(list = deferred$names[deferred$names %in% names(state$ns)], envir = state$ns)
+}
+
+# Builds the imports in a fresh environment, so a name an exporter dropped goes too, and a
+# directive that fails leaves the namespace with the imports it had. Copying the old bindings
+# aside instead would force the promises that lazy definitions import as.
 .ry_import <- function(ns, name, imports) {
-  environment <- parent.env(ns)
-  rm(list = ls(environment, all.names = TRUE), envir = environment)
+  previous <- parent.env(ns)
+  previous_info <- getNamespaceInfo(ns, "imports")
+  environment <- new.env(parent = parent.env(previous), hash = TRUE)
+  attr(environment, "name") <- attr(previous, "name")
+  parent.env(ns) <- environment
+  done <- FALSE
+  on.exit(if (!done) {
+    parent.env(ns) <- previous
+    setNamespaceInfo(ns, "imports", previous_info)
+  })
   canonical <- list(base = TRUE)
   for (directive in imports) {
     package <- directive$package
@@ -280,6 +692,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     )
   }
   setNamespaceInfo(ns, "imports", canonical)
+  assign("system.file", system.file, envir = environment)
+  done <- TRUE
 }
 
 .ry_unregister <- function(ns, registration) {
@@ -297,23 +711,33 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   invisible()
 }
 
-.ry_has_s4_metadata <- function(ns) {
+.ry_has_s4_metadata <- function(ns, except = character()) {
   names <- names(ns)
+  names <- names[!(names %in% except)]
   any(startsWith(names, ".__C__")) || any(startsWith(names, ".__T__")) ||
     any(startsWith(names, ".__A__"))
 }
 
 # The table entry is a promise for the namespace binding, so registering a method does not
-# force its lazy definition. A reload re-registers every method it rebinds.
+# force its lazy definition. A reload re-registers every method it rebinds. A declared method
+# whose function the package does not define refuses the load, as R does.
 .ry_register_s3 <- function(ns, name, method) {
+  if (!exists(method$`function`, envir = ns, inherits = FALSE)) {
+    stop(sprintf("object '%s' not found whilst loading namespace '%s'", method$`function`, name),
+         call. = FALSE)
+  }
   generic <- method$generic
+  .ry_remove_s3_hook(name, method)
   if (grepl("::", generic, fixed = TRUE)) {
     package <- sub("::.*$", "", generic)
     generic <- sub("^.*::", "", generic)
     if (!isNamespaceLoaded(package)) {
-      setHook(packageEvent(package, "onLoad"), function(...) {
+      hook <- function(...) {
         .ry_register_s3_in(ns, generic, method$class, method$`function`, asNamespace(package))
-      })
+      }
+      setHook(packageEvent(package, "onLoad"), hook)
+      assign(.ry_s3_hook_key(name, method), list(package = package, hook = hook),
+             envir = .ry_s3_hooks)
       return(invisible())
     }
     .ry_register_s3_in(ns, generic, method$class, method$`function`, asNamespace(package))
@@ -332,7 +756,28 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
                 get(function_name, envir = ns, inherits = FALSE), assign.env = table)
 }
 
+# The delayed registrations `.ry_register_s3` left for packages not yet loaded, by package,
+# generic and class, so a reload replaces its hook instead of adding another.
+.ry_s3_hooks <- new.env(hash = TRUE, parent = emptyenv())
+
+.ry_s3_hook_key <- function(name, method) {
+  paste(name, method$generic, method$class, sep = "\r")
+}
+
+.ry_remove_s3_hook <- function(name, method) {
+  key <- .ry_s3_hook_key(name, method)
+  entry <- .ry_s3_hooks[[key]]
+  if (is.null(entry)) {
+    return(invisible())
+  }
+  rm(list = key, envir = .ry_s3_hooks)
+  event <- packageEvent(entry$package, "onLoad")
+  kept <- Filter(function(hook) !identical(hook, entry$hook), getHook(event))
+  setHook(event, kept, "replace")
+}
+
 .ry_unregister_s3 <- function(ns, method) {
+  .ry_remove_s3_hook(getNamespaceName(ns), method)
   generic <- sub("^.*::", "", method$generic)
   lookup <- ns
   if (grepl("::", method$generic, fixed = TRUE)) {
@@ -456,6 +901,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 # whichever environment forces it first, both see the value. Stale names always go, since
 # running or undoing code (S4 registrations, `assign()`) changes names no plan lists; `touched`
 # limits the copying to the bindings a plan changed, and without it everything is copied.
+# Datasets come last and win over an export of the same name, as in R's attachNamespace(). A
+# plan that reloads them lists no `touched`, so only a full copy needs them.
 .ry_sync_package_env <- function(state, touched = NULL, keeps_names = FALSE) {
   environment <- state$package_env
   ns <- state$ns
@@ -469,8 +916,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   exported <- names(exports)
   imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
+  lazydata <- getNamespaceInfo(ns, "lazydata")
+  datasets <- names(lazydata)
   present <- names(environment)
-  stale <- present[!(present %in% exported) & !(present %in% imported)]
+  stale <- present[!(present %in% exported) & !(present %in% imported) &
+                     !(present %in% datasets)]
   if (length(stale)) rm(list = stale, envir = environment)
   if (!is.null(touched)) {
     names <- c(touched[touched %in% exported], exported[!(exported %in% present)])
@@ -484,16 +934,24 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (length(exported)) {
     .ry_internal("importIntoEnv", environment, exported, ns, exported)
   }
+  if (length(datasets)) {
+    .ry_internal("importIntoEnv", environment, datasets, lazydata, datasets)
+  }
 }
 
-.ry_summary <- function(plan, elapsed) {
+.ry_summary <- function(plan, elapsed, held = 0L) {
   count <- function(n, singular, plural) sprintf("%d %s", n, if (n == 1L) singular else plural)
   timing <- sprintf("in %.0f ms", elapsed * 1000)
   if (plan$full) {
-    return(sprintf("Loaded %s: %s bound lazily, %s run, %s.", plan$package,
-                   count(length(plan$bind_name), "definition", "definitions"),
-                   count(length(plan$run_path), "top-level statement", "top-level statements"),
-                   timing))
+    parts <- c(
+      sprintf("%s bound lazily", count(length(plan$bind_name), "definition", "definitions")),
+      sprintf("%s run", count(length(plan$run_path) - held, "top-level statement",
+                              "top-level statements")),
+      if (held > 0L) {
+        sprintf("%s held back until first use", count(held, "S4 definition", "S4 definitions"))
+      }
+    )
+    return(sprintf("Loaded %s: %s, %s.", plan$package, paste(parts, collapse = ", "), timing))
   }
   parts <- c(
     if (length(plan$bind_name)) count(length(plan$bind_name), "definition rebound", "definitions rebound"),
@@ -503,6 +961,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       count(length(plan$unregister), "registration undone", "registrations undone")
     },
     if (!is.null(plan$imports)) "imports rebuilt",
+    if (!is.null(plan$data)) "datasets reloaded",
     if (length(plan$s3_register) || length(plan$s3_unregister)) {
       count(length(plan$s3_register) + length(plan$s3_unregister), "S3 method re-registered",
             "S3 methods re-registered")

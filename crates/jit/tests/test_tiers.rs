@@ -169,6 +169,102 @@ fn seeds_agree_across_tiers() {
             "(n = 4L)",
             false,
         ),
+        // Num and Str functions, which compiled code calls directly as leaves, and an
+        // unchecked division by zero, which is an error.
+        (
+            "s <- 0\nfor (i in 1:n) { s <- Num.add(s, Num.sqrt(i * 1)); if (Str.is_empty(\"\")) s <- Num.add(s, 1) }\nNum.div_trunc(s, 0L)",
+            "(n = 30L)",
+            true,
+        ),
+        (
+            "s <- 0L\nfor (i in 1:n) s <- Num.bitwise_xor(s, Num.shift_left_by(i, 2L))\ns",
+            "(n = 30L)",
+            false,
+        ),
+        // Record fields of every slot kind, which reach the field intrinsic.
+        (
+            "r <- (x = 1.5, y = 2L, z = TRUE, w = \"s\")\ns <- 0\nfor (i in 1:n) { s <- s + r$x * r$y; if (r$z) s <- s + 1 }\nlist(s, r$w)",
+            "(n = 50L)",
+            false,
+        ),
+        // A record of another layout mid-loop fails the layout guard.
+        (
+            "r <- (x = 1, y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 3L) r <- (y = 5, x = 10); s <- s + r$x }\ns",
+            "(n = 8L)",
+            false,
+        ),
+        // The same layout with an integer where a double was fails the slot check.
+        (
+            "r <- (x = 1, y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 3L) r <- (x = 4L, y = 2); s <- s + r$x }\ns",
+            "(n = 8L)",
+            false,
+        ),
+        // A list where a record was takes `$`'s own path.
+        (
+            "r <- (x = 1, y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 3L) r <- list(x = 7); s <- s + r$x }\ns",
+            "(n = 8L)",
+            false,
+        ),
+        // Tuple items with constant indices reach the slot intrinsic; a list where the tuple was
+        // hands the read back to `[[`'s path.
+        (
+            "t <- (1.5, 2L, \"s\")\ns <- 0\nfor (i in 1:n) { if (i == 6L) t <- list(10, 20L, \"l\"); s <- s + t[[1L]] * t[[2]] }\nlist(s, t[[3L]])",
+            "(n = 9L)",
+            false,
+        ),
+        // A list element read speculates on the doubles it saw, and an integer, a length-two
+        // vector and a logical each fail the check and take tier 0's path.
+        (
+            "l <- list(1.5, 2.5, 3.5)\ns <- 0\nfor (i in 1:n) { if (i == 5L) l[[2L]] <- 7L; if (i == 7L) l[[2L]] <- c(1, 2); if (i == 9L) l[[2L]] <- TRUE; s <- s + l[[2L]] * l[[(i %% 3L) + 1L]] }\ns",
+            "(n = 12L)",
+            false,
+        ),
+        // A compiled `match` over tags, tuples, records and literals, with nested payloads.
+        (
+            "s <- 0\nfor (i in 1:n) { v <- if (i %% 4L == 0L) :Some((i, 2)) else if (i %% 4L == 1L) :None else if (i %% 4L == 2L) (x = i, y = 1L) else \"k\"\ns <- s + match (v) { :Some((a, b)) => a * b, :None => 1, (x = a, y = 1L) => a, \"k\" | \"j\" => 0.5, _ => 100 } }\ns",
+            "(n = 40L)",
+            false,
+        ),
+        // Guarded arms in a compiled loop: the guard reads the pattern's names and a loop
+        // variable, and a failing guard falls through to the next arm.
+        (
+            "s <- 0\nfor (i in 1:n) { v <- if (i %% 3L == 0L) :Some(i) else (i, 2L)\ns <- s + match (v) { :Some(x) if (x > 10L) => x, :Some(x) => -1, (a, b) if (a * b > i + 5L) => a, (a, b) => 0.5 } }\ns",
+            "(n = 30L)",
+            false,
+        ),
+        // A guard that calls a closure on a bound name evaluates that call in a scratch frame,
+        // beside an inlined guard, in every tier.
+        (
+            "big <- function(z) z > 4\ns <- 0\nfor (i in 1:n) { s <- s + match (:Some(i %% 7L)) { :Some(x) if (big(x)) => 1, :Some(x) if (abs(x - 2L) < 1L) => 10, _ => 0.5 } }\ns",
+            "(n = 30L)",
+            false,
+        ),
+        // A guard on a string binding, and a tuple wider than the unboxed slot mask, whose
+        // trailing numbers are boxed while earlier ones wait to be stored.
+        (
+            "s <- 0\nfor (i in 1:n) { t <- (i + 1.5, i + 2.5, i + 3.5, i + 4.5, i + 5.5, i + 6.5, i + 7.5, i + 8.5, i + 9.5, i + 10.5, i + 11.5, i + 12.5, i + 13.5, i + 14.5, i + 15.5, i + 16.5, i + 17.5, i + 18.5, i + 19.5, i + 20.5, i + 21.5, i + 22.5, i + 23.5, i + 24.5, i + 25.5, i + 26.5, i + 27.5, i + 28.5, i + 29.5, i + 30.5, i + 31.5, i + 32.5, i + 33.5, i + 34.5, i + 35.5, i + 36.5, i + 37.5, i + 38.5, i + 39.5, i + 40.5, i + 41.5, i + 42.5, i + 43.5, i + 44.5, i + 45.5, i + 46.5, i + 47.5, i + 48.5, i + 49.5, i + 50.5, i + 51.5, i + 52.5, i + 53.5, i + 54.5, i + 55.5, i + 56.5, i + 57.5, i + 58.5, i + 59.5, i + 60.5, i + 61.5, i + 62.5, i + 63.5, i + 64.5, i + 65.5, i + 66.5, i + 67.5, i + 68.5, i + 69.5, i + 70.5)\ns <- s + t[[66L]] + t[[70L]]\ns <- s + match (:Some(if (i %% 3L == 0L) \"aaa\" else \"b\")) { :Some(x) if (x == \"aaa\") => 1, _ => 0.5 } }\ns",
+            "(n = 30L)",
+            false,
+        ),
+        // Records, tuples and tags built in compiled code from unboxed doubles, integers,
+        // logicals and NA, and from a boxed vector, read back through fields and `match`.
+        (
+            "s <- 0\nk <- 0L\nfor (i in 1:n) { r <- (a = i * 0.5, b = i, c = i > 3L, d = if (i == 7L) NA_real_ else 1, e = c(i, 2L))\nt <- (r$a, i + 1L)\ng <- :Pt(x = r$b, y = r$a)\ns <- s + r$a + r$b + r$d + t[[1L]] + match (g) { :Pt(x = x, y = y) => x * y }\nif (r$c) k <- k + r$e[[2L]] }\nlist(s, k)",
+            "(n = 12L)",
+            false,
+        ),
+        // A tag pattern with `..`, constructors in the loop, and no arm matching at the end.
+        (
+            "s <- 0L\nfor (i in 1:n) { r <- if (i < n) :Ok(i) else :Other(i)\ns <- s + match (r) { :Ok(..) => 1L, :Err(e) => e } }\ns",
+            "(n = 12L)",
+            true,
+        ),
+        // A boxed field, then a missing one, which is an error.
+        (
+            "r <- (x = c(1, 2), y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 5L) r <- (y = 1,); s <- s + r$x[[1L]] }\ns",
+            "(n = 8L)",
+            true,
+        ),
         // An inlined typed closure keeps its checks: a call reached only after the loop compiled
         // fails on its argument, or on its value, exactly as in tier 0.
         (
@@ -257,6 +353,177 @@ fn seeds_agree_across_tiers() {
     });
 }
 
+/// A speculation that fails after a load forced its promise must not make tier 0 load the
+/// variable again: the forced promise would read as visible, though forcing `n <- 0` left the
+/// value invisible. The integer call makes the compiled code speculate on an integer `x`.
+#[test]
+fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            jit::install_mode(Mode::Force);
+            run("visibility <- function(x) .Internal(withVisible(x))[[2L]]");
+            let outcomes: Vec<String> = ["n <- 0", "3L", "3L", "n <- 0", "3L", "n <- 0"]
+                .iter()
+                .map(|argument| run(&format!("visibility({argument})")))
+                .collect();
+            jit::install_mode(Mode::Off);
+            assert_eq!(
+                outcomes,
+                ["FALSE", "TRUE", "TRUE", "FALSE", "TRUE", "FALSE"]
+            );
+        }
+    });
+}
+
+#[test]
+fn native_functions_agree_across_tiers() {
+    // Scalar functions called with unboxed arguments run as native functions, recursion
+    // included, and every way R would warn or fail leaves the call to tier 0. Each case defines
+    // its functions globally, then runs a body that calls them in a loop.
+    let cases = [
+        (
+            "fi <- function(x) if (x < 2L) x else fi(x - 1L) + fi(x - 2L)",
+            "s <- 0L\nfor (i in 1:n) s <- s + fi(i %% 15L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "g <- function(x) if (x > 0L) x * x else -x",
+            "s <- 0\nfor (i in 1:n) s <- s + g(i * 100L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "g <- function(x) if (x > 1) x else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + g(if (i == 400L) NA_real_ else i)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "deep <- function(x) if (x <= 0) 0 else 1 + deep(x - 1)",
+            "s <- 0\nfor (i in 1:n) s <- s + deep(if (i == 500L) 1e5 else 3)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "r <- function(x) if (x > -1000) sqrt(x) + log(x + 400) else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + r(i - 300L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "h <- function(x) { y <- x * 2; if (y > 900) return(y - 1); z <- 0; if (y > 400) z <- 1; y + z }",
+            "s <- 0\nfor (i in 1:n) s <- s + h(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "q <- function(x) (x > 3L) || (x < 0L)\np <- function(x) if (x > 3 && x < 8) 1L else 2L",
+            "s <- 0L\nfor (i in 1:n) s <- s + q(i - 300L) + p(i %% 10L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "q <- function(x) (x > 3L) && (x < 500L)",
+            "s <- 0L\nfor (i in 1:n) s <- s + q(if (i == 450L) NA_integer_ else i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            // Closure arguments are promises: `b` is forced first and finds the global `y`.
+            "y <- 100L\nlz2 <- function(a, b) b + a\nlz <- function(x) lz2(y <- x, y)",
+            "s <- 0L\nfor (i in 1:n) s <- s + lz(1L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "lz1 <- function(a) 1L\nlzr <- function(x) { lz1(return(5L)); x }",
+            "s <- 0L\nfor (i in 1:n) s <- s + lzr(1L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "half <- function(a: double) -> double if (a > 0) a / 2 else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + half(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "bad <- function(a: double) -> integer if (a > 0) a / 2 else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + bad(i)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "sq <- function(x) if (x > 0) x * x else 0L\nh2 <- function(x) if (x > 1) sq(x) + 1 else 0",
+            "sq <<- function(x) if (x > 0) x * x else 0L\ns <- 0\nfor (i in 1:n) { if (i == 400L) sq <<- function(x) if (x > 0) -x else 1L; s <- s + h2(i) }\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "m <- function(x, y) if (x > y) x %/% y + x %% y + 0.5 else floor(y / 3) + abs(x) - !x",
+            "s <- 0\nfor (i in 1:n) s <- s + m(i, 7L) + m(-i, 1000L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+    ];
+    with_interpreter(|| {
+        for (case, (definitions, body, call, fails)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled) = unsafe {
+                run(definitions);
+                outcomes(2_000_000 + case, body, call)
+            };
+            assert_eq!(reference == "error", *fails, "case {case} gave {reference}");
+            for (run, outcome) in compiled.iter().enumerate() {
+                assert_eq!(
+                    &reference,
+                    outcome,
+                    "case {case}, call {}: f{call} after\n{definitions}\nwith body\n{body}",
+                    run + 1
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn run_time_binding_shadows_cached_global_function() {
+    // Once compiled code has cached the global `g`, a `g` bound in the activation's own frame at
+    // run time, in ways the compiler cannot see, must shadow it. The oracle case
+    // `environments__hidden_function_bindings` covers `assign` into `parent.frame()`, which needs
+    // base R's closures.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("g <- function() \"global\"");
+        let definitions = [
+            "via_default <- function(set, x = if (set) (g <- function() \"local\")) { x; g() }",
+            "gen <- function(x, set) { if (set) g <- function() \"local\"; UseMethod(\"gen\") }\ngen.default <- function(x, set) g()",
+        ];
+        let calls = ["via_default", "gen"];
+        let mut outcomes = Vec::new();
+        for (definition, name) in definitions.iter().zip(calls) {
+            run(definition);
+            let call = |set: &str| {
+                if name == "gen" {
+                    format!("gen(1, {set})")
+                } else {
+                    format!("{name}({set})")
+                }
+            };
+            for _ in 0..3 {
+                run(&call("FALSE"));
+            }
+            outcomes.push((name, run(&call("TRUE"))));
+        }
+        jit::install_mode(Mode::Off);
+        for (name, outcome) in outcomes {
+            assert_eq!(outcome, "\"local\"", "{name}");
+        }
+    });
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
@@ -269,6 +536,70 @@ fn formal_shadows_enclosing_function() {
         jit::install_mode(Mode::Off);
         for outcome in outcomes {
             assert_eq!(outcome, "99");
+        }
+    });
+}
+
+#[test]
+fn fully_typed_closure_compiles_at_its_first_call() {
+    // The signature stands in for the profile, so the first call runs compiled code, and a
+    // call whose values the declared types do not predict still gets tier 0's answer.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let cases = [
+            (
+                "ft <- function(x: double, y: double) -> double x * y + 1",
+                "ft(2, 3)",
+                "7",
+                Some(true),
+            ),
+            (
+                "fi <- function(x: double) -> double x * 2",
+                "fi(2L)",
+                "4",
+                None,
+            ),
+            (
+                "fv <- function(v: double[], k: integer) -> double v[2L] * k",
+                "fv(c(1, 2.5), 2L)",
+                "5",
+                Some(true),
+            ),
+            (
+                "fe <- function(x: double) -> double x + 1",
+                "fe(\"a\")",
+                "error",
+                None,
+            ),
+            (
+                "fu <- function(x: double, y) -> double x + y",
+                "fu(1, 2)",
+                "3",
+                Some(false),
+            ),
+        ];
+        let mut outcomes = Vec::new();
+        for (index, (definition, call, _, _)) in cases.iter().enumerate() {
+            run(definition);
+            let outcome = run(call);
+            let name = format!("f{}", ["t", "i", "v", "e", "u"][index]);
+            let function = lower::parse_text(&name, "<test>")
+                .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+            let compiled = function.is_ok_and(|function| {
+                function.cdr().kind() == heap::object::SexpType::Bytecode
+                    && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
+            });
+            outcomes.push((outcome, compiled));
+        }
+        jit::install_mode(Mode::Off);
+        for ((definition, call, expected, eager), (outcome, compiled)) in cases.iter().zip(outcomes)
+        {
+            assert_eq!(outcome, *expected, "{definition}; {call}");
+            // A call the seeds mispredict deoptimizes and discards the code, so only the others
+            // say whether the first call compiled.
+            if let Some(eager) = eager {
+                assert_eq!(compiled, *eager, "{definition}; {call}");
+            }
         }
     });
 }

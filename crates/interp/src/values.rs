@@ -112,10 +112,6 @@ macro_rules! symbol_table {
                         .unwrap_or_else(|error| panic!("cannot install `{}`: {error}", $name)),)*
                 }
             }
-
-            pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
-                $(marker.mark(self.$field);)*
-            }
         }
     };
 }
@@ -227,6 +223,8 @@ pub struct Globals {
     /// The implicit class vectors S3 dispatch builds for unclassed objects, by dimension shape
     /// and type, so that dispatching on a plain vector allocates no class vector.
     pub implicit_classes: rustc_hash::FxHashMap<(u8, SexpType), Sexp>,
+    /// S4 definitions a package loader holds back until a lookup needs them.
+    pub deferred_definitions: Vec<crate::methods::DeferredDefinitions>,
 }
 
 impl Globals {
@@ -239,6 +237,7 @@ impl Globals {
             keep: Vec::new(),
             s4_extends: rustc_hash::FxHashMap::default(),
             implicit_classes: rustc_hash::FxHashMap::default(),
+            deferred_definitions: Vec::new(),
         }
     }
 
@@ -262,6 +261,9 @@ impl Globals {
         }
         for &classes in self.implicit_classes.values() {
             marker.mark(classes);
+        }
+        for definitions in &self.deferred_definitions {
+            marker.mark(definitions.force);
         }
     }
 }
@@ -387,6 +389,30 @@ pub unsafe fn mkchar_bytes(bytes: &[u8], encoding: Encoding) -> R<Sexp> {
     let object = heap.mk_char(bytes, encoding)?;
     heap.root(object);
     Ok(object)
+}
+
+/// Interns `text` as [`mkchar`] does and stores it as element `index` of the string vector
+/// `vector`, which the caller keeps rooted.
+pub unsafe fn set_mkchar(vector: Sexp, index: usize, text: &str) -> R<()> {
+    match unescape_invalid_bytes(text) {
+        Some(bytes) => set_mkchar_bytes(vector, index, &bytes, Encoding::Native),
+        None => set_mkchar_bytes(vector, index, text.as_bytes(), Encoding::Utf8),
+    }
+}
+
+/// Interns `bytes` straight into element `index` of the string vector `vector`, which the caller
+/// keeps rooted. A string stored at once needs no root handle of its own, and a handle per element
+/// would make a long result hold a second vector's worth of handles until the builtin returns.
+pub unsafe fn set_mkchar_bytes(
+    vector: Sexp,
+    index: usize,
+    bytes: &[u8],
+    encoding: Encoding,
+) -> R<()> {
+    let heap = crate::heap();
+    let charsxp = heap.mk_char(bytes, encoding)?;
+    heap.set_element(vector, index, charsxp);
+    Ok(())
 }
 
 pub unsafe fn install(name: &str) -> R<Sexp> {
@@ -748,8 +774,10 @@ pub fn escaped_byte(character: char) -> Option<u8> {
 /// `text` with every private-use stand-in turned back into its byte, or `None` when it holds
 /// none.
 pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
-    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8.
-    if !text.as_bytes().contains(&0xEF)
+    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8, so ASCII text, the common
+    // case, needs only the vectorized ASCII scan rather than a `memchr`.
+    if text.is_ascii()
+        || !text.as_bytes().contains(&0xEF)
         || !text
             .chars()
             .any(|character| escaped_byte(character).is_some())
@@ -1134,7 +1162,12 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             }
             list
         }
-        SexpType::Closure => triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?,
+        SexpType::Closure => {
+            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
+            // The copy captures the same frame, so a move must count it as it counts the original.
+            crate::moves::created_closure(copy)?;
+            copy
+        }
         SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
         _ if kind.is_vector() => {
             let source = materialize(object)?;

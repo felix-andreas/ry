@@ -2,9 +2,14 @@
 //! plan emitter behind `ry load --emit-plan`, and the R code that installs `load_all()`.
 
 use {
-    crate::{ANALYSIS_STACK_SIZE, config::Config},
+    crate::{
+        ANALYSIS_STACK_SIZE,
+        cli::{self, CommandError},
+        config::Config,
+        preflight::{self, Verdict},
+    },
     loader::{
-        LoadError, LoadState, Loader,
+        LoadError, LoadState, Loader, Plan,
         r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds},
     },
     repl::{
@@ -12,6 +17,7 @@ use {
         libr::{self, CallRoutine, Sexp},
     },
     std::{
+        ffi::{CStr, c_char, c_int},
         fmt, fs, io,
         panic::{AssertUnwindSafe, catch_unwind},
         path::{Path, PathBuf},
@@ -36,6 +42,11 @@ pub fn embedded_runtime() -> String {
 }
 .ry_commit <- function(root) {
   invisible(.Call("ry_loader_commit", root, PACKAGE = "(embedding)"))
+}
+.ry_callers <- function(root, names) {
+  callers <- .Call("ry_loader_callers", root, paste(names, collapse = "\n"), PACKAGE = "(embedding)")
+  if (is.null(callers)) stop("ry's loader panicked; please report this", call. = FALSE)
+  if (!nzchar(callers)) character() else strsplit(callers, "\n", fixed = TRUE)[[1L]]
 }"#,
     )
 }
@@ -66,7 +77,8 @@ pub fn process_runtime() -> String {
   pending <- paste0(state, ".pending")
   if (file.exists(pending)) file.rename(pending, state)
   invisible(TRUE)
-}}"#,
+}}
+.ry_callers <- function(root, names) names"#,
         executable = r_string(&executable)
     ))
 }
@@ -77,27 +89,37 @@ pub fn process_runtime() -> String {
 ///
 /// The runtime also binds each name of ry's standard library that GNU R lacks to a function that
 /// explains the library runs only on ry's runtime, which reads better than GNU R's "could not
-/// find function". A name the session already has, such as `col` or data.table's `copy`, keeps
-/// its meaning.
+/// find function". A constant such as `Bool.true` becomes an active binding that stops with the
+/// same explanation when it is read. A name the session already has, such as `col` or
+/// data.table's `copy`, keeps its meaning.
 fn runtime(transport: &str) -> String {
     let names: Vec<String> = include_str!("../../../types/ry.exports")
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|name| format!("\"{name}\""))
         .collect();
+    // A declaration whose type is not a function type declares a constant.
+    let constants: Vec<String> = include_str!("../../../types/ry.Rtypes")
+        .lines()
+        .filter_map(|line| line.split_once(" : "))
+        .filter(|(name, declared)| !name.contains(' ') && !declared.contains("fn("))
+        .map(|(name, _)| format!("\"{name}\""))
+        .collect();
     let source = format!(
         r#"{transport}
 {RUNTIME_GNUR}
+.ry_standard_library_message <- function(name) paste0(
+  "`", name, "` is part of ry's standard library, which only ry's runtime provides, ",
+  "and this session runs on GNU R; run the code with `ry run` or `ry load` instead"
+)
 .ry_standard_library_name <- function(name) {{
   force(name)
-  function(...) stop(
-    "`", name, "()` is part of ry's standard library, which only ry's runtime provides, ",
-    "and this session runs on GNU R; run the code with `ry run` or `ry load` instead",
-    call. = FALSE
-  )
+  function(...) stop(.ry_standard_library_message(paste0(name, "()")), call. = FALSE)
 }}
-.ry_standard_library_names <- c({names})"#,
-        names = names.join(", ")
+.ry_standard_library_names <- c({names})
+.ry_standard_library_constants <- c({constants})"#,
+        names = names.join(", "),
+        constants = constants.join(", ")
     );
     let cache = dirs::cache_dir()
         .map(|directory| directory.join("ry").to_string_lossy().into_owned())
@@ -123,7 +145,15 @@ fn runtime(transport: &str) -> String {
   }}
   # Decided per session, not cached: a name an attached package exports keeps its meaning.
   for (name in runtime$.ry_standard_library_names) {{
-    if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
+    if (exists(name)) next
+    if (name %in% runtime$.ry_standard_library_constants) {{
+      makeActiveBinding(name, local({{
+        message <- runtime$.ry_standard_library_message(name)
+        function() stop(message, call. = FALSE)
+      }}), runtime)
+    }} else {{
+      runtime[[name]] <- runtime$.ry_standard_library_name(name)
+    }}
   }}
   runtime$.ry_packages <- new.env(parent = emptyenv())
   runtime$.ry_timing <- new.env(parent = emptyenv())
@@ -138,7 +168,7 @@ fn runtime(transport: &str) -> String {
 }
 
 /// A raw R string literal (R >= 4.0) holding `text`, with a delimiter `text` never contains.
-fn r_string(text: &str) -> String {
+pub fn r_string(text: &str) -> String {
     let mut dashes = String::from("-");
     while text.contains(&format!("]{dashes}\"")) {
         dashes.push('-');
@@ -173,6 +203,11 @@ pub fn call_routines() -> Vec<CallRoutine> {
             function: ry_loader_commit as *const (),
             arguments: 1,
         },
+        CallRoutine {
+            name: c"ry_loader_callers",
+            function: ry_loader_callers as *const (),
+            arguments: 2,
+        },
     ]
 }
 
@@ -195,7 +230,7 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
             let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
             loader.set_strict(strict_config(&root));
             match loader.plan(&root, full) {
-                Ok(plan) => plan_value(&plan, true),
+                Ok(plan) => strict_value(&plan).unwrap_or_else(|| plan_value(&plan, true)),
                 Err(error) => error_value(&error.to_string()),
             }
         });
@@ -224,6 +259,27 @@ extern "C" fn ry_loader_commit(root: Sexp) -> Sexp {
         return libr::string_value("ry's loader panicked; please report this");
     }
     libr::null()
+}
+
+/// [`Loader::callers`], with the names in and out joined by line breaks, which spares the
+/// embedding a character-vector API.
+extern "C" fn ry_loader_callers(root: Sexp, names: Sexp) -> Sexp {
+    let callers = catch_unwind(|| {
+        // SAFETY: R passes R objects to a `.Call` routine.
+        let (root, names) = unsafe { (libr::string_argument(root), libr::string_argument(names)) };
+        let root = loader::find_package_root(Path::new(&root?)).ok()?;
+        let changed: Vec<String> = names?.lines().map(str::to_owned).collect();
+        let callers = LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .callers(&root, &changed);
+        Some(callers.join("\n"))
+    });
+    match callers {
+        Ok(Some(callers)) => libr::string_value(&callers),
+        Ok(None) => libr::string_value(""),
+        Err(_) => libr::null(),
+    }
 }
 
 /// Starts analyzing the package at `root` on a thread of its own, so the analysis overlaps
@@ -263,9 +319,15 @@ pub struct ReloadWatcher;
 
 impl ConsoleHooks for ReloadWatcher {
     fn before_command(&mut self) -> Option<String> {
-        let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
-        let changed = !loader.changed_roots().is_empty();
-        changed.then(|| ".ry_autoreload()".to_owned())
+        let changed = LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .changed_roots();
+        let roots: Vec<String> = changed
+            .iter()
+            .map(|root| r_string(&root.to_string_lossy()))
+            .collect();
+        (!roots.is_empty()).then(|| format!(".ry_autoreload(c({}))", roots.join(", ")))
     }
 }
 
@@ -325,7 +387,7 @@ pub fn emit_plan(
                     .map_err(|error| EmitError::State(pending.clone(), error))?;
                 fs::write(&pending, text).map_err(|error| EmitError::Io(pending, error))?;
             }
-            plan_value(&plan, true)
+            strict_value(&plan).unwrap_or_else(|| plan_value(&plan, true))
         }
         Err(error) => error_value(&error.to_string()),
     };
@@ -352,6 +414,79 @@ pub fn current_package() -> Option<PathBuf> {
 /// For `ry load`'s error reporting.
 pub fn package_root(path: &Path) -> Result<PathBuf, LoadError> {
     loader::find_package_root(path)
+}
+
+/// The error a load of a strict package raises instead of running `plan`, when strict mode
+/// refuses the package. A plan that changes nothing needs no check.
+fn strict_value(plan: &Plan) -> Option<RValue> {
+    if !plan.strict || plan.is_noop() {
+        return None;
+    }
+    let reason = match check_strict_package(&plan.root) {
+        StrictCheck::Passed => return None,
+        StrictCheck::Refused => "strict mode refused it",
+        StrictCheck::Failed => "its strict check failed",
+    };
+    Some(error_value(&format!(
+        "{} was not loaded, because {reason}",
+        plan.package
+    )))
+}
+
+/// The outcome of [`check_strict_package`], as ry's runtime receives it from
+/// [`strict_check_on_ry_runtime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrictCheck {
+    Passed = 0,
+    Refused = 1,
+    Failed = 2,
+}
+
+/// Runs strict mode's check of the package at `root`, as `ry load` does before its first
+/// load, printing what it finds. A package that passed unchanged is remembered, so checking it
+/// again costs a hash of its files.
+fn check_strict_package(root: &Path) -> StrictCheck {
+    let config = match Config::discover(root) {
+        Ok(config) => config,
+        Err(error) => {
+            cli::report(&error);
+            return StrictCheck::Failed;
+        }
+    };
+    match preflight::check_package(root, &config) {
+        Ok(Verdict::Run) => StrictCheck::Passed,
+        Ok(Verdict::Refuse) => StrictCheck::Refused,
+        Err(CommandError) => StrictCheck::Failed,
+    }
+}
+
+/// The host side of `loader::ry_runtime::set_check`: ry's runtime calls it before a load of a
+/// strict package runs anything.
+pub extern "C" fn strict_check_on_ry_runtime(root: *const c_char) -> c_int {
+    let Some(root) = runtime_path(root) else {
+        return StrictCheck::Failed as c_int;
+    };
+    // Unwinding into the runtime's frames aborts, so a panic in the check, whose message the
+    // panic hook has printed, counts as a failed check.
+    catch_unwind(|| check_strict_package(&root)).unwrap_or(StrictCheck::Failed) as c_int
+}
+
+/// The host side of the strict query of `loader::ry_runtime::set_check`: 1 when the
+/// configuration that governs the package at `root` turns strict mode on, as [`strict_config`]
+/// decides for GNU R's loader.
+pub extern "C" fn strict_config_on_ry_runtime(root: *const c_char) -> c_int {
+    runtime_path(root)
+        .and_then(|root| catch_unwind(|| strict_config(&root)).ok())
+        .map_or(0, c_int::from)
+}
+
+fn runtime_path(path: *const c_char) -> Option<PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: the runtime passes a NUL-terminated path that outlives the call.
+    let path = unsafe { CStr::from_ptr(path) };
+    Some(PathBuf::from(path.to_string_lossy().into_owned()))
 }
 
 /// Whether the configuration that governs `root` turns strict mode on. A broken config counts as

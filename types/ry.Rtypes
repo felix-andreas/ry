@@ -1,5 +1,5 @@
-# ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, and the
-# DataFrame API.
+# ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules, and
+# the DataFrame API.
 #
 # The functions run only on ry's runtime, which binds them in the `ry` namespace and attaches it as
 # `package:ry`. `crates/interp/src/standard_library.rs` implements the modules and
@@ -93,6 +93,8 @@ List.concat : <T> fn(first: list[T], second: list[T]) -> list[T]
 List.single : <T> fn(value: T) -> list[T]
 #' A list of `count` copies of `value`.
 List.repeat : <T> fn(value: T, count: integer) -> list[T]
+#' The integers from `start` up to and including `end`, or an empty list when `end` is smaller.
+List.range : fn(start: integer, end: integer) -> list[integer]
 #' The elements in reverse order.
 List.reverse : <T> fn(list: Array<T>) -> Array<T>
 List.reverse : <T> fn(list: list[T]) -> list[T]
@@ -120,6 +122,9 @@ List.join_map : <A, B> fn(list: list[A], f: fn(A) -> list[B]) -> list[B]
 #' The elements for which `predicate` is `TRUE`.
 List.keep_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.keep_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+#' The elements for which `predicate` returns `:Ok(TRUE)`, stopping at the first `:Err`.
+List.keep_if_try : <T, E> fn(list: Array<T>, predicate: fn(T) -> Result<logical, E>) -> Result<Array<T>, E>
+List.keep_if_try : <T, E> fn(list: list[T], predicate: fn(T) -> Result<logical, E>) -> Result<list[T], E>
 #' The elements for which `predicate` is `FALSE`.
 List.drop_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.drop_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
@@ -263,6 +268,9 @@ List.with_capacity : <T> fn(capacity: integer) -> list[T]
 #' The list with room for `spare` more elements.
 List.reserve : <T> fn(list: Array<T>, spare: integer) -> Array<T>
 List.reserve : <T> fn(list: list[T], spare: integer) -> list[T]
+#' The list with no room beyond its elements.
+List.release_excess_capacity : <T> fn(list: Array<T>) -> Array<T>
+List.release_excess_capacity : <T> fn(list: list[T]) -> list[T]
 #' The total of the numbers. An integer total that overflows is an error.
 List.sum : <T: scalar numeric> fn(list: Array<T>) -> T
 List.sum : <T: scalar numeric> fn(list: list[T]) -> T
@@ -344,6 +352,18 @@ Str.caseless_ascii_equals : fn(first: character, second: character) -> logical
 Str.walk_utf8 : <S> fn(string: character, state: S, f: fn(S, integer) -> S) -> S
 #' Folds the string's UTF-8 bytes, passing `f` each byte's 1-based position too.
 Str.walk_utf8_with_index : <S> fn(string: character, state: S, f: fn(S, integer, integer) -> S) -> S
+#' The string's UTF-16 code units, each an integer from 0 to 65535.
+Str.to_utf16 : fn(string: character) -> list[integer]
+#' Decodes UTF-16 code units, or `:Err(:BadUtf16)` for an unpaired surrogate.
+Str.from_utf16 : fn(units: list[integer]) -> Result<character, :BadUtf16>
+#' Decodes UTF-16 code units, replacing each unpaired surrogate with U+FFFD.
+Str.from_utf16_lossy : fn(units: list[integer]) -> character
+#' The string's Unicode code points.
+Str.to_utf32 : fn(string: character) -> list[integer]
+#' Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that is not one.
+Str.from_utf32 : fn(code_points: list[integer]) -> Result<character, :BadUtf32>
+#' Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
+Str.from_utf32_lossy : fn(code_points: list[integer]) -> character
 
 # Num
 
@@ -404,26 +424,26 @@ Num.cos : <T: scalar numeric> fn(number: T) -> double
 Num.tan : <T: scalar numeric> fn(number: T) -> double
 #' The arctangent, in radians.
 Num.atan : <T: scalar numeric> fn(number: T) -> double
-#' Adds two numbers, or `:Err(:Overflow)`.
-Num.add_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
-#' Subtracts `second` from `first`, or `:Err(:Overflow)`.
-Num.sub_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
-#' Multiplies two numbers, or `:Err(:Overflow)`.
-Num.mul_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+#' Adds two numbers, or `:Err(:Overflow)` (`:Err(:Undefined)` for a `NaN` result).
+Num.add_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+#' Subtracts `second` from `first`, or `:Err(:Overflow)` (`:Err(:Undefined)` for a `NaN` result).
+Num.sub_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+#' Multiplies two numbers, or `:Err(:Overflow)` (`:Err(:Undefined)` for a `NaN` result).
+Num.mul_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 #' Adds two numbers, clamping an integer result to the largest or smallest integer.
 Num.add_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
 #' Subtracts `second` from `first`, clamping an integer result.
 Num.sub_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
 #' Multiplies two numbers, clamping an integer result.
 Num.mul_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
-#' Divides `first` by `second` as doubles, or `:Err(:DivByZero)`.
-Num.div_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero>
-#' Divides and rounds toward zero, or `:Err(:DivByZero)`.
-Num.div_trunc_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
-#' Divides and rounds up, or `:Err(:DivByZero)`.
-Num.div_ceil_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
-#' The remainder of truncating division, with the sign of `first`, or `:Err(:DivByZero)`.
-Num.rem_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+#' Divides `first` by `second` as doubles, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.div_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero | :Undefined>
+#' Divides and rounds toward zero, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.div_trunc_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#' Divides and rounds up, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.div_ceil_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#' The remainder of truncating division, with the sign of `first`, or `:Err(:DivByZero)` (`:Err(:Undefined)` for a `NaN` result).
+Num.rem_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 #' The square root, or `:Err(:SqrtOfNegative)`.
 Num.sqrt_checked : <T: scalar numeric> fn(number: T) -> Result<double, :SqrtOfNegative>
 #' The natural logarithm, or `:Err(:LogNeedsPositive)`.
@@ -432,6 +452,87 @@ Num.log_checked : <T: scalar numeric> fn(number: T) -> Result<double, :LogNeedsP
 Num.to_double : <T: scalar numeric> fn(number: T) -> double
 #' The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it does not fit.
 Num.to_integer_checked : <T: scalar numeric> fn(number: T) -> Result<integer, :OutOfBounds>
+#' The number truncated toward zero as an integer. A number that does not fit is an error; `Num.to_integer_checked` returns a tag.
+Num.to_integer : <T: scalar numeric> fn(number: T) -> integer
+#' Adds two numbers. An integer result that overflows is an error; `Num.add_checked` returns a tag.
+Num.add : <T: scalar numeric> fn(first: T, second: T) -> T
+#' Subtracts `second` from `first`. An integer result that overflows is an error.
+Num.sub : <T: scalar numeric> fn(first: T, second: T) -> T
+#' Multiplies two numbers. An integer result that overflows is an error.
+Num.mul : <T: scalar numeric> fn(first: T, second: T) -> T
+#' Divides `first` by `second` as doubles. A zero divisor is an error; `Num.div_checked` returns a tag.
+Num.div : <T: scalar numeric> fn(first: T, second: T) -> double
+#' Divides and rounds toward zero. A zero divisor is an error.
+Num.div_trunc : <T: scalar numeric> fn(first: T, second: T) -> T
+#' Divides and rounds up. A zero divisor is an error.
+Num.div_ceil : <T: scalar numeric> fn(first: T, second: T) -> T
+#' The remainder of truncating division, with the sign of `first`. A zero divisor is an error.
+Num.rem : <T: scalar numeric> fn(first: T, second: T) -> T
+#' `base` raised to a non-negative integer `exponent`, as an integer. Overflow is an error.
+Num.pow_int : fn(base: integer, exponent: integer) -> integer
+#' The square root. A negative number is an error; `Num.sqrt_checked` returns a tag.
+Num.sqrt : <T: scalar numeric> fn(number: T) -> double
+#' The natural logarithm. A number that is not positive is an error.
+Num.log : <T: scalar numeric> fn(number: T) -> double
+#' The arcsine, in radians, of a number from -1 to 1.
+Num.asin : <T: scalar numeric> fn(number: T) -> double
+#' The arccosine, in radians, of a number from -1 to 1.
+Num.acos : <T: scalar numeric> fn(number: T) -> double
+#' Whether the number is `NaN`. The one library function that accepts `NaN`.
+Num.is_nan : <T: scalar numeric> fn(number: T) -> logical
+#' The bits set in both integers.
+Num.bitwise_and : fn(first: integer, second: integer) -> integer
+#' The bits set in either integer.
+Num.bitwise_or : fn(first: integer, second: integer) -> integer
+#' The bits set in exactly one of the integers.
+Num.bitwise_xor : fn(first: integer, second: integer) -> integer
+#' The integer with every bit flipped.
+Num.bitwise_not : fn(number: integer) -> integer
+#' Shifts the bits left by `bits`, from 0 to 31; bits shifted past the top are lost.
+Num.shift_left_by : fn(number: integer, bits: integer) -> integer
+#' Shifts the bits right by `bits`, copying the sign bit in.
+Num.shift_right_by : fn(number: integer, bits: integer) -> integer
+#' Shifts the bits right by `bits`, filling with zeros.
+Num.shift_right_zf_by : fn(number: integer, bits: integer) -> integer
+#' The number of set bits in the integer's 32-bit two's complement.
+Num.count_one_bits : fn(number: integer) -> integer
+#' The number of zero bits above the highest set bit, 32 for zero.
+Num.count_leading_zero_bits : fn(number: integer) -> integer
+#' The number of zero bits below the lowest set bit, 32 for zero.
+Num.count_trailing_zero_bits : fn(number: integer) -> integer
+#' The ratio of a circle's circumference to its diameter.
+Num.pi : double
+#' The ratio of a circle's circumference to its radius, `2 * Num.pi`.
+Num.tau : double
+#' Euler's number, the base of the natural logarithm.
+Num.e : double
+#' The largest integer, `2147483647L`.
+Num.max_integer : integer
+#' The smallest integer, `-2147483647L`; R uses the one below it for `NA`.
+Num.min_integer : integer
+#' The largest finite double.
+Num.max_double : double
+#' The most negative finite double, `-Num.max_double`.
+Num.min_double : double
+#' Positive infinity, `Inf`.
+Num.infinity : double
+
+# Bool
+
+#' `TRUE`.
+Bool.true : logical
+#' `FALSE`.
+Bool.false : logical
+#' Whether both are `TRUE`. Both arguments are evaluated, unlike with `&&`.
+Bool.and : fn(first: logical, second: logical) -> logical
+#' Whether either is `TRUE`. Both arguments are evaluated, unlike with `||`.
+Bool.or : fn(first: logical, second: logical) -> logical
+#' The opposite value.
+Bool.not : fn(value: logical) -> logical
+#' Whether two values are equal, by `identical()`.
+Bool.is_eq : <T> fn(first: T, second: T) -> logical
+#' Whether two values differ, by `identical()`.
+Bool.is_not_eq : <T> fn(first: T, second: T) -> logical
 
 # Dict
 
@@ -481,6 +582,10 @@ Dict.keep_shared : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict
 Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 #' The dictionary with room for `spare` more entries. An empty dictionary reserves nothing.
 Dict.reserve : <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
+#' How many entries the dictionary holds before its storage must grow.
+Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> integer
+#' The dictionary with no room beyond its entries.
+Dict.release_excess_capacity : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 #' An empty dictionary of the same type.
 Dict.clear : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 
@@ -524,6 +629,10 @@ Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 #' The set with room for `spare` more elements. An empty set reserves nothing.
 Set.reserve : <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
+#' How many elements the set holds before its storage must grow.
+Set.capacity : <T: key> fn(set: Set<T>) -> integer
+#' The set with no room beyond its elements.
+Set.release_excess_capacity : <T: key> fn(set: Set<T>) -> Set<T>
 
 # DataFrame
 #

@@ -8,9 +8,13 @@ references: 14..23*, 25..34
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 23..23 -> ": T"
+  edit 24..24 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 23..23 -> ": T"
+  edit 24..24 -> " -> T"
 completion (30): parameter, packageStartupMessage, pairs.default, pairwise.table, parent.frame, parseNamespaceFile, print.data.frame, print.summary.table
 hint @1: <T> fn(parameter: T) -> T
 
@@ -28,9 +32,13 @@ references: 36..40*, 57..61
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: <T> fn(items: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 25..25 -> ": T"
+  edit 26..26 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(items: T) -> NULL\n"
+  edit 19..19 -> "<T>"
+  edit 25..25 -> ": T"
+  edit 26..26 -> " -> NULL"
 completion (2): item, items
 hint @7: <T> fn(items: T) -> NULL
 
@@ -51,14 +59,11 @@ references: 66..71*, 82..87
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `inner`
-  edit 38..38 -> "  #: fn() -> integer\n"
+  edit 59..59 -> " -> integer"
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 24..24 -> "  #: integer\n"
-  edit 62..62 -> "    #: integer\n"
-  edit 38..38 -> "  #: fn() -> integer\n"
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
@@ -82,12 +87,9 @@ references: 26..31*, 94..99
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 24..24 -> "  #: integer\n"
-  edit 62..62 -> "    #: integer\n"
-  edit 38..38 -> "  #: fn() -> integer\n"
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
@@ -106,8 +108,8 @@ references: 0..5*, 12..17, 18..23*
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
-  edit 18..18 -> "#: integer\n"
+  edit 5..5 -> ": integer"
+  edit 23..23 -> ": integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer
 hint @23: integer
@@ -137,10 +139,9 @@ references: 26..31*, 39..44
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `wrapper`
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
-  edit 24..24 -> "  #: integer\n"
-  edit 0..0 -> "#: fn() -> integer\n"
+  edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @7: fn() -> integer
 hint @31: integer
@@ -163,14 +164,11 @@ rename: 2 edit(s)
 signature: fn(y: double) -> double
 parameters: [y: double]
 action: Add inferred type annotation for `inner`
-  edit 52..52 -> "  #: fn() -> double\n"
+  edit 73..73 -> " -> double"
 action: Add inferred type annotation for `outer`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 19..19 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 22..22 -> "  #: fn(y: T) -> double\n"
-  edit 76..76 -> "    #: character\n"
-  edit 52..52 -> "  #: fn() -> double\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 19..19 -> " -> double"
 completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @5: fn() -> double
 hint @30: fn(y: T) -> double
@@ -193,11 +191,15 @@ calls scale_by: in apply_scale [82..90] | out
 signature: fn(x: double, by: double) -> double
 parameters: [x: double] | by: double
 action: Add inferred type annotation for `apply_scale`
-  edit 35..35 -> "#: fn(x: double) -> double\n"
+  edit 60..60 -> ": double"
+  edit 61..61 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(x: T, by: T) -> T\n"
-  edit 64..64 -> "  #: double\n"
-  edit 35..35 -> "#: fn(x: double) -> double\n"
+  edit 20..20 -> "<T: numeric>"
+  edit 22..22 -> ": T"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> T"
+  edit 60..60 -> ": double"
+  edit 61..61 -> " -> double"
 completion (38): scale_by, scale, scale.default, cmdscale, apply_scale, sequence.default, setGraphicsEventHandlers, srcfilealias
 hint @8: <T: numeric> fn(x: T, by: T) -> T
 hint @46: fn(x: double) -> double

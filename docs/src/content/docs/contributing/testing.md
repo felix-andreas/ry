@@ -146,11 +146,18 @@ on purpose.
   `#~~~~ after <path>` exists on that side only, so the same path on both sides is an edit and one
   side alone is an addition or a deletion, while a plain `#~~~~ <path>` is unchanged. The case loads
   the `before` side, then renders the plan that takes it to the `after` side: what is bound, run,
-  removed, unregistered, and re-registered. Run it with
+  removed, unregistered, re-registered, and which datasets are read again. `R/` files run in the
+  order `DESCRIPTION`'s collation field gives them, and a `data/` file is a dataset whose text stands
+  in for its size and modification time. Run it with
   `cargo test -p loader --test test_reload_fixtures`.
 - **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
   the expected block, and the runner formats that output again to assert idempotence on every case.
   When the expected result is a refusal, the case renders the structured `FormatError`.
+- **`crates/format/tests/format-range`**: range formatting. The source marks the selection with
+  `$0` markers (two for a selection, one for a bare caret, none for the whole file), and the
+  expectation lists the edits by one-based position and shows the document they leave behind, with
+  each replacement between `«` and `»`. Run it with
+  `cargo test -p format --test test_format_range_fixtures`.
 - **`crates/ide/tests/ide`**: the editor features. The source carries one `$0` cursor marker, which
   is stripped before analysis, and the expectation renders each feature's answer at that position:
   the hover line with its absolute range, the definition's target range, and the reference ranges.
@@ -221,6 +228,20 @@ Comparing kinds alone would miss a miscompile: a stale or off-by-one source rang
 formatter emit the wrong bytes for an identifier, which renames a variable while preserving every
 kind. An injected bug of exactly that shape passed a kind-only comparison and fails the spelling
 comparison.
+
+Every generated input also runs the range battery, `check_range_format_invariants`, over a bounded
+spread of selections (the whole file, carets, whole lines, part-line spans, a range past the end).
+Range edits must be deterministic, refuse exactly when the whole file refuses, cover whole lines in
+order without overlapping, preserve the code, leave a document that still formats to the same
+result, be a subset of the edits formatting the whole file in place makes, reproduce that result
+when the selection is everything, and be stable when re-run on what they produced. On inputs of up
+to 24 lines it also checks additivity (a span of lines makes exactly the union of its lines' edits)
+and composition (formatting line by line until nothing changes reaches the whole-file result, and
+every step still formats to it). Composition is the strongest of these: it found whole-file
+idempotence bugs that no single-pass check sees. `crates/format/tests/test_format_range.rs` runs the
+battery over every fixture source, the program corpus, and re-indented copies of the fixtures (four
+spaces, tabs, mixed steps), and checks every byte selection of a few short sources against an
+independent line oracle.
 
 ### The editor features
 
@@ -353,8 +374,15 @@ JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, 
 and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
 --count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
 its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
-`RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
-allocation, which is too slow for a debug build today.
+`just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
+in a debug build. `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup`
+from the first allocation, which takes about seven seconds on an empty script in a debug build.
+
+`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
+uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
+invalid, requests at every stop. Every request must get exactly one response, the session must end,
+and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
 
 ### The table engine
 
@@ -368,6 +396,13 @@ fuzz tables are small, so the kernels' parallel paths get large-table tests of t
 `just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
 data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
 data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
+
+`just bench-base [--rows 1e5,1e6 --only REGEX --memory]` times base R's own kernels (sorting,
+string formatting and regex, grouping, `merge`, `match`, matrix margins, cumulative sums, xts and
+zoo rolling operations) under `ry run` and GNU R, and prints the ratio ry / GNU R per kernel. A
+kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory` every kernel
+runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
+`RY_BENCH_RLIB` (default `~/R/library`).
 
 ### Coverage-guided fuzzing
 
@@ -630,6 +665,11 @@ pin these contracts:
 - An inserted statement re-checks only the reads it intercepts.
 - A body edit re-derives one item's load facts and its own file's index layer, a `NAMESPACE` edit
   re-derives no item, and a statement that only moved keeps its load facts.
+- A one-shot check (`ProbeDatabase::one_shot`) runs no `package_name`, `test_name` or
+  `interface_group` and one `project_interface_groups`, reports exactly what the incremental check
+  reports, and agrees with the per-name and per-item answers under invariants (checked in a child
+  process, because invariants are process-wide and would perturb the counting tests). The
+  incremental database still goes through the per-name and per-item firewalls.
 
 The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to
 `Unknown`, and that a chain of 4,096 links resolves without overflowing the analysis thread's stack.

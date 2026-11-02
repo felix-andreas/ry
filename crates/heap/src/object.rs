@@ -331,6 +331,13 @@ pub mod gp {
     pub const TYPED_DEFINITION: u16 = 1 << 12;
     /// A promise whose value an inline parameter annotation checks when it is forced.
     pub const CHECKED_PROMISE: u16 = 1 << 12;
+    /// A closure `debug()` flagged, GNU R's `RDEBUG`: every call stops at its first statement
+    /// while a debugger is attached.
+    pub const CLOSURE_DEBUG: u16 = 1 << 15;
+    /// A closure `debugonce()` flagged, GNU R's `RSTEP`: its next call stops, and the flag clears.
+    pub const CLOSURE_STEP: u16 = 1 << 14;
+    /// A closure `trace()` flagged, GNU R's `RTRACE`.
+    pub const CLOSURE_TRACE: u16 = 1 << 13;
 }
 
 pub(crate) mod gc_bits {
@@ -357,6 +364,9 @@ pub(crate) mod flag_bits {
     /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
     /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
     pub const ARRAY: u8 = 1 << 4;
+    /// A list of `(key, value)` pairs that keeps neither alive: a collection that finds either
+    /// dead sets both slots of its pair to `NULL`.
+    pub const WEAK_PAIRS: u8 = 1 << 5;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.
@@ -452,8 +462,8 @@ pub const UNBOXED_SLOTS: usize = 64;
 /// 32 bits under one of these quiet-NaN prefixes, so the one-bit mask is enough to tell a raw
 /// slot from a handle. A double whose upper word happens to equal a prefix is stored boxed
 /// instead, which keeps every NaN payload (`NA_real_` among them) exact.
-const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
-const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
+pub const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
+pub const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
 
 impl Slot {
     fn encode(self) -> u64 {
@@ -510,12 +520,23 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
 
 /// Where a record's slots start.
 pub const RECORD_DATA_OFFSET: usize = size_of::<RecordObject>();
+/// Where a record's layout id and its unboxed-slot mask are, for compiled field reads.
+pub const RECORD_LAYOUT_OFFSET: usize = std::mem::offset_of!(RecordObject, layout);
+pub const RECORD_UNBOXED_OFFSET: usize = std::mem::offset_of!(RecordObject, unboxed);
 
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
 
 const _: () = assert!(size_of::<Header>() == 16);
 const _: () = assert!(VECTOR_DATA_OFFSET == 32);
+// libR's `Rinternals.h` reads these offsets inline, so packages compiled against it depend on them.
+const _: () = assert!(std::mem::offset_of!(Header, kind) == 0);
+const _: () = assert!(std::mem::offset_of!(Header, flags) == 2);
+const _: () = assert!(flag_bits::ALTREP == 2);
+const _: () = assert!(std::mem::offset_of!(VectorObject, length) == 16);
+const _: () = assert!(std::mem::offset_of!(TripleObject, first) == 16);
+const _: () = assert!(std::mem::offset_of!(TripleObject, second) == 24);
+const _: () = assert!(std::mem::offset_of!(TripleObject, third) == 32);
 const _: () = assert!(RECORD_DATA_OFFSET == 32);
 
 /// The bytes an object of `kind` with `length` elements occupies, header included. `CHARSXP`
@@ -614,6 +635,12 @@ impl Sexp {
 
     pub unsafe fn set_object(self, on: bool) {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
+    }
+
+    /// Whether the object's fields count as references to what they hold (see
+    /// `flag_bits::UNTRACKED`).
+    pub unsafe fn tracks_references(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::UNTRACKED == 0 }
     }
 
     pub unsafe fn is_array(self) -> bool {

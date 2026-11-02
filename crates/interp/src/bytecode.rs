@@ -22,7 +22,8 @@
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
 //!   [`profile`]) and the seventh the optimizing tier's compiled code, `NULL` until it exists.
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
-//!   from and the binding cell it found.
+//!   from and the binding cell it found. The list holds them weakly, because closures that share
+//!   a body share its code, and a strong cache would keep the last caller's environment alive.
 //!
 //! The optimizing tier plugs in through [`Tier`]. It works on the same register file: a register
 //! window is a fixed slice of one preallocated buffer that never moves, so compiled code keeps a
@@ -182,8 +183,12 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     let state = &mut interp().bytecode;
     let calls = state.calls.entry(body).or_insert(0);
     *calls += 1;
-    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes.
-    if *calls < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
+    // so does a typed one, whose signature lets the JIT compile it at that call too.
+    if *calls < COMPILE_AFTER_CALLS
+        && !contains_loop(body, LOOP_SEARCH_DEPTH)
+        && !crate::annotations::is_typed(function)
+    {
         if state.calls.len() > MAX_TRACKED_BODIES {
             state.calls.clear();
         }
@@ -265,6 +270,15 @@ pub unsafe fn source_body(function: Sexp) -> Sexp {
         source_of(function.cdr())
     } else {
         function.cdr()
+    }
+}
+
+/// The source of a closure body, compiled or not.
+pub unsafe fn source_of_body(body: Sexp) -> Sexp {
+    if body.kind() == SexpType::Bytecode {
+        source_of(body)
+    } else {
+        body
     }
 }
 
@@ -356,8 +370,9 @@ pub enum Op {
     /// `double` is 1), where `index` is a register that already holds the index's value and the
     /// assignment runs as `<-` would run it.
     SubAssign,
-    /// `srcref`: makes the srcref constant current, for a statement of a `{` with source
-    /// references.
+    /// `srcref statement`: makes the srcref constant current, for a statement of a `{` with
+    /// source references; `statement` is 1 when a statement starts there, which an attached
+    /// debugger may stop on, and 0 when a block's end restores the outer srcref.
     SetSrcref,
     /// `function expected target`: jumps unless the function is the primitive `expected`.
     BranchUnlessPrimitive,
@@ -381,9 +396,42 @@ pub enum Op {
     /// update the parameter's value in place while a move into this frame lasts
     /// (`eval::tail_update`).
     CallTailUpdate,
+    /// `dst src name call shape`: `src$name` for the base `$`. `shape` is a constant integer
+    /// vector caching the last record layout the site saw and the field's slot in it, so a
+    /// record's field is one comparison and a slot read; anything else takes `$`'s own path.
+    Field,
+    /// `dst src index shape target`: `src[[index]]` for a constant `index`, through `shape` as
+    /// for [`Op::Field`], when `src` is a plain record or tuple with that item; otherwise it
+    /// jumps to `target`, where `[[`'s own path runs.
+    Item,
+    /// `src layout target`: jumps unless `src` is a plain record, tuple or tag of `layout`, the
+    /// test of a compiled pattern whose syntax fixes the layout.
+    MatchShape,
+    /// `src tag target`: jumps unless `src` is a plain tag named `tag`, whatever its payload.
+    MatchTag,
+    /// `src pattern target`: jumps unless `src` matches the literal constant `pattern`.
+    MatchLiteral,
+    /// `dst src index layout`: slot `index` of `src`, which a [`Op::MatchShape`] showed has
+    /// `layout`.
+    Slot,
+    /// `src call`: no arm of a compiled `match` matched `src`.
+    MatchFail,
+    /// `dst layout base count`: the record, tuple or tag of `layout` whose slots are in registers
+    /// `base..base + count`.
+    Construct,
+    /// `dst src`: copies a register.
+    Move,
+    /// `dst expression names base count`: evaluates `expression` in a new child of the frame
+    /// where each symbol of the list `names` is bound to the value in the matching register of
+    /// `base..base + count`. A `match` guard's code runs this way wherever it cannot read the
+    /// bound names from registers.
+    BoundEval,
+    /// `dst src guard call`: sets `dst` to `TRUE` or `FALSE` as the value in `src` of the `match`
+    /// guard `guard` holds or not. Errors name `call`, the `match`.
+    MatchCondition,
 }
 
-pub const OPS: [Op; 29] = [
+pub const OPS: [Op; 40] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -413,6 +461,17 @@ pub const OPS: [Op; 29] = [
     Op::EndStatement,
     Op::CallRebinding,
     Op::CallTailUpdate,
+    Op::Field,
+    Op::Item,
+    Op::MatchShape,
+    Op::MatchTag,
+    Op::MatchLiteral,
+    Op::Slot,
+    Op::MatchFail,
+    Op::Construct,
+    Op::Move,
+    Op::BoundEval,
+    Op::MatchCondition,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -517,10 +576,21 @@ struct Compiler {
     /// The call `x <- f(x, ...)` assigns to `x`, while the compiler compiles that call, so a
     /// call of a closure becomes [`Op::CallRebinding`].
     rebinding: Option<(Sexp, Sexp)>,
-    /// The body's last call when it is `f(p, ...)` for a library builtin that updates its first
-    /// argument in place and `p` is the first parameter, with `p`: the call becomes
-    /// [`Op::CallTailUpdate`].
-    tail_update: Option<(Sexp, Sexp)>,
+    /// The body's calls in tail position that are `f(p, ...)` for a library builtin that
+    /// updates its first argument in place, `p` the first parameter, with `p`: each becomes
+    /// [`Op::CallTailUpdate`] (see [`tail_updates`]).
+    tail_updates: (Vec<Sexp>, Sexp),
+    /// While a `match` guard compiles: its arm's bound names, which it reads from registers
+    /// instead of the frame.
+    bound: Option<Bound>,
+}
+
+/// The names a `match` arm binds, held in registers `base..base + names.len()` for its guard,
+/// with `list` the constant listing them for [`Op::BoundEval`].
+struct Bound {
+    names: Vec<Sexp>,
+    list: u32,
+    base: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -531,8 +601,16 @@ struct Loop {
     step: u32,
 }
 
-/// Compiles a closure body, or reports that it is better left to the AST evaluator.
+/// Compiles a closure body, or reports that it is better left to the AST evaluator. The
+/// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
 unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
+    let threshold = crate::heap().swap_report_threshold(usize::MAX);
+    let compiled = compile_unreported(body, function);
+    crate::heap().swap_report_threshold(threshold);
+    compiled
+}
+
+unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -552,7 +630,8 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
-        tail_update: tail_update(body, function),
+        bound: None,
+        tail_updates: tail_updates(body, function),
     };
     let result = compiler.allocate();
     compiler.expression(body, result)?;
@@ -591,6 +670,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         heap.set_element(constants, FIRST_CONSTANT + index, *constant);
     }
     let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
+    heap.mark_weak_pairs(caches);
     let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
     Ok(Some(code))
 }
@@ -648,6 +728,254 @@ unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
     Ok(simple.then_some(function))
 }
 
+/// The items of a `.ry_record`, `.ry_tuple` or `.ry_tag` call named `name`, the layout it
+/// builds and each item's slot, when its syntax fixes them and evaluating the items into
+/// registers is what the builtin's own evaluation would do.
+unsafe fn constructor<'a>(
+    name: &str,
+    args: &'a [(Sexp, Sexp)],
+) -> Option<(&'a [(Sexp, Sexp)], u32, Vec<usize>)> {
+    if args
+        .iter()
+        .any(|(_, value)| *value == symbols().dots || *value == missing_arg())
+        || args
+            .iter()
+            .skip(1)
+            .any(|(_, value)| may_modify_in_place(*value))
+    {
+        return None;
+    }
+    let (tag, items) = if name == ".ry_tag" {
+        let ((name_tag, tag), items) = args.split_first()?;
+        if *name_tag != nil() {
+            return None;
+        }
+        (Some(*tag), items)
+    } else {
+        (None, args)
+    };
+    let names: Vec<Sexp> = items.iter().map(|(tag, _)| *tag).collect();
+    let (layout, slots) = crate::records::constructor_layout(tag, &names, name == ".ry_record")?;
+    Some((items, layout, slots))
+}
+
+/// What a tuple, record or tag pattern tests.
+enum PatternShape {
+    /// `:Name(..)`: the tag, whatever its payload.
+    Tag(u32),
+    /// A pattern whose syntax fixes the layout, with each item's sub-pattern and slot.
+    Layout {
+        layout: u32,
+        items: Vec<(Sexp, usize)>,
+    },
+}
+
+/// The shape a `.ry_tuple`, `.ry_record` or `.ry_tag` pattern tests, or `None` when only the
+/// `match` special handles it: a `..` that leaves the layout open, or a pattern the special
+/// rejects with an error.
+unsafe fn pattern_shape(pattern: Sexp) -> Option<PatternShape> {
+    let head = pattern.car().car().bytes();
+    let items = values::pairlist_items(pattern.cdr());
+    let (tag, payload) = match head {
+        b".ry_tag" => {
+            let ((name_tag, name), payload) = items.split_first()?;
+            if *name_tag != nil() {
+                return None;
+            }
+            (Some(*name), payload)
+        }
+        b".ry_tuple" | b".ry_record" => (None, &items[..]),
+        _ => return None,
+    };
+    let rest = |item: Sexp| item.kind() == SexpType::Symbol && item.car().bytes() == b"..";
+    if let (Some(name), [(item_tag, item)]) = (tag, payload)
+        && *item_tag == nil()
+        && rest(*item)
+    {
+        return crate::records::tag_id(name).ok().map(PatternShape::Tag);
+    }
+    if payload.iter().any(|(_, item)| rest(*item)) {
+        return None;
+    }
+    let names: Vec<Sexp> = payload.iter().map(|(tag, _)| *tag).collect();
+    let (layout, slots) = crate::records::constructor_layout(tag, &names, head == b".ry_record")?;
+    let items = payload.iter().map(|(_, item)| *item).zip(slots).collect();
+    Some(PatternShape::Layout { layout, items })
+}
+
+/// Whether a `match` guard can compile with the arm's bound `names` read from registers: it must
+/// not assign, create a closure, nest a `match`, leave a loop or function, or call a bound name,
+/// since each of those would reach the frame or behave differently outside the special's
+/// scratch frame. Calls the compiler cannot inline evaluate in a scratch frame anyway.
+unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
+    match guard.kind() {
+        SexpType::Symbol => {
+            guard != symbols().dots
+                && guard != missing_arg()
+                && eval::dot_dot_index(guard).is_none()
+        }
+        SexpType::Language => {
+            let head = guard.car();
+            if head.kind() != SexpType::Symbol || names.contains(&head) {
+                return false;
+            }
+            let refused = matches!(
+                head.car().bytes(),
+                b"<-"
+                    | b"="
+                    | b"<<-"
+                    | b"->"
+                    | b"->>"
+                    | b"assign"
+                    | b"function"
+                    | b"local"
+                    | b".Internal"
+                    | b".ry_match"
+                    | b"for"
+                    | b"while"
+                    | b"repeat"
+                    | b"break"
+                    | b"next"
+                    | b"return"
+                    | b"on.exit"
+                    | b"delayedAssign"
+            );
+            !refused
+                && values::pairlist_items(guard.cdr())
+                    .iter()
+                    .all(|&(_, argument)| guard_compiles_in_place(argument, names))
+        }
+        SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+        _ => true,
+    }
+}
+
+/// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
+/// `pattern => guard, value`, and every pattern is one [`Compiler::pattern`] compiles. Anything
+/// else (an open record pattern, a pattern the special rejects) runs the whole `match` in the
+/// special.
+unsafe fn supported_match(args: &[(Sexp, Sexp)]) -> R<bool> {
+    let Some(((_, scrutinee), arms)) = args.split_first() else {
+        return Ok(false);
+    };
+    if args.iter().any(|(tag, _)| *tag != nil())
+        || *scrutinee == symbols().dots
+        || *scrutinee == missing_arg()
+    {
+        return Ok(false);
+    }
+    let arrow = values::install("=>")?;
+    let plain = |part: Sexp| part != symbols().dots && part != missing_arg();
+    Ok(arms.iter().all(|(_, arm)| {
+        if arm.kind() != SexpType::Language || arm.car() != arrow {
+            return false;
+        }
+        match values::pairlist_items(arm.cdr()).as_slice() {
+            [(pattern_tag, pattern), (body_tag, body)] => {
+                *pattern_tag == nil()
+                    && *body_tag == nil()
+                    && plain(*body)
+                    && supported_pattern(*pattern)
+            }
+            [(pattern_tag, pattern), (guard_tag, guard), (body_tag, body)] => {
+                *pattern_tag == nil()
+                    && *guard_tag == nil()
+                    && *body_tag == nil()
+                    && plain(*guard)
+                    && plain(*body)
+                    && supported_pattern(*pattern)
+            }
+            _ => false,
+        }
+    }))
+}
+
+unsafe fn supported_pattern(pattern: Sexp) -> bool {
+    match pattern.kind() {
+        SexpType::Symbol => {
+            !matches!(pattern.car().bytes(), b".." | b"T" | b"F")
+                && pattern != symbols().dots
+                && pattern != missing_arg()
+                && eval::dot_dot_index(pattern).is_none()
+        }
+        SexpType::Language => {
+            if pattern.car().kind() != SexpType::Symbol {
+                return false;
+            }
+            let items = values::pairlist_items(pattern.cdr());
+            if items.iter().any(|(tag, _)| *tag != nil())
+                && !matches!(pattern.car().car().bytes(), b".ry_record" | b".ry_tag")
+            {
+                return false;
+            }
+            match pattern.car().car().bytes() {
+                b"(" => matches!(items.as_slice(), [(_, inner)] if supported_pattern(*inner)),
+                // The special keeps only the bindings of the alternative that matched, which
+                // the compiled tests do not track, so an alternative may not bind a name.
+                b"|" => matches!(items.as_slice(), [(_, left), (_, right)]
+                    if supported_pattern(*left)
+                        && supported_pattern(*right)
+                        && pattern_names(*left).is_empty()
+                        && pattern_names(*right).is_empty()),
+                _ => match pattern_shape(pattern) {
+                    Some(PatternShape::Tag(_)) => true,
+                    Some(PatternShape::Layout { items, .. }) => {
+                        items.iter().all(|(item, _)| supported_pattern(*item))
+                    }
+                    None => false,
+                },
+            }
+        }
+        SexpType::Nil
+        | SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::Complex
+        | SexpType::String => true,
+        _ => false,
+    }
+}
+
+/// The names a pattern may bind: every symbol in it other than `_` and `..`, never a call's
+/// head.
+unsafe fn pattern_names(pattern: Sexp) -> Vec<Sexp> {
+    let mut names = Vec::new();
+    collect_pattern_names(pattern, &mut names);
+    names
+}
+
+unsafe fn collect_pattern_names(pattern: Sexp, names: &mut Vec<Sexp>) {
+    match pattern.kind() {
+        SexpType::Symbol => {
+            if !matches!(pattern.car().bytes(), b"_" | b"..") {
+                names.push(pattern);
+            }
+        }
+        SexpType::Language => {
+            for (_, item) in values::pairlist_items(pattern.cdr()) {
+                collect_pattern_names(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `index` is a constant `[[` index a record or tuple item read can cache: one
+/// positive whole number or one string.
+unsafe fn constant_item(index: Sexp) -> bool {
+    if length(index) != 1 || values::has_attributes(index) {
+        return false;
+    }
+    match index.kind() {
+        SexpType::Integer | SexpType::Real => {
+            let position = values::as_real_scalar(index);
+            position >= 1.0 && position.fract() == 0.0 && position <= f64::from(i32::MAX)
+        }
+        SexpType::String => index.element(0) != values::na_string(),
+        _ => false,
+    }
+}
+
 /// Whether evaluating `expression` may modify a variable of the frame in place: it contains a
 /// replacement assignment such as `x[1] <- 9`, or code that evaluates other code in the frame.
 unsafe fn may_modify_in_place(expression: Sexp) -> bool {
@@ -700,41 +1028,92 @@ unsafe fn rebinds_first_argument(expression: Sexp) -> bool {
         && value.cdr().tag() == nil()
 }
 
-/// The last call of `body`, the body itself or the last statement of a `{`, when it is
-/// `f(p, ...)` for a standard library builtin that updates its first argument in place and `p`
-/// is the first parameter of `function`, with `p`. A move into the frame leaves the parameter holding the
-/// only reference to the caller's value, and nothing runs in the frame after this call, so
+/// The calls in tail position of `body` that are `f(p, ...)` for a standard library builtin that
+/// updates its first argument in place, with `p` the first parameter of `function`, and `p`. A
+/// call is in tail position when it is the body, the last statement of a `{` in tail position, a
+/// branch of an `if` in tail position, or the argument of a `return` in a statement of the body
+/// outside any function literal or `local`. A move into the frame leaves the parameter holding
+/// the only reference to the caller's value, and nothing runs in the frame after such a call, so
 /// updating the parameter's value in place is invisible while the move lasts.
-unsafe fn tail_update(body: Sexp, function: Sexp) -> Option<(Sexp, Sexp)> {
+unsafe fn tail_updates(body: Sexp, function: Sexp) -> (Vec<Sexp>, Sexp) {
     let formals = function.car();
-    let mut last = body;
-    if last.kind() == SexpType::Language
-        && last.car().kind() == SexpType::Symbol
-        && &*symbol_name(last.car()) == "{"
-    {
-        let mut statement = last.cdr();
-        if statement.kind() != SexpType::Pairlist {
-            return None;
-        }
-        while statement.cdr().kind() == SexpType::Pairlist {
-            statement = statement.cdr();
-        }
-        last = statement.car();
-    }
-    if formals.kind() != SexpType::Pairlist
-        || last.kind() != SexpType::Language
-        || last.car().kind() != SexpType::Symbol
-        || !crate::standard_library::reuses_first_argument(&symbol_name(last.car()))
-    {
-        return None;
+    let mut calls = Vec::new();
+    if formals.kind() != SexpType::Pairlist {
+        return (calls, nil());
     }
     let parameter = formals.tag();
-    let arguments = last.cdr();
-    let matches = arguments.kind() == SexpType::Pairlist
-        && arguments.tag() == nil()
-        && arguments.car() == parameter
-        && !crate::moves::may_capture_frame(function);
-    matches.then_some((last, parameter))
+    collect_tail_updates(body, parameter, true, &mut calls);
+    // The compiler finds a tail call by identity, and a body built with `bquote` or `body<-`
+    // can share one call object between a tail and a non-tail position, so a call that occurs
+    // more than once gets no update.
+    if !calls.is_empty() {
+        let mut occurrences = vec![0usize; calls.len()];
+        count_occurrences(body, &calls, &mut occurrences);
+        let mut position = 0;
+        calls.retain(|_| {
+            position += 1;
+            occurrences[position - 1] == 1
+        });
+    }
+    (calls, parameter)
+}
+
+/// Adds, for each of `calls`, how often the object occurs within `expression`.
+unsafe fn count_occurrences(expression: Sexp, calls: &[Sexp], occurrences: &mut [usize]) {
+    if let Some(position) = calls.iter().position(|&call| call == expression) {
+        occurrences[position] += 1;
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+        count_occurrences(cell.car(), calls, occurrences);
+        cell = cell.cdr();
+    }
+}
+
+/// Adds the tail updates of `expression` to `calls`: the expression itself when `tail`, and the
+/// arguments of `return` in the statements it runs.
+unsafe fn collect_tail_updates(
+    expression: Sexp,
+    parameter: Sexp,
+    tail: bool,
+    calls: &mut Vec<Sexp>,
+) {
+    if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+        return;
+    }
+    let mut arguments = Vec::new();
+    let mut argument = expression.cdr();
+    while argument.kind() == SexpType::Pairlist {
+        arguments.push(argument.car());
+        argument = argument.cdr();
+    }
+    match (&*symbol_name(expression.car()), arguments.as_slice()) {
+        ("{", statements) => {
+            for (index, &statement) in statements.iter().enumerate() {
+                let last = index + 1 == statements.len();
+                collect_tail_updates(statement, parameter, tail && last, calls);
+            }
+        }
+        ("if", [condition, branches @ ..]) if branches.len() <= 2 => {
+            collect_tail_updates(*condition, parameter, false, calls);
+            for &branch in branches {
+                collect_tail_updates(branch, parameter, tail, calls);
+            }
+        }
+        ("for", [_, _, statement]) | ("while", [_, statement]) | ("repeat", [statement]) => {
+            collect_tail_updates(*statement, parameter, false, calls);
+        }
+        ("return", [value]) => collect_tail_updates(*value, parameter, true, calls),
+        (name, [first, ..])
+            if tail
+                && *first == parameter
+                && expression.cdr().tag() == nil()
+                && crate::standard_library::reuses_first_argument(name) =>
+        {
+            calls.push(expression);
+        }
+        _ => {}
+    }
 }
 
 /// Whether `expression` is `x <- f(x, ...)` for a standard library builtin that updates its
@@ -780,6 +1159,14 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
                 | "do.call"
         ) {
             return false;
+        }
+        // A `match` arm binds its pattern's names in the frame.
+        if &*name == ".ry_match" {
+            for (_, arm) in values::pairlist_items(expression.cdr()).iter().skip(1) {
+                if arm.kind() == SexpType::Language {
+                    found.extend(pattern_names(arm.cdr().car()));
+                }
+            }
         }
         if matches!(&*name, "<-" | "=" | "for") {
             let mut target = expression.cdr().car();
@@ -877,6 +1264,14 @@ impl Compiler {
         {
             return self.fallback(symbol, dst);
         }
+        // A pattern that binds a name twice leaves the last value bound, as the special does.
+        if let Some(bound) = &self.bound
+            && let Some(index) = bound.names.iter().rposition(|&name| name == symbol)
+        {
+            let register = bound.base + index as u32;
+            self.emit(Op::Move, &[dst, register]);
+            return Ok(());
+        }
         let constant = self.constant(symbol);
         let cache = self.cache();
         self.emit(Op::GetVar, &[dst, constant, cache]);
@@ -885,8 +1280,20 @@ impl Compiler {
 
     unsafe fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
         let constant = self.constant(expression);
-        self.emit(Op::Ast, &[dst, constant]);
+        self.evaluate(dst, constant);
         Ok(())
+    }
+
+    /// Evaluates the expression in constant `constant` in the frame, or with a guard's bound
+    /// names in scope while one compiles.
+    fn evaluate(&mut self, dst: u32, constant: u32) {
+        match &self.bound {
+            Some(bound) => {
+                let (list, base, count) = (bound.list, bound.base, bound.names.len() as u32);
+                self.emit(Op::BoundEval, &[dst, constant, list, base, count])
+            }
+            None => self.emit(Op::Ast, &[dst, constant]),
+        };
     }
 
     unsafe fn call(&mut self, call: Sexp, dst: u32) -> R<()> {
@@ -897,8 +1304,40 @@ impl Compiler {
         let name = symbol_name(head).into_owned();
         if let Some(primitive) = self.base_primitive(head, &name)? {
             let args = values::pairlist_items(call.cdr());
-            if self.eager_subject(primitive, &args)? {
-                return self.subject_call(call, head, primitive, dst, &args);
+            // Ahead of the dispatch-or-eval path `$` would otherwise take, so a record field
+            // read gets the site's shape cache.
+            if name == "$"
+                && let [(subject_tag, subject), (field_tag, field)] = args.as_slice()
+                && *subject_tag == nil()
+                && *field_tag == nil()
+                && field.kind() == SexpType::Symbol
+                && *subject != symbols().dots
+                && *subject != missing_arg()
+            {
+                return self.field(call, head, primitive, dst, *subject, *field);
+            }
+            match name.as_str() {
+                "$" => return self.general_call(call, head, dst),
+                ".ry_record" | ".ry_tuple" | ".ry_tag" => {
+                    return match constructor(&name, &args) {
+                        Some((items, layout, slots)) => {
+                            self.construct(call, head, primitive, dst, items, layout, &slots)
+                        }
+                        None => self.general_call(call, head, dst),
+                    };
+                }
+                ".ry_match" if supported_match(&args)? => {
+                    return self.compiled_match(call, head, primitive, dst, &args);
+                }
+                _ => {}
+            }
+            // Dispatch on an evaluated subject evaluates the other arguments in the frame.
+            if self.bound.is_none() && self.eager_subject(primitive, &args)? {
+                let item = name == "[["
+                    && args.len() == 2
+                    && args.iter().all(|(tag, _)| *tag == nil())
+                    && constant_item(args[1].1);
+                return self.subject_call(call, head, primitive, dst, &args, item);
             }
             let plain = args.iter().all(|(tag, _)| *tag == nil());
             let inlined = match (name.as_str(), args.len()) {
@@ -1067,6 +1506,11 @@ impl Compiler {
                 | "[[<-"
                 | ".Internal"
                 | "local"
+                | "$"
+                | ".ry_record"
+                | ".ry_tuple"
+                | ".ry_tag"
+                | ".ry_match"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1147,8 +1591,8 @@ impl Compiler {
         let mark = self.next_register;
         let function_register = self.allocate();
         self.emit(Op::Constant, &[function_register, expected]);
-        if let Some((_, target)) = self.tail_update.filter(|&(tail, _)| tail == call) {
-            let target = self.constant(target);
+        if self.tail_updates.0.contains(&call) {
+            let target = self.constant(self.tail_updates.1);
             self.emit(
                 Op::CallTailUpdate,
                 &[dst, function_register, call_constant, target],
@@ -1238,7 +1682,7 @@ impl Compiler {
                     if srcrefs != nil() {
                         self.srcref = eval::statement_srcref(srcrefs, index + 1);
                         let srcref = self.constant(self.srcref);
-                        self.emit(Op::SetSrcref, &[srcref]);
+                        self.emit(Op::SetSrcref, &[srcref, 1]);
                     }
                     self.expression(*statement, dst)?;
                     used = self.registers;
@@ -1249,7 +1693,9 @@ impl Compiler {
                 }
                 self.srcref = outer;
                 let srcref = self.constant(outer);
-                self.emit(Op::SetSrcref, &[srcref]);
+                // Restoring the outer srcref after a block starts no statement, so the
+                // debugger must not stop on it.
+                self.emit(Op::SetSrcref, &[srcref, 0]);
             }
             "(" => {
                 self.expression(args[0].1, dst)?;
@@ -1530,6 +1976,7 @@ impl Compiler {
         primitive: Sexp,
         dst: u32,
         args: &[(Sexp, Sexp)],
+        item: bool,
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
@@ -1544,6 +1991,18 @@ impl Compiler {
             self.allocate();
         }
         self.expression(args[0].1, base)?;
+        // A record or tuple item with a constant index reads its slot through the site's shape
+        // cache; anything else falls to `[[`'s path below.
+        let read = if item {
+            let index = self.constant(args[1].1);
+            let shape = self.shape()?;
+            let other = self.emit_patchable(Op::Item, &[dst, base, index, shape, 0]);
+            let read = self.emit_patchable(Op::Jump, &[0]);
+            self.patch(other);
+            Some(read)
+        } else {
+            None
+        };
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
             if *value == missing_arg() {
@@ -1565,6 +2024,231 @@ impl Compiler {
         self.emit(Op::CallGeneric, &[dst, function, call_constant]);
         self.patch(called);
         self.patch(dispatched);
+        if let Some(read) = read {
+            self.patch(read);
+        }
+        self.release_to(mark);
+        Ok(())
+    }
+
+    /// A fresh shape cache for a [`Op::Field`] or [`Op::Item`] site.
+    unsafe fn shape(&mut self) -> R<u32> {
+        let shape = values::alloc(SexpType::Integer, 2)?;
+        values::ints_mut(shape).copy_from_slice(&[crate::records::NO_LAYOUT, 0]);
+        Ok(self.constant(shape))
+    }
+
+    /// A record, tuple or tag constructor whose syntax fixes the layout: the items evaluate in
+    /// order into the registers of their slots, and one instruction builds the value. A
+    /// payload-free tag or the empty tuple is one shared constant.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn construct(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        items: &[(Sexp, Sexp)],
+        layout: u32,
+        slots: &[usize],
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        if items.is_empty() {
+            let value = crate::records::construct(layout, &[])?;
+            let constant = self.constant(value);
+            self.emit(Op::Constant, &[dst, constant]);
+        } else {
+            let mark = self.next_register;
+            let base = self.next_register;
+            for _ in items {
+                self.allocate();
+            }
+            for ((_, value), slot) in items.iter().zip(slots) {
+                self.expression(*value, base + *slot as u32)?;
+            }
+            self.emit(Op::Construct, &[dst, layout, base, items.len() as u32]);
+            self.release_to(mark);
+        }
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
+    }
+
+    /// `match` whose arms [`supported_match`] accepts: the scrutinee evaluates once, each arm's
+    /// pattern compiles to tests that jump to the next arm, the names it binds are assigned once
+    /// the whole pattern matched (so a failed arm binds nothing, as in the special), and the body
+    /// compiles in place.
+    unsafe fn compiled_match(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let call_constant = self.constant(call);
+        let mark = self.next_register;
+        let value = self.allocate();
+        self.expression(args[0].1, value)?;
+        let mut matched = Vec::new();
+        for (_, arm) in &args[1..] {
+            let parts = values::pairlist_items(arm.cdr());
+            let arm_mark = self.next_register;
+            let mut failed = Vec::new();
+            let mut bound = Vec::new();
+            self.pattern(parts[0].1, value, &mut failed, &mut bound)?;
+            if let [_, (_, guard), _] = parts.as_slice() {
+                // The guard sees the bindings as the special's scratch frame would, so a guard
+                // that fails leaves the function's own frame untouched. A guard of plain calls
+                // reads them from registers; anything that could reach the frame by name runs
+                // in a scratch frame, through `Op::BoundEval`.
+                let names: Vec<Sexp> = bound.iter().map(|&(name, _)| name).collect();
+                let list = self.constant(values::list_vector(&names)?);
+                let base = self.next_register;
+                for &(_, register) in &bound {
+                    let copy = self.allocate();
+                    self.emit(Op::Move, &[copy, register]);
+                }
+                let guard_constant = self.constant(*guard);
+                let value = self.allocate();
+                let in_place = guard_compiles_in_place(*guard, &names);
+                self.bound = Some(Bound { names, list, base });
+                if in_place {
+                    self.expression(*guard, value)?;
+                } else {
+                    self.evaluate(value, guard_constant);
+                }
+                self.bound = None;
+                let holds = self.allocate();
+                self.emit(
+                    Op::MatchCondition,
+                    &[holds, value, guard_constant, call_constant],
+                );
+                failed.push(self.emit_patchable(Op::JumpUnless, &[holds, call_constant, 0]));
+            }
+            let body = parts.last().map_or(nil(), |&(_, body)| body);
+            for (name, register) in bound {
+                let name = self.constant(name);
+                self.emit(Op::SetVar, &[name, register]);
+            }
+            self.expression(body, dst)?;
+            matched.push(self.emit_patchable(Op::Jump, &[0]));
+            for position in failed {
+                self.patch(position);
+            }
+            self.release_to(arm_mark);
+        }
+        self.emit(Op::MatchFail, &[value, call_constant]);
+        for position in matched {
+            self.patch(position);
+        }
+        self.release_to(mark);
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
+    }
+
+    /// The tests of one pattern against the value in register `value`: each failing test's
+    /// target operand goes to `failed`, and each name it binds, with the register holding the
+    /// value, to `bound`.
+    unsafe fn pattern(
+        &mut self,
+        pattern: Sexp,
+        value: u32,
+        failed: &mut Vec<usize>,
+        bound: &mut Vec<(Sexp, u32)>,
+    ) -> R<()> {
+        match pattern.kind() {
+            SexpType::Symbol => {
+                if pattern.car().bytes() != b"_" {
+                    bound.push((pattern, value));
+                }
+            }
+            SexpType::Language => {
+                let items = values::pairlist_items(pattern.cdr());
+                match pattern.car().car().bytes() {
+                    b"(" => self.pattern(items[0].1, value, failed, bound)?,
+                    b"|" => {
+                        let mut left = Vec::new();
+                        self.pattern(items[0].1, value, &mut left, bound)?;
+                        let either = self.emit_patchable(Op::Jump, &[0]);
+                        for position in left {
+                            self.patch(position);
+                        }
+                        self.pattern(items[1].1, value, failed, bound)?;
+                        self.patch(either);
+                    }
+                    _ => match pattern_shape(pattern) {
+                        Some(PatternShape::Tag(tag)) => {
+                            failed.push(self.emit_patchable(Op::MatchTag, &[value, tag, 0]));
+                        }
+                        Some(PatternShape::Layout { layout, items }) => {
+                            failed.push(self.emit_patchable(Op::MatchShape, &[value, layout, 0]));
+                            for (item, slot) in items {
+                                if item.kind() == SexpType::Symbol && item.car().bytes() == b"_" {
+                                    continue;
+                                }
+                                let register = self.allocate();
+                                self.emit(Op::Slot, &[register, value, slot as u32, layout]);
+                                self.pattern(item, register, failed, bound)?;
+                            }
+                        }
+                        None => panic!("a compiled `match` reached a pattern it does not support"),
+                    },
+                }
+            }
+            _ => {
+                let constant = self.constant(pattern);
+                failed.push(self.emit_patchable(Op::MatchLiteral, &[value, constant, 0]));
+            }
+        }
+        Ok(())
+    }
+
+    /// `subject$name` for the base `$`, which evaluates its subject as a value, as the special
+    /// does, and never evaluates the name.
+    unsafe fn field(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        subject: Sexp,
+        name: Sexp,
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let call_constant = self.constant(call);
+        let name_constant = self.constant(name);
+        let shape = self.shape()?;
+        let cache = self.cache();
+        let mark = self.next_register;
+        let function = self.allocate();
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
+        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let object = self.allocate();
+        self.expression(subject, object)?;
+        self.emit(
+            Op::Field,
+            &[dst, object, name_constant, call_constant, shape],
+        );
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(generic);
+        self.generic_call(dst, function, call_constant, None);
+        self.patch(done);
         self.release_to(mark);
         Ok(())
     }
@@ -1621,6 +2305,10 @@ impl Compiler {
     }
 
     fn generic_call(&mut self, dst: u32, function: u32, call: u32, rebinding: Option<u32>) {
+        // A closure's promises would read the frame, which does not hold a guard's bound names.
+        if self.bound.is_some() {
+            return self.evaluate(dst, call);
+        }
         match rebinding {
             Some(target) => self.emit(Op::CallRebinding, &[dst, function, call, target]),
             None => self.emit(Op::CallGeneric, &[dst, function, call]),
@@ -1642,6 +2330,12 @@ pub fn operand_count(op: Op) -> usize {
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
         Op::CallRebinding | Op::CallTailUpdate => 4,
+        Op::Field | Op::Item => 5,
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral => 3,
+        Op::Slot | Op::Construct => 4,
+        Op::MatchFail | Op::Move => 2,
+        Op::BoundEval => 5,
+        Op::MatchCondition => 4,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -1656,7 +2350,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::LogicRight => 5,
         Op::Closure => 4,
         Op::SubAssign => 6,
-        Op::SetSrcref => 1,
+        Op::SetSrcref => 2,
         Op::EndStatement => 3,
         Op::BranchUnlessPrimitive => 3,
         Op::BranchIfObject => 2,
@@ -1773,6 +2467,11 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
         match step(machine, &decoded, &mut pc) {
             Ok(Some(value)) => return Ok(value),
             Ok(None) => {
+                // Between instructions every live value sits in a register, so what an
+                // instruction rooted is released at once. Otherwise an object only a finished
+                // call held would stay alive until the body returns, past a later `gc()` and
+                // the finalizer GNU R runs there.
+                crate::heap().release_handles(machine.mark);
                 if pc < at
                     && let Some(tier) = interp().bytecode.tier
                 {
@@ -1851,8 +2550,7 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     let value = lookup_variable(
         symbol,
         env,
-        constants,
-        code.tag(),
+        LookupCache::of(code),
         words[pc + 3] as usize,
         0..0,
     )?;
@@ -1861,13 +2559,14 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
 }
 
 /// What every instruction of an activation reads, loaded once instead of once per instruction.
-/// None of it changes while the activation runs: the code object is rooted and never patched,
-/// and the register window was reserved on entry in a file that never reallocates.
+/// None of these addresses changes while the activation runs: the code object is rooted and
+/// never patched, its vectors are never resized, and the register window was reserved on entry
+/// in a file that never reallocates. What they point at (registers, cache slots) does change.
 #[derive(Clone, Copy)]
 struct Decoded<'a> {
     code: &'a [i32],
     constants: Sexp,
-    caches: Sexp,
+    cache: LookupCache,
     registers: *mut Sexp,
     /// The type feedback bytes, one per code word, or null when no optimizing tier is installed
     /// to read them.
@@ -1884,7 +2583,7 @@ impl Decoded<'_> {
         Decoded {
             code: values::ints(machine.code.car()),
             constants,
-            caches: machine.code.tag(),
+            cache: LookupCache::of(machine.code),
             registers: register_address(machine.base),
             feedback,
         }
@@ -1912,7 +2611,7 @@ unsafe fn step(
     let Decoded {
         code,
         constants,
-        caches,
+        cache,
         registers,
         ..
     } = *decoded;
@@ -1933,7 +2632,7 @@ unsafe fn step(
             interp().visible = true;
             let symbol = constants.element(operand(1));
             let held = machine.base..machine.base + operand(0);
-            let value = lookup_variable(symbol, env, constants, caches, operand(2), held)?;
+            let value = lookup_variable(symbol, env, cache, operand(2), held)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
@@ -1946,7 +2645,7 @@ unsafe fn step(
         Op::GetFun => {
             let symbol = constants.element(operand(1));
             let call = constants.element(operand(3));
-            let function = lookup_function(symbol, env, constants, caches, operand(2), call)?;
+            let function = lookup_function(symbol, env, cache, operand(2), call)?;
             set(operand(0), function);
         }
         Op::BranchUnlessBuiltin => {
@@ -2003,6 +2702,84 @@ unsafe fn step(
             decoded.record(at, value);
             set(operand(0), value);
         }
+        Op::Field => {
+            let object = register(operand(1));
+            let name = constants.element(operand(2));
+            let call = constants.element(operand(3));
+            let shape = constants.element(operand(4));
+            let value = match crate::records::cached_field(object, name, shape)? {
+                Some(value) => value,
+                None => crate::subset::dollar_value(object, name.car(), call, env)?,
+            };
+            record_feedback(constants, at, value);
+            interp().visible = true;
+            set(operand(0), value);
+        }
+        Op::Item => {
+            let object = register(operand(1));
+            let index = constants.element(operand(2));
+            let shape = constants.element(operand(3));
+            match crate::records::cached_item(object, index, shape)? {
+                Some(value) => {
+                    decoded.record(at, value);
+                    interp().visible = true;
+                    set(operand(0), value);
+                }
+                None => {
+                    *pc = operand(4);
+                    return Ok(None);
+                }
+            }
+        }
+        Op::MatchShape => {
+            if !crate::records::has_layout(register(operand(0)), operand(1) as u32) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::MatchTag => {
+            if crate::records::plain_tag(register(operand(0))) != Some(operand(1) as u32) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::MatchLiteral => {
+            let pattern = constants.element(operand(1));
+            if !crate::records::literal_matches(pattern, register(operand(0))) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::Slot => {
+            let value = crate::records::slot_value(register(operand(1)), operand(2))?;
+            decoded.record(at, value);
+            set(operand(0), value);
+        }
+        Op::MatchFail => {
+            let call = constants.element(operand(1));
+            return Err(crate::records::no_arm_matches(register(operand(0)), call));
+        }
+        Op::Construct => {
+            let slots = std::slice::from_raw_parts(registers.add(operand(2)), operand(3));
+            let value = crate::records::construct(operand(1) as u32, slots)?;
+            interp().visible = true;
+            set(operand(0), value);
+        }
+        Op::Move => set(operand(0), register(operand(1))),
+        Op::BoundEval => {
+            let expression = constants.element(operand(1));
+            let names = constants.element(operand(2));
+            let bound = std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
+            let value = crate::records::eval_bound_registers(expression, names, bound, env)?;
+            decoded.record(at, value);
+            set(operand(0), value);
+        }
+        Op::MatchCondition => {
+            let guard = constants.element(operand(2));
+            let call = constants.element(operand(3));
+            let holds = crate::records::guard_holds(register(operand(1)), guard, call)?;
+            set(operand(0), values::scalar_logical(i32::from(holds))?);
+        }
         Op::BranchUnlessPrimitive => {
             if register(operand(0)) != constants.element(operand(1)) {
                 *pc = operand(2);
@@ -2045,9 +2822,9 @@ unsafe fn step(
             let symbol = constants.element(operand(0));
             let expected = constants.element(operand(1));
             let found = if operand(3) == 0 {
-                lookup_enclosing_function(symbol, env, constants, caches, operand(2))
+                lookup_enclosing_function(symbol, env, cache, operand(2))
             } else {
-                lookup_function(symbol, env, constants, caches, operand(2), unbound())
+                lookup_function(symbol, env, cache, operand(2), unbound())
             };
             if !matches!(found, Ok(function) if function == expected) {
                 *pc = operand(4);
@@ -2057,7 +2834,6 @@ unsafe fn step(
         Op::Jump => {
             let target = operand(0);
             if target < at {
-                crate::heap().release_handles(machine.mark);
                 crate::unwind::poll_interrupt()?;
             }
             *pc = target;
@@ -2147,13 +2923,17 @@ unsafe fn step(
         Op::ForEnd => register(operand(0)).decrement_refcount(),
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
-        Op::SetSrcref => interp().srcref = constants.element(operand(0)),
+        Op::SetSrcref => {
+            interp().srcref = constants.element(operand(0));
+            if operand(1) == 1 && interp().debugger.is_some() {
+                crate::debugger::statement()?;
+            }
+        }
         Op::EndStatement => {
             set(operand(0), nil());
             for register in operand(1)..operand(2) {
                 set(register, nil());
             }
-            crate::heap().release_handles(machine.mark);
         }
         Op::LogicLeft => {
             let call = constants.element(operand(2));
@@ -2349,8 +3129,7 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
 unsafe fn lookup_variable(
     symbol: Sexp,
     env: Sexp,
-    constants: Sexp,
-    caches: Sexp,
+    cache: LookupCache,
     slot: usize,
     held: Range<usize>,
 ) -> R<Sexp> {
@@ -2372,7 +3151,7 @@ unsafe fn lookup_variable(
         return Ok(value);
     }
     let enclosure = env.enclosure();
-    if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
+    if let Some(cell) = cached_cell(symbol, enclosure, cache, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
         let value = cell.cdr();
@@ -2384,7 +3163,7 @@ unsafe fn lookup_variable(
         }
     }
     if let Some(cell) = resolve(symbol, enclosure, false)? {
-        fill_cache(symbol, enclosure, cell, constants, caches, slot);
+        fill_cache(symbol, enclosure, cell, cache, slot);
     }
     holding(held, || eval::eval_symbol(symbol, env))
 }
@@ -2414,8 +3193,7 @@ unsafe fn holding(held: Range<usize>, run: impl FnOnce() -> R<Sexp>) -> R<Sexp> 
 unsafe fn lookup_function(
     symbol: Sexp,
     env: Sexp,
-    constants: Sexp,
-    caches: Sexp,
+    cache: LookupCache,
     slot: usize,
     call: Sexp,
 ) -> R<Sexp> {
@@ -2424,7 +3202,7 @@ unsafe fn lookup_function(
         return eval::find_called_fun(symbol, env, call);
     }
     let enclosure = env.enclosure();
-    if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
+    if let Some(cell) = cached_cell(symbol, enclosure, cache, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
         let mut value = cell.cdr();
@@ -2436,7 +3214,7 @@ unsafe fn lookup_function(
         }
     }
     if let Some(cell) = resolve(symbol, enclosure, true)? {
-        fill_cache(symbol, enclosure, cell, constants, caches, slot);
+        fill_cache(symbol, enclosure, cell, cache, slot);
     }
     eval::find_called_fun(symbol, env, call)
 }
@@ -2445,12 +3223,11 @@ unsafe fn lookup_function(
 unsafe fn lookup_enclosing_function(
     symbol: Sexp,
     env: Sexp,
-    constants: Sexp,
-    caches: Sexp,
+    cache: LookupCache,
     slot: usize,
 ) -> R<Sexp> {
     let enclosure = env.enclosure();
-    if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
+    if let Some(cell) = cached_cell(symbol, enclosure, cache, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
         let mut value = cell.cdr();
@@ -2461,40 +3238,50 @@ unsafe fn lookup_enclosing_function(
             return Ok(value);
         }
     }
-    lookup_function(symbol, env, constants, caches, slot, unbound())
+    lookup_function(symbol, env, cache, slot, unbound())
 }
 
-#[inline]
+/// A code object's lookup caches: per lookup slot, the stamp it was filled under (in the
+/// `EPOCHS` constant) and an (enclosure, cell) pair (in the code's tag). Both vectors are
+/// allocated with the code object and never resized, so their storage is addressed directly.
+#[derive(Clone, Copy)]
+struct LookupCache {
+    epochs: *mut f64,
+    caches: Sexp,
+    slots: *const Sexp,
+}
+
+impl LookupCache {
+    unsafe fn of(code: Sexp) -> Self {
+        let caches = code.tag();
+        LookupCache {
+            epochs: values::reals_mut(code.cdr().element(EPOCHS)).as_mut_ptr(),
+            caches,
+            slots: caches.data() as *const Sexp,
+        }
+    }
+}
+
+#[inline(always)]
 unsafe fn cached_cell(
     symbol: Sexp,
     enclosure: Sexp,
-    constants: Sexp,
-    caches: Sexp,
+    cache: LookupCache,
     slot: usize,
 ) -> Option<Sexp> {
-    let epochs = constants.element(EPOCHS);
-    if values::reals(epochs)[slot] != crate::heap().lookup_stamp(symbol) as f64 {
+    if *cache.epochs.add(slot) != crate::heap().lookup_stamp(symbol) as f64
+        || *cache.slots.add(slot * 2) != enclosure
+    {
         return None;
     }
-    if caches.element(slot * 2) != enclosure {
-        return None;
-    }
-    Some(caches.element(slot * 2 + 1))
+    Some(*cache.slots.add(slot * 2 + 1))
 }
 
-unsafe fn fill_cache(
-    symbol: Sexp,
-    enclosure: Sexp,
-    cell: Sexp,
-    constants: Sexp,
-    caches: Sexp,
-    slot: usize,
-) {
+unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, cache: LookupCache, slot: usize) {
     let heap = crate::heap();
-    heap.set_element(caches, slot * 2, enclosure);
-    heap.set_element(caches, slot * 2 + 1, cell);
-    let epochs = constants.element(EPOCHS);
-    values::reals_mut(epochs)[slot] = heap.lookup_stamp(symbol) as f64;
+    heap.set_element(cache.caches, slot * 2, enclosure);
+    heap.set_element(cache.caches, slot * 2 + 1, cell);
+    *cache.epochs.add(slot) = heap.lookup_stamp(symbol) as f64;
 }
 
 /// The cell a lookup from `enclosure` finds, when the result can be cached: the walk passes no

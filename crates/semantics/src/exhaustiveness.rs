@@ -7,14 +7,12 @@
 
 use {
     crate::{
-        Db,
-        annotations::NamedDefinition,
+        Db, TypeDefinitions,
         check::ExpressionTypes,
         hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         infer::apply_definition,
-        types::{Atomic, Name, Ty, TyKind, union_of, unknown},
+        types::{Atomic, Ty, TyKind, union_of, unknown},
     },
-    rustc_hash::FxHashMap,
     syntax::TextRange,
 };
 
@@ -44,7 +42,7 @@ pub const WITNESS_LIMIT: usize = 3;
 
 /// The project's `type` and `alias` definitions, through which a named scrutinee shows
 /// its cases.
-pub type Definitions<'db> = Option<&'db FxHashMap<Name<'db>, NamedDefinition<'db>>>;
+pub type Definitions<'db> = Option<TypeDefinitions<'db>>;
 
 /// Every `match` of an item, in expression order. Ranges are item-relative.
 pub fn match_findings<'db>(
@@ -122,7 +120,7 @@ fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) 
             let TyKind::Named(name, arguments) = current.kind(db) else {
                 break;
             };
-            let Some(definition) = definitions.and_then(|table| table.get(name)) else {
+            let Some(definition) = definitions.and_then(|table| table.get(db, *name)) else {
                 break;
             };
             if matches!(definition.body.kind(db), TyKind::Unknown)

@@ -15,7 +15,7 @@ use {
     },
     heap::{
         GcStress,
-        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
     std::{
@@ -25,6 +25,7 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    builtin(".ry_view", 2, do_ry_view).invisible(),
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
     internal("pcre_config", 0, |_| unsafe {
@@ -44,10 +45,28 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
     }),
     internal("readRenviron", 1, do_read_renviron).invisible(),
-    internal("debug", 3, |_| Ok(nil())).invisible(),
-    internal("undebug", 1, |_| Ok(nil())).invisible(),
-    internal("debugonce", 3, |_| Ok(nil())).invisible(),
-    internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
+    internal("debug", 3, |call| unsafe {
+        debugged_function(call)?.set_gp_bits(gp::CLOSURE_DEBUG, true);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("undebug", 1, |call| unsafe {
+        let function = debugged_function(call)?;
+        if !function.has_gp(gp::CLOSURE_DEBUG) {
+            crate::conditions::warning_call(call.call, "argument is not being debugged")?;
+        }
+        function.set_gp_bits(gp::CLOSURE_DEBUG, false);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("debugonce", 3, |call| unsafe {
+        debugged_function(call)?.set_gp_bits(gp::CLOSURE_STEP, true);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("isdebugged", 1, |call| unsafe {
+        scalar_bool(debugged_function(call)?.has_gp(gp::CLOSURE_DEBUG))
+    }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
     internal("browserText", 1, |call| {
@@ -69,22 +88,47 @@ pub const BUILTINS: &[BuiltinDef] = &[
         link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok())
     }),
     internal("setFileTime", 2, do_sys_set_file_time).invisible(),
+    // GNU R's `R_ShowFiles` sends each header, a blank line, the file and a newline through the
+    // pager; ry's console is the pager, so the same text goes to the console.
     internal("file.show", 5, |call| unsafe {
+        let delete = values::as_logical_scalar(call.arg(3)) == 1;
+        let mut text = Vec::new();
         for index in 0..length(call.arg(0)) {
-            if let Some(path) = values::string_at(call.arg(0), index) {
-                let text = std::fs::read_to_string(&*path).map_err(|failure| {
-                    call.error(format!("cannot open file '{path}': {failure}"))
-                })?;
-                crate::write_console(text.as_bytes(), false);
+            let Some(path) = values::string_at(call.arg(0), index) else {
+                continue;
+            };
+            if let Some(header) = values::string_at(call.arg(1), index)
+                && !header.is_empty()
+            {
+                text.extend_from_slice(format!("{header}\n\n").as_bytes());
+            }
+            let expanded = crate::connections::expand_path(&path);
+            match std::fs::read(&expanded) {
+                Ok(contents) => {
+                    text.extend_from_slice(&contents);
+                    text.push(b'\n');
+                    if delete {
+                        // GNU R's pager ignores a failed removal too.
+                        std::fs::remove_file(&expanded).ok();
+                    }
+                }
+                Err(failure) => text.extend_from_slice(
+                    format!(
+                        "Cannot open file '{path}': {}\n\n",
+                        crate::connections::os_message(&failure)
+                    )
+                    .as_bytes(),
+                ),
             }
         }
+        crate::write_console(&text, false);
         Ok(nil())
     })
     .invisible(),
     internal("file.choose", 1, |call| {
         Err(call.error("file.choose() needs an interactive session"))
     }),
-    internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
+    internal("curlVersion", 0, |_| unsafe { curl_version() }),
     internal("curlGetHeaders", 5, do_curl_get_headers),
     internal("curlDownload", 6, do_curl_download),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
@@ -127,18 +171,25 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("dirname", 1, |call| unsafe {
+        // GNU R keeps an empty path empty and drops the slashes before the last component.
         map_strings(call, |path| {
+            if path.is_empty() {
+                return String::new();
+            }
             let trimmed = path.trim_end_matches('/');
             match trimmed.rfind('/') {
-                Some(0) => "/".to_owned(),
-                Some(position) => trimmed[..position].to_owned(),
+                Some(position) => match trimmed[..position].trim_end_matches('/') {
+                    "" => "/".to_owned(),
+                    parent => parent.to_owned(),
+                },
+                None if path.starts_with('/') => "/".to_owned(),
                 None => ".".to_owned(),
             }
         })
     }),
     internal("file.path", 2, do_file_path),
     internal("tempfile", 3, do_tempfile),
-    internal("tempdir", 1, |_| unsafe { scalar_string(&temp_dir()) }),
+    internal("tempdir", 1, do_tempdir),
     internal("unlink", 4, do_unlink).invisible(),
     internal("file.remove", 1, |call| unsafe {
         map_paths(call, |path| std::fs::remove_file(path).is_ok())
@@ -169,7 +220,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("Sys.which", 1, do_sys_which),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
-    internal("Sys.umask", 1, do_sys_umask),
+    internal("Sys.umask", 1, do_sys_umask).keep_visibility(),
     internal("Sys.getpid", 0, |_| unsafe {
         scalar_integer(std::process::id() as i32)
     }),
@@ -194,7 +245,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
                     .filter(|left| !left.is_zero())
                 {
                     crate::unwind::poll_interrupt()?;
-                    std::thread::sleep(left.min(slice));
+                    // GNU R answers help server requests while it sleeps.
+                    crate::help_server::wait_and_serve(left.min(slice))?;
                 }
             }
             Ok(nil())
@@ -212,7 +264,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", -1, do_system),
+    internal("system", -1, do_system).keep_visibility(),
     internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
     internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
     internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
@@ -224,8 +276,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, |call| Ok(call.arg(0))),
-    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
+    builtin("enc2native", 1, character_unchanged),
+    builtin("enc2utf8", 1, do_enc2utf8),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -256,10 +308,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
             balance_posixlt(call.arg(0), true, false)
         }
     }),
-    // ry has no interactive debugger, so `browser()` continues as it does in a
-    // non-interactive GNU R session.
-    special("browser", -1, |_| Ok(nil())).invisible(),
-    internal("inspect", -1, do_inspect).invisible(),
+    // Without an attached debug adapter, `browser()` continues as it does in a non-interactive
+    // GNU R session, which `R CMD check` and testthat turn into an error.
+    special("browser", -1, |call| unsafe {
+        crate::debugger::browser()?;
+        let checked = std::env::var("_R_CHECK_BROWSER_NONINTERACTIVE_")
+            .is_ok_and(|value| matches!(value.as_str(), "true" | "TRUE" | "True" | "T"));
+        if !crate::interp().interactive && checked {
+            return Err(call.error("non-interactive browser() -- left over from debugging?"));
+        }
+        Ok(nil())
+    })
+    .invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
@@ -276,7 +336,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindtextdomain", 2, |_| Ok(nil())),
     internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, |call| Ok(call.arg(0))),
+    internal("enc2native", 1, character_unchanged),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -360,19 +420,104 @@ fn find_r_home() -> Result<String, String> {
     ))
 }
 
-fn temp_dir() -> String {
-    static mut DIR: Option<String> = None;
-    // SAFETY: single-threaded access.
-    #[allow(static_mut_refs)]
-    unsafe {
-        DIR.get_or_insert_with(|| {
-            let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
-            let path = format!("{base}/RtmpRy{}", std::process::id());
-            drop(std::fs::create_dir_all(&path));
-            path
-        })
-        .clone()
+/// The session's temporary directory, which `tempdir()` returns and native code reads as
+/// `R_TempDir`. As in GNU R it is a fresh `RtmpXXXXXX` under the first of `R_TMPDIR`, `TMPDIR`,
+/// `TMP` and `TEMP` that names a writable directory, created on first use and removed when the
+/// session ends.
+pub fn session_temp_dir() -> Result<&'static str, String> {
+    SESSION_TEMP
+        .get_or_init(create_session_temp_dir)
+        .as_ref()
+        .map(|temp| temp.path.as_str())
+        .map_err(Clone::clone)
+}
+
+/// Removes the session's temporary directory. Only the process that created it does: a forked
+/// child shares the path but must leave the directory to its parent.
+pub fn remove_session_temp_dir() {
+    let Some(Ok(temp)) = SESSION_TEMP.get() else {
+        return;
+    };
+    if temp.owner != std::process::id() {
+        return;
     }
+    match std::fs::remove_dir_all(&temp.path) {
+        Err(failure) if failure.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "ry: cannot remove the temporary directory '{}': {failure}",
+                temp.path
+            );
+        }
+        Ok(()) | Err(_) => {}
+    }
+}
+
+struct SessionTemp {
+    path: String,
+    owner: u32,
+}
+
+static SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> = std::sync::OnceLock::new();
+
+fn create_session_temp_dir() -> Result<SessionTemp, String> {
+    let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|candidate| writable_directory(candidate))
+        .unwrap_or_else(|| "/tmp".to_owned());
+    let template = std::ffi::CString::new(format!("{root}/RtmpXXXXXX"))
+        .map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
+    let mut bytes = template.into_bytes_with_nul();
+    // SAFETY: `bytes` is a NUL-terminated template that mkdtemp rewrites in place.
+    let created = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
+    if created.is_null() {
+        return Err("cannot create 'R_TempDir'".to_owned());
+    }
+    bytes.pop();
+    let path = String::from_utf8(bytes).map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
+    Ok(SessionTemp {
+        path,
+        owner: std::process::id(),
+    })
+}
+
+fn writable_directory(path: &str) -> bool {
+    if path.is_empty() || !std::path::Path::new(path).is_dir() {
+        return false;
+    }
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// `tempdir(check)`: with `check`, a session directory something deleted is created again at
+/// the same path, because native code already holds that path as `R_TempDir`. GNU R picks a
+/// fresh name instead; keeping the name is safe only because the directory is created
+/// private and a directory that already exists must belong to this user.
+unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let path = session_temp_dir().map_err(|message| call.error(message))?;
+    if values::as_logical_scalar(call.arg(0)) == 1 {
+        let usable = match std::fs::symlink_metadata(path) {
+            // SAFETY: geteuid has no preconditions.
+            Ok(metadata) => metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
+            Err(_) => std::fs::DirBuilder::new().mode(0o700).create(path).is_ok(),
+        };
+        if !usable {
+            return Err(call.error("cannot create 'R_TempDir'"));
+        }
+    }
+    scalar_string(path)
+}
+
+/// `.ry_view(x, title)`, behind ry's `View()`: opens a lazy view of `x` in the editors connected
+/// to the console. Only the rows an editor scrolls to are ever formatted.
+unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
+    let title = values::as_string_scalar(call.arg(1))?.unwrap_or_default();
+    crate::console_server::show(call.arg(0), &title).map_err(|message| error(message))?;
+    Ok(call.arg(0))
 }
 
 /// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
@@ -437,90 +582,6 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
         values::set_elt(result, index, charsxp);
     }
     Ok(result)
-}
-
-/// `.Internal(inspect(x))`: GNU R's dump of an object's internal structure, with the header
-/// layout GNU R prints. ry has no GC generations or reference counts to report, so those
-/// fields always read `g0c0 []`.
-unsafe fn do_inspect(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let mut text = String::new();
-    inspect_into(&mut text, object, 0);
-    crate::write_console(text.as_bytes(), false);
-    Ok(object)
-}
-
-unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
-    const SHOWN: usize = 5;
-    let indent = " ".repeat(depth * 2);
-    let kind = object.kind();
-    let header = format!(
-        "{indent}@{:x} {:02} {} g0c0 [] ",
-        object.as_ptr() as usize,
-        kind as u8,
-        kind.constant_name()
-    );
-    text.push_str(&header);
-    let count = if kind.is_vector() { length(object) } else { 0 };
-    match kind {
-        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
-            let shown: Vec<String> = (0..count.min(SHOWN))
-                .map(|index| match kind {
-                    SexpType::Real => {
-                        crate::format::format_real_alone(values::reals(object)[index], 7)
-                    }
-                    SexpType::Complex => {
-                        crate::format::format_complex_alone(values::complexes(object)[index], 7)
-                    }
-                    _ => match values::ints(object)[index] {
-                        NA_INTEGER => "NA".to_owned(),
-                        value => value.to_string(),
-                    },
-                })
-                .collect();
-            let more = if count > SHOWN { ",..." } else { "" };
-            text.push_str(&format!("(len={count}, tl=0) {}{more}\n", shown.join(",")));
-        }
-        SexpType::Raw => {
-            text.push_str(&format!("(len={count}, tl=0)\n"));
-        }
-        SexpType::Char => {
-            let ascii = if object.bytes().is_ascii() {
-                "[ASCII] "
-            } else {
-                ""
-            };
-            text.push_str(&format!(
-                "{ascii}[cached] \"{}\"\n",
-                crate::format::encode_string(&String::from_utf8_lossy(object.bytes()), None)
-            ));
-        }
-        SexpType::Symbol => text.push_str(&format!("\"{}\"\n", values::symbol_name(object))),
-        SexpType::String | SexpType::List | SexpType::Expression => {
-            text.push_str(&format!("(len={count}, tl=0)\n"));
-            for index in 0..count {
-                inspect_into(text, object.element(index), depth + 1);
-            }
-        }
-        SexpType::Pairlist | SexpType::Language => {
-            text.push('\n');
-            let mut node = object;
-            while node != nil() && matches!(node.kind(), SexpType::Pairlist | SexpType::Language) {
-                if node.tag() != nil() {
-                    text.push_str(&format!("{indent}  TAG: "));
-                    inspect_into(text, node.tag(), 0);
-                }
-                inspect_into(text, node.car(), depth + 1);
-                node = node.cdr();
-            }
-        }
-        _ => text.push('\n'),
-    }
-    let attributes = object.attrib();
-    if attributes != nil() && kind != SexpType::Char {
-        text.push_str(&format!("{indent}ATTRIB:\n"));
-        inspect_into(text, attributes, depth + 1);
-    }
 }
 
 unsafe fn map_strings_bool(call: &Call<'_>, function: impl Fn(&str) -> bool) -> R<Sexp> {
@@ -2313,7 +2374,7 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
             regex::RegexBuilder::new(&if fixed {
                 regex::escape(pattern)
             } else {
-                crate::strings::translate_regex(pattern, true)
+                crate::strings::translate_regex(pattern)
             })
             .case_insensitive(ignore_case)
             .build()
@@ -2512,9 +2573,12 @@ unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
         let pattern = values::string_at(patterns, index % length(patterns).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let directory = values::string_at(directories, index % length(directories).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(temp_dir);
+        let directory = match values::string_at(directories, index % length(directories).max(1)) {
+            Some(text) => text.into_owned(),
+            None => session_temp_dir()
+                .map_err(|message| call.error(message))?
+                .to_owned(),
+        };
         let extension = values::string_at(extensions, index % length(extensions).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
@@ -2597,16 +2661,15 @@ unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     let name = crate::platform::system_name();
-    let user = name.user;
     let values_list = [
         name.sysname,
         name.release,
         name.version,
         name.nodename,
         name.machine,
-        user.clone(),
-        user.clone(),
-        user,
+        name.login,
+        name.user,
+        name.effective_user,
     ];
     let result = string_vector(&values_list)?;
     let names = string_vector(&[
@@ -2854,6 +2917,30 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// `libcurlVersion()`'s internal. ry's transfers do not use libcurl, so the version is the
+/// libcurl release whose behavior they follow, which keeps version checks in packages
+/// passing, and the attributes describe what ry really uses: rustls, no SSH, and the
+/// protocols `url()` and `download.file()` handle.
+unsafe fn curl_version() -> R<Sexp> {
+    let version = scalar_string("8.5.0")?;
+    values::set_attr(
+        version,
+        values::install("ssl_version")?,
+        scalar_string("rustls")?,
+    )?;
+    values::set_attr(
+        version,
+        values::install("libssh_version")?,
+        scalar_string("")?,
+    )?;
+    values::set_attr(
+        version,
+        values::install("protocols")?,
+        string_vector(&["file", "http", "https"])?,
+    )?;
+    Ok(version)
+}
+
 /// `curlDownload(url, destfile, quiet, mode, cacheOK, headers)`: fetches each URL into its
 /// destination file. A single URL reports its progress the way GNU R's libcurl method does and
 /// errors when the transfer fails; several URLs only announce themselves and warn per failure.
@@ -3055,6 +3142,7 @@ unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
+    crate::console_server::finish();
     crate::session::finish();
     use std::io::Write;
     drop(std::io::stdout().flush());
@@ -3083,6 +3171,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
                 format!("running command '{command}' had status {status}"),
             )?;
         }
+        interp().visible = true;
         return Ok(result);
     }
     // The child writes straight to the terminal, as GNU R's does, so earlier output must be out
@@ -3095,6 +3184,16 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
     interp().visible = false;
     scalar_integer(status.code().unwrap_or(127))
+}
+
+/// `enc2utf8` and `enc2native`: every string ry holds is already UTF-8, so only the type check
+/// remains.
+unsafe fn character_unchanged(call: &Call<'_>) -> R<Sexp> {
+    let value = call.arg(0);
+    if value.kind() != SexpType::String {
+        return Err(call.error("argument is not a character vector"));
+    }
+    Ok(value)
 }
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
@@ -3113,6 +3212,48 @@ unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
             "unknown"
         };
         values::set_elt(result, index, values::mkchar(name)?);
+    }
+    Ok(result)
+}
+
+/// `enc2utf8`: re-encodes latin1 strings as UTF-8 and marks native non-ASCII strings as UTF-8,
+/// which is what GNU R does in a UTF-8 locale. The vector is copied only when a string changes.
+unsafe fn do_enc2utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("argument is not a character vector"));
+    }
+    let mut result = strings;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        if charsxp == values::na_string()
+            || charsxp.has_gp(heap::object::gp::UTF8)
+            || charsxp.has_gp(heap::object::gp::BYTES)
+            || charsxp.bytes().is_ascii()
+        {
+            continue;
+        }
+        let converted = if charsxp.has_gp(heap::object::gp::LATIN1) {
+            charsxp
+                .bytes()
+                .iter()
+                .map(|&byte| byte as char)
+                .collect::<String>()
+                .into_bytes()
+        } else if std::str::from_utf8(charsxp.bytes()).is_ok() {
+            charsxp.bytes().to_vec()
+        } else {
+            continue;
+        };
+        if result == strings {
+            result = values::shallow_duplicate(strings)?;
+            crate::heap().root(result);
+        }
+        values::set_elt(
+            result,
+            index,
+            values::mkchar_bytes(&converted, Encoding::Utf8)?,
+        );
     }
     Ok(result)
 }
@@ -3525,6 +3666,20 @@ thread_local! {
     static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
+/// The function `debug()` and its relatives flag: their first argument, or the function a
+/// string names. The flags only take effect on closures, but GNU R accepts any function.
+unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
+    let mut function = call.arg(0);
+    if function.kind() == SexpType::String && length(function) == 1 {
+        let name = values::as_string_scalar(function)?.unwrap_or_default();
+        function = crate::eval::find_fun(values::install(&name)?, call.env)?;
+    }
+    match function.kind() {
+        SexpType::Closure | SexpType::Builtin | SexpType::Special => Ok(function),
+        _ => Err(call.error("argument must be a function")),
+    }
+}
+
 /// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
 /// unless that is `NULL`.
 unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
@@ -3732,6 +3887,7 @@ unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_sys_umask(call: &Call<'_>) -> R<Sexp> {
     let mode = values::as_integer_scalar(call.arg(0));
     let old = if mode == NA_INTEGER {
+        interp().visible = true;
         crate::platform::umask()
     } else {
         interp().visible = false;

@@ -88,10 +88,14 @@ static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHAR
 static SYMBOL_TEXT: LazyLock<boxcar::Vec<SymbolEntry>> = LazyLock::new(boxcar::Vec::new);
 
 /// What a hot loop asks of a symbol without reading its spelling: the spelling's hash for a
-/// map probe, and its length in characters for the typo scan's length filter.
+/// map probe, its first bytes for an ordered set's comparison, and its length in characters
+/// for the typo scan's length filter.
 struct SymbolEntry {
     text: &'static str,
     hash: u64,
+    /// The first eight bytes, big-endian and zero-padded, so comparing two prefixes orders
+    /// the spellings whenever they differ in those bytes.
+    prefix: u64,
     characters: u32,
 }
 
@@ -145,6 +149,12 @@ impl Symbol {
         let index = SYMBOL_TEXT.push(SymbolEntry {
             text: interned,
             hash: text_hash,
+            prefix: {
+                let mut bytes = [0u8; 8];
+                let head = interned.len().min(8);
+                bytes[..head].copy_from_slice(&interned.as_bytes()[..head]);
+                u64::from_be_bytes(bytes)
+            },
             characters: u32::try_from(interned.chars().count()).unwrap_or(u32::MAX),
         });
         let symbol = Symbol(
@@ -258,9 +268,17 @@ impl PartialOrd for Symbol {
     }
 }
 
+/// Orders by spelling, which unlike the index is the same in every run. Equal prefixes fall
+/// back to the full text; a zero-padded prefix only ties when the bytes it holds tie.
 impl Ord for Symbol {
     fn cmp(&self, other: &Symbol) -> std::cmp::Ordering {
-        self.as_str().cmp(other.as_str())
+        if self.0 == other.0 {
+            return std::cmp::Ordering::Equal;
+        }
+        let (left, right) = (self.entry(), other.entry());
+        left.prefix
+            .cmp(&right.prefix)
+            .then_with(|| left.text.cmp(right.text))
     }
 }
 
@@ -1770,9 +1788,11 @@ fn literal_kind(node: GreenNodeAt<'_>, buffer: &mut String) -> LiteralKind {
     }
 }
 
+/// A double literal R would treat like an integer: whole, and inside R's integer range, so
+/// `1e10` stays a double (`1e10:(1e10 + 5)` is a double vector in R).
 pub fn is_whole_number_double(text: &str) -> bool {
     text.parse::<f64>()
-        .is_ok_and(|value| value.fract() == 0.0 && value.is_finite())
+        .is_ok_and(|value| value.fract() == 0.0 && value.abs() <= f64::from(i32::MAX))
 }
 
 /// 0-based. Whole-number doubles count: R indexes `x[[2]]` exactly like `x[[2L]]`.

@@ -1,7 +1,9 @@
 #@ weight 3
 #@ param STEPS int 2 6
 # A pipeline of named steps with timing and a content-addressed cache.
-Pipeline@ID@ <- R6::R6Class(
+#: @type Pipeline@ID@ {list{steps: list[named: fn(x: Any) -> Any], history: character[], add: fn(name: character, fn: fn(x: Any) -> Any) -> Pipeline@ID@, run: fn(input: Any) -> Any}}
+
+Pipeline@ID@ <- R6::R6Class( # ry: allow(object-system)
   "Pipeline@ID@",
   public = list(
     steps = list(),
@@ -15,6 +17,7 @@ Pipeline@ID@ <- R6::R6Class(
     run = function(input) {
       value <- input
       for (name in names(self$steps)) {
+        #: Any
         value <- self$steps[[name]](value)
         self$history <- c(self$history, sprintf("%s:%s", name, digest::digest(value, algo = "crc32")))
       }
@@ -23,7 +26,9 @@ Pipeline@ID@ <- R6::R6Class(
   )
 )
 
+#: fn([steps]: integer) -> Pipeline@ID@
 default_pipeline_@ID@ <- function(steps = @STEPS@L) {
+  #: @new Pipeline@ID@
   pipeline <- Pipeline@ID@$new()
   for (i in seq_len(steps)) {
     local({

@@ -8,7 +8,7 @@ and why. Built so far are the object model and collector in `crates/heap`, the C
 in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
 `crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run`),
 a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
-`crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
+`crates/table`. Not built are compiled-to-compiled calls of general (non-scalar) functions, ry's own base R (base R's R
 code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
 runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
 reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
@@ -380,20 +380,37 @@ The GC is a **non-moving, generational mark-sweep collector with size-segregated
 the design GNU R uses, kept because native code holds raw pointers to object data. Reference counts
 drive copy-on-modify exactly as `MAYBE_SHARED` expects. The roots are the `PROTECT` stack, the
 precious list behind `R_PreserveObject`, global variables, the interpreter's frames, and JIT frames
-through Cranelift's stack maps.
+through Cranelift's stack maps. A minor collection marks only the root-stack entries pushed since
+the previous collection, because marks stay set until the next major one, so the cost of a minor
+collection does not grow with the roots that lazy-loading base leaves behind.
 
 The JIT recovers what a moving nursery would buy in other VMs by not allocating in the first place:
 unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (section 5). If
 profiling later shows fragmentation, Immix-style regions with opportunistic, pinning-aware compaction
 of objects that native code has never seen are the upgrade path, and they need no API change.
 
-**Native calls get a handle scope.** Every object passed into `.Call` and every object the API hands
-to native code stays alive until that call returns, as if it were protected. This makes ry strictly
-more forgiving than GNU R (code that forgets to `PROTECT` a temporary keeps working) while `PROTECT`
-itself keeps its exact semantics for objects that outlive the call through globals or preserved
-references. The scope roots results, not allocations, so the temporaries of an `Rf_eval` that native
-code calls stay collectable. Each native call also owns a region of the `PROTECT` stack: unprotecting
-below it is an error, and a region left unbalanced on return is a warning and is cut back.
+**Native calls get a handle scope.** Every object passed into `.Call` stays alive until that call
+returns, and so do the objects the API most recently handed to native code: at least the last 1,024
+of them, as if they were protected. This makes ry strictly more forgiving than GNU R (code that
+forgets to `PROTECT` a recent temporary keeps working, where GNU R could collect it at the next
+allocation) while `PROTECT` itself keeps its exact semantics for objects that outlive the call
+through globals or preserved references. A loop that allocates and drops millions of temporaries
+still runs in bounded memory, because older handouts leave the scope. The scope roots results, not
+allocations, so the temporaries of an `Rf_eval` that native code calls stay collectable, and a result
+reachable through the argument it was read from (a list element, a cell's `CAR`, an attribute) takes
+no handle at all. A view ry builds of something GNU R stores in the argument, such as `FRAME`'s
+pairlist, stays rooted until the call returns, because correct code walks it unprotected. Each
+native call also owns a region of the `PROTECT` stack: unprotecting below it
+is an error, and a region left unbalanced on return is a warning and is cut back.
+
+**Hot accessors are inline.** `Rinternals.h` defines `INTEGER`, `REAL`, `LOGICAL`, `RAW`,
+`COMPLEX`, their `_RO` and `_ELT` forms, `DATAPTR`, `DATAPTR_RO`, `STRING_ELT`, `VECTOR_ELT`,
+`STRING_PTR_RO`, `TYPEOF`, `LENGTH`, `XLENGTH`, `Rf_length`, `Rf_xlength`, `Rf_isNull`, `R_CHAR`,
+`CAR`, `CDR`, `TAG`, `CADR`, `CDDR` and `CADDR` as inline functions that read the object header
+and fall back to libR for anything unusual (an ALTREP instance, a wrong type, an index out of
+bounds). The exported functions take the same fast paths before entering the API, so binaries built
+against GNU R's headers benefit too. A package that defines `RY_NO_INLINE_ACCESSORS` gets plain
+calls.
 
 Ready finalizers run when a native call returns and on `R_gc`, not inside the collection that found
 them, because a collection happens deep inside an allocation, where no native code may run.
@@ -546,7 +563,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
   code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
-  only a few dozen times, which made the load slower.
+  only a few dozen times, which made the load slower. A fully typed closure, one with an inline
+  type on every formal, compiles on its first entry instead: the declared types seed the type
+  feedback of the instructions that have not run yet, and the guards on them stay. When even the
+  declared types leave an instruction's operand unknown (the result of an untyped builtin such as
+  `sum`, or `v[k]` with a formal `k`), the first-call compile is declined without counting against
+  the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -567,7 +589,13 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
   The call goes through tier 0 instead when a calling handler is established, because a handler
   could run R code in between. A call of a small closure defined in the same body, which computes a scalar
-  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
+  such a computation, branches, locals and calls of itself or other such closures included, is
+  compiled once per argument type to a native function on unboxed values with no frame
+  (`crates/jit/src/native.rs`), so a recursive scalar function runs entirely in machine code. It
+  counts the expression-depth limit down itself, and anything that would warn or raise returns a
+  failure status before anything visible happens, so tier 0 reruns the call. A typed closure's
+  checks are decided when its native function compiles. Function bindings are speculated
   against one global binding epoch, which the heap bumps whenever a watched binding changes or a
   watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
@@ -586,8 +614,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
-  call still enters through tier 0's call path and allocates a frame and forced promises), the use
-  of static types as early profiles, and freeing the machine code of invalidated bodies.
+  call still enters through tier 0's call path and allocates a frame and forced promises), result
+  types for builtins and for subscripts, which the early profiles of the next section need to cover
+  more than arithmetic on formals, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -596,7 +625,8 @@ treats them in two ways, depending on whether a guarantee exists:
 
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
-  call, so tier 1 can compile it on the first hot loop instead of after warmup. The guards stay.
+  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. Only
+  inline annotations reach the runtime; `#:` comments are invisible to it.
 - **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
   imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
   on purpose), so a strict package can still receive an imprecise value from typed code. ry
@@ -662,11 +692,13 @@ The rules the implementation settled:
   definitions takes about 30 ms. Any second writer, conditional or replacing (`f <- memoise(f)`),
   makes every writer of the name eager, in order.
 - **Every other top-level expression runs eagerly in `Collate` order**, then the files `Collate`
-  leaves out in C-locale order, as `load_all` does. Making a provably pure constructor call lazy is
-  not implemented.
+  leaves out in C-locale order, as `load_all` does. The code files include `R/unix/` (or
+  `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably
+  pure constructor call lazy is not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
-  copies other development packages hold of a changed binding is not implemented; a session loads
-  one development package at a time without that cascade.
+  copies other development packages hold is done after every load: each loaded development package
+  whose `NAMESPACE` imports from the reloaded one runs its import directives again
+  (`.ry_update_importers` in `runtime.R`), which costs one pass over those directives.
 - **A reload is a diff over items.** A changed or new function is rebound and a deleted one removed.
   Statements in a changed file are matched to the file's old statements by content, in order, so an
   inserted statement runs alone while two swapped writers of a name rerun. A statement reruns when it
@@ -1004,19 +1036,24 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
-   other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
-   exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
+   The interpreter runs. Every oracle case in `crates/oracle/cases` matches GNU R 4.3.3
+   (`oracle compare --engine ry`). Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
+   exit status and 27 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
    `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
-   Parsed code keeps source references when `keep.source` asks for them. Connections are a single
+   Parsed code keeps source references when `keep.source` asks for them. Connections, sockets included (so `parallel`'s PSOCK clusters run), are a single
    implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime
    with the R_GE_version 17 device API, so base graphics, grid, lattice and device packages such as
    ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
    `tiff` devices are engine devices too. On ragg captures, base graphics, grid and lattice match
    GNU R pixel for pixel.
+
+   At the full benchmark size (about 308,000 lines per code base), ry's test suites match GNU R on
+   every test of all three code bases. With the JIT off, finbench's suite takes 1.13x GNU R's time;
+   with it on, finbench, dsbench and biobench take 1.30x, 1.35x and 1.21x, so the JIT currently costs
+   cold code about 15% (`.agents/memory/backlog.md`, "Open: the benchmark packages under ry's
+   runtime", has the levers).
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -1024,9 +1061,11 @@ Each step ends with something real running, and each one is a large, whole chang
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 
-   The C API is done, with evaluation behind a hook the interpreter installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
-   names the closure uses (the rest of the 792 are types, macros and enum constants in the headers)
-   and implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
+   The C API is done, with evaluation behind a hook the interpreter installs
+   (`libr::eval::Evaluator`). `libR` declares and exports all 985 function and variable names that
+   GNU R's public headers declare, which covers the 444 the closure uses (the rest of the 792 are
+   types, macros and enum constants in the headers). `crates/libr/tests/test_headers.rs` checks the
+   list in `tests/headers/r_api_names.txt` against ry's headers and the exports. `libR` implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
    are declared in headers and come from the system libraries. Against the corpus library (GNU R
    4.3.3 binaries, `tests/test_corpus_binaries.rs`), 192 of the closure's 199 non-base compiled
    packages load and register under ry. Of the other seven, six evaluate R code while loading (S7,
@@ -1038,21 +1077,24 @@ Each step ends with something real running, and each one is a large, whole chang
    also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
    on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
    packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
-   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
-   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
-   `.agents/memory/backlog.md`.
+   Magick++. Two package-test rates are tracked, both counting only the packages whose
+   tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
+   ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
+   (`.corpus/ry-library`, `oracle packages --installed`), it passes 126 of 164 (76.8%). The rest
+   fail on interpreter gaps, and the classes are listed in `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
 6. **Inline syntax, agreement warnings and strict mode (done),** in the parser, the checker and the
    runtime, with the runtime type summary and body facts.
-7. **The JIT (loops done, calls next).** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
+7. **The JIT (loops and scalar functions done, general calls next).** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
    runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
-   helpers to it is next.
+   helpers to it is next. On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
+   faster than data.table on every one (section 7 has the table).
 
 9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
    `@rpath/libR.dylib` and the full export list, GNU R's package binaries are rebound to it (section
@@ -1060,8 +1102,9 @@ Each step ends with something real running, and each one is a large, whole chang
    cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
    the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
    Windows builds `R.dll` and `ry.exe` for `x86_64-pc-windows-gnullvm` (the UCRT), and `ry run`
-   runs base R and Rtools-built packages under Wine; what is verified and what is open is in
-   section 11.
+   runs base R and Rtools-built packages under Wine. `rcmd` also follows Rtools' conventions for
+   `R CMD INSTALL` on Windows, verified only by installing from a Linux host, and the session reports
+   a UTF-8 locale as `.utf8`, as GNU R does. What is verified and what is open is in section 11.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would

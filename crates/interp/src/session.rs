@@ -83,6 +83,13 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
             source_file(&site, base_env())?;
         }
     }
+    // The base profile binds `.Library.site` in the global environment too, so that a site
+    // profile can assign it directly; GNU R's global environment no longer holds it afterwards.
+    eval_text(
+        "if (exists(\".Library.site\", envir = globalenv(), inherits = FALSE)) \
+         rm(\".Library.site\", envir = globalenv())",
+        global_env(),
+    )?;
     if options.user_profile {
         // A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
         // points it at its own profile).
@@ -446,7 +453,8 @@ pub unsafe fn run_console(
 }
 
 /// Ends a session as GNU R does before it exits: closes every graphics device, which writes
-/// the files they were drawing.
+/// the files they were drawing, stops the profilers, runs the exit finalizers and removes the
+/// temporary directory. The directory goes last because a finalizer may still write there.
 pub unsafe fn finish() {
     if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
         report_toplevel(unwind);
@@ -454,6 +462,11 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::utils::stop_profiler() {
         report_toplevel(unwind);
     }
+    if let Err(unwind) = crate::utils::stop_memory_profiler() {
+        report_toplevel(unwind);
+    }
+    (interp().hooks.run_exit_finalizers)();
+    crate::system::remove_session_temp_dir();
 }
 
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.
@@ -488,6 +501,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         }
     };
     interp().frames.clear();
+    interp().foreign_calls.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();
@@ -500,6 +514,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     {
         report_toplevel(unwind);
         interp().frames.clear();
+        interp().foreign_calls.clear();
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;
     }

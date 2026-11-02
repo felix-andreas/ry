@@ -19,11 +19,16 @@
 use {
     crate::{
         Global, R_xlen_t, Rboolean,
-        boundary::{ApiResult, Handout, enter, error, with_native_scope, write_console},
+        boundary::{ApiResult, Handout, Reachable, enter, error, with_native_scope, write_console},
         memory, runtime,
         vectors::{self, sexp_type},
     },
     heap::object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType},
+    interp::{
+        builtins::{BuiltinDef, Call, internal},
+        dispatch::top_env,
+        values::{as_integer_scalar, base_namespace},
+    },
     std::{
         convert::Infallible,
         ffi::{CStr, c_char, c_int, c_void},
@@ -933,12 +938,12 @@ unsafe fn instance(object: Sexp) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_altrep_data1(object: Sexp) -> Sexp {
-    enter(|| Ok(instance(object)?.car()))
+    enter(|| Ok(Reachable(instance(object)?.car()))).0
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_altrep_data2(object: Sexp) -> Sexp {
-    enter(|| Ok(instance(object)?.cdr()))
+    enter(|| Ok(Reachable(instance(object)?.cdr()))).0
 }
 
 #[unsafe(no_mangle)]
@@ -959,7 +964,7 @@ pub unsafe extern "C" fn R_set_altrep_data2(object: Sexp, value: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ALTREP_CLASS(object: Sexp) -> Sexp {
-    enter(|| Ok(instance(object)?.tag()))
+    enter(|| Ok(Reachable(instance(object)?.tag()))).0
 }
 
 #[unsafe(no_mangle)]
@@ -1671,6 +1676,45 @@ pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp>
     let wrapper = new_altrep(class, object, metadata)?;
     memory::copy_attributes(wrapper, object, false)?;
     Ok(wrapper)
+}
+
+/// The interpreter builtins that need the ALTREP classes.
+pub const INTERNALS: &[BuiltinDef] = &[internal("wrap_meta", 3, |call| unsafe {
+    do_wrap_meta(call)
+})];
+
+/// `.Internal(wrap_meta(x, srt, no_na))`: `x` in a wrapper whose `*_IS_SORTED` and `*_NO_NA`
+/// report the given metadata. Base R calls it on every numeric `sort` and `order` result so
+/// that a later sort can skip its work, a shortcut ry's `sort` does not take, while each read of
+/// a wrapper from R code copies the vector. So a call from base R returns `x` unwrapped, and
+/// only package code (checkmate's tests, say) gets the wrapper it asked for.
+unsafe fn do_wrap_meta(call: &Call<'_>) -> ApiResult<Sexp> {
+    let object = call.arg(0);
+    if !matches!(
+        object.kind(),
+        SexpType::Integer
+            | SexpType::Real
+            | SexpType::Logical
+            | SexpType::String
+            | SexpType::List
+            | SexpType::Complex
+            | SexpType::Raw
+    ) {
+        return Err(call
+            .error("only INTSXP, REALSXP, STRSXP, VECSXP, CPLXSXP, RAWSXP vectors are supported"));
+    }
+    let sorted = as_integer_scalar(call.arg(1));
+    if !matches!(sorted, -2..=2) && sorted != UNKNOWN_SORTEDNESS {
+        return Err(call.error("srt must be -2, -1, 0, or +1, +2, or NA"));
+    }
+    let no_na = as_integer_scalar(call.arg(2));
+    if !matches!(no_na, 0 | 1) {
+        return Err(call.error("no_na must be 0 or +1"));
+    }
+    if top_env(call.env) == base_namespace() {
+        return Ok(object);
+    }
+    wrap(object, sorted, no_na)
 }
 
 unsafe fn wrapper_metadata(object: Sexp) -> (c_int, c_int) {

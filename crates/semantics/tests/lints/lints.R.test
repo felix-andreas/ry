@@ -3,6 +3,7 @@
 x = 1
 #++++
 2..3 warning[assignment-operator] Use <-, not =, for assignment
+  safe fix 2..3 "<-"
 
 #---- arrow_assignment_clean
 x <- 1
@@ -21,7 +22,9 @@ x <- T
 y <- F
 #++++
 5..6 warning[boolean-shorthand] Use TRUE, not T, for Boolean values
+  safe fix 5..6 "TRUE"
 12..13 warning[boolean-shorthand] Use FALSE, not F, for Boolean values
+  safe fix 12..13 "FALSE"
 
 #---- true_false_clean
 x <- TRUE
@@ -47,6 +50,7 @@ f <- function(a, b) a
 f(1, 2,)
 #++++
 28..29 warning[trailing-comma] Unexpected comma after last argument
+  safe fix 28..29 ""
 
 #---- subset_trailing_comma_allowed
 m <- matrix(1)
@@ -60,6 +64,7 @@ h <- function(x) x
 g(h(1,))
 #++++
 43..44 warning[trailing-comma] Unexpected comma after last argument
+  safe fix 43..44 ""
 
 #==== levels
 #---- naming_style_off_by_default
@@ -92,6 +97,7 @@ clean
 count: integer = 1L
 #++++
 15..16 warning[assignment-operator] Use <-, not =, for assignment
+  safe fix 15..16 "<-"
 
 #==== object-system
 #---- definitions_warn
@@ -132,5 +138,187 @@ methods::setClass("Theirs")
 #---- data_table_is_off_by_default
 library(data.table)
 prices <- fread("prices.csv")
+#++++
+clean
+
+#==== equals-na
+#---- comparing_with_na_warns
+if (x == NA) 1
+y <- z != NA_character_
+w <- NA == v
+#++++
+4..11 warning[equals-na] Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+  unsafe fix 4..11 "is.na(x)"
+20..38 warning[equals-na] Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+  unsafe fix 20..38 "!is.na(z)"
+44..51 warning[equals-na] Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+  unsafe fix 44..51 "is.na(v)"
+
+#---- is_na_and_strings_are_clean
+if (is.na(x)) 1
+y <- z == "NA"
+w <- a == b
+#++++
+clean
+
+#==== vector-logic
+#---- elementwise_operator_in_a_condition_warns
+if (a & b) 1
+while (!(x | y)) x <- step(x)
+if (a && (b & c)) 2
+#++++
+6..7 warning[vector-logic] Use &&, not &, in an `if` condition: & works element by element and always evaluates both sides
+  unsafe fix 6..7 "&&"
+24..25 warning[vector-logic] Use ||, not |, in a `while` condition: | works element by element and always evaluates both sides
+  unsafe fix 24..25 "||"
+55..56 warning[vector-logic] Use &&, not &, in an `if` condition: & works element by element and always evaluates both sides
+  unsafe fix 55..56 "&&"
+
+#---- reductions_and_scalar_operators_are_clean
+if (any(x & y)) 1
+if (a && b || c) 2
+z <- a & b
+#++++
+clean
+
+#==== length-sequence
+#---- one_to_a_length_warns
+for (i in 1:length(x)) print(i)
+for (j in 1L:nrow(df)) print(j)
+k <- 1:NCOL(m)
+#++++
+10..21 warning[length-sequence] `1:length(...)` is `c(1, 0)` when the vector is empty. Use seq_along()
+  unsafe fix 10..21 "seq_along(x)"
+42..53 warning[length-sequence] `1:nrow(...)` is `c(1, 0)` when the count is zero. Use seq_len()
+  unsafe fix 42..53 "seq_len(nrow(df))"
+69..78 warning[length-sequence] `1:NCOL(...)` is `c(1, 0)` when the count is zero. Use seq_len()
+  unsafe fix 69..78 "seq_len(NCOL(m))"
+
+#---- safe_sequences_are_clean
+for (i in seq_along(x)) print(i)
+for (j in 2:length(x)) print(j)
+k <- 1:length(x = x)
+n <- 1:base::length(x)
+m <- 1:(length(x) - 1)
+#++++
+clean
+
+#==== class-equals
+#---- comparing_class_with_a_string_warns
+if (class(x) == "data.frame") 1
+y <- class(z) != "lm"
+w <- "foo" == class(v)
+#++++
+4..28 warning[class-equals] Comparing class() with a string misses objects that have several classes. Use inherits()
+  unsafe fix 4..28 "inherits(x, \"data.frame\")"
+37..53 warning[class-equals] Comparing class() with a string misses objects that have several classes. Use inherits()
+  unsafe fix 37..53 "!inherits(z, \"lm\")"
+59..76 warning[class-equals] Comparing class() with a string misses objects that have several classes. Use inherits()
+  unsafe fix 59..76 "inherits(v, \"foo\")"
+
+#---- inherits_and_other_comparisons_are_clean
+if (inherits(x, "data.frame")) 1
+y <- class(z)[1] == "lm"
+w <- class(a) == class(b)
+#++++
+clean
+
+#---- seq_of_a_length_warns
+for (i in seq(length(x))) print(i)
+k <- seq(nrow(df))
+m <- seq(2, length(x))
+#++++
+10..24 warning[length-sequence] `seq(length(...))` is `c(1, 0)` when the vector is empty. Use seq_along()
+  unsafe fix 10..24 "seq_along(x)"
+40..53 warning[length-sequence] `seq(nrow(...))` is `c(1, 0)` when the count is zero. Use seq_len()
+  unsafe fix 40..53 "seq_len(nrow(df))"
+
+#==== unreachable-code
+#---- statements_after_an_exit_warn
+f <- function(x) {
+  return(x)
+  print("never")
+  x + 1
+}
+for (i in 1:3) {
+  next
+  print(i)
+}
+g <- function() {
+  stop("no")
+  1
+}
+#++++
+33..55 warning[unreachable-code] This code never runs, because return() above it leaves the block first
+84..92 warning[unreachable-code] This code never runs, because `next` above it leaves the block first
+128..129 warning[unreachable-code] This code never runs, because stop() above it leaves the block first
+
+#---- exits_at_the_end_and_inside_branches_are_clean
+f <- function(x) {
+  if (x) return(1)
+  2
+}
+while (TRUE) {
+  if (done()) break
+  step()
+}
+#++++
+clean
+
+#---- a_redefined_stop_is_clean
+stop <- function(message) cat(message)
+f <- function() {
+  stop("log")
+  1
+}
+#++++
+clean
+
+#---- quoted_blocks_are_clean
+q <- quote({
+  return(1)
+  2
+})
+#++++
+clean
+
+#==== sprintf-arguments
+#---- a_mismatched_count_warns
+sprintf("%d of %d", 1)
+sprintf("%s", "a", "b")
+gettextf("%5.2f%%: %s", 1)
+sprintf(fmt = "%*d", 5)
+#++++
+8..18 warning[sprintf-arguments] This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+31..35 warning[sprintf-arguments] This format wants 1 value but sprintf() gets 2 values, so R ignores the extra values with a warning
+56..69 warning[sprintf-arguments] This format wants 2 values but gettextf() gets 1 value, so R stops with "too few arguments"
+88..93 warning[sprintf-arguments] This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+
+#---- matching_and_unmodelled_formats_are_clean
+sprintf("%d of %d", 1, 2)
+sprintf("100%%")
+sprintf("%*d", 5, 1)
+sprintf("%1$s %1$s", "a")
+sprintf(fmt, 1)
+sprintf("%s", ...)
+sprintf("%s", x, collapse = "")
+#++++
+clean
+
+#==== length-test
+#---- a_comparison_inside_length_warns
+if (length(x == 0)) stop("empty")
+n <- !length(names(x) > 1L)
+#++++
+4..18 warning[length-test] `length(x == 0)` is the length of the comparison, not a test of the length. Did you mean `length(x) == 0`?
+  unsafe fix 4..18 "length(x) == 0"
+40..61 warning[length-test] `length(names(x) > 1L)` is the length of the comparison, not a test of the length. Did you mean `length(names(x)) > 1L`?
+  unsafe fix 40..61 "(length(names(x)) > 1L)"
+
+#---- comparing_a_length_is_clean
+if (length(x) == 0) stop("empty")
+length(x & y)
+length(x == 0, 1)
+base::length(x == 0)
 #++++
 clean

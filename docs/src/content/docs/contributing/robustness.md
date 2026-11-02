@@ -81,13 +81,15 @@ queued whenever a query is cancelled.
 
 - edits, including several ranged changes in one notification, typing bursts, full-text
   replacements, emoji and CJK text, and UTF-8 or UTF-16 position encodings;
-- opening, closing and saving files, and untitled buffers;
+- opening, closing and saving files, untitled buffers, and an R Markdown document whose positions
+  count on the document's own text, not on the R script its chunks make;
 - disk changes behind the editor's back to R files, `DESCRIPTION`, `NAMESPACE`, `ry.toml`, data files
   and test files, with watcher events delayed, duplicated, and delivered in shuffled batches;
 - requests of every kind at valid and invalid positions, abandoned requests, and requests that race
   edits;
 - protocol violations, such as changing, saving or closing a document that was never opened;
-- push and pull diagnostics clients.
+- push and pull diagnostics clients, and sessions whose first actions arrive before the startup
+  warm-up has run.
 
 At random checkpoints the session lets everything settle and checks the server against a fresh one
 started on the same disk with the same open buffers:
@@ -112,7 +114,9 @@ injected IO errors is not built yet, so read failures and partial writes are not
 
 Each `crates/ry/tests/scenarios/*.scenario` file is one journey. Editor steps drive the language
 server in-process through the simulator and settle after every step; command-line steps run the real
-`ry` binary in the scenario's workspace. When a journey ends, its editor session is checked against a
+`ry` binary in the scenario's workspace. The in-process server trusts the check records that binary
+writes, as a real server trusts its own, so a journey can run `ry check` and then open the project.
+When a journey ends, its editor session is checked against a
 fresh server, exactly as a simulation checkpoint is. A scenario reads like this:
 
 ```text
@@ -135,8 +139,8 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 
 | Command | Meaning |
 | --- | --- |
-| `requires gnu-r` / `requires ry-runtime` | Skip the scenario unless GNU R is installed, or `libR.so` is built beside `ry` too. |
-| `client pull` / `client utf8` | Start the editor as a pull-diagnostics or UTF-8 client. Must come before the first editor step. |
+| `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME` | Skip the scenario unless GNU R is installed, `libR.so` is built beside `ry` too, or GNU R has the package installed. |
+| `client pull` / `client utf8` / `client cold` | Start the editor as a pull-diagnostics or UTF-8 client, or one whose first steps arrive before the startup warm-up has run. Must come before the first editor step. |
 | `file PATH` + body | Write a file; a running editor sees a watcher event. |
 | `remove PATH` | Delete a file, with a watcher event. |
 | `open`, `close`, `save PATH` | Buffer lifecycle. |
@@ -146,6 +150,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `format PATH` | Format the buffer and apply the edits. |
 | `expect diagnostics PATH none` / `expect diagnostics PATH "needle"` | No diagnostics, or one whose code or message contains the needle. |
 | `expect no diagnostic PATH "needle"` | No diagnostic contains the needle. |
+| `expect early diagnostics PATH "needle"` / `expect no early diagnostic PATH "needle"` | The first diagnostics the server pushed for the file do, or do not, contain the needle. |
 | `expect hover PATH "anchor" "needle"` | The hover at the anchor contains the needle. |
 | `expect definition PATH "anchor" TARGET "text"` | Goto-definition lands at the text in the target file. |
 | `expect completion PATH after "anchor" LABEL` | Completion after the anchor offers the label. |
@@ -155,7 +160,13 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect workspace-symbol QUERY PATH NAME` | The workspace symbol query finds the name in the file. |
 | `expect fold PATH "from" "to"` | A fold spans the lines of the first occurrences of both needles. |
 | `expect selection PATH "anchor" "text"` | Expanding the selection from the anchor reaches exactly the text. |
+| `expect lens PATH "anchor" "title"` | A code lens on the anchor's line has that title, after resolving it. |
+| `expect token PATH "anchor" CLASS` | The semantic token at the anchor has that type, with modifiers as `+name` (`function+defaultLibrary`). |
 | `fix PATH "anchor" TITLE` | Apply the quick fix with that title at the anchor. |
+| `debug start PATH [entry] [prelude "R"] [test "name"] [break N \| break FILE:N]...` | Launch `ry debug-adapter` on the script, with breakpoints in it or in another file. |
+| `debug continue` / `next` / `step-in` / `step-out` / `disconnect` / `evaluate "expr"` | Drive the debug session. |
+| `expect stopped REASON at N` / `expect stack "f@2 g@7"` / `expect variable NAME "value"` | The next stop, its frames, and a variable of the top frame. |
+| `expect evaluated "value"` / `expect debug-output "needle"` / `expect exited N` | The last evaluation, the program's output so far, and its exit status. |
 | `run ry ARGS...` | Run the `ry` binary in the workspace. |
 | `install DIR` | Install a source package through ry's `R CMD INSTALL` into `library/`. |
 | `expect exit N` / `expect stdout\|stderr [lacks] "needle"` | Check the last `run` or `install`. |
@@ -172,17 +183,20 @@ harness of that kind yet; the gap is filed in the backlog.
 | Parser | generated programs, token soup, byte mutations, edit streams (`syntax` `test_fuzz`); `cargo fuzz` `parse` | lossless round trip, tree invariants, splice reparse equals full parse |
 | Lowering, naming, inference, diagnostics | generated programs and projects (`semantics` `test_fuzz`); `cargo fuzz` `semantics` | no panic, determinism, well-formed ranges, incremental equals fresh |
 | Incrementality and cancellation | the simulator's edits and injected cancellations; `test_incremental` | a fresh server; per-item firewalls |
-| Formatter | seeds, mutations, fixture sources (`format` `test_fuzz`); `cargo fuzz` `format` | preservation, idempotence, determinism |
+| Formatter | seeds, mutations, fixture sources (`format` `test_fuzz`, `test_format_range`); `cargo fuzz` `format` | preservation, idempotence, determinism; for range formatting also convergence, restriction to the whole-file edits, additivity and composition |
 | IDE features | generated documents and positions (`ide` `test_fuzz`); `cargo fuzz` `ide` | no panic, ranges inside the document |
 | Language server | the simulator; scenarios; `cargo fuzz` `lsp` | a fresh server, the push contract, range geometry |
 | Loader | random reload sequences (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load |
+| Debugger | scripted sessions and a seeded client that sends random requests at every stop (`interp` `test_debugger`); scenarios | transcripts; every request answered once, the session ends, the interpreter left clean |
 | Interpreter | generated programs (`interp` `test_fuzz`); differential fuzzing; `cargo fuzz` `interp_lower`, `bytecode` | GNU R, tier 0 |
+| Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases | no panic, identical bytes on a second render, one file per page; GNU R's warnings and capabilities |
 | Garbage collector | `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | the unstressed run, the write-barrier invariant |
 | C API | native fuzzing (`libr` `test_fuzz_native`); `cargo fuzz` `unserialize` | GNU R's behavior; the PROTECT balance check on every `.Call` |
 | JIT | `test_tiers`; differential fuzzing with `RY_JIT=force` | tier 0, GNU R |
 | Table engine | `table` property tests; `cargo fuzz` `csv` | the eager implementation; the sniffer's promised columns |
 | Package install | the `install-package` scenario; `test_install` | the package's own results |
 | CLI | scenarios run the real binary | expected output and exit status |
+| Check cache | seeded edits to a generated package (`ry` `cli::tests::cached_checks_match_fresh_checks_across_seeded_edits`, `CACHE_SEED`, `FUZZ_ITERS`) | a fresh check of the same files |
 | Docs examples | every marked output block in the docs, and the landing page samples (`test_docs`) | the output the page shows |
 
 The PROTECT balance check runs on every `.Call` and `.C` in every build: when a routine returns with a

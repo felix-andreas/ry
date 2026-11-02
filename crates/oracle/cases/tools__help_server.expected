@@ -1,0 +1,22 @@
+[stdout]
+| [1] 364
+| [1] "<!DOCTYPE html><html><head><title>R: Fitting Linear Models</title>"
+| [1] "@media screen {"  "    .container {"
+| [1] "<!DOCTYPE html>"                     "<html>"                             
+| [3] "<head><title>R: httpd error</title>"
+| [1] "/custom/probe/echo/a b|x|y|||1|a b&c||z"
+| [1] "/custom/probe/echo||"
+| [1] "bytes"
+| [1] "cannot open URL 'http://127.0.0.1:PORT/custom/probe/fail': HTTP status was '500 Internal Server Error'"
+| [1] "cannot open URL 'http://127.0.0.1:PORT/custom/probe/string': HTTP status was '500 Internal Server Error'"
+| [1] "cannot open URL 'http://127.0.0.1:PORT/custom/probe/invalid': HTTP status was '500 Internal Server Error'"
+| [1] "Request-Method: GET"
+| [1] 0
+[messages]
+- starting httpd help server ...
+-  done
+[warnings]
+[errors]
+[value]
+integer
+| 0L

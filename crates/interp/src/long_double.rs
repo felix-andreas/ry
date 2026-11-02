@@ -366,6 +366,481 @@ impl Div<usize> for LongDouble {
     }
 }
 
+/// `total` plus every value in order, rounding after each addition, as a C loop of
+/// `total += values[i]` on a `long double` does.
+pub fn add_all(total: LongDouble, values: &[f64]) -> LongDouble {
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let Some(start) = to_x87(total) {
+        return from_x87(x87::add_all(start, values));
+    }
+    values
+        .iter()
+        .fold(total, |total, &value| total + LongDouble::from(value))
+}
+
+/// `total` plus every `value - offset` in order, rounding after each subtraction and addition,
+/// as GNU R's second pass over the deviations from a mean does.
+pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) -> LongDouble {
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let (Some(start), Some(offset)) = (to_x87(total), to_x87(offset)) {
+        return from_x87(x87::add_differences(start, values, offset));
+    }
+    values.iter().fold(total, |total, &value| {
+        total + (LongDouble::from(value) - offset)
+    })
+}
+
+/// `total` plus every `(x[i] - x_offset) * (y[i] - y_offset)` in order, rounding after each
+/// operation, as GNU R's covariance loop does. The slices must have the same length.
+pub fn add_products(
+    total: LongDouble,
+    x: &[f64],
+    y: &[f64],
+    x_offset: LongDouble,
+    y_offset: LongDouble,
+) -> LongDouble {
+    assert_eq!(x.len(), y.len(), "covariance columns differ in length");
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let (Some(start), Some(x_offset), Some(y_offset)) =
+        (to_x87(total), to_x87(x_offset), to_x87(y_offset))
+    {
+        return from_x87(x87::add_products(start, x, y, x_offset, y_offset));
+    }
+    x.iter().zip(y).fold(total, |total, (&x, &y)| {
+        total + (LongDouble::from(x) - x_offset) * (LongDouble::from(y) - y_offset)
+    })
+}
+
+/// GNU R's `cumsum` of doubles: each running long double total, rounded to double into `out`,
+/// for the shorter of the two. NA and NaN propagate as the x87 unit propagates them, which is
+/// what decides between them in GNU R.
+pub fn running_sums(values: &[f64], out: &mut [f64]) {
+    let count = values.len().min(out.len());
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    x87::running_sums(&values[..count], &mut out[..count]);
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let mut total = LongDouble::ZERO;
+        for (&value, out) in values[..count].iter().zip(&mut out[..count]) {
+            total += value;
+            *out = total.to_f64();
+        }
+    }
+}
+
+/// GNU R's `rowSums` (`divisor` 1) or `rowMeans` (`divisor` the column count) of a column-major
+/// matrix with `rows` rows: each row's long double total, added column by column, divided by
+/// `divisor` in long double and rounded once to double into `out`. Returns which rows were
+/// written; a row holding an infinite or NaN value is left for the caller, whose `na.rm`
+/// decides it.
+pub fn finite_row_means(values: &[f64], rows: usize, divisor: usize, out: &mut [f64]) -> Vec<bool> {
+    let rows = rows.min(out.len());
+    if rows == 0 {
+        return Vec::new();
+    }
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    {
+        let columns = values.len() / rows;
+        let blocked = rows - rows % x87::BLOCK;
+        let mut totals = vec![[0u8; 16]; rows];
+        for (block, totals) in totals[..blocked].chunks_exact_mut(x87::BLOCK).enumerate() {
+            x87::block_row_sums(values, rows, columns, block * x87::BLOCK, totals);
+        }
+        for column in values.chunks_exact(rows) {
+            x87::add_to_each(&mut totals[blocked..], &column[blocked..]);
+        }
+        x87::divide_each(&totals, divisor as u64, &mut out[..rows]);
+        totals
+            .iter()
+            .map(|total| u16::from_le_bytes([total[8], total[9]]) & 0x7fff != 0x7fff)
+            .collect()
+    }
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let mut totals = vec![LongDouble::ZERO; rows];
+        for column in values.chunks_exact(rows) {
+            for (total, &value) in totals.iter_mut().zip(column) {
+                *total += value;
+            }
+        }
+        totals
+            .into_iter()
+            .zip(out.iter_mut())
+            .map(|(total, out)| {
+                *out = if divisor == 1 {
+                    total.to_f64()
+                } else {
+                    (total / divisor).to_f64()
+                };
+                total.finite().is_some()
+            })
+            .collect()
+    }
+}
+
+impl LongDouble {
+    /// The value when it is finite before any rounding to double, so that a finite total too
+    /// large for a double still counts, as it does in x87 registers. A sum of doubles never
+    /// overflows the extended exponent range, so a total is finite exactly when every term
+    /// is, which lets a caller test once after a kernel instead of once per term.
+    pub fn finite(self) -> Option<LongDouble> {
+        matches!(self.0, Repr::Finite { .. }).then_some(self)
+    }
+
+    /// From an integer, exactly when it fits 64 significand bits, as an x87 `fild` loads it.
+    pub fn from_i64(value: i64) -> LongDouble {
+        let magnitude = value.unsigned_abs();
+        if magnitude == 0 {
+            return LongDouble::ZERO;
+        }
+        let shift = magnitude.leading_zeros();
+        LongDouble(Repr::Finite {
+            negative: value < 0,
+            significand: magnitude << shift,
+            exponent: -(shift as i32),
+        })
+    }
+}
+
+/// The x87 extended format's bytes: the 64-bit significand with its explicit integer bit, then
+/// the sign and a 15-bit exponent biased by 16383. `None` when the exponent leaves its range,
+/// which only products and quotients of extreme values reach.
+#[cfg(all(target_arch = "x86_64", not(windows)))]
+fn to_x87(value: LongDouble) -> Option<[u8; 10]> {
+    let (negative, significand, biased) = match value.0 {
+        Repr::Special(special) => {
+            let bits = special.to_bits();
+            let negative = bits >> 63 == 1;
+            // An infinity has only the integer bit; a NaN keeps its payload below it.
+            let payload = (bits & ((1 << 52) - 1)) << 11;
+            (negative, (1 << 63) | payload, 0x7fff)
+        }
+        Repr::Finite {
+            negative,
+            significand: 0,
+            ..
+        } => (negative, 0, 0),
+        Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } => {
+            let biased = exponent + 63 + 16383;
+            if !(1..0x7fff).contains(&biased) {
+                return None;
+            }
+            (negative, significand, biased as u16)
+        }
+    };
+    let mut bytes = [0u8; 10];
+    bytes[..8].copy_from_slice(&significand.to_le_bytes());
+    let top = biased | if negative { 0x8000 } else { 0 };
+    bytes[8..].copy_from_slice(&top.to_le_bytes());
+    Some(bytes)
+}
+
+#[cfg(all(target_arch = "x86_64", not(windows)))]
+fn from_x87(bytes: [u8; 10]) -> LongDouble {
+    let mut low = [0u8; 8];
+    low.copy_from_slice(&bytes[..8]);
+    let significand = u64::from_le_bytes(low);
+    let top = u16::from_le_bytes([bytes[8], bytes[9]]);
+    let negative = top & 0x8000 != 0;
+    let biased = i32::from(top & 0x7fff);
+    if biased == 0x7fff {
+        let fraction = (significand << 1) >> 12;
+        let magnitude = if fraction == 0 {
+            f64::INFINITY
+        } else {
+            f64::from_bits((0x7ff << 52) | fraction | (1 << 51))
+        };
+        return LongDouble(Repr::Special(if negative { -magnitude } else { magnitude }));
+    }
+    if significand == 0 {
+        return LongDouble(Repr::Finite {
+            negative,
+            significand: 0,
+            exponent: 0,
+        });
+    }
+    // A denormal's exponent field is 0 but means the same scale as 1.
+    let shift = significand.leading_zeros();
+    LongDouble(Repr::Finite {
+        negative,
+        significand: significand << shift,
+        exponent: biased.max(1) - 16383 - 63 - shift as i32,
+    })
+}
+
+/// The loops that need speed run on the x87 unit itself, which rounds exactly like the model:
+/// System V leaves its precision control at the full 64-bit significand. The Windows x64 CRT
+/// sets it to 53 bits, so Windows keeps the software model.
+#[cfg(all(target_arch = "x86_64", not(windows)))]
+mod x87 {
+    use std::arch::asm;
+
+    pub fn add_all(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
+        // SAFETY: the loop reads `values.len()` doubles from the slice and writes `total` back;
+        // the x87 stack starts empty under the ABI and is left empty.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fadd qword ptr [{data}]",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                total = in(reg) total.as_mut_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
+    pub fn add_products(
+        mut total: [u8; 10],
+        x: &[f64],
+        y: &[f64],
+        x_offset: [u8; 10],
+        y_offset: [u8; 10],
+    ) -> [u8; 10] {
+        // SAFETY: as in `add_all`; the caller checked that `y` is as long as `x`.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{y_offset}]",
+                "fld tbyte ptr [{x_offset}]",
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld qword ptr [{x}]",
+                "fsub st(0), st(2)",
+                "fld qword ptr [{y}]",
+                "fsub st(0), st(4)",
+                "fmulp st(1), st(0)",
+                "faddp st(1), st(0)",
+                "add {x}, 8",
+                "add {y}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                "fstp st(0)",
+                "fstp st(0)",
+                total = in(reg) total.as_mut_ptr(),
+                x_offset = in(reg) x_offset.as_ptr(),
+                y_offset = in(reg) y_offset.as_ptr(),
+                x = inout(reg) x.as_ptr() => _,
+                y = inout(reg) y.as_ptr() => _,
+                count = inout(reg) x.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
+    pub fn add_differences(mut total: [u8; 10], values: &[f64], offset: [u8; 10]) -> [u8; 10] {
+        // SAFETY: as in `add_all`; `offset` is only read.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{offset}]",
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld qword ptr [{data}]",
+                "fsub st(0), st(2)",
+                "faddp st(1), st(0)",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                "fstp st(0)",
+                total = in(reg) total.as_mut_ptr(),
+                offset = in(reg) offset.as_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
+    /// `out[i]` is the running total of `values[..=i]`, stored as a double without leaving the
+    /// register. `out` must be as long as `values`.
+    pub(super) fn running_sums(values: &[f64], out: &mut [f64]) {
+        assert_eq!(
+            values.len(),
+            out.len(),
+            "running sums need an output per value"
+        );
+        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        unsafe {
+            asm!(
+                "fldz",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fadd qword ptr [{data}]",
+                "fst qword ptr [{out}]",
+                "add {data}, 8",
+                "add {out}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp st(0)",
+                data = inout(reg) values.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+
+    /// The rows `block_row_sums` keeps in registers at once: seven totals and one loaded term
+    /// fill the eight-register stack.
+    pub(super) const BLOCK: usize = 7;
+
+    /// The totals of rows `first..first + BLOCK` of a column-major `rows` by `columns` matrix,
+    /// each added column by column, written to `out`. The seven independent totals keep the
+    /// adder busy where a single running total would wait on each addition.
+    pub(super) fn block_row_sums(
+        values: &[f64],
+        rows: usize,
+        columns: usize,
+        first: usize,
+        out: &mut [[u8; 16]],
+    ) {
+        assert!(out.len() == BLOCK && first + BLOCK <= rows && rows * columns <= values.len());
+        // SAFETY: the asserts keep every read `first + row + column * rows` inside `values` and
+        // the seven ten-byte stores inside `out`.
+        unsafe {
+            asm!(
+                "fldz", "fldz", "fldz", "fldz", "fldz", "fldz", "fldz",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld qword ptr [{pointer} + 48]",
+                "faddp st(7), st(0)",
+                "fld qword ptr [{pointer} + 40]",
+                "faddp st(6), st(0)",
+                "fld qword ptr [{pointer} + 32]",
+                "faddp st(5), st(0)",
+                "fld qword ptr [{pointer} + 24]",
+                "faddp st(4), st(0)",
+                "fld qword ptr [{pointer} + 16]",
+                "faddp st(3), st(0)",
+                "fld qword ptr [{pointer} + 8]",
+                "faddp st(2), st(0)",
+                "fld qword ptr [{pointer}]",
+                "faddp st(1), st(0)",
+                "add {pointer}, {stride}",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{out}]",
+                "fstp tbyte ptr [{out} + 16]",
+                "fstp tbyte ptr [{out} + 32]",
+                "fstp tbyte ptr [{out} + 48]",
+                "fstp tbyte ptr [{out} + 64]",
+                "fstp tbyte ptr [{out} + 80]",
+                "fstp tbyte ptr [{out} + 96]",
+                pointer = inout(reg) values.as_ptr().add(first) => _,
+                stride = in(reg) rows * 8,
+                count = inout(reg) columns => _,
+                out = in(reg) out.as_mut_ptr(),
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+
+    /// `out[i] = totals[i] / divisor`, divided in extended precision and rounded once to
+    /// double, for the shorter of the two. A divisor of 1 only rounds.
+    pub(super) fn divide_each(totals: &[[u8; 16]], divisor: u64, out: &mut [f64]) {
+        let count = totals.len().min(out.len());
+        let divisor = divisor.min(i64::MAX as u64);
+        // SAFETY: reads `count` totals and writes `count` doubles.
+        unsafe {
+            asm!(
+                "fild qword ptr [{divisor}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "cmp qword ptr [{divisor}], 1",
+                "je 4f",
+                "2:",
+                "fld tbyte ptr [{totals}]",
+                "fdiv st(0), st(1)",
+                "fstp qword ptr [{out}]",
+                "add {totals}, 16",
+                "add {out}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "jmp 3f",
+                "4:",
+                "fld tbyte ptr [{totals}]",
+                "fstp qword ptr [{out}]",
+                "add {totals}, 16",
+                "add {out}, 8",
+                "dec {count}",
+                "jnz 4b",
+                "3:",
+                "fstp st(0)",
+                divisor = in(reg) &divisor,
+                totals = inout(reg) totals.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
+                count = inout(reg) count => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+
+    /// Adds `values[i]` to the extended total in `totals[i]`, for the shorter of the two.
+    pub(super) fn add_to_each(totals: &mut [[u8; 16]], values: &[f64]) {
+        let count = totals.len().min(values.len());
+        // SAFETY: reads `count` doubles and rewrites the first ten bytes of `count` totals.
+        unsafe {
+            asm!(
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld tbyte ptr [{totals}]",
+                "fadd qword ptr [{pointer}]",
+                "fstp tbyte ptr [{totals}]",
+                "add {totals}, 16",
+                "add {pointer}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                totals = inout(reg) totals.as_mut_ptr() => _,
+                pointer = inout(reg) values.as_ptr() => _,
+                count = inout(reg) count => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+}
+
 /// Rounds `wide * 2^exponent` to a 64-bit significand, ties to even.
 fn round_wide(negative: bool, wide: u128, exponent: i32) -> LongDouble {
     let width = 128 - wide.leading_zeros();
@@ -496,6 +971,91 @@ mod tests {
         assert_eq!(LongDouble::from(0.25).sqrt().to_f64(), 0.5);
         assert_eq!(LongDouble::from(1e-300).sqrt().to_f64(), 1e-150);
         assert!(LongDouble::from(-1.0).sqrt().to_f64().is_nan());
+    }
+
+    #[test]
+    fn slice_sums_match_the_model() {
+        let cases: [&[f64]; 6] = [
+            &[],
+            &[1.0, 2.0, 3.0],
+            &[1e300, 1e300, -1e300, 0.1, 5e-324],
+            &[f64::MAX, f64::MAX, -f64::MAX],
+            &[1.0, f64::INFINITY, -f64::INFINITY],
+            &[-0.0, -0.0],
+        ];
+        for values in cases {
+            let model = values.iter().fold(LongDouble::ZERO, |total, &value| {
+                total + LongDouble::from(value)
+            });
+            let fast = add_all(LongDouble::ZERO, values);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+            let third = LongDouble::from(1.0) / 3;
+            let model = values.iter().fold(third, |total, &value| {
+                total + (LongDouble::from(value) - third)
+            });
+            let fast = add_differences(third, values, third);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+            let reversed: Vec<f64> = values.iter().rev().copied().collect();
+            let seven = LongDouble::from(0.7);
+            let model = values.iter().zip(&reversed).fold(third, |total, (&x, &y)| {
+                total + (LongDouble::from(x) - third) * (LongDouble::from(y) - seven)
+            });
+            let fast = add_products(third, values, &reversed, third, seven);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+        }
+        let pseudo: Vec<f64> = (1..2000u32)
+            .map(|index| f64::from(index.wrapping_mul(2654435761) % 10007) * 1.37e-3 - 6.0)
+            .collect();
+        let model = pseudo.iter().fold(LongDouble::ZERO, |total, &value| {
+            total + LongDouble::from(value)
+        });
+        assert_eq!(
+            format!("{:?}", add_all(LongDouble::ZERO, &pseudo)),
+            format!("{model:?}")
+        );
+    }
+
+    #[test]
+    fn row_means_match_the_model() {
+        let values: Vec<f64> = (1..=990u32)
+            .map(|index| f64::from(index.wrapping_mul(2654435761) % 10007) * 1.37e-3 - 6.0)
+            .collect();
+        for divisor in [1, 10] {
+            let mut out = vec![0.0; 99];
+            let written = finite_row_means(&values, 99, divisor, &mut out);
+            assert_eq!(written, vec![true; 99]);
+            for (row, &value) in out.iter().enumerate() {
+                let total = (0..10).fold(LongDouble::ZERO, |total, column| {
+                    total + LongDouble::from(values[row + column * 99])
+                });
+                assert_eq!(value.to_bits(), (total / divisor).to_f64().to_bits());
+            }
+        }
+        let mut running = vec![0.0; values.len()];
+        running_sums(&values, &mut running);
+        let mut total = LongDouble::ZERO;
+        for (&value, &out) in values.iter().zip(&running) {
+            total += value;
+            assert_eq!(out.to_bits(), total.to_f64().to_bits());
+        }
+        let mut out = vec![0.0; 2];
+        assert_eq!(
+            finite_row_means(&[1.0, f64::NAN, 2.0, 3.0], 2, 2, &mut out),
+            vec![true, false]
+        );
+        assert_eq!(out[0], 1.5);
+        assert!(
+            add_all(LongDouble::ZERO, &[1.0, f64::NAN])
+                .finite()
+                .is_none()
+        );
+        assert!(
+            add_all(LongDouble::ZERO, &[f64::INFINITY, 1.0])
+                .finite()
+                .is_none()
+        );
+        let huge = add_all(LongDouble::ZERO, &[f64::MAX, f64::MAX]).finite();
+        assert_eq!(huge.map(LongDouble::to_f64), Some(f64::INFINITY));
     }
 
     #[test]
