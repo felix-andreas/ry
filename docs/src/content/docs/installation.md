@@ -88,8 +88,9 @@ usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it r
 If none holds base R, `ry run` and `ry load` stop with exit status 2 and name the places they
 searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
 
-From 0.4.0-beta on, the release archives hold `ry` and ry's runtime (`libR.so`, `libR.dylib` or
-`R.dll`). Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. The
+From 0.4.0-beta on, the release archives hold `ry`, ry's runtime (`libR.so`, `libR.dylib` or
+`R.dll`), and `ry-rcmd`, which `ry load` uses to compile a package's `src/`. Keep them in the same
+directory, or put the runtime and `ry-rcmd` together in `../lib/ry/` relative to `ry`. The
 Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
 `ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
 a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
