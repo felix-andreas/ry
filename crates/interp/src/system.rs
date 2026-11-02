@@ -15,7 +15,7 @@ use {
     },
     heap::{
         GcStress,
-        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
     std::{
@@ -25,6 +25,7 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    builtin(".ry_view", 2, do_ry_view).invisible(),
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
     internal("pcre_config", 0, |_| unsafe {
@@ -44,10 +45,28 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
     }),
     internal("readRenviron", 1, do_read_renviron).invisible(),
-    internal("debug", 3, |_| Ok(nil())).invisible(),
-    internal("undebug", 1, |_| Ok(nil())).invisible(),
-    internal("debugonce", 3, |_| Ok(nil())).invisible(),
-    internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
+    internal("debug", 3, |call| unsafe {
+        debugged_function(call)?.set_gp_bits(gp::CLOSURE_DEBUG, true);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("undebug", 1, |call| unsafe {
+        let function = debugged_function(call)?;
+        if !function.has_gp(gp::CLOSURE_DEBUG) {
+            crate::conditions::warning_call(call.call, "argument is not being debugged")?;
+        }
+        function.set_gp_bits(gp::CLOSURE_DEBUG, false);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("debugonce", 3, |call| unsafe {
+        debugged_function(call)?.set_gp_bits(gp::CLOSURE_STEP, true);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("isdebugged", 1, |call| unsafe {
+        scalar_bool(debugged_function(call)?.has_gp(gp::CLOSURE_DEBUG))
+    }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
     internal("browserText", 1, |call| {
@@ -225,7 +244,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
     builtin("enc2native", 1, character_unchanged),
-    builtin("enc2utf8", 1, character_unchanged),
+    builtin("enc2utf8", 1, do_enc2utf8),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -257,13 +276,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }
     }),
     // Without an attached debug adapter, `browser()` continues as it does in a non-interactive
-    // GNU R session.
-    special("browser", -1, |_| unsafe {
+    // GNU R session, which `R CMD check` and testthat turn into an error.
+    special("browser", -1, |call| unsafe {
         crate::debugger::browser()?;
+        let checked = std::env::var("_R_CHECK_BROWSER_NONINTERACTIVE_")
+            .is_ok_and(|value| matches!(value.as_str(), "true" | "TRUE" | "True" | "T"));
+        if !crate::interp().interactive && checked {
+            return Err(call.error("non-interactive browser() -- left over from debugging?"));
+        }
         Ok(nil())
     })
     .invisible(),
-    internal("inspect", -1, do_inspect).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
@@ -379,6 +402,14 @@ fn temp_dir() -> String {
     }
 }
 
+/// `.ry_view(x, title)`, behind ry's `View()`: opens a lazy view of `x` in the editors connected
+/// to the console. Only the rows an editor scrolls to are ever formatted.
+unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
+    let title = values::as_string_scalar(call.arg(1))?.unwrap_or_default();
+    crate::console_server::show(call.arg(0), &title).map_err(|message| error(message))?;
+    Ok(call.arg(0))
+}
+
 /// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
 /// suffixes tried when the name has none, as a forward-slash path named by the name, or "".
 /// Unix base R finds programs with `command -v` in R code instead.
@@ -441,90 +472,6 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
         values::set_elt(result, index, charsxp);
     }
     Ok(result)
-}
-
-/// `.Internal(inspect(x))`: GNU R's dump of an object's internal structure, with the header
-/// layout GNU R prints. ry has no GC generations or reference counts to report, so those
-/// fields always read `g0c0 []`.
-unsafe fn do_inspect(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let mut text = String::new();
-    inspect_into(&mut text, object, 0);
-    crate::write_console(text.as_bytes(), false);
-    Ok(object)
-}
-
-unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
-    const SHOWN: usize = 5;
-    let indent = " ".repeat(depth * 2);
-    let kind = object.kind();
-    let header = format!(
-        "{indent}@{:x} {:02} {} g0c0 [] ",
-        object.as_ptr() as usize,
-        kind as u8,
-        kind.constant_name()
-    );
-    text.push_str(&header);
-    let count = if kind.is_vector() { length(object) } else { 0 };
-    match kind {
-        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
-            let shown: Vec<String> = (0..count.min(SHOWN))
-                .map(|index| match kind {
-                    SexpType::Real => {
-                        crate::format::format_real_alone(values::reals(object)[index], 7)
-                    }
-                    SexpType::Complex => {
-                        crate::format::format_complex_alone(values::complexes(object)[index], 7)
-                    }
-                    _ => match values::ints(object)[index] {
-                        NA_INTEGER => "NA".to_owned(),
-                        value => value.to_string(),
-                    },
-                })
-                .collect();
-            let more = if count > SHOWN { ",..." } else { "" };
-            text.push_str(&format!("(len={count}, tl=0) {}{more}\n", shown.join(",")));
-        }
-        SexpType::Raw => {
-            text.push_str(&format!("(len={count}, tl=0)\n"));
-        }
-        SexpType::Char => {
-            let ascii = if object.bytes().is_ascii() {
-                "[ASCII] "
-            } else {
-                ""
-            };
-            text.push_str(&format!(
-                "{ascii}[cached] \"{}\"\n",
-                crate::format::encode_string(&String::from_utf8_lossy(object.bytes()), None)
-            ));
-        }
-        SexpType::Symbol => text.push_str(&format!("\"{}\"\n", values::symbol_name(object))),
-        SexpType::String | SexpType::List | SexpType::Expression => {
-            text.push_str(&format!("(len={count}, tl=0)\n"));
-            for index in 0..count {
-                inspect_into(text, object.element(index), depth + 1);
-            }
-        }
-        SexpType::Pairlist | SexpType::Language => {
-            text.push('\n');
-            let mut node = object;
-            while node != nil() && matches!(node.kind(), SexpType::Pairlist | SexpType::Language) {
-                if node.tag() != nil() {
-                    text.push_str(&format!("{indent}  TAG: "));
-                    inspect_into(text, node.tag(), 0);
-                }
-                inspect_into(text, node.car(), depth + 1);
-                node = node.cdr();
-            }
-        }
-        _ => text.push('\n'),
-    }
-    let attributes = object.attrib();
-    if attributes != nil() && kind != SexpType::Char {
-        text.push_str(&format!("{indent}ATTRIB:\n"));
-        inspect_into(text, attributes, depth + 1);
-    }
 }
 
 unsafe fn map_strings_bool(call: &Call<'_>, function: impl Fn(&str) -> bool) -> R<Sexp> {
@@ -2317,7 +2264,7 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
             regex::RegexBuilder::new(&if fixed {
                 regex::escape(pattern)
             } else {
-                crate::strings::translate_regex(pattern, true)
+                crate::strings::translate_regex(pattern)
             })
             .case_insensitive(ignore_case)
             .build()
@@ -3082,6 +3029,7 @@ unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
+    crate::console_server::finish();
     crate::session::finish();
     use std::io::Write;
     drop(std::io::stdout().flush());
@@ -3150,6 +3098,48 @@ unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
             "unknown"
         };
         values::set_elt(result, index, values::mkchar(name)?);
+    }
+    Ok(result)
+}
+
+/// `enc2utf8`: re-encodes latin1 strings as UTF-8 and marks native non-ASCII strings as UTF-8,
+/// which is what GNU R does in a UTF-8 locale. The vector is copied only when a string changes.
+unsafe fn do_enc2utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("argument is not a character vector"));
+    }
+    let mut result = strings;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        if charsxp == values::na_string()
+            || charsxp.has_gp(heap::object::gp::UTF8)
+            || charsxp.has_gp(heap::object::gp::BYTES)
+            || charsxp.bytes().is_ascii()
+        {
+            continue;
+        }
+        let converted = if charsxp.has_gp(heap::object::gp::LATIN1) {
+            charsxp
+                .bytes()
+                .iter()
+                .map(|&byte| byte as char)
+                .collect::<String>()
+                .into_bytes()
+        } else if std::str::from_utf8(charsxp.bytes()).is_ok() {
+            charsxp.bytes().to_vec()
+        } else {
+            continue;
+        };
+        if result == strings {
+            result = values::shallow_duplicate(strings)?;
+            crate::heap().root(result);
+        }
+        values::set_elt(
+            result,
+            index,
+            values::mkchar_bytes(&converted, Encoding::Utf8)?,
+        );
     }
     Ok(result)
 }
@@ -3560,6 +3550,20 @@ thread_local! {
     /// Whether `trace()`'s inserted calls run. `.doTrace` turns it off while a tracer runs,
     /// so a tracer that calls the traced function does not recurse.
     static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// The function `debug()` and its relatives flag: their first argument, or the function a
+/// string names. The flags only take effect on closures, but GNU R accepts any function.
+unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
+    let mut function = call.arg(0);
+    if function.kind() == SexpType::String && length(function) == 1 {
+        let name = values::as_string_scalar(function)?.unwrap_or_default();
+        function = crate::eval::find_fun(values::install(&name)?, call.env)?;
+    }
+    match function.kind() {
+        SexpType::Closure | SexpType::Builtin | SexpType::Special => Ok(function),
+        _ => Err(call.error("argument must be a function")),
+    }
 }
 
 /// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`

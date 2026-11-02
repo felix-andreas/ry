@@ -308,6 +308,52 @@ const PRINTS: &[(&str, &str)] = &[
         "{ ge <- function(e) e$x; mk <- function() { x <- 7; g <- function() parent.frame(); g() }; e <- mk(); c(ge(e), ge(e), ge(e), ge((x = 8,))) }",
         "[1] 7 7 7 8\n",
     ),
+    // A compiled `match` tests each pattern in bytecode; the loops call each closure past its
+    // compile threshold.
+    (
+        "{ f <- function(v) match (v) { :Ok(x) => x + 1, :Err(..) => -1, (a, b) => a * b, (x = p, y = q) => p - q, \"s\" => 100, NULL => 0, 1L | 2L => 12, _ => 99 }; out <- NULL; for (i in 1:4) out <- c(f(:Ok(1)), f(:Err(:Bad)), f((3, 4)), f((y = 1, x = 5)), f(\"s\"), f(NULL), f(2L), f(2), f(list()), f(:Ok(1, 2))); out }",
+        " [1]   2  -1  12   4 100   0  12  12  99  99\n",
+    ),
+    (
+        "{ f <- function(v, x = \"unset\") match (v) { (x, 1) => x, _ => x }; for (i in 1:4) r <- c(f((5, 2)), f((6, 1))); r }",
+        "[1] \"unset\" \"6\"    \n",
+    ),
+    (
+        "{ f <- function(v) match (v) { :Pair((a, :Some(b))) => a + b, :Pair((a, :None)) => a, _ => 0 }; for (i in 1:4) r <- c(f(:Pair((1, :Some(2)))), f(:Pair((5, :None))), f(:Pair((1, 2)))); r }",
+        "[1] 3 5 0\n",
+    ),
+    (
+        "{ f <- function(v) match (v) { :Some(x) if (x > 1) => x, :Some(x) => -x, :None => 0 }; for (i in 1:4) r <- c(f(:Some(3)), f(:Some(1)), f(:None)); r }",
+        "[1]  3 -1  0\n",
+    ),
+    (
+        "{ f <- function(v) match (v) { :A => 1 }; for (i in 1:4) f(:A); f(:B) }",
+        "Error in match (v) { : no arm of this `match` matches :B\n",
+    ),
+    // `[[` with a constant index reads a record or tuple slot through the site's cache, and a
+    // list, a vector or a classed value takes `[[`'s own path.
+    (
+        "{ g <- function(t) c(t[[2L]], t[[1]]); out <- NULL; for (t in list((1, 2.5), (3L, 4L), list(5, 6), c(7, 8), (\"a\", \"b\"))) out <- c(out, g(t)); out }",
+        " [1] \"2.5\" \"1\"   \"4\"   \"3\"   \"6\"   \"5\"   \"8\"   \"7\"   \"b\"   \"a\"  \n",
+    ),
+    (
+        "{ g <- function(r) r[[\"b\"]]; c(g((a = 1, b = 2)), g((b = 3, c = 0)), g((a = 1, b = 4)), g(list(b = 5)), g((b = 6, a = 1))) }",
+        "[1] 2 3 4 5 6\n",
+    ),
+    (
+        "{ `[[.thing` <- function(x, i) 42; g <- function(t) t[[1L]]; o <- list(1); class(o) <- \"thing\"; c(g((1, 2)), g((2, 3)), g((3, 4)), g(o)) }",
+        "[1]  1  2  3 42\n",
+    ),
+    // A constructor whose syntax fixes the layout builds the value in one instruction; a
+    // payload-free tag is one shared constant.
+    (
+        "{ mk <- function(i) list((y = i, x = -i), :Some(i), :Point(y = 1, x = i), :Red, (), (i, \"a\")); for (i in 1:4) r <- mk(i); r }",
+        "[[1]]\n(x = -4L, y = 4L)\n\n[[2]]\n:Some(4L)\n\n[[3]]\n:Point(x = 4L, y = 1)\n\n[[4]]\n:Red\n\n[[5]]\n()\n\n[[6]]\n(4L, \"a\")\n\n",
+    ),
+    (
+        "{ mk <- function() :Red; for (i in 1:4) a <- mk(); identical(a, :Red) }",
+        "[1] TRUE\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.

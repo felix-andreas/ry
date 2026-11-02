@@ -1839,22 +1839,15 @@ pub fn fmt(
     let paths_with_config = files
         .iter()
         .map(|file| {
-            let config = config::Config::discover(file).map_err(|err| {
+            let mut config = config::Config::discover(file).map_err(|err| {
                 report(&err);
                 CommandError
             })?;
+            // lintr's settings only concern lints, so formatting never warns about them.
+            config.lintr_problems.clear();
             warn_config(&config);
-            // `[check] exclude` scopes analysis, not formatting. Literate documents are never
-            // formatted: most of an `.Rmd` is prose.
-            let paths: Vec<PathBuf> = collect_r_files(file, None)?
-                .into_iter()
-                .filter(|path| {
-                    !path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(is_literate_extension)
-                })
-                .collect();
+            // `[check] exclude` scopes analysis, not formatting.
+            let paths: Vec<PathBuf> = collect_r_files(file, None)?;
             Ok((paths, config.format))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1864,6 +1857,12 @@ pub fn fmt(
         .collect();
     if range.is_some() && jobs.len() != 1 {
         error("`--range` formats part of one file, so pass exactly one file");
+        return Err(CommandError);
+    }
+    if range.is_some() && jobs.iter().any(|(path, _)| is_literate_path(path)) {
+        error(
+            "`--range` formats part of an R file; an `.Rmd`, `.qmd` or `.Rnw` formats whole chunks",
+        );
         return Err(CommandError);
     }
 
@@ -1954,8 +1953,7 @@ pub fn fmt(
         }
     }
 
-    // Not a usage error: a pre-commit hook may pass only a literate document, which
-    // fmt deliberately skips.
+    // Not a usage error: a pre-commit hook may pass only files of other kinds.
     if n_files == 0 {
         info("0 files formatted");
         return Ok(Outcome::Clean);
@@ -2030,6 +2028,12 @@ enum FormatResult {
     },
 }
 
+fn is_literate_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_literate_extension)
+}
+
 fn format_file(
     path: &Path,
     config: format::Config,
@@ -2052,6 +2056,8 @@ fn format_file(
             format::format_range(&initial, config, selection)
                 .map(|edits| format::apply_edits(&initial, &edits))
         }
+        // A literate document formats chunk by chunk, so its prose is never touched.
+        None if is_literate_path(path) => format::format_literate(&initial, config),
         None => format::format(&initial, config),
     };
     let elapsed = start.elapsed();

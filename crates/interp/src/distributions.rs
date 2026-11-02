@@ -593,6 +593,12 @@ pub fn rnchisq(deviates: &mut impl Deviates, df: f64, lambda: f64) -> R<f64> {
     Ok(value)
 }
 
+/// A noncentral beta deviate from two chi-squares, as GNU R's `rnbeta`.
+pub fn rnbeta(deviates: &mut impl Deviates, a: f64, b: f64, ncp: f64) -> R<f64> {
+    let numerator = rnchisq(deviates, 2.0 * a, ncp)?;
+    Ok(numerator / (numerator + rchisq(deviates, 2.0 * b)?))
+}
+
 pub fn rt(deviates: &mut impl Deviates, df: f64) -> R<f64> {
     if df.is_nan() || df <= 0.0 {
         return Ok(f64::NAN);
@@ -1392,7 +1398,9 @@ pub fn rwilcox(deviates: &mut impl Deviates, m: f64, n: f64) -> R<f64> {
 }
 
 /// One multinomial draw of `size` objects into `probabilities.len()` boxes, as successive
-/// binomial draws conditional on the boxes before.
+/// binomial draws conditional on the boxes before. The remaining mass starts at the sum of the
+/// probabilities, added in order as GNU R does, so probabilities that sum to one only within
+/// rounding give GNU R's conditionals.
 pub fn rmultinom(
     deviates: &mut impl Deviates,
     size: i32,
@@ -1404,7 +1412,7 @@ pub fn rmultinom(
         return Ok(());
     };
     let mut left = size;
-    let mut remaining_probability = 1.0;
+    let mut remaining_probability: f64 = probabilities.iter().sum();
     for (index, &probability) in probabilities[..last].iter().enumerate() {
         if probability > 0.0 {
             let conditional = probability / remaining_probability;

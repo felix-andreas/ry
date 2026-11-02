@@ -14,6 +14,7 @@
 # - `validObject` returns its argument if valid (shape mirrors the input).
 # - `setClass`/`setGeneric`/`setMethod`/`setValidity`/`setRefClass` return S4 machinery objects (a class
 #   generator, the generic/method name, a class representation) tied to the dynamic dispatch system.
+# - `setMethod`'s `f` is the generic's name or the generic itself, as in `setMethod(show, "mpfr", ...)`.
 # - `callNextMethod` forwards to the next method (result and named arguments are dispatch-dependent).
 is : Any
 as : Any
@@ -21,7 +22,7 @@ new : fn(Class: character, ...: Any) -> Any
 validObject : Any
 setClass : fn(Class: character, ...: Any) -> fn(...: Any) -> Any
 setGeneric : fn(name: character, [def]: Any, ...: Any) -> character
-setMethod : fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+setMethod : fn(f: character | fn(...: Any) -> Any, [signature]: character[], [definition]: Any, ...: Any) -> character
 setValidity : Any
 setRefClass : Any
 representation : @pure fn(...: character) -> list[character]
@@ -38,7 +39,10 @@ getSlots : Any
 # logical) -> Any` is deliberately NOT declared yet: a naming fixture binds `slot` as a local helper
 # and would fire the builtin-shadow warning; rename it first, then declare.
 isVirtualClass : fn(Class: character, [where]: Any) -> logical
-extends : fn(class1: character, class2: character, [maybe]: Any, [fullInfo]: Any) -> logical
+# `class1` may be a class name or the definition `getClass()` returns. Without `class2`,
+# `extends` lists the class and its superclasses.
+extends : fn(class1: Any) -> character[]
+extends : fn(class1: Any, class2: character, [maybe]: Any, [fullInfo]: Any) -> logical
 isGeneric : fn(f: Any, [where]: Any, [fdef]: Any, [getName]: logical) -> logical
 existsMethod : fn(f: Any, [signature]: Any, [where]: Any) -> logical
 hasMethod : fn(f: Any, [signature]: Any, [where]: Any) -> logical

@@ -100,8 +100,9 @@ already uses, and leaves every other line alone. A statement is laid out as one 
 just outside the range changes when it belongs to a statement the range reaches into. A range that
 starts past the file's last line is an error, and an end past it stops at the last line.
 
-`ry fmt` skips `.Rmd`, `.qmd`, and `.Rnw` files, because it rewrites a whole file's layout and must not
-touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
+In `.Rmd`, `.qmd`, and `.Rnw` files, `ry fmt` formats each R chunk on its own and leaves the prose,
+the fences, inline `` `r expr` `` code, and indented chunks (such as one inside a list item) exactly
+as written. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
 ## run and R
@@ -163,7 +164,7 @@ No feature is experimental right now, so `--experimental-features` ignores every
 `ry debug-adapter` serves one debug session over the
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
 output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
-script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments.
+script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments. On Unix, the `ry run` console serves the same protocol on a socket, so an editor can attach to it while you work.
 
 ## debug
 
