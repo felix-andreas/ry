@@ -2519,10 +2519,36 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     `dst + src * min(1, (1 - Da) / Sa)`, which matches cairo's pixels exactly.
 - **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
   `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
-  offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
-  whole points. Base graphics computes positions in inches rather than through GNU R's NDC
-  pipeline, so the last bit of a coordinate can differ. Contour labels use a clean-room
-  "flattest window" placement, so they can sit in a different spot than GNU R's.
+  offset by `ylbias`, and symbols are sized from half the character height. Base graphics
+  computes positions in inches rather than through GNU R's NDC pipeline, so the last bit of a
+  coordinate can differ. The rules below were found by diffing the plot gallery against GNU R:
+  - The point size and `cex` reach the device separately (`text_context`), so rounding a size to
+    whole points is the device's business, as in GNU R; base graphics rounding it first put
+    ragg's text a pixel off at fractional `cex`. An inline `cex` scales text the same way.
+  - User coordinates map through the plot region `usr` was set on (GNU R's `win2fig`, the
+    `window` field of the parameters), not the current one, so changing `mar` after
+    `plot.window` moves nothing until the next `plot.window`.
+  - `mtext` and margin titles clip to the device, not the figure; `clip()` keeps its region only
+    while `xpd` equals its value when `clip()` ran, as GNU R's `GClip` drops it.
+  - Contour labels are a port of GNU R's `contour()` placement (the simple, edge and flattest
+    methods, label-box intersection, and its quirks: the cumulative gradient variance, the angle
+    computed with `180 / 3.14`), because any other placement lands labels elsewhere.
+  - Labels are a `Label` (string lines, or an expression laid out by `plotmath.rs`), and every
+    text path (`text`, `mtext`, `title`, `axis`, `strwidth`) goes through `push_label`, so
+    plotmath is one code path rather than a deparse fallback per caller.
+- **Base graphics is checked against GNU R by a plot gallery.** `crates/oracle/gallery/*.R` holds
+  about 150 figures (base graphics including the PerformanceAnalytics charts, grid, lattice,
+  ggplot2), and `oracle gallery` renders each on both engines and every device, then compares.
+  ragg (`agg`) rasterizes identically on both engines, so it is the sharp check, with a 0.2%
+  differing-pixel tolerance; `png` and pdf (rasterized with `pdftoppm`) get 5%, and a pixel
+  there differs only when nothing within one pixel in the other image matches it, because GNU R's
+  cairo and ry's tiny-skia antialias differently (a dense tangle of thin lines, such as a lattice
+  parallel plot, otherwise differs in 18% of its pixels while looking identical). The harness
+  auto-prints a figure's visible value, since lattice, ggplot2 and xts draw only when printed. `svg` is rendered and timed but not compared,
+  since cairo writes glyphs as paths. The figure sample is drawn from one seed, and
+  `test_gallery.rs` runs a bounded sample of it in the default suite; a bug class the gallery
+  finds is pinned by a `graphics__*` oracle case, which states the value (a `par`, a metric, a
+  return) rather than a pixel.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
@@ -2536,8 +2562,13 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   `mex` or the layout changes, so `par(mai = ...)` followed by `par(cex = 2)` keeps the inches and
   moves `mar`, and storing all units would let them drift apart.
 - **Text metrics are Helvetica's published AFM widths** (regular and bold; the oblique faces share
-  them) at the nearest whole point size, with the cap height for `strheight`. That matches the pdf
-  device's numbers exactly; bitmap devices in GNU R measure with cairo fonts and can differ.
+  them) at the nearest whole point size, with the cap height for `strheight`, and the symbol
+  face (`font` 5, which plotmath uses for operators, Greek and delimiters) uses the Symbol AFM.
+  That matches the pdf device's numbers exactly; bitmap devices in GNU R measure with cairo fonts
+  and can differ. The device's metric callback receives a glyph as its Adobe Symbol code, but a
+  string arrives as the Unicode characters plotmath translated it to, so only the string path
+  maps back (`symbol_metrics`, `adobe_symbol_code`): mapping both ways confuses raw code 174
+  (an arrow) with U+00AE, the translation of code 210.
 - **`cairoProps` reports cairo**, so `capabilities()` lists png, jpeg and tiff and the bitmap
   devices take the cairo path, which needs no display.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the

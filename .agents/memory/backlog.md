@@ -26,8 +26,7 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **Byte strings print with GNU R's padding.** In a printed character vector, GNU R pads a `"bytes"` string by the width of its `\xNN` spelling before the backslash is escaped, one column narrower than ry. `formatC` on one pads by its byte count. Both are cosmetic.
-- **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
+- **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 ## Open: base R kernels against GNU R
@@ -2315,16 +2314,34 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.
-  - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey
-    fonts fall back to ordinary text, and the Adobe symbol conversions pass text through.
+  - Hershey fonts fall back to ordinary text, and a symbol-face string that is not valid UTF-8
+    (`symbol("\256")`) is measured as replacement characters, where GNU R reads the bytes as
+    Adobe Symbol codes.
   - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
     points); open splines match GNU R value for value.
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
     (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
   - Bitmap pages are written when the device closes rather than per page.
-  - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
+  - The plot gallery (`oracle gallery`) passes on every device, and three figures are not
+    pixel-exact on agg: `pch_table` (the join at pch 11's apex), `ts_decomposition` (rotated
+    side-2 axis labels one pixel off) and `margin_text_and_titles`.
+  - GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
+  - Rendering speed (release build, `ORACLE_RY=target/release/ry oracle gallery --repeats 4`):
+    the whole gallery takes 23.7 s on GNU R and 29.1 s on ry. Base graphics (2.8 s against 2.2 s)
+    and grid (0.60 s against 0.39 s) are faster on ry, but ggplot2 (12.4 s against 15.8 s),
+    lattice (5.8 s against 8.1 s) and PerformanceAnalytics (2.1 s against 2.7 s) are 1.2 to 1.9
+    times slower, worst on `lattice_wireframe` and `pa_rolling_performance`. The devices are not
+    the cost (`pdf(NULL)` is as slow): the time is in the packages' R code, and callgrind shows a
+    flat profile of closure calls, frame setup, argument binding, allocation and builtin dispatch.
+    Measured per call against GNU R: a closure call 0.75 µs against 0.35, `pmin` 15.7 against 6.2,
+    `vapply` 8.2 against 3.4, `mostattributes<-` 10.6 against 4.0, `diff` 8.1 against 4.8. The JIT
+    makes it worse on these bodies: it compiles functions that are mostly tier-0 steps, so `pmin`
+    runs in about 10 µs with `RY_JIT=off`, and `vapply` over an anonymous function takes 306 µs
+    under `RY_JIT=force`. A gate on the ratio of native to tier-0 steps was tried without a clear
+    win. Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
+    path), not a graphics fix.
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
   build: 63 of 66 end with GNU R's exit status, 26 print exactly its output). Two divergences are
   accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`

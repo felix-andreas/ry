@@ -61,6 +61,7 @@ pub mod native;
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
+pub mod plotmath;
 pub mod print;
 pub mod random;
 pub mod rd;
