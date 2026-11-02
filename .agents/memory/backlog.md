@@ -588,9 +588,10 @@ change that does not pay.
    (`crates/jit/src/analysis.rs`).
 3. **Side mark bitmaps in the collector.** Done (`decisions.md`, "Small objects live in bitmap
    pages").
-4. **The allocation fast path.** Done with the same change: allocation claims a bitmap word of
-   free slots and there is no young list. What is left in `allocate_uncollected` is the store into
-   a cold slot's header, so the next cut is fewer allocations, not a faster allocator.
+4. **The allocation fast path.** Done: a bump cursor per size class, inlined, with the OLD
+   header bit for the barrier and a batch `Heap::reserve` for call frames (`decisions.md`, "The
+   young generation allocates by bumping a cursor"). The interpreter's closure call adopting
+   `reserve` is the next cut.
 5. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
