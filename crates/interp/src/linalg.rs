@@ -15,6 +15,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
         coerce::coerce_vector,
         conditions,
+        format::format_g,
         unwind::{R, error},
         values::{
             self, alloc, complexes, complexes_mut, dims, get_attr, ints, ints_mut, length, nil,
@@ -2933,21 +2934,6 @@ fn lapack_status(failed: bool, info: i32, routine: &str) -> R<()> {
         )));
     }
     Ok(())
-}
-
-/// `%g` with six significant digits, as GNU R's messages print reals.
-fn format_g(value: f64) -> String {
-    let mut buffer = [0u8; 64];
-    // SAFETY: the format takes one double and the buffer is large enough for any `%g` output.
-    let written = unsafe {
-        libc::snprintf(
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            c"%g".as_ptr(),
-            value,
-        )
-    };
-    String::from_utf8_lossy(&buffer[..written.clamp(0, 63) as usize]).into_owned()
 }
 
 // The libraries. Each table is opened on first use; a missing library is an error only for the

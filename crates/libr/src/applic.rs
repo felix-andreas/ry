@@ -24,7 +24,7 @@ use {
         runtime,
         utils::format_real_vector,
     },
-    interp::random,
+    interp::{format::format_g, random},
     std::ffi::{c_char, c_int, c_void},
 };
 
@@ -143,40 +143,6 @@ unsafe fn vector<'a>(pointer: *mut f64, length: c_int) -> &'a mut [f64] {
 
 fn print(text: &str) {
     write_console(text.as_bytes(), false);
-}
-
-/// C's `%g`: 6 significant digits, scientific when the exponent is below -4 or above 5, with
-/// trailing zeros removed.
-fn format_g(value: f64) -> String {
-    if !value.is_finite() {
-        return if value.is_nan() {
-            "nan".into()
-        } else if value > 0.0 {
-            "inf".into()
-        } else {
-            "-inf".into()
-        };
-    }
-    if value == 0.0 {
-        return "0".into();
-    }
-    let scientific = format!("{value:.5e}");
-    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    let trim = |text: &str| -> String {
-        if text.contains('.') {
-            text.trim_end_matches('0').trim_end_matches('.').to_owned()
-        } else {
-            text.to_owned()
-        }
-    };
-    if !(-4..6).contains(&exponent) {
-        let sign = if exponent < 0 { '-' } else { '+' };
-        format!("{}e{sign}{:02}", trim(mantissa), exponent.abs())
-    } else {
-        let decimals = (5 - exponent).max(0) as usize;
-        trim(&format!("{value:.decimals$}"))
-    }
 }
 
 // Nash's optimizers, as optim() runs them.

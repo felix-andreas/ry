@@ -1116,15 +1116,28 @@ unsafe fn matrix_index_positions(
         let mut offset = 0usize;
         let mut stride = 1usize;
         let mut na = false;
+        let mut dropped = false;
         for (dimension, &extent) in dims.iter().enumerate() {
             let element = row + dimension * rows;
             let position = if numeric {
-                let value = numeric_element(index, element);
+                let value = numeric_element(index, element).trunc();
                 if value.is_nan() {
                     na = true;
                     break;
                 }
-                if value < 1.0 || value as usize > extent {
+                if value < 0.0 {
+                    return Err(crate::unwind::error_in(
+                        call,
+                        "negative values are not allowed in a matrix subscript",
+                    ));
+                }
+                // GNU R drops a row that names position 0 in the first dimension it reaches,
+                // the way a 0 in a vector subscript selects nothing.
+                if value == 0.0 {
+                    dropped = true;
+                    break;
+                }
+                if value as usize > extent {
                     return Err(crate::unwind::error_in(call, "subscript out of bounds"));
                 }
                 value as usize - 1
@@ -1147,7 +1160,9 @@ unsafe fn matrix_index_positions(
             offset += position * stride;
             stride *= extent;
         }
-        positions.push((!na).then_some(offset));
+        if !dropped {
+            positions.push((!na).then_some(offset));
+        }
     }
     Ok(Some(positions))
 }

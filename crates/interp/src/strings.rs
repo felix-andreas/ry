@@ -57,6 +57,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("make.unique", 2, do_make_unique),
     internal("abbreviate", 3, do_abbreviate),
     internal("utf8ToInt", 1, do_utf8_to_int),
+    internal("adist", 8, do_adist),
     internal("intToUtf8", 3, do_int_to_utf8),
     internal("charToRaw", 1, do_char_to_raw),
     internal("rawToChar", 2, do_raw_to_char),
@@ -1515,6 +1516,183 @@ unsafe fn do_utf8_to_int(call: &Call<'_>) -> R<Sexp> {
         }
         Err(_) => scalar_integer(NA_INTEGER),
     }
+}
+
+/// `.Internal(adist(x, y, costs, counts, fixed, partial, ignore.case, useBytes))`: the
+/// generalized Levenshtein distance between each `x[i]` and `y[j]`. `utils::adist` passes each
+/// string as an integer vector of code points (or bytes), already lowered for `ignore.case`,
+/// with `NA_integer_` standing for a missing string. With `counts`, the result carries the
+/// insertion, deletion and substitution counts and the transformation sequences of one optimal
+/// alignment, chosen with GNU R's tie order (insertion, then deletion, then substitution).
+unsafe fn do_adist(call: &Call<'_>) -> R<Sexp> {
+    let (x, y, costs) = (call.arg(0), call.arg(1), call.arg(2));
+    let counts = flag(call.arg(3));
+    if flag(call.arg(5)) || x.kind() != SexpType::List {
+        return Err(error(
+            "partial matching in 'adist' is not supported by ry yet",
+        ));
+    }
+    let costs = coerce_vector(costs, SexpType::Real)?;
+    let costs = values::reals(costs);
+    let [insert_cost, delete_cost, substitute_cost] = match costs {
+        [insert, delete, substitute, ..] => [*insert, *delete, *substitute],
+        _ => return Err(error("invalid 'costs' argument")),
+    };
+    let points = |list: Sexp| -> R<Vec<Option<Vec<i32>>>> {
+        (0..length(list))
+            .map(|index| {
+                let element = coerce_vector(list.element(index), SexpType::Integer)?;
+                let element = values::ints(element);
+                Ok(if element.first() == Some(&NA_INTEGER) {
+                    None
+                } else {
+                    Some(element.to_vec())
+                })
+            })
+            .collect()
+    };
+    let x_points = points(x)?;
+    let y_points = points(y)?;
+    let (rows, columns) = (x_points.len(), y_points.len());
+    let result = alloc(SexpType::Real, rows * columns)?;
+    let counts_array = if counts {
+        alloc(SexpType::Integer, rows * columns * 3)?
+    } else {
+        nil()
+    };
+    let trafos = if counts {
+        alloc(SexpType::String, rows * columns)?
+    } else {
+        nil()
+    };
+    let mut distances: Vec<f64> = Vec::new();
+    let mut paths: Vec<u8> = Vec::new();
+    for (column, y_string) in y_points.iter().enumerate() {
+        for (row, x_string) in x_points.iter().enumerate() {
+            let cell = row + rows * column;
+            let (Some(x_string), Some(y_string)) = (x_string, y_string) else {
+                values::reals_mut(result)[cell] = heap::object::NA_REAL;
+                if counts {
+                    for kind in 0..3 {
+                        values::ints_mut(counts_array)[cell + rows * columns * kind] = NA_INTEGER;
+                    }
+                    set_elt(trafos, cell, na_string());
+                }
+                continue;
+            };
+            let (x_length, y_length) = (x_string.len(), y_string.len());
+            let stride = x_length + 1;
+            distances.clear();
+            distances.resize(stride * (y_length + 1), 0.0);
+            paths.clear();
+            paths.resize(stride * (y_length + 1), b'M');
+            for k in 0..=x_length {
+                distances[k] = k as f64 * delete_cost;
+                paths[k] = b'D';
+            }
+            for l in 0..=y_length {
+                distances[l * stride] = l as f64 * insert_cost;
+                paths[l * stride] = b'I';
+            }
+            for l in 1..=y_length {
+                for k in 1..=x_length {
+                    let here = k + l * stride;
+                    if x_string[k - 1] == y_string[l - 1] {
+                        distances[here] = distances[here - 1 - stride];
+                        paths[here] = b'M';
+                        continue;
+                    }
+                    let insert = distances[here - stride] + insert_cost;
+                    let delete = distances[here - 1] + delete_cost;
+                    let substitute = distances[here - 1 - stride] + substitute_cost;
+                    let (distance, path) = if insert <= delete {
+                        if insert <= substitute {
+                            (insert, b'I')
+                        } else {
+                            (substitute, b'S')
+                        }
+                    } else if delete <= substitute {
+                        (delete, b'D')
+                    } else {
+                        (substitute, b'S')
+                    };
+                    distances[here] = distance;
+                    paths[here] = path;
+                }
+            }
+            values::reals_mut(result)[cell] = distances[x_length + y_length * stride];
+            if counts {
+                let (mut k, mut l) = (x_length, y_length);
+                let mut tally = [0i32; 3];
+                let mut steps = Vec::with_capacity(x_length + y_length);
+                while k > 0 || l > 0 {
+                    let step = paths[k + l * stride];
+                    match step {
+                        b'I' => {
+                            tally[0] += 1;
+                            l -= 1;
+                        }
+                        b'D' => {
+                            tally[1] += 1;
+                            k -= 1;
+                        }
+                        _ => {
+                            if step == b'S' {
+                                tally[2] += 1;
+                            }
+                            k -= 1;
+                            l -= 1;
+                        }
+                    }
+                    steps.push(step);
+                }
+                steps.reverse();
+                for (kind, count) in tally.iter().enumerate() {
+                    values::ints_mut(counts_array)[cell + rows * columns * kind] = *count;
+                }
+                let text = String::from_utf8_lossy(&steps);
+                set_elt(trafos, cell, values::mkchar(&text)?);
+            }
+        }
+    }
+    let x_names = values::names(x);
+    let y_names = values::names(y);
+    let dimnames = if x_names != nil() || y_names != nil() {
+        values::list_vector(&[x_names, y_names])?
+    } else {
+        nil()
+    };
+    set_attr(
+        result,
+        symbols().dim,
+        values::integer_vector(&[rows as i32, columns as i32])?,
+    )?;
+    if dimnames != nil() {
+        set_attr(result, symbols().dimnames, dimnames)?;
+    }
+    if counts {
+        set_attr(
+            counts_array,
+            symbols().dim,
+            values::integer_vector(&[rows as i32, columns as i32, 3])?,
+        )?;
+        set_attr(
+            counts_array,
+            symbols().dimnames,
+            values::list_vector(&[x_names, y_names, string_vector(&["ins", "del", "sub"])?])?,
+        )?;
+        set_attr(
+            trafos,
+            symbols().dim,
+            values::integer_vector(&[rows as i32, columns as i32])?,
+        )?;
+        if dimnames != nil() {
+            set_attr(trafos, symbols().dimnames, dimnames)?;
+        }
+        set_attr(result, values::install("counts")?, counts_array)?;
+        set_attr(result, values::install("trafos")?, trafos)?;
+    }
+    Ok(result)
 }
 
 unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {

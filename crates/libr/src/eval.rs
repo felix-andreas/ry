@@ -31,7 +31,7 @@ use {
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
-        write_console: |text, is_error| crate::boundary::write_console(text, is_error),
+        write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_task_callbacks: |expression, value, succeeded, visible| unsafe {
@@ -49,6 +49,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
+    interp::register_builtins(crate::inspect::BUILTINS);
     install_evaluator(&Interpreter);
 }
 
@@ -524,7 +525,9 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".External", -1, |call| unsafe {
         dot_call(call, RoutineKind::External)
     }),
-    builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
+    // GNU R's `.External2` (eval code 201) leaves visibility to the routine, so a routine whose
+    // last step evaluates an invisible call, such as magrittr's pipe, returns invisibly.
+    builtin(".External2", -1, |call| unsafe { dot_external2(call) }).keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
         dot_call(call, RoutineKind::Call)
     }),

@@ -7,6 +7,7 @@ use {
     heap::object::NA_INTEGER,
     interp::{
         distributions::{self, SessionDeviates},
+        format::format_g,
         rmath::*,
     },
     std::ffi::c_int,
@@ -336,19 +337,3 @@ pub extern "C" fn wilcox_free() {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn signrank_free() {}
-
-/// C's `%g` for the few messages that print a number that way.
-fn format_g(value: f64) -> String {
-    if value == 0.0 || (1e-4..1e6).contains(&value.abs()) {
-        let text = format!("{value:.6}");
-        let text = text.trim_end_matches('0').trim_end_matches('.');
-        let digits = text.chars().filter(char::is_ascii_digit).count();
-        if digits <= 6 {
-            return text.to_owned();
-        }
-        let precision = 6usize.saturating_sub(value.abs().log10().floor() as usize + 1);
-        let text = format!("{value:.precision$}");
-        return text.trim_end_matches('0').trim_end_matches('.').to_owned();
-    }
-    format!("{value:e}")
-}

@@ -3185,52 +3185,52 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
         }
         (from, to, by, Some(count)) => {
             let count = count as usize;
+            // With `length.out`, GNU R returns integers whenever the start and the step are
+            // whole numbers and both ends fit an integer, whatever the arguments' types.
+            let sequence = |from: f64, by: f64, last: f64, values: Vec<f64>| {
+                let fits = |value: f64| (i32::MIN as f64..=i32::MAX as f64).contains(&value);
+                if by == by.trunc() && from == from.trunc() && fits(from) && fits(last) {
+                    let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
+                    values::integer_vector(&integers)
+                } else {
+                    values::real_vector(&values)
+                }
+            };
             match (from, to, by) {
                 (Some(from), Some(to), None) => {
-                    if count == 1 {
-                        return values::real_vector(&[from]);
-                    }
-                    let by = (to - from) / (count as f64 - 1.0);
+                    let by = if count > 1 {
+                        (to - from) / (count as f64 - 1.0)
+                    } else {
+                        0.0
+                    };
                     let values: Vec<f64> = (0..count)
                         .map(|index| {
-                            if index == count - 1 {
+                            if index == 0 {
+                                from
+                            } else if index == count - 1 {
                                 to
-                            } else {
+                            } else if index < count / 2 {
                                 from + index as f64 * by
+                            } else {
+                                to - (count - 1 - index) as f64 * by
                             }
                         })
                         .collect();
-                    if all_integer && values.iter().all(|value| value.fract() == 0.0) {
-                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-                        return values::integer_vector(&integers);
-                    }
-                    values::real_vector(&values)
+                    sequence(from, by, to, values)
                 }
                 (from, None, by) => {
                     let from = from.unwrap_or(1.0);
                     let by = by.unwrap_or(1.0);
                     let values: Vec<f64> =
                         (0..count).map(|index| from + index as f64 * by).collect();
-                    if (from_value.is_none() || all_integer)
-                        && values
-                            .iter()
-                            .all(|value| value.fract() == 0.0 && value.abs() < i32::MAX as f64)
-                    {
-                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-                        return values::integer_vector(&integers);
-                    }
-                    values::real_vector(&values)
+                    sequence(from, by, from + (count as f64 - 1.0) * by, values)
                 }
                 (None, Some(to), by) => {
                     let by = by.unwrap_or(1.0);
                     let from = to - (count as f64 - 1.0) * by;
                     let values: Vec<f64> =
                         (0..count).map(|index| from + index as f64 * by).collect();
-                    if all_integer && values.iter().all(|value| value.fract() == 0.0) {
-                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-                        return values::integer_vector(&integers);
-                    }
-                    values::real_vector(&values)
+                    sequence(to, by, from, values)
                 }
                 _ => Err(call.error("too many arguments")),
             }
@@ -3243,7 +3243,14 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
     let object = present(matched[0]).unwrap_or(nil());
-    let times = present(matched[1]);
+    // GNU coerces `times` to a numeric vector first, so a list of counts such as
+    // `lapply(x, length)` works.
+    let times = match present(matched[1]) {
+        Some(times) if times.kind() == SexpType::List => {
+            Some(crate::coerce::coerce_vector(times, SexpType::Real)?)
+        }
+        other => other,
+    };
     let length_out = present(matched[2])
         .map(|value| values::as_real_scalar(value))
         .filter(|value| !value.is_nan());

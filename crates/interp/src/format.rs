@@ -866,3 +866,18 @@ pub unsafe fn width_option() -> usize {
         values::as_integer_scalar(width).clamp(10, 10000) as usize
     }
 }
+
+/// C's `%g`: six significant digits, as GNU R's messages and `.Internal(inspect())` print reals.
+pub fn format_g(value: f64) -> String {
+    let mut buffer = [0u8; 64];
+    // SAFETY: the format takes one double and the buffer is large enough for any `%g` output.
+    let written = unsafe {
+        libc::snprintf(
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            c"%g".as_ptr(),
+            value,
+        )
+    };
+    String::from_utf8_lossy(&buffer[..written.clamp(0, 63) as usize]).into_owned()
+}

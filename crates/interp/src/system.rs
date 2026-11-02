@@ -2359,16 +2359,34 @@ unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
             .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    // As in GNU R: `login` is `getlogin()`, which a process without a controlling terminal
+    // lacks, and the two user fields name the real and effective user ids.
+    let text = |pointer: *const libc::c_char| {
+        if pointer.is_null() {
+            "unknown".to_owned()
+        } else {
+            std::ffi::CStr::from_ptr(pointer)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    let user_name = |uid: libc::uid_t| {
+        let entry = libc::getpwuid(uid);
+        if entry.is_null() {
+            "unknown".to_owned()
+        } else {
+            text((*entry).pw_name)
+        }
+    };
     let values_list = [
         field(&name.sysname),
         field(&name.release),
         field(&name.version),
         field(&name.nodename),
         field(&name.machine),
-        user.clone(),
-        user.clone(),
-        user,
+        text(libc::getlogin()),
+        user_name(libc::getuid()),
+        user_name(libc::geteuid()),
     ];
     let result = string_vector(&values_list)?;
     let names = string_vector(&[

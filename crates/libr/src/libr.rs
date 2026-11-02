@@ -63,6 +63,7 @@ pub mod frame_altrep;
 pub mod globals;
 pub mod graphics;
 pub mod hashtab;
+pub mod inspect;
 pub mod legacy;
 pub mod linpack;
 pub mod lists;
