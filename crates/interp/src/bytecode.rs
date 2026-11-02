@@ -2464,7 +2464,10 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                 // instruction rooted is released at once. Otherwise an object only a finished
                 // call held would stay alive until the body returns, past a later `gc()` and
                 // the finalizer GNU R runs there.
-                crate::heap().release_handles(machine.mark);
+                let heap = crate::heap();
+                if heap.handle_mark() > machine.mark {
+                    heap.release_handles(machine.mark);
+                }
                 if pc < at
                     && let Some(tier) = interp().bytecode.tier
                 {

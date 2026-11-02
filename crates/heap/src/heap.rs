@@ -1263,10 +1263,12 @@ impl Heap {
         self.roots.handles.push(object);
     }
 
+    #[inline]
     pub fn handle_mark(&self) -> usize {
         self.roots.handles.len()
     }
 
+    #[inline]
     pub fn release_handles(&mut self, mark: usize) {
         self.roots.handles.truncate(mark);
     }
@@ -2145,7 +2147,11 @@ impl RootStack {
         self.entries.push(object);
     }
 
+    #[inline]
     fn truncate(&mut self, length: usize) {
+        if length >= self.entries.len() {
+            return;
+        }
         self.entries.truncate(length);
         self.scanned = self.scanned.min(self.entries.len());
     }
