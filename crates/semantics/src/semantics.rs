@@ -1573,7 +1573,7 @@ pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> Packag
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = Symbol::new(name.name(db).text(db));
+    let text = name.name(db).symbol();
     PackageName {
         winner: package_definitions(db, files).get(&text).copied(),
         conditional_writers: conditional_slot_items(db, files)
@@ -1695,7 +1695,7 @@ pub fn test_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageNa
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = Symbol::new(name.name(db).text(db));
+    let text = name.name(db).symbol();
     PackageName {
         winner: test_definitions(db, files).get(&text).copied(),
         conditional_writers: test_conditional_slot_items(db, files)
@@ -1881,10 +1881,12 @@ fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
 pub struct InterfaceReads<'db> {
     /// Binders in the item's own file that a read reaches.
     pub frame: Vec<Item<'db>>,
-    /// Names whose read may continue past the file into the project's layers.
-    pub layered: BTreeSet<Symbol>,
-    /// Names whose read continues past the file to a definition only (`earlier_binding`).
-    pub earlier: BTreeSet<Symbol>,
+    /// Names whose read may continue past the file into the project's layers, sorted and
+    /// unique.
+    pub layered: Vec<Symbol>,
+    /// Names whose read continues past the file to a definition only (`earlier_binding`),
+    /// sorted and unique.
+    pub earlier: Vec<Symbol>,
 }
 
 /// A firewall: whole-project walks depend on this rather than the full naming, so a body edit
@@ -1899,20 +1901,22 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     let package = *item.file(db).kind(db) == DocumentKind::Package;
     // `(name, deferred)` reads through the item's frame first, the rest straight from the
     // layers (`enclosing_scheme`, and `namespace_scheme` outside a package file).
-    let mut lookups: BTreeSet<(Symbol, bool)> = BTreeSet::new();
+    // Gathered unsorted and deduplicated once: names compare by spelling, which makes an ordered
+    // set's per-insert comparisons the cost of this query.
+    let mut lookups: Vec<(Symbol, bool)> = Vec::new();
     for (id, &name) in naming.non_locals.iter() {
-        lookups.insert((name, naming.deferred_non_locals.contains(id)));
+        lookups.push((name, naming.deferred_non_locals.contains(id)));
         if !package {
-            reads.layered.insert(name);
+            reads.layered.push(name);
         }
     }
     for (id, &name) in naming.quiet_reads.iter() {
-        lookups.insert((name, naming.deferred_quiet_reads.contains(id)));
+        lookups.push((name, naming.deferred_quiet_reads.contains(id)));
     }
     for name in naming.namespace_reads.values().filter_map(|read| read.name) {
         match package {
-            true => lookups.insert((name, false)),
-            false => reads.layered.insert(name),
+            true => lookups.push((name, false)),
+            false => reads.layered.push(name),
         };
     }
     let top_level = |slot: &naming::BindingId| {
@@ -1930,10 +1934,10 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
         };
         if top_level(slot) || fallback.outer.iter().any(top_level) {
             if !package {
-                reads.layered.insert(binding.name);
+                reads.layered.push(binding.name);
             }
         } else {
-            lookups.insert((binding.name, fallback.deferred));
+            lookups.push((binding.name, fallback.deferred));
         }
     }
     // A top-level slot read before the item writes it reads the binding that stood before
@@ -1965,22 +1969,28 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
         match frame_definition(name, false) {
             Some(binder) => push_unique(&mut reads.frame, binder),
             None => {
-                reads.earlier.insert(name);
+                reads.earlier.push(name);
             }
         }
     }
+    lookups.sort_unstable();
+    lookups.dedup();
     for (name, deferred) in lookups {
         let binder = frame_definition(name, deferred);
         match binder.map(|binder| binder_source(db, binder, name.as_str())) {
             Some(Source::Definition(binder)) => push_unique(&mut reads.frame, binder),
             Some(Source::Statement(binder)) => {
                 push_unique(&mut reads.frame, binder);
-                reads.layered.insert(name);
+                reads.layered.push(name);
             }
             Some(Source::Conditional(_)) | None => {
-                reads.layered.insert(name);
+                reads.layered.push(name);
             }
         }
+    }
+    for names in [&mut reads.layered, &mut reads.earlier] {
+        names.sort_unstable();
+        names.dedup();
     }
     reads
 }
@@ -2132,43 +2142,40 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
-    if node.kind() == SyntaxKind::FUNCTION_DEF {
-        return 0;
-    }
+    let root = node.node_ref();
+    let mut nested: Option<NodeRef<'_>> = None;
     let mut count = 0;
-    let mut stack = vec![(node.kind(), node.node_ref().children())];
-    while let Some((parent_kind, children)) = stack.last_mut() {
-        let parent_kind = *parent_kind;
-        let Some(element) = children.next() else {
-            stack.pop();
+    for element in root.descendants_with_tokens() {
+        if nested.is_some_and(|function| function.encloses(element)) {
             continue;
-        };
-        match element {
-            NodeOrToken::Node(child) => {
-                let kind = child.kind();
-                if kind != SyntaxKind::FUNCTION_DEF {
-                    stack.push((kind, child.children()));
-                }
-            }
-            NodeOrToken::Token(token) => {
-                let writes = match token.kind() {
-                    SyntaxKind::LESS_MINUS
-                    | SyntaxKind::LESS2_MINUS
-                    | SyntaxKind::MINUS_GREATER
-                    | SyntaxKind::MINUS_GREATER2
-                    | SyntaxKind::COLON_EQ
-                    | SyntaxKind::FOR_KW => true,
-                    SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
-                    SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
-                    SyntaxKind::IDENT => matches!(
-                        token.text().trim_matches('`'),
-                        ":=" | "setnames" | "setcolorder"
-                    ),
-                    _ => false,
-                };
-                count += usize::from(writes);
-            }
         }
+        let token = match element {
+            NodeOrToken::Node(child) => {
+                if child.kind() == SyntaxKind::FUNCTION_DEF {
+                    nested = Some(child);
+                }
+                continue;
+            }
+            NodeOrToken::Token(token) => token,
+        };
+        let writes = match token.kind() {
+            SyntaxKind::LESS_MINUS
+            | SyntaxKind::LESS2_MINUS
+            | SyntaxKind::MINUS_GREATER
+            | SyntaxKind::MINUS_GREATER2
+            | SyntaxKind::COLON_EQ
+            | SyntaxKind::FOR_KW => true,
+            SyntaxKind::EQ => {
+                token.parent().map(NodeRef::kind) == Some(SyntaxKind::BINARY_EXPR)
+            }
+            SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
+            SyntaxKind::IDENT => matches!(
+                token.text().trim_matches('`'),
+                ":=" | "setnames" | "setcolorder"
+            ),
+            _ => false,
+        };
+        count += usize::from(writes);
     }
     count
 }
@@ -2648,6 +2655,10 @@ struct SalsaGlobals<'db, 'a> {
     group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
     files: Option<ProjectFiles>,
     file: SourceFile,
+    // Read once: a body looks up hundreds of names, and each salsa read of an input field or a
+    // memo records a dependency edge.
+    kind: DocumentKind,
+    sources_files: OnceCell<bool>,
     definitions: TypeDefinitions<'db>,
     library: Option<&'db stubs::StubLibrary<'db>>,
     // A body reads the same few globals many times, and each salsa read pays for interning
@@ -2799,7 +2810,7 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
-    FrameBinders::of(db, item).binder(Symbol::new(name.text(db)), deferred)
+    FrameBinders::of(db, item).binder(name.symbol(), deferred)
 }
 
 /// [`frame_binder`] for a name [`item_frame_binders`] does not list. An incremental host goes
@@ -2902,6 +2913,8 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             group,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            kind: *item.file(db).kind(db),
+            sources_files: OnceCell::new(),
             definitions: TypeDefinitions::of(db, *item.file(db)),
             library: stubs::stubs(db),
             schemes: RefCell::default(),
@@ -2978,14 +2991,13 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
-        if deferred && *self.file.kind(self.db) == DocumentKind::Package {
+        if deferred && self.kind == DocumentKind::Package {
             return None;
         }
-        let text = name.text(self.db);
         if let Some(&(immediate, later)) = self
             .item_frame_binders
             .get_or_init(|| item_frame_binders(self.db, self.item))
-            .get(&Symbol::new(text))
+            .get(&name.symbol())
         {
             return if deferred { later } else { immediate };
         }
@@ -2994,7 +3006,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             .borrow_mut()
             .entry((name, deferred))
             .or_insert_with(|| {
-                unlisted_frame_binder(self.db, self.item, &self.frame, Symbol::new(text), deferred)
+                unlisted_frame_binder(self.db, self.item, &self.frame, name.symbol(), deferred)
             })
     }
 
@@ -3005,13 +3017,18 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             .files
             .filter(|_| {
                 matches!(
-                    *self.file.kind(self.db),
+                    self.kind,
                     DocumentKind::Test | DocumentKind::TestHelper
                 )
             })
             .map(|files| self.layer(&self.test_layers, &self.test_lookup, files, name, true));
         let sourced =
-            sourced_definition(self.db, self.file, name.symbol()).map(|winner| NameLayer {
+            (*self
+                .sources_files
+                .get_or_init(|| !sourced_files(self.db, self.file).is_empty()))
+            .then(|| *sourced_name_definition(self.db, self.file, name.symbol()))
+            .flatten()
+            .map(|winner| NameLayer {
                 winner: Some(winner),
                 conditional_writers: &[],
             });
@@ -3043,7 +3060,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         *layers.borrow_mut().entry(name).or_insert_with(|| {
             lookup
                 .get_or_init(|| NameLookup::new(self.db, files, test))
-                .layer(self.db, Symbol::new(name.text(self.db)))
+                .layer(self.db, name.symbol())
         })
     }
 
@@ -3110,7 +3127,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn namespace_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
-        if *self.file.kind(self.db) == DocumentKind::Package {
+        if self.kind == DocumentKind::Package {
             return self.scheme(name, false);
         }
         let interned = types::Name::new(self.db, name);
@@ -3124,7 +3141,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn enclosing_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
-        if *self.file.kind(self.db) == DocumentKind::Package {
+        if self.kind == DocumentKind::Package {
             return None;
         }
         let interned = types::Name::new(self.db, name);

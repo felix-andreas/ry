@@ -861,7 +861,7 @@ fn analyze_project_with(
                     .tokens(index)
                     .unwrap_or_default()
                     .iter()
-                    .filter_map(|token| imported.get(token.as_str()).copied())
+                    .filter_map(|token| imported.get(token.as_str()))
                     .collect();
             }
         }

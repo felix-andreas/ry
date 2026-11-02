@@ -1341,6 +1341,13 @@ impl<'a> TokenRef<'a> {
     pub fn text(self) -> &'a str {
         self.tree.slice(self.range())
     }
+
+    pub fn parent(self) -> Option<NodeRef<'a>> {
+        Some(NodeRef {
+            tree: self.tree,
+            index: self.tree.parent(self.index)?,
+        })
+    }
 }
 
 impl PartialEq for TokenRef<'_> {
