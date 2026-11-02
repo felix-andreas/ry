@@ -1068,3 +1068,68 @@ hint @44 -> T
 hint @71: double[]
 hint @95factor =
 hint @98offset =
+
+#==== replacement_copy
+#---- a_field_write_in_a_function_refers_to_the_global
+the <- new.env()
+f <- function() {
+  the$x <- 1
+  th$0e$y
+}
+g <- function() the$z
+#++++
+hover 50..53: the: Unknown
+hover-definition: global 0..3
+definition 0..3
+references: 0..3*, 37..40, 50..53, 74..77
+rename: 4 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 3..3 -> ": environment"
+completion (2): the, Theoph
+hint @3: environment
+
+#---- a_copy_of_an_enclosing_local_refers_to_it
+outer <- function() {
+  config <- list()
+  inner <- function() {
+    config$a <- 1
+    conf$0ig
+  }
+  config
+}
+#++++
+hover 87..93: config: Unknown
+hover-definition: local 24..30
+definition 24..30
+references: 24..30*, 69..75, 87..93, 100..106
+rename: 4 edit(s)
+signature: none
+action: Add inferred type annotation for `outer`
+  edit 19..19 -> " -> list{}"
+action: Add inferred type annotations for the whole file
+  edit 19..19 -> " -> list{}"
+completion (21): config, confint, confint.default, confint.lm, conflictRules, conflicts, conformMethod, pcre_config
+hint @19 -> list{}
+hint @30: list{}
+
+#---- a_copy_inside_a_loop_body_refers_to_the_global
+the <- new.env()
+for (i in 1:2) {
+  f <- function() {
+    the$x <- 1
+    th$0e$x
+  }
+}
+#++++
+hover 73..76: the: Unknown
+hover-definition: global 0..3
+definition 0..3
+references: 0..3*, 58..61, 73..76
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 3..3 -> ": environment"
+completion (2): the, Theoph
+hint @3: environment
+hint @23: integer

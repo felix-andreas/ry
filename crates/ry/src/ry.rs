@@ -11,6 +11,7 @@ pub mod namespace;
 pub mod position;
 pub mod preflight;
 pub mod repl_completer;
+pub mod scope_oracle;
 pub mod server;
 pub mod stats;
 

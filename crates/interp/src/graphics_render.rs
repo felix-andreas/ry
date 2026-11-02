@@ -2261,7 +2261,8 @@ fn draw_items(
     if depth > MAX_NESTING {
         return;
     }
-    let mut current: Option<((Clip, Option<usize>), Option<tiny_skia::Mask>)> = None;
+    type CoverageKey = (Clip, Option<usize>);
+    let mut current: Option<(CoverageKey, Option<tiny_skia::Mask>)> = None;
     for item in items {
         let key = (item.clip, item.mask);
         if current.as_ref().is_none_or(|(known, _)| *known != key) {
@@ -2315,9 +2316,9 @@ fn draw_items(
 /// tiny-skia lacks: the source, scaled down to fit the room the destination's alpha leaves,
 /// is added to the destination. Both are premultiplied and the same size.
 fn saturate(canvas: &mut tiny_skia::Pixmap, layer: &tiny_skia::Pixmap, coverage: &tiny_skia::Mask) {
-    let pixels = canvas.data_mut().chunks_exact_mut(4);
+    let pixels = canvas.data_mut().as_chunks_mut::<4>().0.iter_mut();
     for ((destination, source), &cover) in pixels
-        .zip(layer.data().chunks_exact(4))
+        .zip(layer.data().as_chunks::<4>().0)
         .zip(coverage.data())
     {
         let cover = f32::from(cover) / 255.0;
@@ -3437,7 +3438,7 @@ impl RenderDevice {
     }
 
     /// The map from device units to inches.
-    fn from_device(&self) -> Affine {
+    fn device_to_inches(&self) -> Affine {
         let unit = self.unit_inches;
         if self.y_down {
             Affine([unit, 0.0, 0.0, -unit, 0.0, self.size[1]])
@@ -3844,7 +3845,7 @@ unsafe extern "C" fn device_use_group(reference: Sexp, transform: Sexp, dd: *mut
     let transform = if transform != nil() && length(transform) >= 6 {
         let t: Vec<f64> = (0..6).map(|index| number_at(transform, index)).collect();
         let in_device = Affine([t[0], t[3], t[1], t[4], t[2], t[5]]);
-        let from_device = device.from_device();
+        let from_device = device.device_to_inches();
         match from_device.invert() {
             Some(to_device) => to_device.then(in_device).then(from_device),
             None => Affine::IDENTITY,
@@ -3959,8 +3960,9 @@ unsafe extern "C" fn device_glyph(
 
 /// A font file's face `index`, loaded once per session.
 fn font_file(file: &str, index: u32) -> Option<Rc<ab_glyph::FontVec>> {
+    type FontCache = BTreeMap<(String, u32), Option<Rc<ab_glyph::FontVec>>>;
     thread_local! {
-        static FONTS: RefCell<BTreeMap<(String, u32), Option<Rc<ab_glyph::FontVec>>>> =
+        static FONTS: RefCell<FontCache> =
             const { RefCell::new(BTreeMap::new()) };
     }
     FONTS.with(|fonts| {

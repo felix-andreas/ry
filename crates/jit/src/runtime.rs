@@ -723,6 +723,92 @@ pub unsafe extern "C" fn jit_construct(
     }
 }
 
+/// Puts a new list of `length` elements, each `NULL`, in register `dst`, for a compiled
+/// traversal to fill. Returns 0 when allocating fails, with the error parked.
+pub unsafe extern "C" fn jit_list_new(activation: *mut Activation, length: i64, dst: i64) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            match scoped(|| values::alloc(SexpType::List, length as usize)) {
+                Ok(list) => {
+                    *activation.registers.add(dst as usize) = list;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
+/// Stores the value `kind` and `bits` describe (see [`representation`]) at `index` of the list
+/// in register `dst`, boxing a number. Returns 0 when boxing fails, with the error parked.
+pub unsafe extern "C" fn jit_list_store(
+    activation: *mut Activation,
+    dst: i64,
+    index: i64,
+    kind: i32,
+    bits: i64,
+) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let stored = scoped(|| -> R<()> {
+                let list = *activation.registers.add(dst as usize);
+                let value = match kind {
+                    representation::INTEGER => values::scalar_integer(bits as i32)?,
+                    representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
+                    representation::LOGICAL => values::scalar_logical(bits as i32)?,
+                    _ => Sexp::from_raw(bits as *mut Header)
+                        .ok_or_else(|| error("compiled code stored a null item"))?,
+                };
+                heap().set_element(list, index as usize, value);
+                Ok(())
+            });
+            match stored {
+                Ok(()) => 1,
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
+/// Cuts the list in register `dst` down to its first `count` elements. Returns 0 when
+/// allocating the shorter list fails, with the error parked.
+pub unsafe extern "C" fn jit_list_prefix(activation: *mut Activation, dst: i64, count: i64) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let cell = activation.registers.add(dst as usize);
+            let list = *cell;
+            let count = count as usize;
+            if count == values::length(list) {
+                return 1;
+            }
+            let shortened = scoped(|| -> R<Sexp> {
+                let heap = heap();
+                let shorter = values::alloc(SexpType::List, count)?;
+                for index in 0..count {
+                    heap.set_element(shorter, index, list.element(index));
+                }
+                Ok(shorter)
+            });
+            match shortened {
+                Ok(shorter) => {
+                    *cell = shorter;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
 /// Key kinds [`jit_collection_position`] takes.
 pub mod key {
     pub const INTEGER: i32 = 0;
@@ -845,6 +931,12 @@ pub extern "C" fn jit_log(value: f64) -> f64 {
 
 pub extern "C" fn jit_real_modulo(a: f64, b: f64) -> f64 {
     arith::real_modulo(a, b)
+}
+
+/// Whether `%%` on doubles must warn about a total loss of accuracy, which compiled code
+/// leaves to tier 0: 1 when it must, else 0.
+pub extern "C" fn jit_modulus_loses_accuracy(a: f64, b: f64) -> i32 {
+    i32::from(arith::modulus_loses_accuracy(a, b))
 }
 
 /// `%/%` on doubles, as the interpreter computes it.

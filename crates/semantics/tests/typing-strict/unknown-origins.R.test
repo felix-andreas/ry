@@ -159,9 +159,7 @@ first <- function(df) sum(df[["amount"]])
 == R/main.R
 total: fn(df: data.frame) -> double
 first: fn(df: data.frame) -> double
-54..68 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 58..67 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
-123..142 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 127..141 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #==== strict_friction

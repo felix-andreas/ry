@@ -232,7 +232,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
-            if !(seconds >= 0.0) {
+            if seconds.is_nan() || seconds < 0.0 {
                 return Err(error("invalid 'time' value"));
             }
             if seconds.is_finite() && seconds > 0.0 {
@@ -516,7 +516,7 @@ unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
 /// to the console. Only the rows an editor scrolls to are ever formatted.
 unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
     let title = values::as_string_scalar(call.arg(1))?.unwrap_or_default();
-    crate::console_server::show(call.arg(0), &title).map_err(|message| error(message))?;
+    crate::console_server::show(call.arg(0), &title).map_err(error)?;
     Ok(call.arg(0))
 }
 
@@ -1378,8 +1378,8 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         if !value.is_finite() {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
             values::reals_mut(fields[0])[index] = value;
-            for field in 1..8 {
-                values::ints_mut(fields[field])[index] = NA_INTEGER;
+            for &field in &fields[1..8] {
+                values::ints_mut(field)[index] = NA_INTEGER;
             }
             values::ints_mut(fields[8])[index] = -1;
             // UTC and GMT name themselves and have a known offset even for a missing time.
@@ -3715,7 +3715,7 @@ unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
         .map(|pattern| crate::connections::expand_path(&pattern))
         .collect();
     let matches = crate::platform::glob(&expanded, dirmark != 0)
-        .map_err(|()| error("internal out-of-memory condition"))?;
+        .ok_or_else(|| error("internal out-of-memory condition"))?;
     if matches.read_error {
         crate::conditions::warning("read error on directory")?;
     }

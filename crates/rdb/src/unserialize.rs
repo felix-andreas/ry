@@ -973,11 +973,10 @@ mod tests {
         );
     }
 
-    /// Mutates small valid streams with a seeded generator: reading, deparsing and rendering
+    /// Mutates small valid streams, one per seed: reading, deparsing and rendering
     /// whatever comes out must fail cleanly or succeed, never panic.
     #[test]
     fn mutated_streams_never_panic() {
-        const SEED: u64 = 0x5eed_f7db;
         let samples = [
             stream(&[
                 Word(LANGSXP as i32),
@@ -1023,37 +1022,32 @@ mod tests {
         ];
         let bytecode = unserialize(&samples[1]).expect("byte code reads");
         assert_eq!(crate::deparse::deparse(&bytecode), "g()");
-        let mut state = SEED;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (state >> 33) as usize
-        };
         for sample in &samples {
             assert!(
                 unserialize(sample).is_ok(),
                 "sample streams are well formed"
             );
-            for round in 0..2000 {
-                let mut bytes = sample.clone();
-                for _ in 0..1 + next() % 4 {
-                    let position = 14 + next() % (bytes.len() - 14);
-                    bytes[position] = match next() % 3 {
-                        0 => 0xff,
-                        1 => 0,
-                        _ => next() as u8,
-                    };
-                }
-                if round % 5 == 0 {
-                    bytes.truncate(14 + next() % (bytes.len() - 14));
-                }
-                if let Ok(value) = unserialize(&bytes) {
-                    crate::deparse::deparse(&value);
-                    crate::rd::render(&value);
-                }
-            }
         }
+        syntax::testing::for_each_seed(4000, |seed| {
+            let mut random = syntax::testing::SplitMix64(seed);
+            let sample = &samples[seed as usize % samples.len()];
+            let mut bytes = sample.clone();
+            for _ in 0..1 + random.below(4) {
+                let position = 14 + random.below(bytes.len() - 14);
+                bytes[position] = match random.below(3) {
+                    0 => 0xff,
+                    1 => 0,
+                    _ => random.next_u64() as u8,
+                };
+            }
+            if random.chance(1, 5) {
+                bytes.truncate(14 + random.below(bytes.len() - 14));
+            }
+            if let Ok(value) = unserialize(&bytes) {
+                crate::deparse::deparse(&value);
+                crate::rd::render(&value);
+            }
+        });
     }
 
     #[test]

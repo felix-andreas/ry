@@ -153,26 +153,11 @@ impl Connection {
     }
 }
 
-fn read_message(reader: &mut impl BufRead) -> Option<Value> {
-    let mut length = None;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 {
-            return None;
-        }
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse::<usize>().ok();
-        }
-    }
-    let length = length.filter(|&length| length <= 64 << 20)?;
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).ok()?;
+/// One message from the console, or `None` once the connection broke, timed out, or sent
+/// something that is not a framed JSON message. The console frames its messages as the debug
+/// adapter's client does, so both read them the same way.
+pub fn read_message(reader: &mut impl BufRead) -> Option<Value> {
+    let body = crate::debug_adapter::read_message(reader).ok()??;
     serde_json::from_slice(&body).ok()
 }
 
