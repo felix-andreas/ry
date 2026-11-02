@@ -105,22 +105,41 @@ def migrate_and_check(ry, env, label, original, migrated, strict):
     output = subprocess.run([ry, "migrate", "data-table", "--write"], cwd=migrated, env=env, capture_output=True, text=True)
     if output.returncode != 0:
         return failures + [f"{label}: `ry migrate data-table --write` failed:\n{output.stdout}{output.stderr}"]
-    changed = [path for path in sorted(migrated.rglob("*.R"))
+    changed = [path.relative_to(migrated) for path in sorted(migrated.rglob("*.R"))
                if path.read_bytes() != (original / path.relative_to(migrated)).read_bytes()]
     print(f"{label}: {output.stdout.strip()} ({len(changed)} files changed)", file=sys.stderr, flush=True)
-    if changed:
-        parse = subprocess.run(
-            ["Rscript", "--vanilla", "-e",
-             "for (f in commandArgs(TRUE)) tryCatch(parse(f), error = function(e) cat(f, conditionMessage(e), '\\n'))",
-             *map(str, changed)],
-            env=env, capture_output=True, text=True)
-        if parse.returncode != 0 or parse.stdout.strip():
-            failures.append(f"{label}: migrated code GNU R cannot parse:\n{parse.stdout}{parse.stderr}")
+    # A typed package written in ry's inline annotation syntax is not R, so only a file whose
+    # original GNU R parses has to parse after migration.
+    before_parse = gnu_unparsable(env, original, changed)
+    broken = {path: message for path, message in gnu_unparsable(env, migrated, changed).items()
+              if path not in before_parse}
+    if broken:
+        failures.append(f"{label}: migrated code GNU R cannot parse:\n"
+                        + "\n".join(f"{path}: {broken[path]}" for path in sorted(broken)[:20]))
     after = errors(ry, env, migrated)
     added = sorted(after - before)
     if added:
         failures.append(f"{label}: migration added {len(added)} errors:\n" + "\n".join(added[:20]))
     return failures
+
+
+def gnu_unparsable(env, package, files):
+    """GNU R's parse error for each of `files` (paths relative to `package`) it rejects."""
+    if not files:
+        return {}
+    paths = [package / path for path in files]
+    parse = subprocess.run(
+        ["Rscript", "--vanilla", "-e",
+         "for (f in commandArgs(TRUE)) tryCatch(parse(f), error = function(e) cat(f, '\\t', gsub('\\n', ' ', conditionMessage(e)), '\\n', sep = ''))",
+         *map(str, paths)],
+        env=env, capture_output=True, text=True)
+    if parse.returncode != 0:
+        sys.exit(f"Rscript failed:\n{parse.stderr}")
+    found = {}
+    for line in parse.stdout.splitlines():
+        path, _, message = line.partition("\t")
+        found[str(pathlib.Path(path).relative_to(package))] = message
+    return found
 
 
 def errors(ry, env, package):

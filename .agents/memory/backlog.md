@@ -2082,22 +2082,27 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** At 2e7 rows the five
-  joins take 3.7 s against data.table's 22.3 s but peak at 11.6 GB against 5.2 GB, and nearly all
-  of it is reading the CSVs (`join_x` 4.9 GB, `join_big` 4.2 GB more). Two causes, both measured:
-  - A Polars Enum stores every level twice (a `Utf8ViewArray` plus `CategoricalMapping`'s hash
-    table and boxcar vector), about 135 bytes per level, and the read peaks at about twice its
-    resident size (2e7 `join_x` with factors: 4.87 GB peak, 2.37 GB resident, 0.64 GB of column
-    data). The fix is a factor type outside Polars: u32 codes plus one levels array beside the
-    frame (`Table.string_codes` is precedent), converted to an Enum only where a Polars plan needs
-    one. About 50 sites read the Enum: `query.rs`, `ops.rs`, `convert.rs`, `table.rs`,
-    `kernel.rs`, `io.rs`, `join.rs`, `group.rs`, interp's `data_table.rs` and `frame.rs`, libr's
-    `frame_altrep.rs`, and the lazy plans' string expressions.
-  - Reading the id columns as text (`strings_as_factors = FALSE`) holds slices and final columns
-    at once: 2.44 GB peak and 1.4 GB resident at 2e7, and an 11.7 GB peak for the 5.1 GB 1e8
-    `join_x`, after which `join_big` no longer fits.
-  At 1e8, data.table runs out of memory reading `join_x` with factors as well, so "at or below
-  data.table's memory" is met trivially there; the target is that ry completes.
+- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** The factor type outside
+  Polars and the code-building reader are in (`decisions.md`, "Factors are ry's own codes plus
+  one level table, outside Polars"), and at 1e7 the joins beat data.table on every question. At 1e8 both
+  data.table and ry run out of memory (`tools/bench/table/report.py` records it as "out of
+  memory"). Measured for ry, with libR's mimalloc settings:
+  - Reading `join_x` (5.1 GB, 63.2 million `id6` levels) peaks at 7.35 GB against 3.9 GB live:
+    2.9 GB of columns plus about 1.0 GB of level views. `join_big` is the same size, and q5's
+    answer is about 4.9 GB, so x, big and one answer already need about 12.7 GB.
+  - The transients are the u32 codes a low-cardinality column holds until it narrows (`id4`:
+    0.4 GB, then 0.1 GB as u8), the interner's hash tables, `finish`'s keys and rank array beside
+    the old views, and the per-slice Polars frames. libR never purges freed memory
+    (`PURGE_DELAY=-1`), so they stay resident; `mi_collect(true)` with purging switched on
+    briefly freed little at 2e7 (2.04 GB resident against about 0.87 GB live), which points at
+    pages held in the rayon threads' heaps.
+  - Next: give the reader's large transients an allocator that maps and unmaps whole regions
+    (std's `Allocator` on the pinned nightly; hashbrown takes it with its `nightly` feature),
+    keep a column's codes narrow while its level count allows, and sum the checksum in
+    `tools/bench/table/ry.R` per chunk rather than converting a whole column. Then run
+    `report.py DIR --rows 1e8 --joins-only` and the 1e8 group-by, write the tables with
+    `--write`, and update `contributing/design/r-runtime.md` section 7, whose 1e8 join prose
+    says neither engine fits.
 - **A factor column with a missing value costs a second whole-file parse.** The sliced reader
   (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
   `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any

@@ -414,7 +414,7 @@ pub fn from_strings(series: &Series) -> Result<Series> {
     Ok(interner.finish(series.name().clone()))
 }
 
-const PARTITION_BITS: u32 = 6;
+const PARTITION_BITS: u32 = 8;
 const PARTITIONS: usize = 1 << PARTITION_BITS;
 
 /// Numbers a column's strings as they arrive in pieces, such as the slices of a file being read,
@@ -431,6 +431,9 @@ pub(crate) struct Interner {
     /// them, until [`Interner::finish`] renumbers them into level order.
     codes: Vec<u32>,
     validity: Option<MutableBitmap>,
+    /// The rows the whole column is expected to have, which sizes the partitions once the first
+    /// piece shows how many distinct strings a row brings.
+    expected_rows: usize,
 }
 
 #[derive(Default)]
@@ -441,14 +444,8 @@ struct Partition {
 }
 
 impl Partition {
-    fn label<'a>(&'a self, view: &'a View) -> &'a [u8] {
-        match view.get_inlined_slice() {
-            Some(bytes) => bytes,
-            None => {
-                let start = view.offset as usize;
-                &self.arena[start..start + view.length as usize]
-            }
-        }
+    fn label(&self, index: u32) -> &[u8] {
+        label(&self.views, &self.arena, index)
     }
 
     fn intern(&mut self, partition: u32, value: &[u8], hash: u64) -> Result<u32> {
@@ -490,17 +487,35 @@ impl Partition {
         };
         views.push(view);
         table.insert_unique(hash, index, |index| {
-            let view = &views[*index as usize];
-            let bytes = match view.get_inlined_slice() {
-                Some(bytes) => bytes,
-                None => {
-                    let start = view.offset as usize;
-                    &arena[start..start + view.length as usize]
-                }
-            };
-            state.hash_one(bytes)
+            state.hash_one(label(views, arena, *index))
         });
         Ok(index)
+    }
+
+    /// Makes room for `levels` labels in all, so that a column of mostly distinct strings neither
+    /// rehashes its table nor copies its views as they grow. A reservation the column does not
+    /// fill costs only the table's control bytes, since untouched memory is never paged in.
+    fn reserve(&mut self, levels: usize) {
+        let state = FixedState::default();
+        let Partition {
+            table,
+            views,
+            arena,
+        } = self;
+        let more = levels.saturating_sub(views.len());
+        views.reserve(more);
+        table.reserve(more, |index| state.hash_one(label(views, arena, *index)));
+    }
+}
+
+fn label<'a>(views: &'a [View], arena: &'a [u8], index: u32) -> &'a [u8] {
+    let view = &views[index as usize];
+    match view.get_inlined_slice() {
+        Some(bytes) => bytes,
+        None => {
+            let start = view.offset as usize;
+            &arena[start..start + view.length as usize]
+        }
     }
 }
 
@@ -527,6 +542,7 @@ impl Interner {
             partitions: (0..PARTITIONS).map(|_| Partition::default()).collect(),
             codes: Vec::with_capacity(rows),
             validity: None,
+            expected_rows: rows,
         }
     }
 
@@ -576,6 +592,7 @@ impl Interner {
             }
         }
         let codes = Codes32(self.codes[base..].as_mut_ptr());
+        let expected_rows = self.expected_rows;
         self.partitions
             .par_iter_mut()
             .enumerate()
@@ -587,6 +604,12 @@ impl Interner {
                     // SAFETY: `row` is within the piece, and no other partition owns it.
                     unsafe { codes.write(row, (index << PARTITION_BITS) | partition as u32) };
                 }
+                // A column whose first piece is mostly distinct strings is sized for the whole
+                // file now, scaled from the piece, because growing it later copies and rehashes
+                // every label several times and holds the old and new tables at once.
+                if base == 0 && rows > 0 && owned.views.len() * 4 > rows / PARTITIONS {
+                    owned.reserve(owned.views.len() * expected_rows.div_ceil(rows));
+                }
                 Ok(())
             })
     }
@@ -594,46 +617,75 @@ impl Interner {
     /// The factor of every row interned so far, with its levels sorted in byte order. The strings
     /// sort by a key of their first 12 bytes and their interned code, and only runs of strings
     /// that share those 12 bytes are sorted again by their whole bytes.
+    ///
+    /// A key is as wide as a view, so the sorted keys become the level table's views in place,
+    /// and the most the method holds beyond the codes is the partitions' views, the keys and one
+    /// rank per level.
     pub(crate) fn finish(self, name: PlSmallStr) -> Series {
         let Interner {
             mut partitions,
             mut codes,
             validity,
+            ..
         } = self;
         for partition in &mut partitions {
             partition.table = HashTable::new();
         }
         let partitions = partitions;
-        let mut keys: Vec<u128> = partitions
-            .par_iter()
+        let total = partitions.iter().map(|owned| owned.views.len()).sum();
+        let mut keys = vec![View::default(); total];
+        let mut rest = keys.as_mut_slice();
+        let mut chunks = Vec::with_capacity(PARTITIONS);
+        for owned in &partitions {
+            let (chunk, tail) = rest.split_at_mut(owned.views.len());
+            chunks.push(chunk);
+            rest = tail;
+        }
+        // The key's first three words are the label's first 12 bytes read big-endian, so keys
+        // order as their labels' prefixes do, and the last word is the interned code.
+        chunks
+            .into_par_iter()
+            .zip(partitions.par_iter())
             .enumerate()
-            .flat_map_iter(|(partition, owned)| {
-                owned.views.iter().enumerate().map(move |(index, view)| {
-                    let mut prefix = [0u8; 16];
-                    let label = owned.label(view);
+            .for_each(|(partition, (chunk, owned))| {
+                for (index, slot) in chunk.iter_mut().enumerate() {
+                    let label = owned.label(index as u32);
+                    let mut prefix = [0u8; 12];
                     let take = label.len().min(12);
                     prefix[..take].copy_from_slice(&label[..take]);
-                    let code = ((index as u32) << PARTITION_BITS) | partition as u32;
-                    (u128::from_be_bytes(prefix)) | u128::from(code)
-                })
-            })
-            .collect();
-        keys.par_sort_unstable();
-        let label_of = |key: u128| {
-            let code = key as u32;
-            let owned = &partitions[(code as usize) & (PARTITIONS - 1)];
-            owned.label(&owned.views[(code >> PARTITION_BITS) as usize])
+                    let word = |at: usize| {
+                        u32::from_be_bytes([
+                            prefix[at],
+                            prefix[at + 1],
+                            prefix[at + 2],
+                            prefix[at + 3],
+                        ])
+                    };
+                    *slot = View {
+                        length: word(0),
+                        prefix: word(4),
+                        buffer_idx: word(8),
+                        offset: ((index as u32) << PARTITION_BITS) | partition as u32,
+                    };
+                }
+            });
+        let order = |key: &View| (key.length, key.prefix, key.buffer_idx, key.offset);
+        keys.par_sort_unstable_by_key(order);
+        let label_of = |key: &View| {
+            let owned = &partitions[(key.offset as usize) & (PARTITIONS - 1)];
+            owned.label(key.offset >> PARTITION_BITS)
         };
+        let prefix_of = |key: &View| (key.length, key.prefix, key.buffer_idx);
         let mut start = 0;
         while start < keys.len() {
-            let prefix = keys[start] >> 32;
+            let prefix = prefix_of(&keys[start]);
             let end = start
                 + keys[start..]
                     .iter()
-                    .position(|key| key >> 32 != prefix)
+                    .position(|key| prefix_of(key) != prefix)
                     .unwrap_or(keys.len() - start);
             if end - start > 1 {
-                keys[start..end].sort_unstable_by(|a, b| label_of(*a).cmp(label_of(*b)));
+                keys[start..end].sort_unstable_by(|a, b| label_of(a).cmp(label_of(b)));
             }
             start = end;
         }
@@ -645,17 +697,18 @@ impl Interner {
             << PARTITION_BITS;
         let mut rank = vec![0u32; span];
         for (position, key) in keys.iter().enumerate() {
-            rank[*key as u32 as usize] = position as u32;
+            rank[key.offset as usize] = position as u32;
         }
-        let views: Vec<View> = keys
-            .par_iter()
-            .map(|key| {
-                let code = *key as u32;
-                partitions[(code as usize) & (PARTITIONS - 1)].views
-                    [(code >> PARTITION_BITS) as usize]
-            })
-            .collect();
-        drop(keys);
+        keys.par_iter_mut().for_each(|key| {
+            let code = key.offset;
+            *key = partitions[(code as usize) & (PARTITIONS - 1)].views
+                [(code >> PARTITION_BITS) as usize];
+        });
+        let buffers: Buffer<Buffer<u8>> = partitions
+            .into_iter()
+            .map(|owned| Buffer::from(owned.arena))
+            .collect::<Vec<_>>()
+            .into();
         let valid = validity.as_ref();
         codes.par_iter_mut().enumerate().for_each(|(row, code)| {
             *code = match valid.is_none_or(|bits| bits.get(row)) {
@@ -664,18 +717,13 @@ impl Interner {
             }
         });
         drop(rank);
-        let buffers: Buffer<Buffer<u8>> = partitions
-            .into_iter()
-            .map(|owned| Buffer::from(owned.arena))
-            .collect::<Vec<_>>()
-            .into();
         // SAFETY: every view is inline or points into its partition's arena, which became the
         // buffer at the partition's index, and every label is valid UTF-8 because it was read
         // from a string array.
         let labels = unsafe {
             Utf8ViewArray::new_unchecked_unknown_md(
                 ArrowDataType::Utf8View,
-                views.into(),
+                keys.into(),
                 buffers,
                 None,
                 None,

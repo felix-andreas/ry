@@ -4399,11 +4399,14 @@ check` releases its trees once, and memoized records are compact" below).
   refused by Polars, so every conversion goes through `factor::cast`, `factor::text` or their
   lazy forms `cast_expr`/`text_expr` (Polars `map` UDFs).
 - **Reader.** A factor column parses as String slice by slice, and each slice is interned into a
-  persistent `Interner` with 64 hash partitions, each owning its labels' views and byte arena (a
-  label of up to 12 bytes lives in its view). Codes during the read are `index << 6 | partition`;
-  `finish` sorts u128 keys (12-byte big-endian prefix, code), re-sorts only the runs whose prefix
-  ties, remaps the codes in parallel, and turns the arenas into the label buffers without copying
-  a byte. `NA` never enters the levels, so the whole-column text re-read is gone.
+  persistent `Interner` with 256 hash partitions, each owning its labels' views and byte arena (a
+  label of up to 12 bytes lives in its view). Codes during the read are `index << 8 | partition`.
+  A partition that the first slice fills with mostly distinct labels is sized for the whole file
+  from that slice, because growing it later copies and rehashes every label and holds both tables
+  at once. `finish` sorts one 16-byte key per level (the label's first 12 bytes read big-endian, then
+  its code), stored in the view type so that the sorted keys become the label views in place, re-sorts only the runs
+  whose prefix ties, remaps the codes in parallel, and turns the arenas into the label buffers
+  without copying a byte. `NA` never enters the levels, so the whole-column text re-read is gone.
 - **Joins.** `join::factor_codes` translates one side's codes into the other's levels through
   `Levels::position`; identical level tables (the same `Arc`) translate by identity.
 - **Impact.** One source of truth for a column's levels, about 16 bytes of view plus the label
