@@ -22,6 +22,8 @@
 |  chr "end"
 | [1] 0a 07 00 00 00
 | [1] "error reading from connection"
+| [1] ""  "x" "" 
+| [1] "input format does not match specified format"
 [messages]
 [warnings]
 [errors]

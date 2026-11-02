@@ -208,11 +208,15 @@ impl Reader<'_> {
     fn ascii_string(&mut self, length: usize) -> R<Vec<u8>> {
         let truncated = || error("ReadItem: unexpected end of serialized data");
         let mut bytes = Vec::with_capacity(length.min(4096));
+        // An empty string is written as nothing, so skipping whitespace would consume the
+        // first byte of the next item.
+        if length == 0 {
+            return Ok(bytes);
+        }
         let mut next = loop {
             match self.next_byte()? {
                 Some(byte) if byte.is_ascii_whitespace() => {}
                 Some(byte) => break Some(byte),
-                None if length == 0 => return Ok(bytes),
                 None => return Err(truncated()),
             }
         };
@@ -833,6 +837,11 @@ pub unsafe fn unserialize_connection(con: Rconnection, hook: Sexp) -> R<Sexp> {
         start = vec![b'A', reader.next_byte()?.unwrap_or(0)];
     }
     reader.format = stream_format(Some(&start)).ok_or_else(|| error("unknown input format"))?;
+    // A text-mode connection may translate bytes, so only the ASCII format survives it.
+    // SAFETY: the caller holds `con` open for the whole read.
+    if unsafe { (*con).text } != 0 && reader.format != Format::Ascii {
+        return Err(error("input format does not match specified format"));
+    }
     read_object(reader)
 }
 
