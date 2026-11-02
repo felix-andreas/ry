@@ -50,6 +50,26 @@ seq_along(c(1L, 2L))
 #++++
 integer[]
 
+#---- seq_from_a_whole_number_is_integer_vector
+seq(1, 10)
+#++++
+integer[]
+
+#---- seq_from_a_fraction_is_double_vector
+seq(0.5, 3)
+#++++
+double[]
+
+#---- seq_with_by_is_double_vector
+seq(1, 10, by = 2)
+#++++
+double[]
+
+#---- seq_of_one_number_is_integer_vector
+seq(2.5)
+#++++
+integer[]
+
 #---- toupper_is_character
 toupper("x")
 #++++
@@ -356,10 +376,12 @@ rep(0, n)
 n: Any
 double[]
 
-#---- unchecked_arguments_the_specific_fits_disagree_on_stay_unknown
+#---- unchecked_arguments_the_specific_fits_disagree_on_pick_no_candidate
+# `nrow` returns `Any`, which fits every `seq` candidate, and the candidates disagree, so the
+# call opts out like its argument rather than taking the first candidate's `integer[]`.
 seq(nrow(matrix(0, 2L, 2L)))
 #++++
-Unknown
+Any
 
 #==== precise_strings
 #---- trimws_is_character
@@ -376,6 +398,14 @@ character
 gsub("a", "b", "banana")
 #++++
 character
+
+#---- regex_patterns_accept_a_vector
+# R uses the first element of a longer pattern with a warning, which the types cannot see.
+patterns <- c("a", "b")
+gregexpr(patterns, "banana")
+#++++
+patterns: character[]
+list[integer[]]
 
 #---- grepl_is_logical
 grepl("a", "banana")
@@ -722,10 +752,10 @@ getOption("digits", default = 7L)
 Any
 
 #==== untyped_stubs
-#---- grep_is_unknown
+#---- grep_is_any
 grep("a", "banana")
 #++++
-Unknown
+Any
 
 #---- sapply_is_unknown
 sapply(list(1L), is.numeric)
@@ -895,3 +925,8 @@ pick(2L)
 #++++
 pick: <T: numeric> fn([x]: T) -> T | integer
 integer
+
+#---- seq_from_beyond_the_integer_range_is_double_vector
+seq(1e10, 1e10 + 5)
+#++++
+double[]

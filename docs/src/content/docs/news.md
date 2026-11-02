@@ -23,6 +23,10 @@ that runtime runs.
   `--unsafe-fixes` also applies spelling suggestions. The editor gets the same quick fixes plus a
   fix-all action, a call hierarchy, an outline with sections, folding, selection ranges, semantic
   highlighting and parameter-name hints.
+- **A debugger and a console in VS Code.** `F5` runs the current script under a debugger with
+  breakpoints, stepping and variable inspection, "Debug test" does the same for one `test_that()`
+  block, and `Ctrl+Enter` sends the selection to a ry console. Other editors can use the same
+  debugger through `ry debug-adapter`. See [Editors](/guides/editors#running-and-debugging).
 
 Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
 aarch64), macOS (Apple silicon and Intel) and Windows (x86_64). The macOS and Windows runtimes have

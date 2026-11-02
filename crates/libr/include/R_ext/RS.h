@@ -12,6 +12,8 @@ extern "C" {
 void *R_chk_calloc(size_t, size_t);
 void *R_chk_realloc(void *, size_t);
 void R_chk_free(void *);
+void *R_chk_memcpy(void *, const void *, size_t);
+void *R_chk_memset(void *, int, size_t);
 
 #define R_Calloc(n, t) (t *) R_chk_calloc((size_t) (n), sizeof(t))
 #define R_Realloc(p, n, t) (t *) R_chk_realloc((void *) (p), (size_t) ((n) * sizeof(t)))

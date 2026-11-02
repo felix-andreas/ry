@@ -11,6 +11,7 @@ token "f" Function
 token "x" Parameter
 token "sum" LibraryFunction
 token "x" Parameter
+lens references "f"
 select "TRUE"
 select "na.rm = TRUE"
 select "x, na.rm = TRUE"
@@ -26,6 +27,7 @@ select "f <- function(x) {\n  total <- sum(x, na.rm = TRUE)\n  total\n}"
 message("hel$0lo world")
 #++++
 token "message" LibraryFunction
+lens run file at line 0
 select "hello world"
 select "\"hello world\""
 select "(\"hello world\")"
@@ -35,6 +37,7 @@ select "message(\"hello world\")"
 f(a,  $0 b)
 #++++
 token "f" Function
+lens run file at line 0
 select "a,   b"
 select "(a,   b)"
 select "f(a,   b)"
@@ -56,6 +59,7 @@ token "median" LibraryFunction
 token "x" Parameter
 token "helper" Function
 token "n" Parameter
+lens references "f"
 
 #---- project_definition_is_not_library
 paste <- function(...) "mine"
@@ -67,6 +71,8 @@ token "paste" Function
 token "report" Function
 token "paste" Function
 token "nchar" LibraryFunction
+lens references "paste"
+lens references "report"
 
 #==== fixes
 #---- lint_fixes
@@ -78,6 +84,7 @@ token "c" Function
 fix Change to `<-`: "=" -> "<-"
 fix Change to `TRUE`: "T" -> "TRUE"
 fix Remove the trailing comma: "," -> ""
+lens run file at line 1
 
 #---- misspelled_name
 #' @export
@@ -93,6 +100,7 @@ token "values" Parameter
 token "sum" LibraryFunction
 token "values" Parameter
 fix Change to `total` (unsafe): "totl" -> "total"
+lens references "compute"
 
 #---- misspelled_argument
 f <- function(alpha, beta) alpha + beta
@@ -106,6 +114,8 @@ token "alpha" Parameter
 token "beta" Parameter
 token "f" Function
 fix Change to `alpha` (unsafe): "alpah" -> "alpha"
+lens references "f"
+lens run file at line 1
 
 #---- boolean_shorthand_only_on_values
 x <- list(T = 1)
@@ -119,6 +129,7 @@ symbol y (Value) at "y"
 token "list" Function
 token "f" Function
 fix Change to `FALSE`: "F" -> "FALSE"
+lens run file at line 3
 
 #---- backticked_argument
 f <- function(`my value`, beta) beta
@@ -131,12 +142,15 @@ token "beta" Parameter
 token "beta" Parameter
 token "f" Function
 fix Change to `my value` (unsafe): "my valeu" -> "my value"
+lens references "f"
+lens run file at line 1
 
 #==== raw_strings
 #---- raw_string_contents_first
 message(r"(he$0llo)")
 #++++
 token "message" LibraryFunction
+lens run file at line 0
 select "hello"
 select "r\"(hello)\""
 select "(r\"(hello)\")"
@@ -181,6 +195,7 @@ token ":" Tag
 token "None" Tag
 token "=>" Operator
 fix Remove the unreachable arm: "    :None => 1L\n" -> ""
+lens references "f"
 
 #---- missing_arms
 #: fn(c: :Red | :Green | :Blue) -> integer
@@ -215,6 +230,74 @@ token ":" Tag
 token "Red" Tag
 token "=>" Operator
 fix Add arms for the missing cases (unsafe): "" -> "    :Green => stop(\"not handled yet\")\n    :Blue => stop(\"not handled yet\")\n"
+lens references "f"
+
+#---- missing_arms_after_a_continued_arm
+#: fn(c: :Red | :Green | :Blue) -> integer
+f <- function(c) {
+  match (c) {
+    :Red => as.integer(
+      1
+    )
+  }
+}
+#++++
+symbol f (Function fn(c)) at "f"
+fold 1..=6 Block
+fold 3..=4 Block
+token "fn" Keyword
+token "(" Operator
+token "c" Parameter
+token ":" Operator
+token ":" Tag
+token "Red" Tag
+token "|" Operator
+token ":" Tag
+token "Green" Tag
+token "|" Operator
+token ":" Tag
+token "Blue" Tag
+token ")" Operator
+token "->" Operator
+token "integer" Type
+token "f" Function
+token "c" Parameter
+token "match" Keyword
+token "c" Parameter
+token ":" Tag
+token "Red" Tag
+token "=>" Operator
+token "as.integer" LibraryFunction
+fix Add arms for the missing cases (unsafe): "" -> "    :Green => stop(\"not handled yet\")\n    :Blue => stop(\"not handled yet\")\n"
+lens references "f"
+
+#---- missing_arms_without_any_arm
+#: fn(c: :Red | :Green) -> integer
+f <- function(c) {
+  match (c) {
+  }
+}
+#++++
+symbol f (Function fn(c)) at "f"
+fold 1..=3 Block
+token "fn" Keyword
+token "(" Operator
+token "c" Parameter
+token ":" Operator
+token ":" Tag
+token "Red" Tag
+token "|" Operator
+token ":" Tag
+token "Green" Tag
+token ")" Operator
+token "->" Operator
+token "integer" Type
+token "f" Function
+token "c" Parameter
+token "match" Keyword
+token "c" Parameter
+fix Add arms for the missing cases (unsafe): "" -> "    :Red => stop(\"not handled yet\")\n    :Green => stop(\"not handled yet\")\n"
+lens references "f"
 
 #---- comment_follows_inline_annotation
 #: double

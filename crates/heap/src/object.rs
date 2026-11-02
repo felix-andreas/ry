@@ -452,8 +452,8 @@ pub const UNBOXED_SLOTS: usize = 64;
 /// 32 bits under one of these quiet-NaN prefixes, so the one-bit mask is enough to tell a raw
 /// slot from a handle. A double whose upper word happens to equal a prefix is stored boxed
 /// instead, which keeps every NaN payload (`NA_real_` among them) exact.
-const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
-const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
+pub const INTEGER_PREFIX: u32 = 0xFFF9_A11E;
+pub const LOGICAL_PREFIX: u32 = 0xFFF9_A11F;
 
 impl Slot {
     fn encode(self) -> u64 {
@@ -510,6 +510,9 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
 
 /// Where a record's slots start.
 pub const RECORD_DATA_OFFSET: usize = size_of::<RecordObject>();
+/// Where a record's layout id and its unboxed-slot mask are, for compiled field reads.
+pub const RECORD_LAYOUT_OFFSET: usize = std::mem::offset_of!(RecordObject, layout);
+pub const RECORD_UNBOXED_OFFSET: usize = std::mem::offset_of!(RecordObject, unboxed);
 
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
@@ -614,6 +617,12 @@ impl Sexp {
 
     pub unsafe fn set_object(self, on: bool) {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
+    }
+
+    /// Whether the object's fields count as references to what they hold (see
+    /// `flag_bits::UNTRACKED`).
+    pub unsafe fn tracks_references(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::UNTRACKED == 0 }
     }
 
     pub unsafe fn is_array(self) -> bool {
@@ -752,12 +761,22 @@ impl Sexp {
     #[inline]
     pub unsafe fn element(self, index: usize) -> Sexp {
         unsafe {
-            if self.is_altrep()
-                && let Some(elements) = ALTREP_ELEMENTS.get()
-            {
-                return (elements.read)(self, index);
+            if self.is_altrep() {
+                return self.altrep_element(index);
             }
             *(self.data() as *const Sexp).add(index)
+        }
+    }
+
+    // Out of line, so that `element` is small enough to inline into the interpreter's loop.
+    #[cold]
+    #[inline(never)]
+    unsafe fn altrep_element(self, index: usize) -> Sexp {
+        unsafe {
+            match ALTREP_ELEMENTS.get() {
+                Some(elements) => (elements.read)(self, index),
+                None => *(self.data() as *const Sexp).add(index),
+            }
         }
     }
 

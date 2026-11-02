@@ -245,14 +245,45 @@ pub unsafe fn wrap(table: Table) -> R<Sexp> {
     heap.root(object);
     heap.alloc_weak_ref(object, nil(), nil(), finalize as *const () as usize, false)?;
     set_attr(object, symbols().class, scalar_string("DataFrame")?)?;
+    if is_large(&*address.cast::<Table>()) {
+        release_worker_memory();
+    }
     Ok(object)
+}
+
+/// Returns the memory the engine's worker threads hold for blocks other threads freed, and purges
+/// the pages that leaves empty. libR's allocator is mimalloc, which hands a block freed on another
+/// thread back to its owning thread's queue and processes that queue only when the owner
+/// allocates again. The engine's workers allocate a table's columns and the R thread frees them,
+/// so without this an idle pool keeps every dropped column resident: reading a 5e7-row CSV left
+/// 9 GB resident for a 1.7 GB table.
+pub fn release_worker_memory() {
+    // SAFETY: `mi_collect` only reorganizes the calling thread's own heap.
+    let collect = || unsafe { libmimalloc_sys::mi_collect(true) };
+    table::on_every_worker(collect);
+    collect();
+}
+
+/// A table at least this many cells large (32 MB of doubles) releases the workers' memory when it
+/// is made or dropped. Each release walks every worker's heap, so below this a loop that derives
+/// one frame from another would pay for two releases per iteration and get little back.
+const RELEASE_CELLS: usize = 1 << 22;
+
+fn is_large(table: &Table) -> bool {
+    let frame = table.frame();
+    frame.height().saturating_mul(frame.width()) >= RELEASE_CELLS
 }
 
 unsafe extern "C" fn finalize(object: Sexp) {
     let address = object.external_address();
     if !address.is_null() {
         object.set_external_address(std::ptr::null_mut());
-        drop(Box::from_raw(address.cast::<Table>()));
+        let table = Box::from_raw(address.cast::<Table>());
+        let large = is_large(&table);
+        drop(table);
+        if large {
+            release_worker_memory();
+        }
     }
 }
 

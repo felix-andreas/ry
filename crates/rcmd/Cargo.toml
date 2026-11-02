@@ -5,6 +5,7 @@ edition = "2024"
 version.workspace = true
 license.workspace = true
 publish = false
+build = "../ry/build.rs"
 
 [lib]
 path = "src/rcmd.rs"

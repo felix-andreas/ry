@@ -31,6 +31,8 @@ You get:
 - semantic highlighting of parameters, called functions and package namespaces, which an R grammar
   cannot tell apart, with functions from packages and base R marked as library functions
 - formatting with the same rules as `ry fmt`
+- code lenses: "Run file" above a script, "Run test" and "Debug test" above each testthat
+  `test_that()` block, and a reference count above each function
 
 Hover, completion and inlay hints use inferred types even when type errors are switched off, so you
 get them on any R project.
@@ -40,6 +42,27 @@ word "total" in a string are three different things.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
+
+## Running and debugging
+
+The VS Code extension runs your code on ry's runtime.
+
+- **Run file** runs the current script with `ry run`, or a testthat file with `testthat::test_file()`
+  after loading your package.
+- **Send to console**: `Ctrl+Enter` (`Cmd+Enter` on macOS) sends the selection, or the current line
+  and moves to the next one, to a "ry console" terminal running `ry run`. `Ctrl+Alt+F` sends the
+  function around the cursor, and "ry: Source File in Console" sends the whole file.
+- **Debugging**: press `F5` in an R file, or click "Debug test" above a test. You get breakpoints,
+  stepping in, over and out, the call stack, each frame's variables, and evaluation in the selected
+  frame. `browser()` stops in the debugger, and so does an uncaught error, where it was raised.
+  Breakpoints in your package's `R/` files work while you debug one of its tests, because the
+  package is loaded with source references for the session.
+
+Other editors can launch the same debugger as `ry debug-adapter`, a
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) server on standard
+input and output. Its launch arguments are `program` (the script), `args`, `stopOnEntry`, `prelude`
+(R code run first, such as `load_all("."); library(testthat)`) and `testName` (run only the
+`test_that()` block with that description).
 
 ## Settings
 

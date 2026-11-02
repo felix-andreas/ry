@@ -4,7 +4,7 @@ use {
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime},
         config::Config,
-        load,
+        debug_adapter, load,
         preflight::{self, ConsoleFilter, Erase, Preflight, Verdict},
         repl_completer::AnalysisCompleter,
         server,
@@ -84,6 +84,10 @@ fn main() -> ExitCode {
         return run_load(path, expressions, file.as_deref(), *runtime);
     }
 
+    if let Command::DebugAdapter = &cli.command {
+        return run_debug_adapter();
+    }
+
     // Recursive tree walks can exceed a constrained `ulimit -s` main stack.
     let command = move || match cli.command {
         Command::Check {
@@ -92,13 +96,24 @@ fn main() -> ExitCode {
             min_severity,
             fix,
             unsafe_fixes,
+            no_cache,
         } => {
             let fix = match (fix, unsafe_fixes) {
                 (false, _) => cli::FixMode::Off,
                 (true, false) => cli::FixMode::Safe,
                 (true, true) => cli::FixMode::All,
             };
-            exit_code(cli::check(files.as_deref(), output, min_severity, fix))
+            let cache = match no_cache {
+                true => ry::check_cache::CacheUse::Off,
+                false => ry::check_cache::CacheUse::ReadWrite,
+            };
+            exit_code(cli::check(
+                files.as_deref(),
+                output,
+                min_severity,
+                fix,
+                cache,
+            ))
         }
         Command::Fmt {
             files,
@@ -141,7 +156,11 @@ fn main() -> ExitCode {
             println!("{}", load::process_runtime());
             ExitCode::SUCCESS
         }
-        Command::Run { .. } | Command::R { .. } | Command::Repl { .. } | Command::Load { .. } => {
+        Command::Run { .. }
+        | Command::R { .. }
+        | Command::Repl { .. }
+        | Command::Load { .. }
+        | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
     };
@@ -280,6 +299,22 @@ fn run_console(
             }))
         }
     }
+}
+
+/// The debugged program runs with the flags of the project the working directory belongs to,
+/// which is the workspace an editor starts the adapter in.
+fn run_debug_adapter() -> ExitCode {
+    let working_directory = match env::current_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            cli::error(&format!("cannot read the working directory: {error}"));
+            return ExitCode::from(2);
+        }
+    };
+    let Some(preflight) = Preflight::discover(&working_directory, working_directory.clone()) else {
+        return ExitCode::from(2);
+    };
+    runtime_exit(debug_adapter::run(runtime_flags(preflight.config())))
 }
 
 /// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against

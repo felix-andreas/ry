@@ -7365,13 +7365,16 @@ const BESSEL_MAXIT: usize = 10_000_000;
 /// Downward recurrences rescale past this magnitude so that a high order does not overflow.
 const BESSEL_BIG: f64 = 1e250;
 
-/// `exp(-x) I_nu(x)` and `exp(x) K_nu(x)` for `x > 0` and `nu >= 0`, by the asymptotic
-/// expansion where `x` is large against `nu^2` and by Temme's method elsewhere.
-fn bessel_ik_scaled(x: f64, nu: f64) -> (f64, f64) {
+/// `exp(-x) I_nu(x)` and `k_factor * exp(x) K_nu(x)` for `x > 0` and `nu >= 0`, by the
+/// asymptotic expansion where `x` is large against `nu^2` and by Temme's method elsewhere.
+/// Passing `k_factor = exp(-x)` gives `K_nu(x)` itself without forming the scaled value, which
+/// overflows for a high order before the unscaled one does.
+fn bessel_ik_scaled(x: f64, nu: f64, k_factor: f64) -> (f64, f64) {
     if x >= 50.0 && x >= 2.0 * nu * nu {
-        return bessel_ik_asymptotic(x, nu);
+        let (i, k) = bessel_ik_asymptotic(x, nu);
+        return (i, k * k_factor);
     }
-    bessel_ik_temme(x, nu)
+    bessel_ik_temme(x, nu, k_factor)
 }
 
 /// `exp(-x) I_nu(x) ~ (2 pi x)^(-1/2) sum (-1)^k a_k / x^k` and
@@ -7403,7 +7406,7 @@ fn bessel_ik_asymptotic(x: f64, nu: f64) -> (f64, f64) {
     )
 }
 
-fn bessel_ik_temme(x: f64, nu: f64) -> (f64, f64) {
+fn bessel_ik_temme(x: f64, nu: f64, k_factor: f64) -> (f64, f64) {
     let nl = (nu + 0.5) as usize;
     let xmu = nu - nl as f64;
     let xmu2 = xmu * xmu;
@@ -7522,8 +7525,9 @@ fn bessel_ik_temme(x: f64, nu: f64) -> (f64, f64) {
     let rkmup = xmu * xi * rkmu - rk1;
     let rimu = xi / (f * rkmu - rkmup);
     let rinu = (rimu * ril1) / ril;
-    let mut rkmu = rkmu;
-    let mut rk1 = rk1;
+    // The upward recurrence is linear, so scaling its two starting values scales every order.
+    let mut rkmu = rkmu * k_factor;
+    let mut rk1 = rk1 * k_factor;
     for i in 1..=nl {
         let rktemp = (xmu + i as f64) * xi2 * rk1 + rkmu;
         rkmu = rk1;
@@ -7743,7 +7747,7 @@ pub fn bessel_i(x: f64, alpha: f64, expo: f64) -> f64 {
         let i = bessel_i_series(x, alpha);
         return if scaled { i * (-x).exp() } else { i };
     }
-    let (i, _) = bessel_ik_scaled(x, alpha);
+    let (i, _) = bessel_ik_scaled(x, alpha, 1.0);
     if scaled { i } else { i * x.exp() }
 }
 
@@ -7789,8 +7793,8 @@ pub fn bessel_k(x: f64, alpha: f64, expo: f64) -> f64 {
     if x == f64::INFINITY {
         return 0.0;
     }
-    let (_, k) = bessel_ik_scaled(x, alpha);
-    if scaled { k } else { k * (-x).exp() }
+    let k_factor = if scaled { 1.0 } else { (-x).exp() };
+    bessel_ik_scaled(x, alpha, k_factor).1
 }
 
 pub fn bessel_j(x: f64, alpha: f64) -> f64 {

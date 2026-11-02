@@ -94,6 +94,28 @@ fn routines_return_correct_values() {
     );
 }
 
+/// GNU R's number formatting API and the binding-cell and string-buffer entry points GNU R
+/// exports without declaring them, as packages call them.
+#[test]
+fn formatting_and_variable_locations() {
+    let r = r();
+    rytest(&r);
+    let results = r.call("rytest_api_extras", &[]).expect("rytest_api_extras");
+    let results: Vec<String> = r.strings(results).into_iter().flatten().collect();
+    assert_eq!(
+        results,
+        vec![
+            "6 2 0 [  1.50]",
+            "5 0 1 [1e-10]",
+            "41 42 ry_extras_value 1",
+            "1",
+            "1 2 3 4",
+            "grown 1",
+            "  7  FALSE",
+        ]
+    );
+}
+
 #[test]
 fn coercion_follows_r() {
     let r = r();

@@ -1506,7 +1506,15 @@ fn root_help_lists_run_and_r_but_not_the_console_s_earlier_name() {
     assert_eq!(
         commands,
         [
-            "check", "fmt", "run", "R", "load", "server", "debug", "help"
+            "check",
+            "fmt",
+            "run",
+            "R",
+            "load",
+            "debug-adapter",
+            "server",
+            "debug",
+            "help"
         ],
         "{}",
         output.stdout

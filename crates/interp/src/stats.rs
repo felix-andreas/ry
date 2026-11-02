@@ -432,6 +432,14 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     }
     let x = real_data(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
+    if length(x_argument) == 0
+        && matches!(
+            policy,
+            MissingPolicy::AllObservations | MissingPolicy::Pairwise
+        )
+    {
+        return Err(call.error("'x' is empty"));
+    }
     let has_y = y_argument != values::nil();
     let (y, y_columns) = if has_y {
         let (y_rows, y_columns) = matrix_shape(y_argument);
@@ -467,17 +475,20 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                 let used: Vec<bool> = (0..n)
                     .map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan())
                     .collect();
-                result[i + j * x_columns] = if !has_y && i == j && correlate {
+                let statistic = pair_statistic(
+                    &x_data[i],
+                    &y_data[j],
+                    &used,
+                    correlate,
+                    kendall,
+                    &mut zero_deviation,
+                );
+                // A column correlates with itself exactly, unless it has no spread at all.
+                result[i + j * x_columns] = if !has_y && i == j && correlate && !statistic.is_nan()
+                {
                     1.0
                 } else {
-                    pair_statistic(
-                        x_data[i],
-                        y_data[j],
-                        &used,
-                        correlate,
-                        kendall,
-                        &mut zero_deviation,
-                    )
+                    statistic
                 };
             }
         }
@@ -492,7 +503,9 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         } else {
             vec![true; n]
         };
-        if !used.iter().any(|&flag| flag) && policy == MissingPolicy::CompleteObservations {
+        // With no columns no row counts as complete, so GNU R reports an empty input here.
+        let none_complete = all_columns.is_empty() || !used.iter().any(|&flag| flag);
+        if none_complete && policy == MissingPolicy::CompleteObservations {
             return Err(call.error("no complete element pairs"));
         }
         let used_count = used.iter().filter(|&&flag| flag).count();
@@ -501,7 +514,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         let summarize = |data: &&[f64]| -> (bool, Option<LongDouble>) {
             if !kendall
                 && used_count == n
-                && let Some(total) = long_double::finite_sum(data)
+                && let Some(total) = long_double::add_all(LongDouble::ZERO, data).finite()
             {
                 return (false, Some(arith::long_double_mean_from_total(data, total)));
             }
@@ -551,6 +564,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     })
                     .collect::<Vec<f64>>()
             };
+            let observations = used.iter().filter(|&&flag| flag).count();
             let x_scale = scales(&x_data, &missing_x, &x_means);
             let y_scale = if has_y {
                 scales(&y_data, &missing_y, &y_means)
@@ -560,7 +574,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             for i in 0..x_columns {
                 for j in 0..y_columns {
                     let slot = &mut result[i + j * x_columns];
-                    if !has_y && i == j {
+                    if !has_y && i == j && observations > 1 {
                         *slot = 1.0;
                     } else if slot.is_nan() {
                     } else if x_scale[i] == 0.0 || y_scale[j] == 0.0 {
@@ -639,37 +653,29 @@ fn complete_covariance(
         }
         return sum;
     }
-    if count == x.len() {
-        let [x_mean, y_mean] = [(x, means[0]), (y, means[1])]
-            .map(|(data, mean)| mean.unwrap_or_else(|| arith::long_double_slice_mean(data)));
-        // GNU R keeps the column means in a double array, so they round before the products.
-        let (x_mean, y_mean) = (
-            LongDouble::from(x_mean.to_f64()),
-            LongDouble::from(y_mean.to_f64()),
-        );
-        if let Some(sum) = long_double::finite_cross_deviation_sum(x, y, x_mean, y_mean) {
-            return sum / (count - 1);
-        }
-    }
-    let x_mean = arith::long_double_mean(used_values(x, used));
-    let y_mean = arith::long_double_mean(used_values(y, used));
-    let (x_mean, y_mean) = (
-        LongDouble::from(x_mean.to_f64()),
-        LongDouble::from(y_mean.to_f64()),
-    );
-    for k in 0..x.len() {
-        if used[k] {
-            sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
-        }
-    }
-    sum / (count - 1)
+    let (x, y, means) = if count == x.len() {
+        (Cow::Borrowed(x), Cow::Borrowed(y), means)
+    } else {
+        (
+            Cow::Owned(used_values(x, used)),
+            Cow::Owned(used_values(y, used)),
+            [None, None],
+        )
+    };
+    // GNU R keeps the column means in a double array, so they round before the products.
+    let [x_mean, y_mean] = [(&x, means[0]), (&y, means[1])].map(|(data, mean)| {
+        let mean = mean.unwrap_or_else(|| arith::long_double_mean(data));
+        LongDouble::from(mean.to_f64())
+    });
+    long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
 }
 
-fn used_values<'a>(data: &'a [f64], used: &'a [bool]) -> impl Iterator<Item = f64> + Clone + 'a {
+fn used_values(data: &[f64], used: &[bool]) -> Vec<f64> {
     data.iter()
         .zip(used)
         .filter(|(_, flag)| **flag)
         .map(|(value, _)| *value)
+        .collect()
 }
 
 /// One entry of a pairwise-complete `cov` or `cor`.
