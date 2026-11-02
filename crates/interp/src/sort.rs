@@ -356,7 +356,11 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&key| values::materialize(key))
         .collect::<R<Vec<Sexp>>>()?;
-    let columns: Vec<Option<Column<'_>>> = keys.iter().map(|&key| column(key)).collect();
+    // GNU R's `orderVector1` and `listgreater` have no raw case.
+    let columns: Vec<Option<Column<'_>>> = keys
+        .iter()
+        .map(|&key| column(key).filter(|_| key.kind() != SexpType::Raw))
+        .collect();
     let routine = if keys.len() == 1 {
         "orderVector1"
     } else {
@@ -455,7 +459,7 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
                 ends
             })
         }
-        // A key the radix sort cannot read (a complex vector after the first key) is reported
+        // A key the radix sort cannot read (a complex or raw vector after the first key) is reported
         // only when rows tie on every earlier key, so it needs the comparison sort.
         None => {
             let unsupported = Cell::new(None);
@@ -497,7 +501,13 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             })
         }
     };
-    if na_last != NA_LOGICAL {
+    // `na.last = NA` is the default of `sort`, and most keys have no NA to drop.
+    let any_missing = na_last == NA_LOGICAL
+        && columns
+            .iter()
+            .flatten()
+            .any(|column| (0..count).any(|index| column.is_na(index)));
+    if !any_missing {
         for slot in order.iter_mut() {
             *slot += 1;
         }
@@ -1009,7 +1019,8 @@ unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
 /// order of first appearance instead of collation order.
 unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a>> {
     match vector.kind() {
-        SexpType::Complex => None,
+        // GNU R's radix sort reads neither, and reports one only where it is needed.
+        SexpType::Complex | SexpType::Raw => None,
         SexpType::String if !sort_strings => {
             let mut ranks: FxHashMap<Option<Cow<'_, str>>, i32> = FxHashMap::default();
             let codes = (0..length(vector))

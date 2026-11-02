@@ -302,7 +302,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bitwiseShiftR", 2, |call| unsafe {
         bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32)
     }),
-    builtin("xtfrm", 1, |call| Ok(call.arg(0))).generic(Generic::Internal),
+    builtin("xtfrm", 1, |call| unsafe {
+        // GNU R's `xtfrm.default` ranks a raw vector, and `rank` refuses a bare one.
+        if call.arg(0).kind() == SexpType::Raw && !call.arg(0).is_object() {
+            return Err(error("raw vectors cannot be sorted"));
+        }
+        Ok(call.arg(0))
+    })
+    .generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
     builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
     builtin("Mod", 1, |call| unsafe { complex_part(call, 2) }).generic(Generic::Complex),
@@ -2806,8 +2813,10 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             }
             if kind == SexpType::Real {
                 // Within one argument the first NaN or NA wins, as GNU R's long double loop gives;
-                // each argument's sum is rounded to double, and across arguments NA outranks NaN.
-                let mut total = LongDouble::ZERO;
+                // each argument's sum is rounded to double and added in double, so
+                // `sum(1e308, 1e308, -1e308)` overflows where one argument would not, and across
+                // arguments NA outranks NaN.
+                let mut total = 0.0;
                 let mut na = false;
                 for &item in &items {
                     let finite = if item.kind() == SexpType::Real {
@@ -2854,7 +2863,7 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                     na |= is_na_real(item_sum);
                     total += item_sum;
                 }
-                return scalar_real(if na { NA_REAL } else { total.to_f64() });
+                return scalar_real(if na { NA_REAL } else { total });
             }
             let mut total: i64 = 0;
             for &item in &items {

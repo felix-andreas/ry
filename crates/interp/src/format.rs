@@ -277,6 +277,8 @@ pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
             "Inf".into()
         };
     }
+    // GNU R's `encodeReal0` writes a negative zero as a positive one.
+    let value = if value == 0.0 { 0.0 } else { value };
     if format.exponent == 0 {
         let text = format!("{:.*}", format.decimals, value);
         // `-0` prints as `0`.
@@ -960,24 +962,18 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
     } else {
         ""
     };
-    let precision = if digits < 0 {
-        None
-    } else {
-        Some(digits as usize)
-    };
+    // formatC turns a negative `digits` into the default before it gets here, and negates
+    // `digits` itself only to ask `fg` to keep trailing zeros, so every other format reads the
+    // magnitude, as GNU R's C code does.
+    let precision = digits.unsigned_abs() as usize;
     let text = match format {
         "d" => format!("{}", value.round() as i64),
-        "f" => format!("{:.*}", precision.unwrap_or(6), value),
-        "e" => scientific_text(value, precision.unwrap_or(6)),
-        "E" => scientific_text(value, precision.unwrap_or(6)).to_uppercase(),
-        // formatC passes a negative `digits` to ask `fg` to keep trailing zeros.
-        "fg" => fixed_significant(
-            value,
-            digits.unsigned_abs().max(1) as usize,
-            digits < 0 || flag.contains('#'),
-        ),
+        "f" => format!("{:.*}", precision, value),
+        "e" => scientific_text(value, precision),
+        "E" => scientific_text(value, precision).to_uppercase(),
+        "fg" => fixed_significant(value, precision.max(1), digits < 0 || flag.contains('#')),
         "g" | "G" => {
-            let significant = precision.unwrap_or(6).max(1);
+            let significant = precision.max(1);
             let text = c_general(value, significant, flag.contains('#'));
             if format == "G" {
                 text.to_uppercase()
@@ -989,7 +985,7 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
             if integer {
                 format!("{}", value as i64)
             } else {
-                c_general(value, precision.unwrap_or(6).max(1), false)
+                c_general(value, precision.max(1), false)
             }
         }
     };
@@ -998,8 +994,9 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
 
 /// C's `%g`: the shorter of `%e` and `%f` at `significant` digits, without trailing zeros.
 pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
-    if value == 0.0 {
-        return "0".into();
+    if value == 0.0 && !keep_zeros {
+        // C keeps the sign of a negative zero.
+        return if value.is_sign_negative() { "-0" } else { "0" }.into();
     }
     let text = format!("{:.*e}", significant.saturating_sub(1), value.abs());
     let exponent: i32 = text

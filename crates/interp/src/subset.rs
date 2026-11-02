@@ -1732,19 +1732,31 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .into_iter()
         .filter(|&position| position != NA_POSITION)
         .collect();
-    if positions.is_empty() {
+    // A logical subscript longer than the vector stretches it to the subscript's length, even
+    // where the trailing flags are FALSE or select nothing at all.
+    let stretch = if index.kind() == SexpType::Logical {
+        length(index)
+    } else {
+        0
+    };
+    if positions.is_empty() && stretch <= count {
         return Ok(result);
     }
-    if value_count == 0 {
+    if !positions.is_empty() && value_count == 0 {
         return Err(crate::unwind::error_in(call, "replacement has length zero"));
     }
-    if !positions.len().is_multiple_of(value_count) {
+    if !positions.is_empty() && !positions.len().is_multiple_of(value_count) {
         conditions::warning_call(
             call,
             "number of items to replace is not a multiple of replacement length",
         )?;
     }
-    let needed = positions.iter().copied().max().map_or(0, |max| max + 1);
+    let needed = positions
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max| max + 1)
+        .max(stretch);
     if needed > count {
         result = grow(result, needed)?;
         if names != nil() || !new_names.is_empty() {
