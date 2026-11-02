@@ -4955,9 +4955,9 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                 }
             }
             'b' | 'c' => {
-                // Each segment stops short of its points by half a character width, leaving
-                // room for the symbols.
-                let gap = device.char_inches()[0] / 2.0 * pars.cex;
+                // Each segment stops short of its points by half a character, which GNU R
+                // measures in character heights (`CHARS` units) on both axes.
+                let gap = device.char_inches()[1] / 2.0 * pars.cex;
                 for run in runs() {
                     for pair in run.windows(2) {
                         let [from, to] = [pair[0], pair[1]];
@@ -5484,7 +5484,8 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
         } else {
             x.len().max(labels.len())
         };
-        let char_width = device.char_inches()[0] * pars.cex;
+        // GNU R converts the offset from `CHARS` units, which are character heights.
+        let char_width = device.char_inches()[1] * pars.cex;
         let offset = if offset.is_finite() { offset } else { 0.5 } * char_width;
         for index in 0..count {
             if x.is_empty() {
@@ -5521,16 +5522,18 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
             let mut yadj = adj.get(1).copied().unwrap_or(f64::NAN);
             let mut anchor = point;
             let position = real_at(pos, index, f64::NAN);
+            // GNU R's `C_text` aligns sideways labels on the device's character
+            // addressing offset, not on the label's middle.
             if position.is_finite() {
                 match position as i32 {
                     1 => {
                         hadj = 0.5;
-                        yadj = 1.0;
+                        yadj = 1.0 - (0.5 - device.dev().y_char_offset);
                         anchor[1] -= offset;
                     }
                     2 => {
                         hadj = 1.0;
-                        yadj = 0.5;
+                        yadj = device.dev().y_char_offset;
                         anchor[0] -= offset;
                     }
                     3 => {
@@ -5540,7 +5543,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
                     }
                     4 => {
                         hadj = 0.0;
-                        yadj = 0.5;
+                        yadj = device.dev().y_char_offset;
                         anchor[0] += offset;
                     }
                     _ => return Err(error("invalid 'pos' value")),
@@ -6255,7 +6258,12 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
             y: &y,
             z: &z,
         };
-        let mut placed: Vec<Rect> = Vec::new();
+        let method = values::as_integer_scalar(call.arg(7));
+        if !(1..=3).contains(&method) {
+            return Err(error("invalid 'method' value"));
+        }
+        let usr = pars.usr;
+        let mut placed: Vec<LabelBox> = Vec::new();
         for (index, level) in levels.iter().enumerate() {
             let colour = colour_at(col, index, pars.col, pars.bg)?;
             let stroke = stroke_with(
@@ -6276,26 +6284,102 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                 };
                 let width = text_inches(device, label, labcex, 1)?;
                 let height = text_height_inches(device, label, labcex, 1)?;
-                match flattest_window(&points, width, height, &placed) {
-                    Some(window) => {
-                        placed.push(window.bounds);
-                        push_line(device, clip, window.before, stroke)?;
-                        push_line(device, clip, window.after, stroke)?;
-                        push_text(
-                            device,
-                            clip,
-                            window.centre,
-                            &[label.to_owned()],
-                            window.angle,
-                            0.5,
-                            0.5,
-                            labcex,
-                            1,
-                            colour,
-                        )?;
-                    }
-                    None => push_line(device, clip, points, stroke)?,
+                if width <= 0.0 {
+                    continue;
                 }
+                let [device_width, device_height] = device.size();
+                let placement = ContourLabelling {
+                    user: &line,
+                    inches: &points,
+                    usr,
+                    width,
+                    height,
+                    device: [device_width, device_height],
+                };
+                if method == 1 {
+                    let at = if placement.use_start() {
+                        0
+                    } else {
+                        points.len() - 1
+                    };
+                    push_line(device, clip, points.clone(), stroke)?;
+                    push_text(
+                        device,
+                        clip,
+                        points[at],
+                        &[label.to_owned()],
+                        0.0,
+                        0.5,
+                        0.5,
+                        labcex,
+                        1,
+                        colour,
+                    )?;
+                    continue;
+                }
+                let found = if method == 2 {
+                    placement.at_edge(&placed)
+                } else {
+                    placement.flattest(&placed)
+                };
+                let (start, range) = found.unwrap_or((0, 0));
+                let count = points.len();
+                if start > 0 {
+                    push_line(device, clip, points[..=start].to_vec(), stroke)?;
+                }
+                if count > 1 + start + range {
+                    push_line(device, clip, points[start + range..].to_vec(), stroke)?;
+                }
+                if found.is_none() {
+                    continue;
+                }
+                let (from, to) = (points[start], points[start + range]);
+                placed.push(placement.corners(from, to));
+                let closest_to_end = placement.closest_to_end(start, range);
+                let span = (to[0] - from[0]).hypot(to[1] - from[1]);
+                let fraction = width / span;
+                // The label may not fill the gap the line leaves for it, so GNU R draws the
+                // rest of the gap's chord on the side away from the nearest plot edge.
+                let gap_end = if closest_to_end {
+                    let gap_end = [
+                        to[0] - (to[0] - from[0]) * fraction,
+                        to[1] - (to[1] - from[1]) * fraction,
+                    ];
+                    if fraction < 1.0 {
+                        push_line(device, clip, vec![from, gap_end], stroke)?;
+                    }
+                    gap_end
+                } else {
+                    let gap_end = [
+                        from[0] + (to[0] - from[0]) * fraction,
+                        from[1] + (to[1] - from[1]) * fraction,
+                    ];
+                    if fraction < 1.0 {
+                        push_line(device, clip, vec![gap_end, to], stroke)?;
+                    }
+                    gap_end
+                };
+                let (anchor, toward) = match (line[start].0 < line[start + range].0, closest_to_end)
+                {
+                    (true, true) => (gap_end, to),
+                    (true, false) => (from, gap_end),
+                    (false, true) => (to, gap_end),
+                    (false, false) => (gap_end, from),
+                };
+                // GNU R converts radians with 180 / 3.14, not 180 / pi.
+                let angle = (180.0 / 3.14) * (toward[1] - anchor[1]).atan2(toward[0] - anchor[0]);
+                push_text(
+                    device,
+                    clip,
+                    anchor,
+                    &[label.to_owned()],
+                    angle,
+                    0.0,
+                    0.5,
+                    labcex,
+                    1,
+                    colour,
+                )?;
             }
         }
         Ok(())
@@ -6303,121 +6387,181 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// Where a contour label goes: the line split around it, its centre and angle, and the box
-/// it covers.
-struct LabelWindow {
-    before: Vec<[f64; 2]>,
-    after: Vec<[f64; 2]>,
-    centre: [f64; 2],
-    angle: f64,
-    bounds: Rect,
-}
+/// The four corners of a contour label's box, in inches, in GNU R's order: two along the
+/// line's start, then two along its end.
+type LabelBox = [[f64; 2]; 4];
 
-/// The stretch of `points`, `width` inches long along the line, that strays least from its
-/// chord, as long as the label it would carry keeps clear of the labels already `placed`.
-fn flattest_window(
-    points: &[[f64; 2]],
+/// One contour polyline being labelled, the way GNU R's `contour` places labels: its points
+/// in user coordinates (which the edge tests compare against `usr`) and in inches, and the
+/// label's size in inches.
+struct ContourLabelling<'a> {
+    user: &'a [(f64, f64)],
+    inches: &'a [[f64; 2]],
+    usr: [f64; 4],
     width: f64,
     height: f64,
-    placed: &[Rect],
-) -> Option<LabelWindow> {
-    let mut arc = Vec::with_capacity(points.len());
-    let mut total = 0.0;
-    for (index, point) in points.iter().enumerate() {
-        if index > 0 {
-            let previous = points[index - 1];
-            total += (point[0] - previous[0]).hypot(point[1] - previous[1]);
-        }
-        arc.push(total);
+    device: [f64; 2],
+}
+
+impl ContourLabelling<'_> {
+    fn distance_from_edge(&self, index: usize) -> f64 {
+        let (x, y) = self.user[index];
+        let usr = self.usr;
+        (x - usr[0])
+            .min(usr[1] - x)
+            .min((y - usr[2]).min(usr[3] - y))
     }
-    if total <= width || points.len() < 2 {
-        return None;
+
+    fn use_start(&self) -> bool {
+        self.distance_from_edge(0) < self.distance_from_edge(self.user.len() - 1)
     }
-    let point_at = |distance: f64| -> ([f64; 2], usize) {
-        let segment = arc
-            .iter()
-            .position(|length| *length >= distance)
-            .unwrap_or(points.len() - 1)
-            .max(1);
-        let (start, end) = (points[segment - 1], points[segment]);
-        let span = arc[segment] - arc[segment - 1];
-        let fraction = if span > 0.0 {
-            (distance - arc[segment - 1]) / span
+
+    fn chord(&self, from: usize, to: usize) -> f64 {
+        let (a, b) = (self.inches[from], self.inches[to]);
+        (b[0] - a[0]).hypot(b[1] - a[1])
+    }
+
+    /// The label at whichever end of the line lies nearer a plot edge (method "edge"): the
+    /// first run of points from that end whose chord is as long as the label.
+    fn at_edge(&self, placed: &[LabelBox]) -> Option<(usize, usize)> {
+        let count = self.inches.len();
+        let (start, range) = if self.use_start() {
+            let mut range = 0;
+            let mut distance = 0.0;
+            while range + 1 < count && distance < self.width {
+                distance = self.chord(0, range + 1);
+                range += 1;
+            }
+            (distance >= self.width).then_some((0, range))?
         } else {
-            0.0
+            let mut range = 0;
+            let mut distance = 0.0;
+            while range + 1 < count && distance < self.width {
+                distance = self.chord(count - 2 - range, count - 1);
+                range += 1;
+            }
+            (distance >= self.width).then_some((count - 1 - range, range))?
         };
-        (
-            [
-                start[0] + fraction * (end[0] - start[0]),
-                start[1] + fraction * (end[1] - start[1]),
-            ],
-            segment,
-        )
-    };
-    let mut best: Option<(f64, LabelWindow)> = None;
-    for (index, start_distance) in arc.iter().enumerate() {
-        if start_distance + width > total {
-            break;
-        }
-        let (start, _) = point_at(*start_distance);
-        let (end, end_segment) = point_at(start_distance + width);
-        let chord = [end[0] - start[0], end[1] - start[1]];
-        let length = chord[0].hypot(chord[1]);
-        if length <= 0.0 {
-            continue;
-        }
-        let straying = points[index..end_segment]
-            .iter()
-            .map(|point| {
-                ((point[0] - start[0]) * chord[1] - (point[1] - start[1]) * chord[0]).abs() / length
-            })
-            .fold(0.0, f64::max);
-        if best.as_ref().is_some_and(|(score, _)| *score <= straying) {
-            continue;
-        }
-        let centre = [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0];
-        let mut angle = chord[1].atan2(chord[0]).to_degrees();
-        if angle > 90.0 {
-            angle -= 180.0;
-        } else if angle <= -90.0 {
-            angle += 180.0;
-        }
-        let (sin, cos) = angle.to_radians().sin_cos();
-        let half = [
-            (width * cos.abs() + height * sin.abs()) / 2.0,
-            (width * sin.abs() + height * cos.abs()) / 2.0,
-        ];
-        let bounds = Rect {
-            x0: centre[0] - half[0],
-            x1: centre[0] + half[0],
-            y0: centre[1] - half[1],
-            y1: centre[1] + half[1],
-        };
-        let overlaps = placed.iter().any(|other| {
-            bounds.x0 < other.x1
-                && other.x0 < bounds.x1
-                && bounds.y0 < other.y1
-                && other.y0 < bounds.y1
-        });
-        if overlaps {
-            continue;
-        }
-        let mut before = points[..index].to_vec();
-        before.push(start);
-        let mut after = vec![end];
-        after.extend_from_slice(&points[end_segment..]);
-        best = Some((
-            straying,
-            LabelWindow {
-                before,
-                after,
-                centre,
-                angle,
-                bounds,
-            },
-        ));
+        self.fits(start, range, placed).then_some((start, range))
     }
-    best.map(|(_, window)| window)
+
+    /// The label where the line's gradients vary least over the label's length (method
+    /// "flattest"). GNU R accumulates the gradients into a running sum and squares that sum,
+    /// not each gradient, and this keeps its choice.
+    fn flattest(&self, placed: &[LabelBox]) -> Option<(usize, usize)> {
+        let count = self.inches.len();
+        let mut best: Option<(f64, usize, usize)> = None;
+        for start in 0..count {
+            let (mut distance, mut gradient_sum, mut square_sum) = (0.0, 0.0, 0.0);
+            let mut range = 0;
+            let mut next = start + 1;
+            while next + 1 < count && distance < self.width {
+                distance = self.chord(start, next);
+                let delta_x = self.user[next].0 - self.user[next - 1].0;
+                let delta_y = self.user[next].1 - self.user[next - 1].1;
+                let delta_x = if delta_x == 0.0 { 1.0 } else { delta_x };
+                gradient_sum += delta_y / delta_x;
+                square_sum += gradient_sum * gradient_sum;
+                next += 1;
+                range += 1;
+            }
+            if distance < self.width {
+                break;
+            }
+            if !self.fits(start, range, placed) {
+                continue;
+            }
+            let samples = range as f64;
+            let variance = (square_sum - gradient_sum * gradient_sum / samples) / samples;
+            if best.is_none_or(|(lowest, _, _)| variance < lowest) && variance < 9999999.0 {
+                best = Some((variance, start, range));
+            }
+        }
+        best.map(|(_, start, range)| (start, range))
+    }
+
+    /// Whether a label over `start..=start + range` stays on the device and clear of every
+    /// label already placed.
+    fn fits(&self, start: usize, range: usize, placed: &[LabelBox]) -> bool {
+        let corners = self.corners(self.inches[start], self.inches[start + range]);
+        let inside = corners
+            .iter()
+            .all(|[x, y]| (0.0..=self.device[0]).contains(x) && (0.0..=self.device[1]).contains(y));
+        inside && !placed.iter().any(|other| boxes_cross(&corners, other))
+    }
+
+    /// GNU R's `FindCorners`: the box along the chord from `from` to `to`, as wide on each
+    /// side as the label's height scaled by the chord over the label's width.
+    fn corners(&self, from: [f64; 2], to: [f64; 2]) -> LabelBox {
+        let ratio = self.height / self.width;
+        let offset_y = (to[0] - from[0]) * ratio;
+        let offset_x = (to[1] - from[1]) * ratio;
+        [
+            [from[0] + offset_x, from[1] - offset_y],
+            [from[0] - offset_x, from[1] + offset_y],
+            [to[0] - offset_x, to[1] + offset_y],
+            [to[0] + offset_x, to[1] - offset_y],
+        ]
+    }
+
+    /// Whether the label's far end (`start + range`) is the one nearer a plot edge, decided
+    /// in user coordinates the way GNU R decides it.
+    fn closest_to_end(&self, start: usize, range: usize) -> bool {
+        let usr = self.usr;
+        let (x1, y1) = self.user[start];
+        let (x2, y2) = self.user[start + range];
+        let dx1 = (x1 - usr[0]).min(usr[1] - x1);
+        let dx2 = (usr[1] - x2).min(x2 - usr[0]);
+        let (mut closest, mut nearest) = if dx1 < dx2 { (false, dx1) } else { (true, dx2) };
+        let dy1 = (y1 - usr[2]).min(usr[3] - y1);
+        if closest && dy1 < nearest {
+            closest = false;
+            nearest = dy1;
+        } else if dy1 < nearest {
+            nearest = dy1;
+        }
+        let dy2 = (usr[3] - y2).min(y2 - usr[2]);
+        if !closest && dy2 < nearest {
+            closest = true;
+        }
+        closest
+    }
+}
+
+/// GNU R's `TestLabelIntersection`: whether any edge of one label box meets an edge of the
+/// other. It solves each pair of edges as lines and checks both parameters, so a box wholly
+/// inside another does not count.
+fn boxes_cross(first: &LabelBox, second: &LabelBox) -> bool {
+    for i in 0..4 {
+        let [ax_, ay_] = first[i];
+        let [bx_, by_] = first[(i + 1) % 4];
+        for j in 0..4 {
+            let [ax, ay] = second[j];
+            let [bx, by] = second[(j + 1) % 4];
+            let dom = bx_ * by - bx_ * ay - ax_ * by + ax_ * ay - bx * by_ + bx * ay_ + ax * by_
+                - ax * ay_;
+            let (along_first, along_second) = if dom == 0.0 {
+                (-1.0, -1.0)
+            } else {
+                let along_first =
+                    (bx * ay_ - ax * ay_ - ay * bx - ax_ * by + ax_ * ay + by * ax) / dom;
+                let along_second = if bx - ax == 0.0 {
+                    if by - ay == 0.0 {
+                        -1.0
+                    } else {
+                        (ay_ + (by_ - ay_) * along_first - ay) / (by - ay)
+                    }
+                } else {
+                    (ax_ + (bx_ - ax_) * along_first - ax) / (bx - ax)
+                };
+                (along_first, along_second)
+            };
+            if (0.0..=1.0).contains(&along_first) && (0.0..=1.0).contains(&along_second) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `symbols(x, y, type, data, inches, bg, fg, ...)` for circles (type 1), squares (2) and
