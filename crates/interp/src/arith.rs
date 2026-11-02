@@ -232,8 +232,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("digamma", 1, |call| unsafe { math1(call, Math::Digamma) }).generic(Generic::Math),
     builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) }).generic(Generic::Math),
     builtin("log", -1, do_log).generic(Generic::Math),
-    builtin("round", -1, |call| unsafe { round_like(call, false) }).generic(Generic::Math),
-    builtin("signif", -1, |call| unsafe { round_like(call, true) }).generic(Generic::Math),
+    builtin("round", -1, |call| unsafe { round_like(call, false) })
+        .generic(Generic::Math)
+        .keep_missing(),
+    builtin("signif", -1, |call| unsafe { round_like(call, true) })
+        .generic(Generic::Math)
+        .keep_missing(),
     builtin("cumsum", 1, |call| unsafe {
         cumulative(call, Cumulative::Sum)
     })

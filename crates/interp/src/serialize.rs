@@ -776,7 +776,10 @@ unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
             crate::coerce::coerce_vector(argument, SexpType::String)
         }
         name if name.starts_with("wrap_") => {
-            if state.kind() == SexpType::List && length(state) >= 1 {
+            // GNU serializes a wrapper's state as the pairlist `(wrapped, metadata)`.
+            if state.kind() == SexpType::Pairlist {
+                Ok(state.car())
+            } else if state.kind() == SexpType::List && length(state) >= 1 {
                 Ok(state.element(0))
             } else {
                 Ok(state)
