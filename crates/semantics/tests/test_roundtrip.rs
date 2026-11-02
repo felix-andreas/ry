@@ -103,7 +103,7 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
         let (Some(name), Some(check)) = (item.name(db).clone(), item_check(db, item)) else {
             continue;
         };
-        let Some(scheme) = check.scheme else {
+        let Some(scheme) = &check.scheme else {
             continue;
         };
         // An already-annotated item echoes the user's text, and a second block would stack.

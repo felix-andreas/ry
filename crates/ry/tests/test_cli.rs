@@ -1220,6 +1220,47 @@ fn fmt_formats_only_the_r_chunks_of_a_literate_document() {
 }
 
 #[test]
+fn check_shows_a_literate_document_with_its_prose() {
+    let directory = project(&[
+        (
+            "report.Rnw",
+            "\\begin{document}\n<<>>=\nprint(missing_value)\n@\n\\end{document}\n",
+        ),
+        ("inline.Rmd", "Größe: `r missing_inline` here.\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "report.Rnw"]);
+    assert!(
+        output.stderr.contains("<<>>=") && output.stderr.contains("@"),
+        "the snippet shows the chunk delimiters, not blanked prose: {}",
+        output.stderr
+    );
+    // Columns count UTF-16 units of the document, where `ö` and `ß` are one unit each.
+    let output = ry(
+        directory.path(),
+        &["check", "--output", "json", "inline.Rmd"],
+    );
+    assert!(
+        output.stdout.contains("\"column\":11,\"endColumn\":25"),
+        "{}",
+        output.stdout
+    );
+}
+
+#[test]
+fn fmt_keeps_crlf_line_endings_in_a_literate_document() {
+    let document = "Prose.\r\n\r\n```{r}\r\nf <- function(a) {\r\nx<-1\r\n}\r\n```\r\n";
+    let directory = project(&[("report.Rmd", document)]);
+    let output = ry(directory.path(), &["fmt", "report.Rmd"]);
+    assert_eq!(output.code, 0, "{}", output.stderr);
+    let text = fs::read_to_string(directory.path().join("report.Rmd"))
+        .expect("failed to read the document back");
+    assert_eq!(
+        text,
+        "Prose.\r\n\r\n```{r}\r\nf <- function(a) {\r\n  x <- 1\r\n}\r\n```\r\n"
+    );
+}
+
+#[test]
 fn fmt_syntax_error_exits_two() {
     let directory = project(&[("bad.R", SYNTAX_ERROR_SOURCE)]);
     let output = ry(directory.path(), &["fmt", "bad.R"]);

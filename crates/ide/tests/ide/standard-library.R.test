@@ -13,9 +13,9 @@ parameters: [list: Array<T>] | f: fn(T) -> U
 signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
 parameters: [list: list[integer]] | f: fn(integer) -> integer
 action: Add inferred type annotation for `doubled`
-  edit 0..0 -> "#: list[integer]\n"
+  edit 7..7 -> ": list[integer]"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list[integer]\n"
+  edit 7..7 -> ": list[integer]"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @7: list[integer]
 hint @20list =
@@ -47,10 +47,10 @@ rename: none
 signature: fn(dict: Dict<character, double>, key: character) -> :Ok(double) | :Err(:KeyNotFound)
 parameters: [dict: Dict<character, double>] | key: character
 action: Add inferred type annotation for `got`
-  edit 36..36 -> "#: :Ok(double) | :Err(:KeyNotFound)\n"
+  edit 39..39 -> ": :Ok(double) | :Err(:KeyNotFound)"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Dict<character, double>\n"
-  edit 36..36 -> "#: :Ok(double) | :Err(:KeyNotFound)\n"
+  edit 1..1 -> ": Dict<character, double>"
+  edit 39..39 -> ": :Ok(double) | :Err(:KeyNotFound)"
 completion (2): Dict.get, Dict.single
 hint @1: Dict<character, double>
 hint @39: :Ok(double) | :Err(:KeyNotFound)
@@ -96,9 +96,11 @@ rename: 1 edit(s)
 calls summarise: in  | out
 signature: none
 action: Add inferred type annotation for `summarise`
-  edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
+  edit 139..139 -> ": list[Position]"
+  edit 140..140 -> " -> double[]"
 action: Add inferred type annotations for the whole file
-  edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
+  edit 139..139 -> ": list[Position]"
+  edit 140..140 -> " -> double[]"
 completion (37): summarise, Summary, summary, summary.aov, summary.connection, Summary.data.frame, summary.data.frame, Summary.Date
 hint @117: fn(positions: list[Position]) -> double[]
 hint @159FUN =
