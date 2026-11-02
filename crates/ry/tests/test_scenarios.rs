@@ -706,7 +706,7 @@ impl Journey {
                     .filter_map(Value::as_u64)
                     .collect();
                 let (mut line, mut column) = (0u64, 0u64);
-                for token in data.chunks_exact(5) {
+                for token in data.as_chunks::<5>().0 {
                     if token[0] > 0 {
                         column = 0;
                     }
@@ -981,7 +981,11 @@ impl Journey {
                     .wait()
                     .map_err(|error| format!("waiting for the adapter: {error}"))?;
                 session.drain();
-                match exited["body"]["exitCode"].to_string() == *code && status.code().is_some() {
+                match exited["body"]["exitCode"]
+                    == serde_json::from_str::<serde_json::Value>(code)
+                        .map_err(|error| format!("bad exit code {code}: {error}"))?
+                    && status.code().is_some()
+                {
                     true => Ok(()),
                     false => Err(format!(
                         "exited with {exited} and the adapter with {status}"
@@ -1233,7 +1237,7 @@ impl Journey {
                 text,
             ));
         }
-        ranges.sort_by(|left, right| right.0.cmp(&left.0));
+        ranges.sort_by_key(|range| std::cmp::Reverse(range.0));
         for (start, end, text) in ranges {
             self.change(&path, start, end, &text);
         }

@@ -76,6 +76,111 @@ symbol Nothing here (Section) at "# Nothing here ----"
 symbol   value (Value) at "value"
 fold 0..=2 Section
 
+#---- members_of_classes_and_types
+Person <- R6::R6Class("Person",
+  public = list(
+    name = NULL,
+    greet = function() cat("Hi", self$name)
+  ),
+  active = list(
+    upper = function() toupper(self$name)
+  )
+)
+setClass("Account", contains = "Base", representation("VIRTUAL", Base, owner = "character"), slots = c(balance = "numeric"))
+deposit <- function(account, amount) account@balance + amount
+alias Shape =
+  | :Circle(radius: double)
+  | :Empty
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Empty => 0
+  }
+}
+point <- (x = 1, y = 2)
+total <- point$x + point$y
+person <- Person$new()
+person$greet()
+#++++
+symbol Person (R6Class) at "Person"
+symbol   name (R6Field) at "name"
+symbol   greet (R6Method fn()) at "greet"
+symbol   upper (R6Field fn()) at "upper"
+symbol Account (S4Class) at "Account"
+symbol   owner (S4Slot character) at "owner"
+symbol   balance (S4Slot numeric) at "balance"
+symbol deposit (Function fn(account, amount)) at "deposit"
+symbol Shape (AliasDefinition alias) at "Shape"
+symbol   Circle (Tag) at "Circle"
+symbol   Empty (Tag) at "Empty"
+symbol area (Function fn(s)) at "area"
+symbol point (Value) at "point"
+symbol total (Value) at "total"
+symbol person (Value) at "person"
+fold 0..=7 Block
+fold 1..=3 Block
+fold 5..=6 Block
+fold 14..=18 Block
+token "R6" Namespace
+token "R6Class" LibraryFunction
+token "list" Function
+token "name" Property
+token "greet" Method
+token "cat" LibraryFunction
+token "name" Property
+token "list" Function
+token "upper" Property
+token "toupper" LibraryFunction
+token "name" Property
+token "setClass" LibraryFunction
+token "representation" LibraryFunction
+token "owner" Property
+token "c" Function
+token "balance" Property
+token "deposit" Function
+token "account" Parameter
+token "amount" Parameter
+token "account" Parameter
+token "balance" Property
+token "amount" Parameter
+token "alias" Keyword
+token "Shape" Type
+token "|" Operator
+token ":" Tag
+token "Circle" Tag
+token "(" Operator
+token "radius" Parameter
+token ":" Operator
+token "double" Type
+token ")" Operator
+token "|" Operator
+token ":" Tag
+token "Empty" Tag
+token "area" Function
+token "s" Parameter
+token ":" Operator
+token "Shape" Type
+token "->" Operator
+token "double" Type
+token "match" Keyword
+token "s" Parameter
+token ":" Tag
+token "Circle" Tag
+token "radius" Property
+token "=>" Operator
+token ":" Tag
+token "Empty" Tag
+token "=>" Operator
+token "x" Property
+token "y" Property
+token "x" Property
+token "y" Property
+token "new" Method
+token "greet" Method
+lens run file at line 9
+lens references "deposit"
+lens references "area"
+
 #==== folding
 #---- blocks_keep_closing_line
 f <- function(
@@ -261,10 +366,26 @@ token "expect_true" Function
 token "test_that" Function
 token "paste" LibraryFunction
 token "expect_true" Function
+fix Qualify as `testthat::test_that`: "" -> "testthat::"
+fix Qualify as `testthat::expect_equal`: "" -> "testthat::"
+fix Qualify as `testthat::expect_true`: "" -> "testthat::"
+fix Qualify as `testthat::test_that`: "" -> "testthat::"
+fix Qualify as `testthat::expect_true`: "" -> "testthat::"
 lens run file at line 0
 lens references "helper"
 lens test "adds one" at line 2
 lens test "named description" at line 5
+
+#---- an_installed_package_the_project_reads_offers_its_exports
+columns <- fakepkg::fetch_columns()
+fetch_rows()
+#++++
+symbol columns (Value) at "columns"
+token "fakepkg" Namespace
+token "fetch_columns" LibraryFunction
+token "fetch_rows" Function
+fix Qualify as `fakepkg::fetch_rows`: "" -> "fakepkg::"
+lens run file at line 1
 
 #---- definitions_alone_have_nothing_to_run
 square <- function(x) x^2

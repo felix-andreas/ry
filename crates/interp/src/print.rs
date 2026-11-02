@@ -585,8 +585,13 @@ unsafe fn print_matrix_rows(
         })
         .collect();
     if cols == 0 {
-        // GNU R prints the row labels alone.
+        // GNU R prints the row labels alone, under the column title line of named dimnames.
         let mut text = String::new();
+        if titled {
+            text.push_str(&" ".repeat(row_label_width));
+            text.push_str(&col_title);
+            text.push('\n');
+        }
         text.push_str(&pad(&row_title, row_label_width, false));
         text.push('\n');
         for label in &row_labels[..shown] {

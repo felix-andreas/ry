@@ -1,0 +1,71 @@
+[stdout]
+| [1] "bytes"   "unknown"
+| [1] "caf\\xe9"
+| caf\xe9 
+| [1] 4
+| [1] "E: number of characters is not computable in \"bytes\" encoding, element 1"
+| [1] "E: number of characters is not computable in \"bytes\" encoding, element 1"
+| [1] "E: width is not computable in \"bytes\" encoding, element 1"
+| [1] 3
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] "abc"
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] "caf"
+| [1] "af\\xe9"
+| [1] "list(c(\"c\", \"a\", \"f\", \"\\\\xe9\"))"
+| [1] "list(c(\"c\", \"f\\\\xe9\"))"
+| [1] "caf\\xe9 z"
+| [1] "caf\\xe9\\xc3\\xa9"
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] "caf\\xe9"
+| [1] "caf\\xe9"
+| [1] "caf\\xe9"
+| [1] "café"
+| [1] "E: unsupported conversion from 'bytes' to 'UTF-8'"
+| [1] TRUE
+| [1] "Caf\\xe9"
+| [1] "cafE"
+| [1] 2
+| attr(,"match.length")
+| [1] 1
+| attr(,"index.type")
+| [1] "bytes"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] "caf\\xe9"
+| [1] TRUE
+| [1] NA
+| [1] FALSE
+| [1] NA
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] 63 61 66 e9
+| [1] FALSE
+| [1] "\"caf\\\\xe9\""
+| [1] "'caf\\xe9'"
+| [1] "caf\\\\xe9"
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] 2748
+| [1] "W: NAs introduced by coercion"
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] "E: translating strings with \"bytes\" encoding is not allowed"
+| [1] ""
+| [1] 1
+| [1] ef 9f a9
+| [1] TRUE
+| [1] 1
+| [1] f4 8f bf a9
+| [1] 2
+| [1] 41 ff 62
+| [1] 61 ff 62 f4 8f bf a9
+| [1] 3
+| [1] "a\xe9"
+| [1] "unknown"
+| [1] "E: invalid multibyte string, element 1"
+| [1] "E: invalid multibyte string 1"
+[messages]
+[warnings]
+[errors]
+- invalid multibyte string 1 (in toupper("a\\xe9"))
+[value]

@@ -1,0 +1,437 @@
+# The roughly 200 base, stats and utils functions that the benchmark-dependency corpus calls
+# most often, each in an idiomatic call form. With typing on, none of them may report anything:
+# an error here is a false positive on code every R user writes.
+#==== most_used
+#---- vectors_and_strings_1
+xs <- c(1.5, 2, 3)
+ns <- 1:10
+words <- c("alpha", "beta", "gamma")
+flags <- c(TRUE, FALSE, NA)
+a1 <- length(xs)
+a2 <- is.null(xs)
+a3 <- list(a = 1, b = "x")
+a4 <- names(a3)
+a5 <- paste("a", words, sep = "-")
+a6 <- paste0("x", seq_along(words))
+a7 <- rep(0, 5)
+a8 <- is.na(flags)
+a9 <- as.integer("3")
+a10 <- any(flags, na.rm = TRUE)
+a11 <- identical(xs, ns)
+a12 <- as.double(ns)
+a13 <- sprintf("%d items, %.2f mean", length(xs), mean(xs))
+a14 <- sum(xs, na.rm = TRUE)
+a15 <- as.numeric(words)
+a16 <- max(xs)
+a17 <- which(flags)
+a18 <- is.character(words)
+a19 <- unlist(a3)
+a20 <- sqrt(xs)
+a21 <- is.numeric(xs)
+a22 <- all(xs > 0)
+a23 <- character(3)
+a24 <- abs(-xs)
+a25 <- seq_along(xs)
+a26 <- grepl("^a", words)
+#++++
+xs: double[]
+ns: integer[]
+words: character[]
+flags: logical[]
+a1: integer
+a2: logical
+a3: list{a: double, b: character}
+a4: Any
+a5: character
+a6: character
+a7: double[]
+a8: logical
+a9: integer
+a10: logical
+a11: logical
+a12: double
+a13: character
+a14: double
+a15: double
+a16: double
+a17: integer[]
+a18: logical
+a19: Any
+a20: double
+a21: logical
+a22: logical
+a23: character[]
+a24: double[]
+a25: integer[]
+a26: logical
+
+#---- vectors_and_strings_2
+xs <- c(1.5, 2, 3)
+ns <- 1:10
+words <- c("alpha", "beta", "gamma")
+flags <- c(TRUE, FALSE, NA)
+a27 <- sapply(words, nchar)
+a28 <- gsub("a", "A", words, fixed = TRUE)
+a29 <- isTRUE(all(flags))
+a30 <- double(2)
+a31 <- as.list(xs)
+a32 <- seq_len(4)
+a33 <- min(ns)
+a34 <- vapply(words, nchar, integer(1))
+a35 <- match("beta", words)
+a36 <- ifelse(xs > 2, "big", "small")
+a37 <- round(xs, 1)
+a38 <- substr(words, 1, 2)
+a39 <- nchar(words)
+a40 <- format(xs, nsmall = 2)
+a41 <- unique(ns)
+a42 <- as.vector(list(a = 1))
+a43 <- seq(0, 1, by = 0.1)
+a44 <- integer(0)
+a45 <- log(xs)
+a46 <- sub("a$", "", words)
+a47 <- as.logical("TRUE")
+a48 <- vector("list", 3)
+a49 <- deparse(quote(x + y))
+a50 <- nzchar(words)
+a51 <- tolower(words)
+a52 <- tail(xs, 2)
+#++++
+xs: double[]
+ns: integer[]
+words: character[]
+flags: logical[]
+a27: Any
+a28: character
+a29: logical
+a30: double[]
+a31: list[Any]
+a32: integer[]
+a33: integer
+a34: integer[]
+a35: integer
+a36: Any
+a37: double
+a38: character
+a39: integer
+a40: character
+a41: integer[]
+a42: Any
+a43: double[]
+a44: integer[]
+a45: double
+a46: character
+a47: logical
+a48: Any
+a49: character
+a50: logical
+a51: character
+a52: double[]
+
+#---- vectors_and_strings_3
+xs <- c(1.5, 2, 3)
+ns <- 1:10
+words <- c("alpha", "beta", "gamma")
+flags <- c(TRUE, FALSE, NA)
+a53 <- strsplit("a,b,c", ",")[[1]]
+a54 <- sort(xs, decreasing = TRUE)
+a55 <- exp(xs)
+a56 <- grep("a", words, value = TRUE)
+a57 <- mean(xs)
+a58 <- rep.int(1L, 3L)
+a59 <- typeof(xs)
+a60 <- setdiff(ns, 1:3)
+a61 <- logical(2)
+a62 <- numeric(4)
+a63 <- floor(xs)
+a64 <- diff(xs)
+a65 <- is.finite(xs)
+a66 <- rev(words)
+a67 <- order(xs, decreasing = TRUE)
+a68 <- substring("abcdef", 1:3, 3:5)
+a69 <- na.omit(c(1, NA, 3))
+a70 <- sample(ns, 3)
+a71 <- anyNA(xs)
+a72 <- cumsum(xs)
+a73 <- rep_len(1:3, 7)
+a74 <- head(words, 2)
+a75 <- unname(c(a = 1, b = 2))
+a76 <- ceiling(xs)
+a77 <- prod(xs)
+a78 <- is.integer(ns)
+#++++
+xs: double[]
+ns: integer[]
+words: character[]
+flags: logical[]
+a53: character[]
+a54: double[]
+a55: double
+a56: Any
+a57: double
+a58: integer[]
+a59: character
+a60: integer[]
+a61: logical[]
+a62: double[]
+a63: double
+a64: Any
+a65: logical
+a66: character[]
+a67: integer[]
+a68: character
+a69: Any
+a70: Any
+a71: logical
+a72: double[]
+a73: Any
+a74: character[]
+a75: double[named]
+a76: double
+a77: double
+a78: logical
+
+#---- vectors_and_strings_4
+xs <- c(1.5, 2, 3)
+ns <- 1:10
+words <- c("alpha", "beta", "gamma")
+flags <- c(TRUE, FALSE, NA)
+a79 <- regmatches(words, regexpr("[aeiou]", words))
+a80 <- append(xs, 4)
+a81 <- runif(3)
+a82 <- split(xs, c(1, 1, 2))
+a83 <- var(xs)
+a84 <- all.equal(xs, xs)
+a85 <- is.raw(xs)
+a86 <- is.factor(words)
+a87 <- mapply(function(x, y) x + y, 1:3, 4:6)
+a88 <- enc2utf8(words)
+a89 <- pmax(xs, 2)
+a90 <- intersect(ns, 5:15)
+a91 <- duplicated(c(1, 1, 2))
+a92 <- is.nan(xs)
+a93 <- signif(xs, 2)
+a94 <- seq.int(1, 10, 2)
+a95 <- sign(-2)
+a96 <- range(xs)
+a97 <- levels(factor(words))
+a98 <- is.complex(xs)
+a99 <- is.vector(xs)
+a100 <- is.logical(flags)
+a101 <- is.list(list(1))
+a102 <- is.function(mean)
+a103 <- drop(matrix(1:3, 1))
+a104 <- lapply(xs, function(x) x * 2)
+#++++
+xs: double[]
+ns: integer[]
+words: character[]
+flags: logical[]
+a79: Any
+a80: double[]
+a81: double[]
+a82: list[Any]
+a83: Any
+a84: Any
+a85: logical
+a86: logical
+a87: Any
+a88: character
+a89: double[]
+a90: integer[]
+a91: logical
+a92: logical
+a93: double
+a94: double[]
+a95: double
+a96: double[]
+a97: character[]
+a98: logical
+a99: logical
+a100: logical
+a101: logical
+a102: logical
+a103: Any
+a104: list[double]
+
+#---- vectors_and_strings_5
+xs <- c(1.5, 2, 3)
+ns <- 1:10
+words <- c("alpha", "beta", "gamma")
+flags <- c(TRUE, FALSE, NA)
+a105 <- do.call(rbind, list(1:2, 3:4))
+a106 <- Reduce(`+`, xs, accumulate = TRUE)
+a107 <- rev(sort(unique(words)))
+#++++
+xs: double[]
+ns: integer[]
+words: character[]
+flags: logical[]
+a105: Any
+a106: Unknown
+a107: character[]
+
+#---- matrices
+m <- matrix(1:6, nrow = 2)
+df <- data.frame(id = 1:3, name = c("a", "b", "c"), stringsAsFactors = FALSE)
+b1 <- dim(m)
+b2 <- t(m)
+b3 <- nrow(df)
+b4 <- ncol(m)
+b5 <- colnames(df)
+b6 <- dimnames(m)
+b7 <- diag(3)
+b8 <- as.matrix(df)
+b9 <- apply(m, 1, sum)
+b10 <- rownames(df)
+b11 <- cbind(m, 7:8)
+b12 <- rbind(m, 7:9)
+b13 <- array(0, dim = c(2, 2, 2))
+b14 <- is.matrix(m)
+b15 <- NCOL(m)
+b16 <- NROW(1:3)
+b17 <- as.data.frame(m)
+b18 <- solve(diag(2))
+b19 <- crossprod(m)
+b20 <- rowSums(m)
+b21 <- is.data.frame(df)
+b22 <- df[df$id > 1, ]
+b23 <- head(df, 2)
+b24 <- merge(df, df, by = "id")
+colnames(m) <- c("x", "y", "z")
+rownames(df) <- df$name
+dim(b13) <- c(4, 2)
+#++++
+m: matrix
+df: data.frame
+b1: Any
+b2: matrix
+b3: Any
+b4: Any
+b5: Any
+b6: Any
+b7: Any
+b8: matrix
+b9: Any
+b10: Any
+b11: Any
+b12: Any
+b13: Any
+b14: logical
+b15: integer
+b16: integer
+b17: data.frame
+b18: Any
+b19: matrix
+b20: double[]
+b21: logical
+b22: Any
+b23: data.frame
+b24: data.frame
+character[]
+Unknown
+double[]
+
+#---- control
+check <- function(x, type = c("fast", "slow"), verbose = getOption("pkg.verbose", FALSE)) {
+  type <- match.arg(type)
+  if (missing(x)) stop("`x` is required", call. = FALSE)
+  stopifnot(is.numeric(x), length(x) > 0)
+  if (!inherits(x, "numeric")) warning("coercing")
+  if (verbose) message("checking ", length(x), " values")
+  if (isTRUE(verbose)) cat("type:", type, "\n")
+  old <- options(digits = 3)
+  on.exit(options(old), add = TRUE)
+  invisible(x)
+}
+attempt <- function(expr) {
+  out <- tryCatch(expr, error = function(e) conditionMessage(e), warning = function(w) NULL)
+  res <- try(log(-1), silent = TRUE)
+  suppressWarnings(as.numeric("x"))
+  list(out, res)
+}
+meta <- function(x, ...) {
+  cl <- match.call()
+  sc <- sys.call()
+  ex <- substitute(x)
+  env <- parent.frame()
+  fn <- match.fun("sum")
+  args <- formals(check)
+  b <- body(check)
+  nm <- deparse(substitute(x))
+  e <- eval(quote(1 + 1), envir = env)
+  f <- environment(check)
+  g <- get("sum", envir = baseenv())
+  ok <- exists("x", inherits = FALSE)
+  assign("y", 1, envir = env)
+  force(x)
+  rm(ok)
+  list(cl, sc, ex, fn, args, b, nm, e, f, g)
+}
+classes <- function(x) {
+  k <- class(x)
+  a <- attr(x, "names")
+  attr(x, "tag") <- "t"
+  s <- structure(list(1), class = "myclass")
+  u <- unclass(s)
+  at <- attributes(x)
+  oc <- oldClass(x)
+  storage.mode(x) <- "double"
+  nm <- as.name("x")
+  list(x, k, a, u, at, oc, nm)
+}
+print.myclass <- function(x, ...) {
+  print(unclass(x))
+  invisible(x)
+}
+summary.myclass <- function(object, ...) NextMethod()
+describe <- function(x, ...) UseMethod("describe")
+describe.default <- function(x, ...) format(x)
+#++++
+check: <T, U, V> fn([x]: Unknown, [type]: T, [verbose]: U) -> V
+attempt: <T> fn(expr: T) -> list{Any, Any}
+meta: <T> fn(x: T, ...: Any) -> list{Any, Any, Any, Any, Any, Any, character, Any, environment, Any}
+classes: fn(x: Unknown) -> list{Unknown, character, Any, Any, Any, Any, Unknown}
+print.myclass: <T> fn(x: T, ...: Any) -> T
+summary.myclass: <T> fn([object]: T, ...: Any) -> Any
+describe: <T> fn([x]: T, ...: Any) -> Any
+describe.default: <T> fn(x: T, ...: Any) -> character
+
+#---- system
+io <- function(dir) {
+  p <- file.path(dir, "out.txt")
+  if (!file.exists(p)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+  writeLines(c("a", "b"), p)
+  lines <- readLines(p, warn = FALSE)
+  b <- basename(p)
+  d <- dirname(p)
+  n <- normalizePath(p, mustWork = FALSE)
+  tmp <- tempfile(fileext = ".csv")
+  unlink(tmp)
+  files <- list.files(dir, pattern = "\\.R$", full.names = TRUE)
+  sf <- system.file("DESCRIPTION", package = "stats")
+  home <- Sys.getenv("HOME", unset = "")
+  now <- Sys.time()
+  day <- as.Date("2024-01-01")
+  stamp <- as.POSIXct("2024-01-01 10:00:00", tz = "UTC")
+  wd <- getwd()
+  v <- getRversion()
+  ok <- requireNamespace("stats", quietly = TRUE)
+  ns <- asNamespace("stats")
+  e <- new.env(parent = emptyenv())
+  con <- file(p, "r")
+  close(con)
+  i <- interactive()
+  msg <- gettextf("found %d files", length(files))
+  ex <- parse(text = "1 + 2")
+  list(lines, b, d, n, sf, home, now, day, stamp, wd, v, ok, ns, e, i, msg, ex)
+}
+models <- function(df) {
+  fit <- lm(y ~ x, data = df)
+  cf <- coef(fit)
+  fv <- fitted(fit)
+  list(cf, fv)
+}
+#++++
+io: <T> fn(dir: T) -> list{character[], character, character, character, character, character, POSIXct, Date, POSIXct, character, Any, logical, environment, environment, logical, character, Any}
+models: <T> fn(df: T) -> list{Any, Any}

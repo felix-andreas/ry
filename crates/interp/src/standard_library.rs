@@ -19,6 +19,7 @@
 
 use {
     crate::{
+        annotations::Entry,
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval,
@@ -36,6 +37,7 @@ use {
         records::{Fields, Layout, NativeKind},
     },
     rustc_hash::{FxHashSet, FxHasher},
+    smallvec::SmallVec,
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
@@ -52,7 +54,9 @@ const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> Bu
 /// return or raise an error, so compiled code may call them without saving its state first. A
 /// function that takes a callback runs R code, and one that updates its first argument in place
 /// must not be handed a value compiled code still holds, so neither is a leaf; the test
-/// `leaves_are_the_functions_without_callbacks` keeps this list equal to that rule.
+/// `leaves_are_the_functions_without_callbacks` keeps this list equal to that rule. Reading an
+/// ALTREP argument can still run R code through its class's methods, so compiled code checks
+/// each boxed argument's ALTREP flag before trusting the leaf.
 const LEAVES: &[&str] = &[
     "Result.is_ok",
     "Result.is_err",
@@ -580,21 +584,78 @@ unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
     })
 }
 
-unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Sexp> {
+unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Callback> {
     if !values::is_function(value) {
         return Err(wrong(call, parameter, "a function", value));
     }
-    Ok(value)
+    Callback::new(value)
 }
 
-/// Calls `function` with positional `arguments`, through the interpreter's ordinary call path.
-unsafe fn invoke(call: &Call<'_>, function: Sexp, arguments: &[Sexp]) -> R<Sexp> {
-    let arguments: Vec<Arg> = arguments
+/// A function the library calls back, checked once per library call. A closure whose formals
+/// have no `...` binds its arguments by position, which skips argument matching on every item.
+#[derive(Clone, Copy)]
+struct Callback {
+    function: Sexp,
+    /// The number of formals, for a closure without `...`.
+    formals: Option<usize>,
+}
+
+impl Callback {
+    unsafe fn new(function: Sexp) -> R<Callback> {
+        if function.kind() != SexpType::Closure {
+            return Ok(Callback {
+                function,
+                formals: None,
+            });
+        }
+        let mut count = 0;
+        let mut formal = function.car();
+        while formal.kind() == SexpType::Pairlist {
+            if formal.tag() == values::symbols().dots {
+                return Ok(Callback {
+                    function,
+                    formals: None,
+                });
+            }
+            count += 1;
+            formal = formal.cdr();
+        }
+        Ok(Callback {
+            function,
+            formals: Some(count),
+        })
+    }
+}
+
+/// Calls `callback` with positional `arguments`. A closure given an argument for each formal
+/// binds them directly; anything else takes the interpreter's ordinary call path.
+///
+/// The frame's call quotes the argument values, `(f)(5)`, as the ordinary path does. Naming the
+/// formals instead, as GNU R's `FUN(X[[i]], ...)` does, would be wrong here: `sys.call()` and
+/// `match.call()` evaluate such a call in the caller's frame, where the formal names find the
+/// caller's own variables.
+unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<Sexp> {
+    let arguments: SmallVec<[Arg; 4]> = arguments
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    crate::moves::calling_back(function)?;
-    eval::apply(nil(), function, &arguments, call.env)
+    match callback.formals {
+        Some(formals) if formals == arguments.len() => {
+            let function = callback.function;
+            let mut items: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+            items.push((nil(), function));
+            items.extend(arguments.iter().map(|argument| (nil(), argument.value)));
+            let form = values::pairlist(&items, SexpType::Language)?;
+            crate::heap().root(form);
+            let env = eval::bind_arguments(form, function, &arguments, None)?;
+            let promargs = eval::args_pairlist(&arguments)?;
+            eval::run_closure(form, function, env, call.env, promargs, Entry::Unchecked)
+        }
+        _ => {
+            crate::moves::calling_back(callback.function)?;
+            eval::apply(nil(), callback.function, &arguments, call.env)
+        }
+    }
 }
 
 /// A predicate's answer, which must be `TRUE` or `FALSE`.

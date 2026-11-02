@@ -15,6 +15,7 @@ use {
         },
         inline_annotations_enabled, item_annotation_syntax, item_hir, item_syntax,
         metadata::namespace_active,
+        naming::{base_masking_family, data_argument_flags},
         package_layer,
         stubs::{QUALIFIED_ONLY_NAMESPACES, StubSources, stubs},
     },
@@ -534,6 +535,23 @@ impl Classifier<'_> {
                 }
                 if QUOTING.contains(&name) {
                     return None;
+                }
+                // A masked argument runs in an environment made from the data, so its
+                // assignments touch only that environment, as inside `local()`.
+                if let Some(leading) = base_masking_family(name)
+                    .filter(|_| package.is_none_or(|package| package == "base"))
+                {
+                    let flags = data_argument_flags(self.module, &self.module[arguments], &leading);
+                    return self.module[arguments].iter().zip(flags).find_map(
+                        |(argument, data_argument)| {
+                            let value = argument.value?;
+                            if data_argument {
+                                self.effect(value, locals)
+                            } else {
+                                self.effect(value, &mut Some(locals.clone().unwrap_or_default()))
+                            }
+                        },
+                    );
                 }
                 self.module[arguments]
                     .iter()

@@ -278,6 +278,8 @@ unsafe fn do_sockclose(call: &NativeCall<'_>) -> R<Sexp> {
 }
 
 unsafe fn register_socket(handle: platform::SocketHandle, socket: UtilsSocket) -> R<Sexp> {
+    // A socket handle is already an `i32` on Unix but a 64-bit `SOCKET` on Windows.
+    #[allow(clippy::useless_conversion)]
     let key = i32::try_from(handle).map_err(|_| error("socket handle out of range"))?;
     lock_sockets().insert(key, socket);
     scalar_integer(key)
