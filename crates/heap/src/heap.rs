@@ -211,6 +211,9 @@ pub struct GcStats {
     pub large_objects: u64,
 }
 
+/// GNU R's `MAXIDSIZE`: the longest symbol name, in bytes.
+pub const MAX_SYMBOL_BYTES: usize = 10_000;
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HeapError {
     CannotAllocate { bytes: usize },
@@ -779,7 +782,7 @@ impl Heap {
 
     /// The interned symbol named `name`, which `Rf_install` returns.
     pub unsafe fn install(&mut self, name: &[u8]) -> HeapResult<Sexp> {
-        if name.len() > 10_000 {
+        if name.len() > MAX_SYMBOL_BYTES {
             return Err(HeapError::SymbolTooLong);
         }
         if name.is_empty() {
@@ -793,6 +796,9 @@ impl Heap {
     pub unsafe fn install_char(&mut self, name: Sexp) -> HeapResult<Sexp> {
         if let Some(&symbol) = self.symbols.get(&name) {
             return Ok(symbol);
+        }
+        if name.length() as usize > MAX_SYMBOL_BYTES {
+            return Err(HeapError::SymbolTooLong);
         }
         let nil = self.known.nil;
         let symbol = self.alloc_triple(SexpType::Symbol, name, nil, nil)?;

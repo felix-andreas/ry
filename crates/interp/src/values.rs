@@ -411,7 +411,7 @@ pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
     if name != na_string()
         && name.has_gp(gp::ASCII)
         && name.has_gp(gp::CACHED)
-        && (1..=10_000).contains(&name.length())
+        && name.length() > 0
     {
         return Ok(crate::heap().install_char(name)?);
     }

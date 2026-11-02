@@ -1881,12 +1881,19 @@ unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
             if dots_env.kind() == SexpType::Environment {
                 let dots = find_var(symbols().dots, dots_env)?;
                 if dots.kind() == SexpType::Dots {
-                    for (dot_tag, dot_value) in values::pairlist_items(dots) {
-                        let code = if dot_value.kind() == SexpType::Promise {
-                            dot_value.cdr()
-                        } else {
-                            dot_value
-                        };
+                    for (index, (dot_tag, dot_value)) in
+                        values::pairlist_items(dots).into_iter().enumerate()
+                    {
+                        // GNU R's `subDots`: an argument written as a symbol or a call becomes
+                        // `..1`, `..2` and so on, which evaluate in the frame `...` belongs
+                        // to, since its expression may name variables of a frame further up.
+                        let mut code = dot_value;
+                        while code.kind() == SexpType::Promise {
+                            code = crate::bytecode::source_of_body(code.cdr());
+                        }
+                        if matches!(code.kind(), SexpType::Symbol | SexpType::Language) {
+                            code = values::install(&format!("..{}", index + 1))?;
+                        }
                         supplied.push(Arg {
                             tag: dot_tag,
                             value: code,

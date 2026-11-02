@@ -118,6 +118,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
     internal("path.expand", 1, |call| unsafe {
+        if call.arg(0).kind() != SexpType::String {
+            return Err(call.error("invalid 'path' argument"));
+        }
         map_strings(call, crate::connections::expand_path)
     }),
     internal("basename", 1, |call| unsafe {
