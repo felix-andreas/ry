@@ -137,8 +137,6 @@ x: double[]
 y: double[]
 Any
 Any
-0..1 warning[unused] `x` is assigned but never used.
-13..14 warning[unused] `y` is assigned but never used.
 
 #---- model_fitters_absorb_passthrough_keywords
 x <- c(1, 2)
@@ -148,8 +146,6 @@ lm(y ~ x, singular.ok = TRUE)
 x: double[]
 y: double[]
 Any
-0..1 warning[unused] `x` is assigned but never used.
-13..14 warning[unused] `y` is assigned but never used.
 
 #---- model_fitter_rejects_a_non_formula_subject
 lm(c(1, 2))

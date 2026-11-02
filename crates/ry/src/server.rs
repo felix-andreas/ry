@@ -12,8 +12,8 @@ use {
         check_cache,
         cli::{
             analysable_source, collect_r_files, data_file_key, document_kind, exclude_matcher,
-            project_order, project_stub_paths, read_project_stubs, scan_data_files,
-            sniff_data_file,
+            is_package_source, project_order, project_stub_paths, read_project_stubs,
+            scan_data_files, sniff_data_file,
         },
         config::{
             CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, INLINE_ANNOTATIONS_OFF,
@@ -792,12 +792,7 @@ impl Worker {
             let mut paths: Vec<PathBuf> = entries
                 .flatten()
                 .map(|entry| entry.path())
-                .filter(|path| {
-                    path.is_file()
-                        && path
-                            .extension()
-                            .is_some_and(|extension| extension == "R" || extension == "r")
-                })
+                .filter(|path| path.is_file() && is_package_source(path))
                 .collect();
             paths.sort();
             for path in paths {
@@ -1851,9 +1846,7 @@ impl Worker {
                     }
                 }
             } else if self.is_package_path(&path)
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "R" || extension == "r")
+                && is_package_source(&path)
                 && !self.open_documents.contains(&path)
             {
                 match fs::read_to_string(&path) {
@@ -1933,7 +1926,7 @@ impl Worker {
                         lsp_types::Url::from_file_path(self.workspace_root.join("R"))
                             .unwrap_or_else(|_| self.document_uri(&self.workspace_root)),
                     ),
-                    pattern: "*.[rR]".to_owned(),
+                    pattern: "*.[rRsSq]".to_owned(),
                 }),
                 kind: None,
             },

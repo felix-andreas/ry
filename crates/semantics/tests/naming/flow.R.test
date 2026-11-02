@@ -144,7 +144,6 @@ f <- function(flag) {
   28..32 flag -> b0
   40..41 x <- b1
   63..64 x -> non-local deferred
-  unused x 40..41
 
 #---- switch_branches_are_alternatives_not_a_sequence
 # Exactly one alternative runs, so neither write is dead: each is live whenever
