@@ -1319,7 +1319,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         return false;
     }
     if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
-        runtime().heap.policy_mut().stress = heap::GcStress::EveryAllocation;
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = heap::GcStress::EveryAllocation);
     }
     true
 }

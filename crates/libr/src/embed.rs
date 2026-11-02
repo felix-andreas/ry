@@ -32,11 +32,13 @@ pub extern "C" fn ry_initialize() -> c_int {
 /// allocation that exposes it.
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_set_gc_stress(enabled: c_int) {
-    runtime().heap.policy_mut().stress = if enabled != 0 {
-        GcStress::EveryAllocation
-    } else {
-        GcStress::Off
-    };
+    runtime().heap.update_policy(|policy| {
+        policy.stress = if enabled != 0 {
+            GcStress::EveryAllocation
+        } else {
+            GcStress::Off
+        }
+    });
 }
 
 #[unsafe(no_mangle)]

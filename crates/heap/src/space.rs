@@ -4,12 +4,15 @@
 //! slot is marked, whether it is allocated, and whether its object owns memory that must be
 //! released when it dies. The collector tests and sets marks, and sweeps a page, with word
 //! operations on those bitmaps, so neither marking an already-marked object nor freeing a dead
-//! one touches the object's own memory.
+//! one touches the object's own memory. Marking an object for the first time also sets its
+//! header's `OLD` bit, which the write barrier reads; the collector scans that object next, so
+//! the header is about to be in cache anyway.
 //!
-//! Allocation takes a whole bitmap word of free slots at a time: the cursor of a size class
-//! claims every free slot of the word in the allocated bitmap, then hands them out with one
-//! trailing-zero count each. A sweep first gives back the slots a cursor claimed but never handed
-//! out, so they count as free rather than as freed objects.
+//! Allocation bumps a pointer. The cursor of a size class claims a run of consecutive free slots
+//! in the allocated bitmap, which on a fresh or emptied page is the whole page, and then hands
+//! out one slot per allocation by adding the slot size to its pointer. A sweep first gives back
+//! the slots a cursor claimed but never handed out, so they count as free rather than as freed
+//! objects.
 //!
 //! Objects never move, which the C API requires, and a mark is sticky between collections, so a
 //! marked object is an old one.
@@ -100,19 +103,20 @@ pub(crate) struct Space {
 
 #[derive(Clone, Copy)]
 struct Cursor {
-    /// Claimed slots of the current word not yet handed out.
-    free: u64,
-    /// The address of the current word's first slot.
-    word_base: *mut u8,
+    /// The next slot to hand out.
+    next: *mut u8,
+    /// The end of the run of claimed free slots `next` walks through.
+    end: *mut u8,
     page: u32,
-    next_word: u32,
+    /// The slot of `page` where the search for the next run starts.
+    next_slot: u32,
 }
 
 const IDLE_CURSOR: Cursor = Cursor {
-    free: 0,
-    word_base: std::ptr::null_mut(),
+    next: std::ptr::null_mut(),
+    end: std::ptr::null_mut(),
     page: NO_PAGE,
-    next_word: 0,
+    next_slot: 0,
 };
 
 /// What a sweep found.
@@ -162,42 +166,45 @@ impl Space {
 
     /// A slot of `class`, or `None` when the reservation is exhausted. Its memory is whatever
     /// the slot last held.
-    #[inline]
+    #[inline(always)]
     pub fn allocate(&mut self, class: usize) -> Option<NonNull<u8>> {
         let cursor = &mut self.cursors[class];
-        if cursor.free != 0 {
-            let bit = cursor.free.trailing_zeros() as usize;
-            cursor.free &= cursor.free - 1;
-            // SAFETY: the claimed bit is a slot of the cursor's page.
-            return NonNull::new(unsafe { cursor.word_base.add(bit * SLOT_SIZES[class]) });
+        let slot = cursor.next;
+        if slot != cursor.end {
+            // SAFETY: `slot` is a claimed slot of the cursor's run, so the next one is at most
+            // the run's end.
+            cursor.next = unsafe { slot.add(SLOT_SIZES[class]) };
+            // SAFETY: a run lies inside a committed page, never at address zero.
+            return Some(unsafe { NonNull::new_unchecked(slot) });
         }
         self.refill(class)
     }
 
+    /// Claims the cursor's next run of free slots, moving to another page when its page has
+    /// none left, and hands out the run's first slot.
     #[cold]
+    #[inline(never)]
     fn refill(&mut self, class: usize) -> Option<NonNull<u8>> {
-        let slots = PAGE_SIZE / SLOT_SIZES[class];
-        let words = slots.div_ceil(64);
+        let slot_size = SLOT_SIZES[class];
+        let slots = PAGE_SIZE / slot_size;
         loop {
             let cursor = self.cursors[class];
             if cursor.page != NO_PAGE {
                 let page = cursor.page as usize;
-                let mut word = cursor.next_word as usize;
-                while word < words {
-                    let free = !self.allocated[page][word] & valid_slots(slots, word);
-                    word += 1;
-                    if free != 0 {
-                        self.allocated[page][word - 1] |= free;
-                        let offset = page * PAGE_SIZE + (word - 1) * 64 * SLOT_SIZES[class];
-                        self.cursors[class] = Cursor {
-                            free,
-                            // SAFETY: the offset is inside a committed page.
-                            word_base: unsafe { self.base.as_ptr().add(offset) },
-                            page: cursor.page,
-                            next_word: word as u32,
-                        };
-                        return self.allocate(class);
-                    }
+                if let Some((start, end)) =
+                    claim_run(&mut self.allocated[page], slots, cursor.next_slot as usize)
+                {
+                    // SAFETY: both offsets are inside a committed page.
+                    let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
+                    let next = unsafe { page_base.add(start * slot_size) };
+                    self.cursors[class] = Cursor {
+                        // SAFETY: the run holds at least one slot.
+                        next: unsafe { next.add(slot_size) },
+                        end: unsafe { page_base.add(end * slot_size) },
+                        page: cursor.page,
+                        next_slot: end as u32,
+                    };
+                    return NonNull::new(next);
                 }
             }
             let page = match self.available[class].pop() {
@@ -267,10 +274,11 @@ impl Space {
         }
     }
 
-    /// Marks `object` and says whether it was unmarked.
+    /// Marks `object` and says whether it was unmarked. An object marked for the first time
+    /// becomes old.
     #[inline]
     pub unsafe fn mark(&mut self, object: Sexp) -> bool {
-        match self.locate(object) {
+        let unmarked = match self.locate(object) {
             Some((page, word, bit)) => {
                 let marks = &mut self.marks[page][word];
                 let unmarked = *marks & bit == 0;
@@ -282,7 +290,13 @@ impl Space {
                 object.set_gc_bit(gc_bits::MARK, true);
                 unmarked
             },
+        };
+        // A major collection marks every live object again, so the test keeps it from storing
+        // into the header of each one that is already old.
+        if unmarked && unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
+            unsafe { object.set_gc_bit(gc_bits::OLD, true) };
         }
+        unmarked
     }
 
     /// Records that `object`, an environment in this space, owns a frame to drop when it dies.
@@ -425,17 +439,17 @@ impl Space {
     /// Gives back the slots each cursor claimed but never handed out, so the sweep neither
     /// counts them as freed objects nor reads them.
     fn release_cursors(&mut self) {
-        for cursor in &mut self.cursors {
-            if cursor.page != NO_PAGE && cursor.free != 0 {
-                let word = cursor.next_word as usize - 1;
-                if let Some(allocated) = self
-                    .allocated
-                    .get_mut(cursor.page as usize)
-                    .and_then(|bitmap| bitmap.get_mut(word))
-                {
-                    *allocated &= !cursor.free;
+        for (class, cursor) in self.cursors.iter_mut().enumerate() {
+            if cursor.page != NO_PAGE && cursor.next != cursor.end {
+                let page = cursor.page as usize;
+                let page_base = self.base.as_ptr() as usize + page * PAGE_SIZE;
+                let slot_size = SLOT_SIZES[class];
+                let from = (cursor.next as usize - page_base) / slot_size;
+                let to = (cursor.end as usize - page_base) / slot_size;
+                if let Some(allocated) = self.allocated.get_mut(page) {
+                    release_run(allocated, from, to);
                 }
-                cursor.free = 0;
+                cursor.end = cursor.next;
             }
         }
     }
@@ -502,6 +516,65 @@ unsafe fn drop_frame(object: Sexp) {
 }
 
 /// The slots of word `word` that exist in a page of `slots` slots.
+/// Finds the first run of free slots at or after `from` among a page's first `slots`, marks it
+/// allocated, and returns its slot range. A run stops at the first allocated slot, so on a page
+/// with no objects it is the whole page.
+fn claim_run(allocated: &mut Bitmap, slots: usize, from: usize) -> Option<(usize, usize)> {
+    let words = slots.div_ceil(64);
+    let mut word = from / 64;
+    let mut start = None;
+    let mut free = 0;
+    while word < words {
+        free = !allocated[word] & valid_slots(slots, word);
+        if word == from / 64 {
+            free &= u64::MAX << (from % 64);
+        }
+        if free != 0 {
+            start = Some(word * 64 + free.trailing_zeros() as usize);
+            break;
+        }
+        word += 1;
+    }
+    let start = start?;
+    let mut end = start;
+    loop {
+        let bit = end % 64;
+        let run = (free >> bit).trailing_ones() as usize;
+        allocated[end / 64] |= run_mask(bit, run);
+        end += run;
+        if bit + run < 64 || end / 64 >= words {
+            break;
+        }
+        free = !allocated[end / 64] & valid_slots(slots, end / 64);
+        if free & 1 == 0 {
+            break;
+        }
+    }
+    Some((start, end))
+}
+
+/// Clears the allocated bits of slots `from..to`.
+fn release_run(allocated: &mut Bitmap, from: usize, to: usize) {
+    let mut slot = from;
+    while slot < to {
+        let bit = slot % 64;
+        let run = (64 - bit).min(to - slot);
+        if let Some(word) = allocated.get_mut(slot / 64) {
+            *word &= !run_mask(bit, run);
+        }
+        slot += run;
+    }
+}
+
+/// `run` set bits starting at `bit`, with `bit + run <= 64`.
+fn run_mask(bit: usize, run: usize) -> u64 {
+    if run == 64 {
+        u64::MAX
+    } else {
+        ((1u64 << run) - 1) << bit
+    }
+}
+
 fn valid_slots(slots: usize, word: usize) -> u64 {
     match slots.saturating_sub(word * 64) {
         0 => 0,

@@ -152,11 +152,16 @@ unsafe fn verify(heap: &mut Heap, model: &mut Model) {
 fn run(seed: u64, steps: usize, stress: bool) {
     let mut rng = SplitMix64(seed);
     let mut heap = Heap::new();
-    heap.policy_mut().young_limit = 4096 + rng.below(64 * 1024);
-    heap.policy_mut().young_large_limit = 4096 + rng.below(256 * 1024);
-    if stress {
-        heap.policy_mut().stress = GcStress::EveryAllocation;
-    }
+    heap.update_policy(|policy| {
+        policy.young_limit = 4096 + rng.below(64 * 1024);
+        policy.young_large_limit = 4096 + rng.below(256 * 1024);
+        // Checks the barrier, and that each header's old bit agrees with its mark, before
+        // every minor collection.
+        policy.verify = true;
+        if stress {
+            policy.stress = GcStress::EveryAllocation;
+        }
+    });
     let mut model = Model {
         nodes: Vec::new(),
         roots: Vec::new(),
@@ -752,6 +757,49 @@ fn fuzz_arena_watermarks_nest() {
             }
             let encoded = Arena::encode(arena.watermark());
             assert_eq!(Arena::decode(encoded), arena.watermark());
+        }
+    }
+}
+
+#[test]
+fn bump_runs_fill_the_holes_a_collection_leaves() {
+    let mut heap = Heap::new();
+    unsafe {
+        // Frees what the heap's own start left behind, so the only holes are the test's.
+        heap.collect(Collection::Major);
+        let count = 3000;
+        let kept = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.root(kept);
+        for index in 0..count * 2 {
+            let scalar = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            scalar.slice_mut::<i32>()[0] = index as i32;
+            // Every other object dies, so the survivors leave runs of one free slot.
+            if index % 2 == 0 {
+                heap.set_element(kept, index / 2, scalar);
+            }
+        }
+        heap.collect(Collection::Minor);
+        let pages = heap.stats().pages;
+        let fresh = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.root(fresh);
+        for index in 0..count {
+            let scalar = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            scalar.slice_mut::<i32>()[0] = -(index as i32) - 1;
+            heap.set_element(fresh, index, scalar);
+        }
+        heap.collect(Collection::Minor);
+        assert_eq!(
+            heap.stats().pages,
+            pages,
+            "the holes left room for every new object"
+        );
+        for index in 0..count {
+            assert_eq!(kept.element(index).slice::<i32>(), &[(index * 2) as i32]);
+            assert_eq!(fresh.element(index).slice::<i32>(), &[-(index as i32) - 1]);
         }
     }
 }
