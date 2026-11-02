@@ -28,19 +28,19 @@ R, with the same results:
 
 | program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
 | --- | ---: | ---: | ---: | ---: |
-| array_dot | 0.261 s | 0.034 s | 0.036 s | 7.7x |
-| array_filter | 0.237 s | 0.028 s | 0.031 s | 8.5x |
-| array_map | 0.356 s | 0.049 s | 0.055 s | 7.3x |
-| array_sum | 0.140 s | 0.032 s | 0.036 s | 4.4x |
-| closures | 0.810 s | 0.447 s | 0.391 s | 1.8x |
-| drawdown | 0.309 s | 0.034 s | 0.035 s | 9.1x |
-| fib | 0.957 s | 0.010 s | 0.008 s | 95.7x |
-| log_rank | 0.107 s | 0.075 s | 0.076 s | 1.4x |
-| loop_sum | 0.249 s | 0.047 s | 0.042 s | 5.3x |
-| vasicek | 0.033 s | 0.042 s | 0.042 s | 0.8x |
-| vector_arith | 0.215 s | 0.125 s | 0.128 s | 1.7x |
+| array_dot | 0.264 s | 0.031 s | 0.032 s | 8.5x |
+| array_filter | 0.210 s | 0.028 s | 0.029 s | 7.5x |
+| array_map | 0.330 s | 0.039 s | 0.046 s | 8.5x |
+| array_sum | 0.142 s | 0.028 s | 0.029 s | 5.1x |
+| closures | 0.799 s | 0.375 s | 0.413 s | 2.1x |
+| drawdown | 0.323 s | 0.031 s | 0.032 s | 10.4x |
+| fib | 1.020 s | 0.007 s | 0.007 s | 145.7x |
+| log_rank | 0.103 s | 0.072 s | 0.071 s | 1.4x |
+| loop_sum | 0.249 s | 0.039 s | 0.039 s | 6.4x |
+| vasicek | 0.050 s | 0.026 s | 0.027 s | 1.9x |
+| vector_arith | 0.206 s | 0.165 s | 0.164 s | 1.2x |
 
-`vasicek` is still slower than GNU R, and call-heavy code that is not plain scalar arithmetic is
+Call-heavy code that is not plain scalar arithmetic, such as `log_rank` and `vector_arith`, is
 near parity. A recursive function over numbers, such as `fib`, compiles to machine code with no
 environment per call. Typed code runs as fast as untyped code, but not yet faster, because ry
 already learns from the running code what the types say. `drawdown`, `vasicek` and `log_rank` are
