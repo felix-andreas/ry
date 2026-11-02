@@ -1923,6 +1923,13 @@ impl<'a> Builder<'a> {
                     ),
                 }
             }
+            // An error it raises may run a calling handler; otherwise it only reads `src`.
+            Op::SwitchArm => self.opaque_step(
+                state,
+                Some((operand(0), Ty::Boxed)),
+                &[],
+                Effect::PureUnlessObserved,
+            ),
             Op::Ast => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
@@ -3386,7 +3393,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
         Op::Move => smallvec![operand(1)],
         Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
-        Op::MatchCondition => smallvec![operand(1)],
+        Op::MatchCondition | Op::SwitchArm => smallvec![operand(1)],
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             smallvec![operand(0)]
         }
@@ -3488,7 +3495,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::MatchCondition => {
+        Op::MatchCondition | Op::SwitchArm => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

@@ -617,7 +617,7 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
 The two corpus suites pass without a corpus and report that they skipped.
 
 These suites need a C and C++ toolchain, and GNU R for the second suite and the generator check.
-`RY_SKIP_GNU_R=1` skips the parts that need GNU R, and without it a missing R is a failure.
+The parts that need GNU R find it through the `R` on `PATH`, taking its headers from `R CMD config --cppflags` and its `Rscript` from `PATH`, so Debian's split layout and a source build both work. When no `R` is on `PATH`, or `RY_SKIP_GNU_R=1` is set, those parts print why and skip.
 
 ### The language server
 

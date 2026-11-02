@@ -15,7 +15,7 @@ use {
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
     rustc_hash::{FxHashMap, FxHashSet},
-    salsa::Durability,
+    salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{
@@ -23,7 +23,7 @@ use {
             derive_from_syntax, project_fold_shares,
         },
         metadata::{
-            OS_TYPE, PackageMetadata, attached_union, normalized_imports,
+            NamespaceFile, OS_TYPE, PackageMetadata, attached_union, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
             parse_namespace,
         },
@@ -464,89 +464,20 @@ fn analyze_project_with(
         }
     }
 
-    // Override stubs fold on top of the shipped corpus (later sources win); an
-    // unreadable one is an I/O failure.
-    let project_stubs = match read_project_stubs(root) {
-        Ok(project_stubs) => project_stubs,
-        Err((path, err)) => {
-            failures += 1;
-            error_because(
-                &format!("failed to read override stub: {}", path.display()),
-                &err,
-            );
-            Vec::new()
-        }
-    };
-    let mut stub_sources = shipped_stub_sources();
-    stub_sources.extend(
-        project_stubs
-            .iter()
-            .map(|stub| (stub.stem.clone(), stub.text.clone())),
-    );
-
-    // A one-shot check changes one input after analysis starts: the attached namespaces,
-    // known only once every file is parsed. Every other input is high durability, so a memo
-    // that never read the attached set skips verification in the revision that sets it.
     let mut db = RootDatabase::one_shot();
-    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
-        .durability(Durability::HIGH)
-        .new(&db);
-    let _: AnalysisSettings =
-        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
-            .durability(Durability::HIGH)
-            .new(&db);
-
+    let ProjectEnvironment {
+        metadata,
+        namespace_source,
+        namespace_file,
+        description_source,
+        collate,
+        project_stubs,
+        stub_problems,
+        data_files,
+        failures: environment_failures,
+    } = install_environment(&db, root, &config);
+    failures += environment_failures;
     let namespace_path = root.join("NAMESPACE");
-    let namespace_source = fs::read_to_string(&namespace_path).ok();
-    let namespace_file = namespace_source
-        .as_deref()
-        .map(parse_namespace)
-        .unwrap_or_default();
-    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
-    let dependencies = description_source
-        .as_deref()
-        .map(parse_description_dependencies)
-        .unwrap_or_default();
-    let collate = description_source
-        .as_deref()
-        .map(parse_description_collate)
-        .unwrap_or_default();
-    let metadata = PackageMetadata::builder(
-        normalized_imports(&namespace_file.imports),
-        dependencies,
-        BTreeSet::new(),
-        description_source
-            .as_deref()
-            .and_then(parse_description_package),
-        namespace_file.native_symbols,
-    )
-    .durability(Durability::HIGH)
-    .attached_durability(Durability::LOW)
-    .new(&db);
-
-    // A broken override stub silently changes what every file checks against, so
-    // its dropped declarations are reported as findings. This reads the stub library, so it
-    // must follow the metadata input: a high-durability memo computed before that input
-    // existed is never re-verified, and would keep every conditional namespace inactive.
-    let mut stub_problems = Vec::new();
-    for stub in &project_stubs {
-        let stub_text = &stub.text;
-        let stub_index = LineIndex::new(stub_text);
-        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
-            .into_iter()
-            .map(|problem| {
-                let start = stub_index.line_start(problem.line as u32);
-                let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                Diagnostic::new(
-                    TextRange::new(start.into(), end.into()),
-                    Severity::Error,
-                    "stub",
-                    problem.message,
-                )
-            })
-            .collect();
-        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
-    }
 
     let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
@@ -587,7 +518,6 @@ fn analyze_project_with(
     let _: ProjectFiles = ProjectFiles::builder(project.clone())
         .durability(Durability::HIGH)
         .new(&db);
-    let data_files = scan_data_files(root);
     // Hashing the binary and every source only pays when a record is read or written.
     let (key, contents) = match cache {
         CacheUse::ReadWrite => {
@@ -611,9 +541,6 @@ fn analyze_project_with(
         }
         CacheUse::Off => (Fingerprint::default(), Vec::new()),
     };
-    let _: DataFiles = DataFiles::builder(data_files)
-        .durability(Durability::HIGH)
-        .new(&db);
     let (paths, documents): (Vec<PathBuf>, Vec<Option<String>>) = checked
         .into_iter()
         .map(|(path, _, document)| (path, document))
@@ -687,6 +614,10 @@ fn analyze_project_with(
         Plan::Partial { previous, .. } => Some(previous),
         Plan::Fresh | Plan::Replay(_) => None,
     };
+    // Only the requested files are checked. Another file's items are still analysed where a
+    // requested file's check reaches them, but its own findings would only be thrown away, so
+    // the record keeps it as unchecked and a later run that asks about it checks it.
+    let checked = |index: usize| reported.get(index).copied().unwrap_or(false);
 
     // Everything later passes read from a tree is derived here, across all cores, so a check
     // that reaches another file never walks that file's tree on its own thread.
@@ -696,7 +627,13 @@ fn analyze_project_with(
     let mut surfaces = vec![Fingerprint::default(); files.len()];
     for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
-        derive_from_syntax(db, file, &config.lint);
+        // A file that is not checked contributes only its share of the project-wide maps.
+        if checked(index) {
+            derive_from_syntax(db, file, &config.lint);
+        } else {
+            semantics::diagnostics::warm_project_folds(db, file);
+            semantics::metadata::file_attached_namespaces(db, file);
+        }
         let root = semantics::parse(db, file).syntax_node();
         let mut tokens = FxHashSet::default();
         if want_tokens {
@@ -759,17 +696,9 @@ fn analyze_project_with(
         }
     }
     if !attached.is_empty() {
-        use salsa::Setter;
         metadata.set_attached(&mut db).to(attached.clone());
     }
 
-    // Without the cache only the requested files are checked: another file's items are still
-    // analyzed where a requested file's check reaches them, but its own findings would only be
-    // thrown away. The cache records every file's findings, so with it every stale file is checked.
-    let checked = |index: usize| match cache {
-        CacheUse::ReadWrite => true,
-        CacheUse::Off => reported.get(index).copied().unwrap_or(false),
-    };
     let checked_by_size: Vec<usize> = checked_order
         .iter()
         .copied()
@@ -801,6 +730,10 @@ fn analyze_project_with(
     if let Some(project) = ProjectFiles::try_get(&db) {
         semantics::project_interface_groups(&db.clone(), project);
     }
+    // Whether the file's findings are known, from the record or from this run.
+    let has_findings: Vec<bool> = (0..files.len())
+        .map(|index| recorded[index].is_some() || checked(index))
+        .collect();
     let mut per_file: Vec<Vec<Diagnostic>> = recorded
         .into_iter()
         .map(Option::unwrap_or_default)
@@ -867,6 +800,8 @@ fn analyze_project_with(
                     (Plan::Partial { previous, .. }, false) => {
                         previous.dependencies(index).unwrap_or_default().to_vec()
                     }
+                    // An unchecked file is stale in the next run whatever it depends on.
+                    _ if !has_findings[index] => Vec::new(),
                     _ => semantics::file_dependency_files(&db, files[index])
                         .iter()
                         .filter_map(|file| positions.get(file).copied())
@@ -881,7 +816,7 @@ fn analyze_project_with(
                         .iter()
                         .map(|&token| token.to_owned())
                         .collect(),
-                    diagnostics: &per_file[index],
+                    diagnostics: has_findings[index].then(|| per_file[index].as_slice()),
                 }
             })
             .collect();
@@ -912,6 +847,302 @@ fn analyze_project_with(
     ))
 }
 
+/// A package's analysis kept from one check to the next within a process, so a check after
+/// an edit re-derives only what the edit invalidated. A console session's reloads each check a
+/// strict package, and a fresh [`analyze_project`] would analyze all of `R/` every time.
+pub(crate) struct PackageCheck {
+    /// Every code file of `R/`, each requested, with its findings when strict mode covers it.
+    pub analysis: ProjectAnalysis,
+    /// Of the inputs besides the code files. Changing one rebuilds the analysis: they reach
+    /// every file, and they change far less often than the code.
+    environment: u64,
+    /// Override stubs that could not be read, each reported when the analysis was built.
+    environment_failures: usize,
+    metadata: PackageMetadata,
+    project: ProjectFiles,
+    collate: Vec<String>,
+    encoding: SourceEncoding,
+}
+
+/// Checks the code files of the package at `root`, as [`analyze_project`] checks `R/`, but
+/// only in the files strict mode covers. It reuses `previous` when that analyzed the same
+/// inputs besides the code files, so only what changed since is derived again.
+pub(crate) fn check_package_code(
+    previous: Option<PackageCheck>,
+    root: &Path,
+    config: &config::Config,
+) -> Result<PackageCheck, CommandError> {
+    let environment = environment_key(root, config);
+    let mut check = match previous {
+        Some(previous) if previous.environment == environment => previous,
+        _ => {
+            // Kept for edits, so the queries keep their firewalls.
+            let db = RootDatabase::default();
+            let installed = install_environment(&db, root, config);
+            let project = ProjectFiles::builder(Vec::new())
+                .durability(Durability::HIGH)
+                .new(&db);
+            let encoding =
+                SourceEncoding::of(installed.description_source.as_deref().unwrap_or_default());
+            PackageCheck {
+                analysis: ProjectAnalysis {
+                    db,
+                    files: Vec::new(),
+                    stub_problems: installed.stub_problems,
+                    namespace: None,
+                    failures: installed.failures,
+                },
+                environment,
+                environment_failures: installed.failures,
+                metadata: installed.metadata,
+                project,
+                collate: installed.collate,
+                encoding,
+            }
+        }
+    };
+    let fresh = check.analysis.files.is_empty();
+    let exclude = exclude_matcher(config, root)?;
+    let mut read = read_sources(
+        collect_r_files(&root.join("R"), exclude.as_ref())?,
+        check.encoding,
+    );
+    {
+        let order = project_order(root, &check.collate);
+        read.sort_by_cached_key(|(path, _)| order(path));
+    }
+    let known: FxHashMap<PathBuf, SourceFile> = check
+        .analysis
+        .files
+        .drain(..)
+        .map(|analyzed| (analyzed.path, analyzed.file))
+        .collect();
+    let db = &mut check.analysis.db;
+    let mut failures = 0;
+    let mut files = Vec::with_capacity(read.len());
+    for (path, read) in read {
+        let text = match read {
+            Ok((text, _)) => text,
+            Err(err) => {
+                failures += 1;
+                error_because(&format!("failed to read: {}", path.display()), &err);
+                continue;
+            }
+        };
+        let file = match known.get(&path) {
+            Some(&file) => {
+                if file.text(db) != text.as_str() {
+                    file.set_text(db).with_durability(Durability::LOW).to(text);
+                }
+                file
+            }
+            // A file that joins later is edited like any other; the first ones stay high
+            // until edited, so a memo that reads only them skips verification.
+            None => SourceFile::builder(text, document_kind(&path, root))
+                .durability(if fresh {
+                    Durability::HIGH
+                } else {
+                    Durability::LOW
+                })
+                .new(db),
+        };
+        files.push(AnalyzedFile {
+            path,
+            file,
+            requested: true,
+            diagnostics: Vec::new(),
+            document: None,
+        });
+    }
+    let source_files: Vec<SourceFile> = files.iter().map(|analyzed| analyzed.file).collect();
+    let attached = attached_union(db, source_files.iter().copied());
+    if check.project.files(db) != &source_files {
+        check
+            .project
+            .set_files(db)
+            .with_durability(Durability::HIGH)
+            .to(source_files);
+    }
+    if check.metadata.attached(db) != &attached {
+        check.metadata.set_attached(db).to(attached);
+    }
+    let db = &check.analysis.db;
+    let strict: Vec<usize> = (0..files.len())
+        .filter(|&index| semantics::file_is_strict(db, files[index].file))
+        .collect();
+    let workers = thread::available_parallelism()
+        .map(NonZero::get)
+        .unwrap_or(1)
+        .min(files.len().max(1));
+    if fresh {
+        // As in `analyze_project_with`: deriving every file's syntax facts, names and
+        // interface edges across cores first keeps the checks below from walking other
+        // files' trees on their own threads, or blocking on one another's claims.
+        let every: Vec<usize> = (0..files.len()).collect();
+        in_parallel(db, workers, &every, |db, index| {
+            derive_from_syntax(db, files[index].file, &config.lint);
+            let items = semantics::item_tree(db, files[index].file);
+            for &item in items {
+                semantics::item_naming(db, item);
+            }
+            for &item in items {
+                semantics::item_interface_edges(db, item);
+            }
+        });
+        semantics::project_interface_groups(&db.clone(), check.project);
+    }
+    for (index, diagnostics) in in_parallel(db, workers, &strict, |db, index| {
+        let file = files[index].file;
+        apply_suppressions(document_diagnostics(db, file, config), file.text(db))
+    }) {
+        files[index].diagnostics = diagnostics;
+    }
+    check.analysis.files = files;
+    check.analysis.failures = check.environment_failures + failures;
+    Ok(check)
+}
+
+/// Hashes what [`install_environment`] reads, so a check can tell whether a kept analysis
+/// still describes the package.
+fn environment_key(root: &Path, config: &config::Config) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    format!("{config:?}").hash(&mut hasher);
+    for name in ["DESCRIPTION", "NAMESPACE"] {
+        fs::read(root.join(name)).ok().hash(&mut hasher);
+    }
+    for (path, stem) in project_stub_paths(root) {
+        stem.hash(&mut hasher);
+        fs::read(&path).ok().hash(&mut hasher);
+    }
+    format!("{:?}", scan_data_files(root)).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The inputs of a project's analysis besides its R files, as [`install_environment`] read
+/// them.
+struct ProjectEnvironment {
+    metadata: PackageMetadata,
+    namespace_source: Option<String>,
+    namespace_file: NamespaceFile,
+    description_source: Option<String>,
+    collate: Vec<String>,
+    project_stubs: Vec<ProjectStub>,
+    /// A broken override stub's dropped declarations: its path, text and findings.
+    stub_problems: Vec<(PathBuf, String, Vec<Diagnostic>)>,
+    data_files: BTreeMap<String, sniff::Layout>,
+    /// Override stubs that could not be read, each already reported.
+    failures: usize,
+}
+
+/// Reads the inputs of the project at `root` besides its R files (stubs, settings,
+/// `DESCRIPTION`, `NAMESPACE` and data files) into `db`, which holds no inputs yet.
+fn install_environment(
+    db: &RootDatabase,
+    root: &Path,
+    config: &config::Config,
+) -> ProjectEnvironment {
+    let mut failures = 0;
+    // Override stubs fold on top of the shipped corpus (later sources win); an
+    // unreadable one is an I/O failure.
+    let project_stubs = match read_project_stubs(root) {
+        Ok(project_stubs) => project_stubs,
+        Err((path, err)) => {
+            failures += 1;
+            error_because(
+                &format!("failed to read override stub: {}", path.display()),
+                &err,
+            );
+            Vec::new()
+        }
+    };
+    let mut stub_sources = shipped_stub_sources();
+    stub_sources.extend(
+        project_stubs
+            .iter()
+            .map(|stub| (stub.stem.clone(), stub.text.clone())),
+    );
+
+    // A one-shot check changes one input after analysis starts: the attached namespaces,
+    // known only once every file is parsed. Every other input is high durability, so a memo
+    // that never read the attached set skips verification in the revision that sets it.
+    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
+        .durability(Durability::HIGH)
+        .new(db);
+    let _: AnalysisSettings =
+        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
+            .durability(Durability::HIGH)
+            .new(db);
+
+    let namespace_path = root.join("NAMESPACE");
+    let namespace_source = fs::read_to_string(&namespace_path).ok();
+    let namespace_file = namespace_source
+        .as_deref()
+        .map(parse_namespace)
+        .unwrap_or_default();
+    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
+    let dependencies = description_source
+        .as_deref()
+        .map(parse_description_dependencies)
+        .unwrap_or_default();
+    let collate = description_source
+        .as_deref()
+        .map(parse_description_collate)
+        .unwrap_or_default();
+    let metadata = PackageMetadata::builder(
+        normalized_imports(&namespace_file.imports),
+        dependencies,
+        BTreeSet::new(),
+        description_source
+            .as_deref()
+            .and_then(parse_description_package),
+        namespace_file.native_symbols.clone(),
+    )
+    .durability(Durability::HIGH)
+    .attached_durability(Durability::LOW)
+    .new(db);
+
+    // A broken override stub silently changes what every file checks against, so
+    // its dropped declarations are reported as findings. This reads the stub library, so it
+    // must follow the metadata input: a high-durability memo computed before that input
+    // existed is never re-verified, and would keep every conditional namespace inactive.
+    let mut stub_problems = Vec::new();
+    for stub in &project_stubs {
+        let stub_text = &stub.text;
+        let stub_index = LineIndex::new(stub_text);
+        let problems: Vec<Diagnostic> = stub_source_problems(db, stub_text)
+            .into_iter()
+            .map(|problem| {
+                let start = stub_index.line_start(problem.line as u32);
+                let end = start + stub_index.line_length(problem.line as u32, stub_text);
+                Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    Severity::Error,
+                    "stub",
+                    problem.message,
+                )
+            })
+            .collect();
+        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
+    }
+
+    let data_files = scan_data_files(root);
+    let _: DataFiles = DataFiles::builder(data_files.clone())
+        .durability(Durability::HIGH)
+        .new(db);
+    ProjectEnvironment {
+        metadata,
+        namespace_source,
+        namespace_file,
+        description_source,
+        collate,
+        project_stubs,
+        stub_problems,
+        data_files,
+        failures,
+    }
+}
+
 fn analyzed_files(
     paths: Vec<PathBuf>,
     documents: Vec<Option<String>>,
@@ -937,19 +1168,22 @@ fn analyzed_files(
         .collect()
 }
 
+/// A file's R source and, for a literate document, the document text it was extracted from.
+type DecodedSource = (String, Option<String>);
+
 /// Reads every source across cores, in `paths` order. A cold check reads a thousand files
 /// before anything else can start, so a serial read is a visible slice of its wall time. Each
 /// file is decoded in `encoding`, the package's declared one, as R reads its code.
 fn read_sources(
     paths: Vec<PathBuf>,
     encoding: SourceEncoding,
-) -> Vec<(PathBuf, io::Result<(String, Option<String>)>)> {
+) -> Vec<(PathBuf, io::Result<DecodedSource>)> {
     let workers = thread::available_parallelism()
         .map_or(1, usize::from)
         .min(paths.len())
         .max(1);
     let chunk = paths.len().div_ceil(workers).max(1);
-    let read: Vec<io::Result<(String, Option<String>)>> = thread::scope(|scope| {
+    let read: Vec<io::Result<DecodedSource>> = thread::scope(|scope| {
         let handles: Vec<_> = paths
             .chunks(chunk)
             .map(|chunk| {
@@ -2272,6 +2506,37 @@ fn format_file(
         elapsed,
         write_error,
     }
+}
+
+/// Rewrites each file as its erasure, the same program `ry R` runs. A file with a syntax error is
+/// refused, because its erasure would be a guess at what the broken code means.
+pub fn erase(paths: &[PathBuf]) -> Result<(), CommandError> {
+    let mut failed = false;
+    for path in paths {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => {
+                error(&format!("{}: {err}", path.display()));
+                failed = true;
+                continue;
+            }
+        };
+        let parse = syntax::parse(&text);
+        if let Some(syntax_error) = parse.errors().first() {
+            error(&format!(
+                "{}: not erased, it has a syntax error: {}",
+                path.display(),
+                syntax_error.message
+            ));
+            failed = true;
+            continue;
+        }
+        if let Err(err) = fs::write(path, syntax::erase_inline_annotations(&parse)) {
+            error(&format!("{}: {err}", path.display()));
+            failed = true;
+        }
+    }
+    if failed { Err(CommandError) } else { Ok(()) }
 }
 
 pub fn ast(path: &Path) -> Result<(), CommandError> {

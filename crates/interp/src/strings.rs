@@ -223,6 +223,24 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
     let counts = values::ints_mut(result);
     for (index, slot) in counts.iter_mut().enumerate() {
         let charsxp = text.element(index);
+        if count_type != CountType::Bytes
+            && charsxp.has_gp(gp::BYTES)
+            && !charsxp.bytes().is_ascii()
+        {
+            if !allow_na {
+                let what = if count_type == CountType::Chars {
+                    "number of characters"
+                } else {
+                    "width"
+                };
+                return Err(error(format!(
+                    "{what} is not computable in \"bytes\" encoding, element {}",
+                    index + 1
+                )));
+            }
+            *slot = NA_INTEGER;
+            continue;
+        }
         let invalid = count_type != CountType::Bytes
             && !charsxp.has_gp(gp::LATIN1)
             && std::str::from_utf8(charsxp.bytes()).is_err();
@@ -288,6 +306,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
         if starts.is_empty() || stops.is_empty() {
             return Err(error("invalid substring arguments"));
         }
+        let mut memo = values::StringMemo::default();
         for index in 0..count {
             let start = starts[index % starts.len()];
             let stop = stops[index % stops.len()];
@@ -304,7 +323,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
                 if first == 0 && last == bytes.len() {
                     set_elt(result, index, charsxp);
                 } else {
-                    values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Native)?;
+                    set_elt(result, index, memo.mk_char(&bytes[first..last])?);
                 }
                 continue;
             }
@@ -547,6 +566,10 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     let formats = call.arg(0);
     if formats.kind() != SexpType::String {
         return Err(error("'fmt' is not a character vector"));
+    }
+    values::refuse_bytes(formats)?;
+    for arg in call.args.iter().skip(1) {
+        values::refuse_bytes(arg.value)?;
     }
     let mut arguments = Vec::with_capacity(call.len().saturating_sub(1));
     for (position, arg) in call.args.iter().enumerate().skip(1) {
@@ -1182,6 +1205,16 @@ unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
     if all_ascii(x) {
         return change_ascii_case(x, upper);
     }
+    values::refuse_bytes(x)?;
+    for index in 0..length(x) {
+        let charsxp = x.element(index);
+        if charsxp != na_string()
+            && !charsxp.has_gp(gp::LATIN1)
+            && std::str::from_utf8(charsxp.bytes()).is_err()
+        {
+            return Err(error(format!("invalid multibyte string {}", index + 1)));
+        }
+    }
     map_strings(x, |text| {
         Some(
             text.chars()
@@ -1258,6 +1291,7 @@ unsafe fn do_chartr(call: &Call<'_>) -> R<Sexp> {
     if x.kind() != SexpType::String {
         return Err(error("invalid 'x' argument"));
     }
+    values::refuse_bytes(x)?;
     map_strings(x, |text| {
         Some(
             text.chars()
@@ -1495,6 +1529,7 @@ unsafe fn do_make_names(call: &Call<'_>) -> R<Sexp> {
         return Err(error("invalid 'allow_' value"));
     }
     let allow_underscore = allow_underscore == 1;
+    values::refuse_bytes(names)?;
     let made: Vec<String> = strings(names)
         .into_iter()
         .map(|name| {
@@ -1576,6 +1611,7 @@ unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
         return Err(error("invalid 'minlength' argument"));
     }
     let use_classes = flag(call.arg(2));
+    values::refuse_bytes(x)?;
     let mut warned = false;
     let count = length(x);
     let result = alloc(SexpType::String, count)?;
@@ -2986,13 +3022,9 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 atom = None;
             }
             '*' | '+' | '?' => match atom {
-                // POSIX takes a repetition operator with nothing to repeat literally.
-                None => {
-                    output.push('\\');
-                    output.push(character);
-                    atom = Some(start);
-                    quantified = false;
-                }
+                // TRE drops a repetition operator with nothing to repeat, at the start of the
+                // pattern or right after `(`, `|` or `^`: `grepl("+ab", "xab")` is `TRUE`.
+                None => {}
                 Some(_) => {
                     output.push(character);
                     quantified = true;

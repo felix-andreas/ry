@@ -7,8 +7,8 @@ use {
             statement_inline_site,
         },
         check::{
-            ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError,
-            TypeErrorKind, column_element,
+            ExpressionNeeds, ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind,
+            TypeError, TypeErrorKind, column_element,
         },
         comment_annotation,
         exhaustiveness::{MatchFinding, MatchFindingKind},
@@ -37,7 +37,7 @@ use {
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
-        paired_comment_definition,
+        node_text, paired_comment_definition,
     },
 };
 
@@ -330,10 +330,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let sites = file_syntax_sites(db, file);
     // Only a sequence with an annotation among its statements can hold a dangling one.
     let sequences = sites.nodes(&root, SiteRole::AnnotatedSequence);
-    for (node, target) in sequences
-        .iter()
-        .flat_map(|parent| statement_annotations(parent))
-    {
+    for (node, target) in sequences.iter().flat_map(statement_annotations) {
         let Some(annotation) = comment_annotation(db, file, &node) else {
             continue;
         };
@@ -636,7 +633,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 db,
                 context.get_or_init(|| read_context(db, file)),
                 item_index,
-                &check,
+                check,
                 naming,
                 expression,
                 *name,
@@ -712,7 +709,7 @@ fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId,
                 .iter()
                 .filter_map(|(expression, name)| {
                     let read = classify_non_local_read(
-                        db, &context, item_index, &check, naming, expression, *name,
+                        db, &context, item_index, check, naming, expression, *name,
                     );
                     (read != NonLocalRead::Resolvable).then_some((*expression, read))
                 })
@@ -1321,7 +1318,7 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
         };
         let governing = match coercion(&lower_inline_annotation(db, &site)) {
             Some(directive) => Some(("inline annotation's", directive)),
-            None => coercion(&lowered_comment).map(|directive| ("comment's", directive)),
+            None => coercion(lowered_comment).map(|directive| ("comment's", directive)),
         };
         for inline in inline_slots(db, &site) {
             let Some(written) = comment_slots.iter().find(|slot| slot.slot == inline.slot) else {
@@ -1468,7 +1465,7 @@ fn definition_agreement_candidates<'db>(
                         .children()
                         .filter(|word| word.kind() == SyntaxKind::NAME)
                         .skip(1)
-                        .map(|word| word.text().to_string())
+                        .map(|word| node_text(&word).into_owned())
                         .collect::<Vec<_>>()
                         .join(" ");
                     (spelling, binder.text_range())
@@ -1532,7 +1529,7 @@ fn definition_agreement_candidates<'db>(
 fn positional_binders<'db>(
     db: &'db dyn Db,
     binders: &[(Name<'db>, Constraint)],
-) -> FxHashMap<Name<'db>, Ty<'db>> {
+) -> Vec<(Name<'db>, Ty<'db>)> {
     binders
         .iter()
         .enumerate()
@@ -2924,6 +2921,35 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::HeadInsideExpression { column } => format!(
             "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
+        ),
+        TypeErrorKind::ExpressionOperand {
+            operation,
+            column,
+            needs,
+            found,
+        } => {
+            let needs = match needs {
+                ExpressionNeeds::Numbers => "needs numbers",
+                ExpressionNeeds::LogicalOrNumbers => "needs logical values or numbers",
+                ExpressionNeeds::Logical => "needs a `logical` test",
+            };
+            let subject = match column {
+                Some(column) => format!("the column `{column}`"),
+                None => "this operand".to_owned(),
+            };
+            format!(
+                "`{operation}` {needs}, but {subject} is `{}`",
+                renderer.render(db, *found)
+            )
+        }
+        TypeErrorKind::ExpressionComparison {
+            operator,
+            left,
+            right,
+        } => format!(
+            "`{operator}` compares `{}` with `{}`, text with a number, which almost always means the wrong column",
+            renderer.render(db, *left),
+            renderer.render(db, *right)
         ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",

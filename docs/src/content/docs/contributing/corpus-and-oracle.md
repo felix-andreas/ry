@@ -105,7 +105,9 @@ killed. `ORACLE_RY` picks the ry binary; copy it, with `libR.so` beside it, to a
 first if you rebuild while a long run is going.
 
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
-measures the container, not ry. `MEMORY.md` records the current rate.
+measures the container, not ry. With the packages ry installed itself, ry passes 135 of the 164
+that GNU R passes (82.3%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
+`MEMORY.md` records the current rate.
 
 ## Installing on ry
 
@@ -180,17 +182,13 @@ just bench-test .bench/finbench
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
-count (by default one file per 600 lines). `--typed` keeps the templates' `#:` annotations and
-turns on strict mode in the generated `ry.toml`, so the package doubles as a strict-mode dogfood
-corpus; without it the annotations are stripped and the package is plain R. The line target counts
-code without annotations, so a typed and an untyped run with the same seed generate the same program. `--only` limits
+count (by default one file per 600 lines). The templates are written with inline annotations.
+`--typed` keeps them and turns on strict mode in the generated `ry.toml`, so the package doubles as
+a strict-mode dogfood corpus and ry's runtime checks and compiles its typed functions. Without it,
+the generator erases the package with `ry debug erase` (so `target/release/ry` must exist, or pass
+`--ry`), which gives plain R. Both runs count the same text toward the line target, so a typed and
+an untyped run with the same seed generate the same program. Where a record or a tag union models the data better than S4, R6 or a named list, a template keeps both versions in `#@ typed` and `#@ untyped` blocks, so the typed program uses ry's own data types while the untyped one stays plain R (the finance `ledger`, data-science `readings` and biostatistics `followup` templates model their data as tags, tuples and records this way); the templates' `README.md` has the details. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
-
-A template can also differ between the two programs. A run of `#:= CODE` lines replaces, line for
-line, the lines right after it in the typed program, and the untyped program drops them like any
-other `#:` line. The finance `ledger`, data-science `readings` and biostatistics `followup` templates use this to model
-their data as tags, tuples and records when typed and as `list(kind = ...)` when untyped, so both
-programs compute the same results from the same instances.
 
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is

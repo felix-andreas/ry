@@ -6,14 +6,14 @@ use {
     crate::{
         check_cache::CacheUse,
         cli::{
-            self, CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote,
-            analyze_project, collect_r_files, exclude_matcher, project_stub_paths, render_findings,
-            report, scan_data_files, warn_config,
+            CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis, RelatedNote,
+            analyze_project, check_package_code, render_findings, report, warn_config,
         },
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
     },
     repl::{Filtered, InputFilter},
+    rustc_hash::FxHashMap,
     salsa::Setter,
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -21,12 +21,10 @@ use {
         stubs::install_shipped_stubs,
     },
     std::{
-        env, fs,
-        hash::{DefaultHasher, Hash, Hasher},
-        io,
+        fs,
         path::{Path, PathBuf},
+        sync::{LazyLock, Mutex, PoisonError},
         thread,
-        time::UNIX_EPOCH,
     },
     syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation},
 };
@@ -154,10 +152,13 @@ impl Preflight {
 }
 
 /// Enforces strict mode on the package `ry load` is about to load, on either runtime, because
-/// strict mode is a property of the code. Its `R/` files are checked together, so a name
-/// another file defines resolves, and alone: a load sources nothing else, so a name only a
-/// test file defines is unbound in the loaded package. A package that turns strict mode on
-/// nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips analysis entirely.
+/// strict mode is a property of the code. The check is `ry check`'s analysis of the project
+/// asked about `R/` alone, so its verdict is the one `ry check` reaches for those files, and
+/// the two share the check cache: a package that `ry check` or the editor last checked loads
+/// without a second analysis. A reload in the same process keeps the analysis it builds in
+/// [`PACKAGE_CHECKS`] and re-derives only what the edit invalidated. A package that turns
+/// strict mode on nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips
+/// analysis entirely.
 pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
     let sources = root.join("R");
     // The directive is ASCII, so the bytes answer for a file in any encoding.
@@ -177,27 +178,34 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     {
         return Ok(Verdict::Run);
     }
-    // A package that passed unchanged loads again without a second analysis, because the
-    // check is a function of these inputs and the ry binary alone.
-    let record = strict_fingerprint(root, config)?.zip(verdict_record(root));
-    if let Some((fingerprint, record)) = &record
-        && fs::read_to_string(record).is_ok_and(|stored| stored == *fingerprint)
-    {
-        return Ok(Verdict::Run);
-    }
-    let analysis = thread::scope(|scope| {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut checks = PACKAGE_CHECKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // The first check in a process reads the shared record, which makes a cold load after
+    // `ry check` or the editor cheap, but its database replays findings it never derived. A
+    // reload builds a database kept for edits instead, so every reload after it is incremental.
+    let first = !checks.contains_key(&key);
+    let previous = checks.remove(&key).flatten();
+    let check = thread::scope(|scope| {
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn_scoped(scope, || {
-                let analysis = analyze_project(
-                    root,
-                    &sources,
-                    config.clone(),
-                    std::slice::from_ref(&sources),
-                    CacheUse::Off,
-                )?;
-                let errors = strict_errors(&analysis);
-                Ok::<_, CommandError>((analysis, errors))
+                if first {
+                    let analysis = analyze_project(
+                        root,
+                        root,
+                        config.clone(),
+                        std::slice::from_ref(&sources),
+                        CacheUse::ReadWrite,
+                    )?;
+                    let errors = strict_errors(&analysis);
+                    Ok::<_, CommandError>(Checked::Recorded(analysis, errors))
+                } else {
+                    let check = check_package_code(previous, root, config)?;
+                    let errors = strict_errors(&check.analysis);
+                    Ok(Checked::Kept(check, errors))
+                }
             });
         match worker {
             Ok(handle) => handle
@@ -205,15 +213,18 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
             Err(error) => panic!("the preflight thread should spawn: {error}"),
         }
-    });
-    let (analysis, errors) = analysis?;
+    })?;
+    let (analysis, errors) = match &check {
+        Checked::Recorded(analysis, errors) => (analysis, errors),
+        Checked::Kept(check, errors) => (&check.analysis, errors),
+    };
     // A file the analysis could not read went unchecked, and it has said which.
     if analysis.failures > 0 {
         return Err(CommandError);
     }
     let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
     let mut problems = 0;
-    for (file, errors) in analysis.files.iter().zip(&errors) {
+    for (file, errors) in analysis.files.iter().zip(errors) {
         problems += render_findings(
             OutputFormat::Human,
             MinSeverity::Warning,
@@ -223,105 +234,31 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             &resolve_note,
         );
     }
+    checks.insert(
+        key,
+        match check {
+            Checked::Recorded(..) => None,
+            Checked::Kept(check, _) => Some(check),
+        },
+    );
+    drop(checks);
     if problems == 0 {
-        // A file saved while the analysis ran would leave the earlier contents marked clean
-        // although the analysis judged the later ones, so the verdict is kept only when the
-        // inputs still hash the same afterwards.
-        if let Some((fingerprint, record)) = record
-            && strict_fingerprint(root, config)?.as_ref() == Some(&fingerprint)
-        {
-            remember_clean(&record, &fingerprint);
-        }
         return Ok(Verdict::Run);
     }
     refuse(problems);
     Ok(Verdict::Refuse)
 }
 
-/// Hashes everything the strict check reads: the ry binary, the configuration, every R file
-/// in `R/`, the override stubs, the package metadata and the data files.
-/// Two independently seeded hashes give 128 bits, so a stale verdict needs a real collision.
-fn strict_fingerprint(root: &Path, config: &Config) -> Result<Option<String>, CommandError> {
-    let mut low = DefaultHasher::new();
-    let mut high = DefaultHasher::new();
-    "ry strict verdict, low".hash(&mut low);
-    "ry strict verdict, high".hash(&mut high);
-    let mut feed = |bytes: &[u8]| {
-        bytes.len().hash(&mut low);
-        low.write(bytes);
-        bytes.len().hash(&mut high);
-        high.write(bytes);
-    };
-    // Without a binary identity a verdict could outlive the ry that reached it, so none is kept.
-    let Ok(binary) = env::current_exe() else {
-        return Ok(None);
-    };
-    let Ok(metadata) = fs::metadata(&binary) else {
-        return Ok(None);
-    };
-    feed(binary.as_os_str().as_encoded_bytes());
-    feed(&metadata.len().to_le_bytes());
-    let Some(modified) = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-    else {
-        return Ok(None);
-    };
-    feed(&modified.as_nanos().to_le_bytes());
-    feed(env!("CARGO_PKG_VERSION").as_bytes());
-    feed(format!("{config:?}").as_bytes());
-    let exclude = exclude_matcher(config, root)?;
-    // An input that cannot be read cannot be fingerprinted, so that load keeps no verdict; the
-    // analysis itself reports the unreadable file.
-    for path in collect_r_files(&root.join("R"), exclude.as_ref())? {
-        let Ok(contents) = fs::read(&path) else {
-            return Ok(None);
-        };
-        feed(path.as_os_str().as_encoded_bytes());
-        feed(&contents);
-    }
-    for (path, stem) in project_stub_paths(root) {
-        let Ok(contents) = fs::read(&path) else {
-            return Ok(None);
-        };
-        feed(stem.as_bytes());
-        feed(&contents);
-    }
-    for name in ["DESCRIPTION", "NAMESPACE"] {
-        match fs::read(root.join(name)) {
-            Ok(contents) => feed(&contents),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => feed(b"absent"),
-            Err(_) => return Ok(None),
-        }
-    }
-    feed(format!("{:?}", scan_data_files(root)).as_bytes());
-    Ok(Some(format!("{:016x}{:016x}", low.finish(), high.finish())))
-}
+/// Each package's analysis from its last strict check in this process, by canonical root:
+/// `None` after a first check that read the shared record, and the database kept for edits
+/// after any later one.
+static PACKAGE_CHECKS: LazyLock<Mutex<FxHashMap<PathBuf, Option<PackageCheck>>>> =
+    LazyLock::new(Mutex::default);
 
-/// Where the last clean verdict for the package at `root` is kept: one small file per package
-/// in the user's cache directory, so the cache never grows with the number of edits.
-fn verdict_record(root: &Path) -> Option<PathBuf> {
-    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let mut hasher = DefaultHasher::new();
-    root.hash(&mut hasher);
-    let directory = dirs::cache_dir()?.join("ry").join("strict");
-    Some(directory.join(format!("{:016x}", hasher.finish())))
-}
-
-/// A verdict that cannot be stored only costs the next load a fresh check, so failing to store
-/// it is reported and otherwise ignored.
-fn remember_clean(record: &Path, fingerprint: &str) {
-    let stored = record
-        .parent()
-        .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| fs::write(record, fingerprint));
-    if let Err(error) = stored {
-        cli::warn(&format!(
-            "cannot remember the strict check of this package in {}: {error}",
-            record.display()
-        ));
-    }
+/// A strict check's analysis and each file's strict-mode errors.
+enum Checked {
+    Recorded(ProjectAnalysis, Vec<Vec<Diagnostic>>),
+    Kept(PackageCheck, Vec<Vec<Diagnostic>>),
 }
 
 /// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does
@@ -331,7 +268,12 @@ fn strict_errors(analysis: &ProjectAnalysis) -> Vec<Vec<Diagnostic>> {
         .files
         .iter()
         .map(|file| {
-            if !file.requested || !semantics::file_is_strict(&analysis.db, file.file) {
+            // Findings replayed from the record leave the file unparsed, so whether it is
+            // strict is asked only of a file that has an error.
+            if !file.requested
+                || !file.diagnostics.iter().any(is_strict_error)
+                || !semantics::file_is_strict(&analysis.db, file.file)
+            {
                 return Vec::new();
             }
             file.diagnostics

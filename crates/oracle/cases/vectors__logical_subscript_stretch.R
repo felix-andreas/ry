@@ -1,0 +1,17 @@
+# A logical subscript longer than the vector stretches it on assignment, even where the
+# extra elements are FALSE, and rank(ties.method = "first") relies on that.
+y <- NA; y[c(TRUE, TRUE, FALSE, TRUE, FALSE)] <- 1:3; print(y)
+y <- 1:2; y[c(TRUE, FALSE, FALSE, FALSE)] <- 9L; print(y)
+y <- 1:2; y[c(FALSE, FALSE, FALSE)] <- 9L; print(y)
+l <- list(1); l[c(FALSE, TRUE, FALSE)] <- list(2); str(l)
+y <- c(a=1); y[c(TRUE, FALSE, FALSE)] <- 5; print(y)
+y <- 1:3; y[c(TRUE, NA, FALSE, FALSE)] <- 0L; print(y)
+print(rank(c(2, 1, NA, 2, NaN), ties.method = "first"))
+print(rank(c(2, 1, NA, 2, NaN), ties.method = "last"))
+print(rank(c(2, 1, NA, 2, NaN), ties.method = "random") > 0)
+print(rank(c(b = 3, a = 1, c = 3), ties.method = "first"))
+x <- list(1,2); x[c(FALSE,FALSE,FALSE)] <- NULL; str(x)
+x <- list(a=1,b=2); x[c(TRUE,FALSE,FALSE,FALSE)] <- NULL; str(x)
+x <- list(1,2); x[5] <- NULL; str(x)
+x <- list(a=1,b=2); x[c(FALSE,TRUE,NA)] <- NULL; str(x)
+x <- list(1,2); x[c(FALSE,FALSE,FALSE,TRUE)] <- NULL; str(x)

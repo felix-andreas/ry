@@ -24,9 +24,9 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        GreenEvent, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
-        ast::{self, BinaryExpr, is_expression_kind},
-        matching_nodes, paired_comment_definition,
+        GreenEvent, GreenNodeAt, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ast::{is_expression_kind, name_text},
+        matching_nodes, node_text, paired_comment_definition,
     },
     thin_vec::ThinVec,
 };
@@ -1484,7 +1484,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder(db, item, types::Name::new(db, &name), deferred),
+            None => frame_binder(db, item, types::Name::new(db, name), deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -2180,7 +2180,7 @@ struct SalsaGlobals<'db, 'a> {
     // A body reads the same few globals many times, and each salsa read pays for interning
     // its key and verifying the memo, so a check looks each one up once.
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
-    item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
+    item_frame_binders: OnceCell<&'db ItemFrameBinders<'db>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
     package_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
     test_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
@@ -2330,11 +2330,11 @@ fn frame_binder<'db>(
 /// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
 /// which interned a key and kept a memo, and its value still changes only when a binder of
 /// one of the item's own names does.
+/// Each symbol bound in an item's frame, with its immediate and deferred binders.
+type ItemFrameBinders<'db> = FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
+
 #[salsa::tracked(returns(ref))]
-fn item_frame_binders<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-) -> FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)> {
+fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders<'db> {
     let mut binders = FxHashMap::default();
     let Some(naming) = item_naming(db, item) else {
         return binders;
@@ -2725,28 +2725,40 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     if node.kind() != SyntaxKind::BINARY_EXPR {
         return None;
     }
-    let binary = BinaryExpr::cast(node.clone())?;
-    let operator = binary.operator()?;
-    let (lhs, rhs) = (binary.lhs(), binary.rhs());
+    // Read off the green tree: this runs on every top-level statement of every file, and each
+    // red child is an allocation.
+    let green = node.green();
+    let binary = GreenNodeAt::new(&green, node.text_range().start());
+    let mut operator = None;
+    let mut operands = binary
+        .child_nodes()
+        .filter(|child| is_expression_kind(child.kind()));
+    let (lhs, rhs) = (operands.next(), operands.next());
+    for child in binary.child_tokens() {
+        if !child.kind.is_trivia() {
+            operator = Some(child.kind);
+            break;
+        }
+    }
     // `:=` binds nothing: R calls a function of that name (data.table, rlang).
-    let (target, value) = match operator.kind() {
+    let (target, value) = match operator? {
         SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => (lhs, rhs),
         SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (rhs, lhs),
         _ => return None,
     };
     let target = target?;
-    let name = ast::Name::cast(target.clone())
-        .and_then(|name| name.text())
-        .or_else(|| {
-            (target.kind() == SyntaxKind::LITERAL
-                && target
-                    .first_token()
-                    .is_some_and(|t| t.kind() == SyntaxKind::STRING))
-            .then(|| {
-                let text = target.text().to_string();
-                text.trim_matches(['"', '\'']).to_owned()
-            })
-        })?;
+    let name = match target.kind() {
+        SyntaxKind::NAME => name_text(target.first_token()?.text).into_owned(),
+        SyntaxKind::LITERAL
+            if target
+                .first_token()
+                .is_some_and(|token| token.kind == SyntaxKind::STRING) =>
+        {
+            let text: String = target.child_tokens().map(|token| token.text).collect();
+            text.trim_matches(['"', '\'']).to_owned()
+        }
+        _ => return None,
+    };
     let kind = match value.map(|value| value.kind()) {
         Some(SyntaxKind::FUNCTION_DEF) => ItemKind::Function,
         _ => ItemKind::Value,
@@ -2754,7 +2766,7 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     Some(TopLevelDefinition {
         kind,
         name,
-        name_range: target.text_range(),
+        name_range: target.range(),
     })
 }
 
@@ -2785,7 +2797,7 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
     }
     let callee = node.children().next()?;
     let callee_name = match callee.kind() {
-        SyntaxKind::NAME => callee.text().to_string(),
+        SyntaxKind::NAME => node_text(&callee).into_owned(),
         SyntaxKind::NAMESPACE_EXPR => callee
             .children()
             .filter(|child| child.kind() == SyntaxKind::NAME)
