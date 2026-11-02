@@ -810,12 +810,10 @@ fn differs_from_r_4_3(line: &str) -> bool {
 
 #[test]
 fn graphics_structures_match_the_installed_gnu_r() {
-    let gnu_include = Path::new("/usr/share/R/include");
-    if !gnu_include.join("R_ext").join("GraphicsEngine.h").exists() {
-        eprintln!("skipped: GNU R's headers are not installed");
+    let Some(gnu_r) = harness::gnu_r() else {
         return;
-    }
-    let gnu = graphics_layout(Some(gnu_include), &[], "gnu");
+    };
+    let gnu = graphics_layout(Some(&gnu_r.include), &[], "gnu");
     let ry = graphics_layout(None, &[], "ry_without_lock");
     let shared = |text: &str| -> Vec<String> {
         text.lines()
