@@ -239,9 +239,10 @@ def build(harnesses):
         targets.setdefault(harness["package"], set()).add(harness["target"])
     targets.setdefault("libr", set()).update(GC_STRESS_SUITES)
     targets.setdefault("oracle", set()).add("test_cases")
-    # Incremental caches for every test binary of the workspace outgrow a tight disk, and a
-    # campaign builds once, so it does without them.
-    environment = {**os.environ, "CARGO_INCREMENTAL": "0"}
+    # Incremental caches and full debug info for every test binary of the workspace outgrow a
+    # tight disk. A campaign builds once, so it does without the caches, and line tables still
+    # give a failure's backtrace its files and lines.
+    environment = {**os.environ, "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "line-tables-only"}
     # The oracle's torture and several suites run the `ry` binary and ry's runtime.
     subprocess.run(["cargo", "build", "-q", "-p", "ry-lang", "-p", "libr", "-p", "rcmd"],
                    cwd=ROOT, env=environment, check=True)
