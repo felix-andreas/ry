@@ -494,16 +494,15 @@ pub enum GreenEvent<'a> {
     },
     /// The end of a node, after its last child.
     Leave(GreenRef<'a>),
-    Token {
-        kind: SyntaxKind,
-        text: &'a str,
-        range: TextRange,
-    },
+    /// A comment token, the only token a whole-file pass reads.
+    Comment { text: &'a str, range: TextRange },
 }
 
-/// The tree under `root`, `root` included, in preorder, read from the green tree, so the
+/// The nodes under `root`, `root` included, in preorder, read from the green tree, so the
 /// walk builds no [`SyntaxNode`]s. Pair it with [`node_at`] to build red nodes only for the
-/// few sites a pass needs.
+/// few sites a pass needs. Tokens other than comments only advance the offset: most
+/// elements of a tree are tokens, and the whole-file passes read only nodes and comments.
+#[inline]
 pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
     let root_green = root.green();
     visit(GreenEvent::Enter {
@@ -524,29 +523,50 @@ pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
         };
         let start = *next_start;
         *next_start += child.text_len();
-        let range = TextRange::at(start, child.text_len());
         match child {
             NodeOrToken::Node(green) => {
                 visit(GreenEvent::Enter {
                     node: GreenRef(green),
                     parent: Some(GreenRef(parent)),
-                    range,
+                    range: TextRange::at(start, green.text_len()),
                 });
                 stack.push((green, green.children(), start));
             }
-            NodeOrToken::Token(token) => visit(GreenEvent::Token {
-                kind: RLanguage::kind_from_raw(token.kind()),
-                text: token.text(),
-                range,
-            }),
+            NodeOrToken::Token(token)
+                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::COMMENT =>
+            {
+                visit(GreenEvent::Comment {
+                    text: token.text(),
+                    range: TextRange::at(start, token.text_len()),
+                });
+            }
+            NodeOrToken::Token(_) => {}
         }
     }
 }
 
-/// The first node in preorder under `root` with this kind and exactly this range. The search
-/// only descends into children whose range contains `range`, so it touches one path of the
-/// tree, plus the neighbors of an empty range.
+/// The first node in preorder under `root` with this kind and exactly this range. A non-empty
+/// range lies inside at most one child, so the search descends one path through a binary search
+/// over the green children and builds only the red nodes on that path. An empty range can sit on
+/// the boundary of several children (and inside empty nodes), so it falls back to a preorder
+/// search over every child that contains it.
 pub fn node_at(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
+    if range.is_empty() {
+        return node_at_empty(root, kind, range);
+    }
+    if !root.text_range().contains_range(range) {
+        return None;
+    }
+    let mut node = root.clone();
+    loop {
+        if node.kind() == kind && node.text_range() == range {
+            return Some(node);
+        }
+        node = node.child_or_token_at_range(range)?.into_node()?;
+    }
+}
+
+fn node_at_empty(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
     let mut stack = vec![root.clone()];
     while let Some(node) = stack.pop() {
         if node.kind() == kind && node.text_range() == range {

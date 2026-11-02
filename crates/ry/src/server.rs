@@ -9,8 +9,10 @@ pub mod simulation;
 
 use {
     crate::{
+        check_cache,
         cli::{
-            data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
+            analysable_source, collect_r_files, data_file_key, document_kind, exclude_matcher,
+            project_order, project_stub_paths, read_project_stubs, scan_data_files,
             sniff_data_file,
         },
         config::{
@@ -41,7 +43,7 @@ use {
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{
             Applicability, Diagnostic, Severity, applicable_fixes, parse_stage_diagnostics,
-            warm_project_folds,
+            project_fold_shares, warm_project_folds,
         },
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
@@ -95,6 +97,7 @@ pub async fn run(debug: bool) {
             },
             debug,
             cancel: cancel.clone(),
+            executable: env::current_exe().unwrap_or_default(),
         };
         thread::Builder::new()
             .name("ry-analysis".to_owned())
@@ -239,6 +242,9 @@ struct WorkerSeed {
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
+    /// The ry binary whose `ry check` records the server may trust: a record is keyed by the
+    /// binary that wrote it.
+    executable: PathBuf,
 }
 
 /// Where the worker's server-to-client traffic goes. Every message the worker originates
@@ -455,6 +461,11 @@ struct Worker {
     /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
     /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
     published_fixes: HashMap<SourceFile, PublishedFixes>,
+    /// Findings restored from the last `ry check` record at startup, for files whose text and
+    /// dependencies are unchanged since. The first wave shows them until analysis catches up,
+    /// so opening a large project shows its findings at once. Any change to the inputs drops
+    /// them all: a change to one file can change another's findings.
+    recorded_diagnostics: HashMap<SourceFile, Vec<Diagnostic>>,
 }
 
 struct PublishedFixes {
@@ -571,6 +582,7 @@ impl Worker {
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
             published_fixes: HashMap::new(),
+            recorded_diagnostics: HashMap::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
         // durable as its least durable input, and nearly every memo reads the stubs or the
@@ -598,6 +610,7 @@ impl Worker {
             .durability(Durability::MEDIUM)
             .new(&worker.db);
         worker.load_workspace_sources();
+        worker.recorded_diagnostics = worker.restore_recorded_diagnostics(&seed.executable);
 
         let result = initialize_result(encoding);
         (worker, result)
@@ -779,6 +792,89 @@ impl Worker {
             self.prime_queue = cold;
         }
         self.rebuild_project_files();
+    }
+
+    /// The findings of the last `ry check` that still hold, by file. `ry check` and the server
+    /// key the record the same way ([`check_cache::key`]), and [`check_cache::plan`] decides
+    /// which files kept their findings. A changed file's surface is computed over the server's
+    /// own files, so the plan can be stricter than a fresh `ry check` but never reuses findings
+    /// whose file changed. Only files the server loaded are restored.
+    fn restore_recorded_diagnostics(
+        &self,
+        executable: &Path,
+    ) -> HashMap<SourceFile, Vec<Diagnostic>> {
+        let root =
+            fs::canonicalize(&self.workspace_root).unwrap_or_else(|_| self.workspace_root.clone());
+        if !check_cache::is_project(&root) {
+            return HashMap::new();
+        }
+        let Some(record) = check_cache::load(&root) else {
+            return HashMap::new();
+        };
+        let Ok(exclude) = exclude_matcher(&self.config, &root) else {
+            return HashMap::new();
+        };
+        let Ok(paths) = collect_r_files(&root, exclude.as_ref()) else {
+            return HashMap::new();
+        };
+        let Ok(stubs) = read_project_stubs(&root) else {
+            return HashMap::new();
+        };
+        let namespace = fs::read_to_string(root.join("NAMESPACE")).ok();
+        let description = fs::read_to_string(root.join("DESCRIPTION")).ok();
+        let key = check_cache::key(
+            executable,
+            &self.config,
+            &root,
+            &scan_data_files(&root),
+            namespace.as_deref(),
+            description.as_deref(),
+            stubs
+                .iter()
+                .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
+        );
+        // The server keys its files by the root as the client spelled it, which differs from
+        // the canonical root when the project is opened through a symbolic link.
+        let loaded: Vec<Option<SourceFile>> = paths
+            .iter()
+            .map(|path| {
+                let relative = path.strip_prefix(&root).unwrap_or(path);
+                self.files.get(&self.workspace_root.join(relative)).copied()
+            })
+            .collect();
+        let mut contents = Vec::with_capacity(paths.len());
+        for (path, file) in paths.iter().zip(&loaded) {
+            let content = match file {
+                Some(file) => check_cache::fingerprint(file.text(&self.db)),
+                None => match fs::read_to_string(path) {
+                    Ok(text) => check_cache::fingerprint(&analysable_source(path, text)),
+                    Err(_) => return HashMap::new(),
+                },
+            };
+            contents.push(content);
+        }
+        // A changed file the server did not load has no surface here, which plans a fresh run.
+        let surface_of = |index: usize| match loaded.get(index).copied().flatten() {
+            Some(file) => check_cache::surface(
+                file.text(&self.db),
+                &semantics::parse(&self.db, file).syntax_node(),
+                &project_fold_shares(&self.db, file),
+            ),
+            None => check_cache::Fingerprint::default(),
+        };
+        let (record, stale) =
+            match check_cache::plan(Some(record), key, &paths, &contents, surface_of) {
+                check_cache::Plan::Fresh => return HashMap::new(),
+                check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
+                check_cache::Plan::Partial { previous, stale } => (previous, stale),
+            };
+        let file_at = |index: usize| loaded.get(index).copied().flatten();
+        loaded
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| !stale.get(index).copied().unwrap_or(true))
+            .filter_map(|(index, file)| Some((((*file)?), record.diagnostics(index, file_at)?)))
+            .collect()
     }
 
     /// In the order the last-writer-wins symbol index and the CLI agree on.
@@ -1336,12 +1432,16 @@ impl Worker {
                 if *file.text(&self.db) == params.text_document.text && self.unwarmed.is_empty() {
                     self.pending_lowering.push(path.clone());
                 } else {
+                    if *file.text(&self.db) != params.text_document.text {
+                        self.recorded_diagnostics.clear();
+                    }
                     file.set_text(&mut self.db)
                         .with_durability(Durability::LOW)
                         .to(params.text_document.text);
                 }
             }
             None => {
+                self.recorded_diagnostics.clear();
                 let file = SourceFile::new(&self.db, params.text_document.text, kind);
                 self.files.insert(path.clone(), file);
                 self.rebuild_project_files();
@@ -1355,6 +1455,7 @@ impl Worker {
     }
 
     fn did_change(&mut self, params: lsp_types::DidChangeTextDocumentParams) {
+        self.recorded_diagnostics.clear();
         let Some(path) = self.document_path(&params.text_document.uri) else {
             tracing::warn!("unusable URI in didChange: {}", params.text_document.uri);
             return;
@@ -1397,6 +1498,7 @@ impl Worker {
 
     /// Stubs and NAMESPACE are tracked as text, outside the analyzed project.
     fn sync_stub_document(&mut self, path: PathBuf, text: String, version: i32) {
+        self.recorded_diagnostics.clear();
         if !self.supports_pull_diagnostics {
             let diagnostics = self.stub_diagnostics(&text);
             let uri = self.document_uri(&path);
@@ -1406,6 +1508,7 @@ impl Worker {
     }
 
     fn sync_namespace_document(&mut self, path: PathBuf, text: String, version: i32) {
+        self.recorded_diagnostics.clear();
         self.namespace_documents.insert(path.clone(), text.clone());
         self.refresh_metadata();
         if !self.supports_pull_diagnostics {
@@ -1474,6 +1577,9 @@ impl Worker {
             match fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
+                        if *file.text(&self.db) != text {
+                            self.recorded_diagnostics.clear();
+                        }
                         file.set_text(&mut self.db)
                             .with_durability(Durability::MEDIUM)
                             .to(text);
@@ -1487,6 +1593,7 @@ impl Worker {
                 }
             }
         }
+        self.recorded_diagnostics.clear();
         self.files.remove(&path);
         self.virtual_document_uris.remove(&path);
         self.rebuild_project_files();
@@ -1494,6 +1601,7 @@ impl Worker {
     }
 
     fn did_change_watched_files(&mut self, params: lsp_types::DidChangeWatchedFilesParams) {
+        self.recorded_diagnostics.clear();
         let mut config_changed = false;
         let mut metadata_changed = false;
         let mut reloaded_documents: Vec<PathBuf> = Vec::new();
@@ -1719,10 +1827,13 @@ impl Worker {
         self.defer_semantic_publish(path);
     }
 
-    /// Before the startup warm-up ends, only the parse diagnostics: the lints read the
+    /// A file's findings restored from the last `ry check` while they still hold. Otherwise,
+    /// before the startup warm-up ends, only the parse diagnostics: the lints read the
     /// project-wide maps, which one thread would take seconds to derive.
     fn fast_diagnostics(&self, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
-        if self.unwarmed.is_empty() {
+        if let Some(recorded) = self.recorded_diagnostics.get(&file) {
+            recorded.clone()
+        } else if self.unwarmed.is_empty() {
             first_wave_diagnostics(&self.db, file, config)
         } else {
             parse_stage_diagnostics(&self.db, file)

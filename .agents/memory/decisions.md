@@ -4898,6 +4898,27 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
 
+## The language server reads the check record
+
+- **Previous shape.** The server started from nothing. Until the startup warm-up ended, opening a file
+  showed only its parse-stage findings, so a large project looked clean for seconds.
+- **Target shape.** At initialize the worker loads `.ry_cache/check.json` and keys it with
+  `check_cache::key`, the one function `ry check` uses too. The key canonicalizes the root and the
+  configuration's directory, because `ry check .` and the server spell them differently. The worker
+  then runs `check_cache::plan` over `collect_r_files`, hashing loaded files from the database and
+  reading the others from disk, and restores the findings of every loaded file the plan reuses
+  (`Worker::restore_recorded_diagnostics`). `fast_diagnostics` serves them until the settled wave
+  replaces them. Any input change clears them all, because one file's change can change another's
+  findings.
+- **Why not per-file invalidation.** Partial invalidation would need the dependency closure at every
+  edit. The record is only a cold-start aid: after the first edit the live analysis is warm anyway.
+- **Known difference.** The server analyses the package files and the open documents while `ry check`
+  analyses every file, so a finding that depends on a script can differ until the settled wave.
+- **Identity.** A record is keyed by the binary that wrote it. `WorkerSeed::executable` is
+  `current_exe` in production; `Simulation::start_as` passes the scenario's `ry` binary, since the
+  simulated server runs inside the test binary. `ClientOptions::cold` starts a simulated session
+  before the warm-up, and the seeded sessions draw it.
+
 ## Compiled function lookups also check the activation's own frame
 
 - **Previous shape.** A compiled body's speculations resolve a called name from the closure's
