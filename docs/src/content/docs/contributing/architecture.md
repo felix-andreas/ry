@@ -183,6 +183,11 @@ wall time. Several of them are worth knowing:
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
+  borrows the item's checks and the stub schemes instead of cloning them. The parser's green
+  builder shares tokens through a thread-local table but not nodes (`TreeBuilder`): hashing every
+  node to find a twin cost more time than allocating it, at the price of about 70 MiB more peak
+  memory on the finance benchmark.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
   only before a line that opens a call and follows a line that is exactly one complete top-level
   call, so no directive straddles a boundary.
@@ -332,6 +337,17 @@ binder that an immediate or script read sees. The interface edges an item contri
 walk (`item_interface_edges`) go through `package_name` too. A structural edit re-runs each firewall
 that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
 items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+
+`ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
+cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches two lookups to a coarser shape.
+`name_layer` reads a name's winner and conditional writers straight from the project-wide maps
+instead of interning a name and going through `package_name` or `test_name`, and `item_group`
+finds every cyclic group in one walk over the project (`project_interface_groups`) instead of one
+`interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+facts; only the granularity of the recorded dependencies changes. Under
+`syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
+per-item answer. The language server and a cached `ry check` keep the firewalls.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions

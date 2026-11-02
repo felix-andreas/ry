@@ -17,6 +17,13 @@ This page is the exact behavior.
   writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
   gives what a load would have computed
   ([lazy constants](/reference/type-system#lazy-constants)).
+- **An R6 class generator**, `Name <- R6Class(...)` or `Name <- R6::R6Class(...)` in any file,
+  becomes a promise too when its arguments are built only from literals, names, functions, and
+  `list()` or `c()` of them, and every package name it reads outside its methods (an `inherit =`
+  class, say) is written once, earlier in collation order. Such a generator depends on nothing but
+  its arguments, and its methods read the namespace only when they run, so building it on first
+  use gives the same class. An argument that calls anything else, as in
+  `public = list(at = Sys.time())`, keeps the statement eager.
 - **Every other top-level statement** runs at load time, in collation order. The code files are
   those of `R/` and then those of `R/unix/` (`R/windows/` on Windows), as R CMD INSTALL finds them:
   names that start with a letter or digit and end in `.R`, `.r`, `.S`, `.s` or `.q`. Collation
@@ -39,9 +46,14 @@ This page is the exact behavior.
 - **A syntax error stops the load before anything runs**, and names the file and line. A statement
   that fails at load time is reported with its file and line too.
 - **With [strict mode](/type-checking/strict-mode) on**, in `ry.toml` or in a file's
-  `# typing: strict` comment, `ry load` checks the package's `R/` files first, on either runtime.
-  If any has a strict-mode error, it prints the errors and exits with status 1 without loading
-  anything. The `R/` files are checked together, so a name one file defines resolves in the others.
+  `# typing: strict` comment, `ry load` checks the package's `R/` files. If any has a strict-mode
+  error, it prints the errors and exits with status 1 before anything with an effect runs. On GNU
+  R the check finishes before the load starts. On ry's runtime it runs while the runtime starts
+  and the package's definitions bind. Imported packages may load in that time, but the load waits
+  for the check before it runs a top-level statement whose arguments could have an effect,
+  `data/*.R`, compiled code, `.onLoad`, or your `-e` and `-f` code. The
+  `R/` files are checked together, so a name one file defines resolves in the others, and test
+  files are not part of the check.
   A later `load_all()` in the same session, and the load a console makes, do not check.
   A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
   so loading it again without changing its files, configuration, stubs, data files or the ry

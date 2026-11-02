@@ -13,11 +13,12 @@ use {
             native_record, null, scalar, substitute_rigid, union_of, unknown,
         },
     },
+    rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::mem::take,
     syntax::{
-        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
-        matching_nodes,
+        GreenRef, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize, ast,
+        is_green_inline_annotation, matching_nodes,
     },
 };
 
@@ -832,20 +833,36 @@ pub enum BlockRefusal {
 pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
     // A refused region has no trustworthy payload: a refused binder, for instance, leaves type
     // parameters unbound, which would be blamed a second time as unknown types.
-    if node
-        .descendants()
-        .any(|descendant| descendant.kind() == SyntaxKind::ERROR)
-    {
+    if node.kind() == SyntaxKind::ERROR {
         return Some(BlockRefusal::Unparsed);
     }
     // Markers come from all descendant tokens, not just direct children: a line continuing a
-    // still-open node puts its marker inside that node.
-    let markers: Vec<TextSize> = node
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::ANNOTATION_MARKER)
-        .map(|token| token.text_range().start())
-        .collect();
+    // still-open node puts its marker inside that node. The walk reads the green tree, because
+    // every annotation block runs this and a red walk builds a node per element.
+    let mut markers: Vec<TextSize> = Vec::new();
+    let green = node.green();
+    let mut stack = vec![(green.children(), node.text_range().start())];
+    while let Some((children, next_start)) = stack.last_mut() {
+        let Some(child) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        let start = *next_start;
+        *next_start += child.text_len();
+        match child {
+            NodeOrToken::Node(child) => {
+                if RLanguage::kind_from_raw(child.kind()) == SyntaxKind::ERROR {
+                    return Some(BlockRefusal::Unparsed);
+                }
+                stack.push((child.children(), start));
+            }
+            NodeOrToken::Token(token) => {
+                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::ANNOTATION_MARKER {
+                    markers.push(start);
+                }
+            }
+        }
+    }
     let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
 
     let mut previous: Option<BlockForm> = None;

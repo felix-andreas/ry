@@ -134,11 +134,29 @@ fn header_lines_here(
 
 /// Runs a whole transfer, from building the client to reading the body, on a thread of its own:
 /// the blocking client runs an async runtime inside, which must not nest in one the embedding
-/// program may already be running on the caller's thread.
+/// program may already be running on the caller's thread. Meanwhile the caller answers the help
+/// server's requests.
 fn on_transfer_thread<T: Send>(
     transfer: impl FnOnce() -> Result<T, FetchError> + Send,
 ) -> Result<T, FetchError> {
-    std::thread::scope(|scope| scope.spawn(transfer).join()).unwrap_or_else(|_| {
+    std::thread::scope(|scope| {
+        let transfer = scope.spawn(transfer);
+        // GNU R's libcurl loop runs R's event loop, so a session can download pages from its own
+        // help server; waiting without answering would hang until the transfer timed out.
+        while crate::help_server::running() && !transfer.is_finished() {
+            // SAFETY: transfers start from R calls on the interpreter's thread, where GNU R
+            // runs event handlers too.
+            let served = unsafe { crate::help_server::wait_and_serve(Duration::from_millis(5)) };
+            if served.is_err() {
+                // The transfer cannot be cut short from here, so the Ctrl-C waits for the next
+                // interrupt check after it.
+                crate::unwind::INTERRUPT_REQUESTED
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        transfer.join()
+    })
+    .unwrap_or_else(|_| {
         Err(FetchError::Transport {
             code: 2,
             message: "Failed initialization",

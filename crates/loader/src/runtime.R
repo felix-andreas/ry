@@ -5,7 +5,8 @@
 # applies a plan that touches only the items that changed.
 #
 # A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
-# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The host defines the
+# R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The backend's
+# `.ry_await_verdict()` returns once the host lets the package's effects run. The host defines the
 # transport, `.ry_request(root, full)` (which returns the plan) and `.ry_commit(root)`, and
 # creates the session's state, `.ry_packages` (one entry per loaded package root) and
 # `.ry_timing`, since a host may cache the compiled functions across sessions and state must
@@ -39,6 +40,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   # Switching `export_all` changes what is exported even when no file changed.
   resync <- !identical(state$export_all, export_all)
   if (!plan$full && plan$noop && current && !resync) {
+    state$changed <- character()
     .ry_commit(root)
     if (!quiet && report_noop) {
       message(sprintf("%s is up to date.", plan$package))
@@ -61,6 +63,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
   applied <- TRUE
+  # The names this load rebound or removed, which `ry test` reruns the tests of first. `NULL`
+  # when the load ran code, which may have changed anything.
+  state$changed <- if (plan$full) NULL else plan$touched
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
@@ -237,6 +242,10 @@ View <- function(x, title) {
   }
   state$s4_cursor <- NULL
   .ry_phase("run")
+  # Everything above only binds names, registers classes and loads imported packages, unless a
+  # statement the plan did not mark effect-free ran, and that one waited. `data/*.R`, compiled
+  # code and hooks may have effects.
+  .ry_await_verdict()
   if (!identical(plan$sysdata, "keep")) {
     if (length(state$sysdata)) {
       rm(list = intersect(state$sysdata, ls(ns, all.names = TRUE)), envir = ns)

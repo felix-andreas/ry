@@ -10,9 +10,9 @@ rename: 1 edit(s)
 type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `xs`
-  edit 0..0 -> "#: Array<double>\n"
+  edit 2..2 -> ": Array<double>"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Array<double>\n"
+  edit 2..2 -> ": Array<double>"
 completion (29): xs, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
 hint @2: Array<double>
 
@@ -28,10 +28,10 @@ rename: 2 edit(s)
 type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `first`
-  edit 15..15 -> "#: integer\n"
+  edit 20..20 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Array<integer>\n"
-  edit 15..15 -> "#: integer\n"
+  edit 2..2 -> ": Array<integer>"
+  edit 20..20 -> ": integer"
 completion (29): xs, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
 hint @2: Array<integer>
 hint @20: integer
@@ -47,9 +47,9 @@ rename: 1 edit(s)
 type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `points`
-  edit 0..0 -> "#: Array<Record{x: double, y: double}>\n"
+  edit 6..6 -> ": Array<Record{x: double, y: double}>"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Array<Record{x: double, y: double}>\n"
+  edit 6..6 -> ": Array<Record{x: double, y: double}>"
 completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
 hint @6: Array<Record{x: double, y: double}>
 

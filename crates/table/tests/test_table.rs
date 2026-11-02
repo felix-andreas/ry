@@ -3444,6 +3444,26 @@ fn setorder_sorts_na_first_and_keeps_ties_in_order() {
 }
 
 #[test]
+fn the_viewer_filters_by_text_ignoring_case_and_sorts_the_rows_left() {
+    let x = frame(vec![
+        ("name", strings(&["Bo", "ÄNNE", "Cy", "dan"])),
+        ("age", doubles(&[30.0, 25.0, NA_REAL, 25.5])),
+    ]);
+    let rows = |search: &str, sort: Option<(&str, bool)>| {
+        ops::view_rows(&x, search, sort).unwrap_or_else(|error| panic!("{error}"))
+    };
+    assert_eq!(rows("", None), [0, 1, 2, 3]);
+    assert_eq!(rows("än", None), [1]);
+    assert_eq!(rows("25", Some(("age", true))), [3, 1]);
+    // A missing value contains no text, not even "NA".
+    assert_eq!(rows("na", None), Vec::<u32>::new());
+    assert_eq!(rows("", Some(("age", false))), [2, 1, 3, 0]);
+    assert!(ops::view_rows(&x, "", Some(("nope", false))).is_err());
+    let taken = ops::take_rows(&x, &[3, 0]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(taken.height(), 2);
+}
+
+#[test]
 fn setnames_and_setcolorder_rename_and_reorder_in_place() {
     let mut x = frame(vec![
         ("a", ints(&[2, 1])),
@@ -3931,6 +3951,12 @@ fn fuzz_sort_unique_and_runs_against_a_reference() {
         }
 
         let x = frame(names.iter().copied().zip(vectors.iter().cloned()).collect());
+        if let [(name, descending)] = by[..] {
+            let shown = ops::view_rows(&x, "", Some((name, descending)))
+                .unwrap_or_else(|error| panic!("{error}"));
+            let expected: Vec<u32> = expected.iter().map(|&row| row as u32).collect();
+            assert!(shown == expected, "the viewer's rows sorted by {name}");
+        }
         let key_names: Vec<&str> = by.iter().map(|(name, _)| *name).collect();
         let same = |left: usize, right: usize| {
             (0..key_names.len()).all(|index| r_order(&vectors[index], left, right, false).is_eq())

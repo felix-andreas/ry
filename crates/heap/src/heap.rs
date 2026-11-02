@@ -129,12 +129,12 @@ pub struct Roots {
     precious: FxHashMap<Sexp, u32>,
     /// Objects kept alive for the rest of the current scope. A foreign call truncates it on
     /// return, which gives native code its handle scope.
-    handles: Vec<Sexp>,
+    handles: RootStack,
     /// What the C API has handed to native code in the native calls in progress. Each call owns
     /// the entries above the base it started at, and only its most recent ones stay rooted (see
     /// [`Heap::hand_out`]), so a loop's dropped temporaries can be collected before it returns.
-    handouts: Vec<Sexp>,
-    globals: Vec<Sexp>,
+    handouts: RootStack,
+    globals: RootStack,
 }
 
 /// How many of a native call's most recent handouts stay rooted at least. Code that is correct
@@ -146,9 +146,20 @@ pub const HANDOUT_WINDOW: usize = 1024;
 /// The `PROTECT` stack. `base` is where the innermost native call's protections start, so
 /// native code cannot unprotect what its caller protected.
 pub struct ProtectStack {
-    stack: Vec<Sexp>,
+    stack: RootStack,
     pub limit: usize,
     base: usize,
+}
+
+/// A stack of roots that knows how much of itself the last collection scanned. Every entry
+/// below `scanned` has been there, unchanged, since that collection marked it, and a mark stays
+/// until the next major collection, so a minor collection skips those entries: marking them
+/// again would find them marked and do nothing. Without this, a long handle scope (unserializing
+/// a large object roots every cell it reads) made every minor collection rescan the whole scope.
+#[derive(Default)]
+struct RootStack {
+    entries: Vec<Sexp>,
+    scanned: usize,
 }
 
 /// Something that holds handles the collector cannot see otherwise, such as an interpreter's
@@ -171,7 +182,8 @@ pub enum Collection {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GcStress {
     Off,
-    /// Collect before every allocation, every eighth collection a major one.
+    /// Collect before every allocation. Every eighth collection is a major one while the heap
+    /// is small; past that, one per sixteenth of the live objects.
     EveryAllocation,
 }
 
@@ -359,14 +371,14 @@ impl Heap {
             layouts: Layouts::default(),
             roots: Roots {
                 protect: ProtectStack {
-                    stack: Vec::new(),
+                    stack: RootStack::default(),
                     limit: DEFAULT_PROTECT_LIMIT,
                     base: 0,
                 },
                 precious: FxHashMap::default(),
-                handles: Vec::new(),
-                handouts: Vec::new(),
-                globals: Vec::new(),
+                handles: RootStack::default(),
+                handouts: RootStack::default(),
+                globals: RootStack::default(),
             },
             sources: Vec::new(),
             next_source_id: 0,
@@ -793,11 +805,11 @@ impl Heap {
         if bytes.len() > i32::MAX as usize {
             return Err(HeapError::StringTooLong);
         }
-        if bytes.contains(&0) {
+        let (any_nul, ascii) = scan_nul_and_ascii(bytes);
+        if any_nul {
             let text = String::from_utf8_lossy(bytes).replace('\0', "\\0");
             return Err(HeapError::EmbeddedNul { text });
         }
-        let ascii = bytes.is_ascii();
         let bits = if ascii { gp::ASCII } else { encoding.gp_bits() };
         let hash = strings::hash(bytes, bits & gp::ENCODING);
         if let Some(found) = self.strings.find(hash, bytes, bits & gp::ENCODING) {
@@ -1273,7 +1285,7 @@ impl Heap {
     pub fn hand_out(&mut self, object: Sexp, base: usize) {
         let handouts = &mut self.roots.handouts;
         if handouts.len() - base >= 2 * HANDOUT_WINDOW {
-            handouts.drain(base..base + HANDOUT_WINDOW);
+            handouts.remove_range(base, base + HANDOUT_WINDOW);
         }
         handouts.push(object);
     }
@@ -1430,8 +1442,15 @@ impl Heap {
         }
         match self.policy.stress {
             GcStress::EveryAllocation => {
+                // A major collection marks the whole heap, so running one every few allocations
+                // makes stress quadratic in the heap's size: base R's loading never finished in a
+                // debug build. Spacing majors by a sixteenth of the live objects bounds their
+                // marking at about sixteen objects per allocation while still running them often
+                // enough to free an old object whose last reference was dropped.
                 self.stress_counter += 1;
-                let kind = if self.stress_counter.is_multiple_of(8) {
+                let spacing = (self.stats.live_objects / 16).max(8);
+                let kind = if self.stress_counter >= spacing {
+                    self.stress_counter = 0;
                     Collection::Major
                 } else {
                     Collection::Minor
@@ -1569,17 +1588,23 @@ impl Heap {
         for object in known.all() {
             self.mark(object);
         }
-        for index in 0..self.roots.globals.len() {
-            self.mark(self.roots.globals[index]);
-        }
-        for index in 0..self.roots.protect.stack.len() {
-            self.mark(self.roots.protect.stack[index]);
-        }
-        for index in 0..self.roots.handles.len() {
-            self.mark(self.roots.handles[index]);
-        }
-        for index in 0..self.roots.handouts.len() {
-            self.mark(self.roots.handouts[index]);
+        let roots = &mut self.roots;
+        for stack in [
+            &mut roots.globals,
+            &mut roots.protect.stack,
+            &mut roots.handles,
+            &mut roots.handouts,
+        ] {
+            let start = match kind {
+                Collection::Major => 0,
+                Collection::Minor => stack.scanned,
+            };
+            for &object in &stack.entries[start..] {
+                if self.space.mark(object) {
+                    self.mark_stack.push(object);
+                }
+            }
+            stack.scanned = stack.entries.len();
         }
         // Marking only touches the mark stack, so the tables can be borrowed beside it instead of
         // copied out on every collection; a package with tens of thousands of symbols made that
@@ -1599,18 +1624,16 @@ impl Heap {
             Collection::Minor => self.new_roots.iter().for_each(|&object| mark(object)),
         }
         self.new_roots.clear();
-        let sources: Vec<Rc<dyn RootSource>> = self
-            .sources
-            .iter()
-            .map(|(_, source)| source.clone())
-            .collect();
-        for source in sources {
+        // Tracing only marks, so it cannot register or remove a source while the list is out.
+        let sources = std::mem::take(&mut self.sources);
+        for (_, source) in &sources {
             let mut marker = Marker {
                 stack: &mut self.mark_stack,
                 space: &mut self.space,
             };
             source.trace(&mut marker);
         }
+        self.sources = sources;
         // A weak reference lives until its key dies; only its key and value are weak.
         for index in 0..self.weak_refs.len() {
             self.mark(self.weak_refs[index]);
@@ -2099,11 +2122,12 @@ impl ProtectStack {
 
     /// `UNPROTECT_PTR`: removes the topmost protection of `object` wherever it is.
     pub fn unprotect_object(&mut self, object: Sexp) -> HeapResult<()> {
-        let position = self.stack[self.base..]
+        let position = self.stack.entries[self.base..]
             .iter()
             .rposition(|&protected| protected == object)
             .ok_or(HeapError::UnprotectPointerNotFound)?;
-        self.stack.remove(self.base + position);
+        self.stack
+            .remove_range(self.base + position, self.base + position + 1);
         Ok(())
     }
 
@@ -2111,10 +2135,34 @@ impl ProtectStack {
         let available = self.stack.len();
         let slot = self
             .stack
+            .entries
             .get_mut(index)
             .ok_or(HeapError::ReprotectIndex { available, index })?;
         *slot = object;
+        self.stack.scanned = self.stack.scanned.min(index);
         Ok(())
+    }
+}
+
+impl RootStack {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn push(&mut self, object: Sexp) {
+        self.entries.push(object);
+    }
+
+    fn truncate(&mut self, length: usize) {
+        self.entries.truncate(length);
+        self.scanned = self.scanned.min(self.entries.len());
+    }
+
+    /// Removes `start..end`, which moves every later entry down, so none of those counts as
+    /// scanned any more.
+    fn remove_range(&mut self, start: usize, end: usize) {
+        self.entries.drain(start..end);
+        self.scanned = self.scanned.min(start);
     }
 }
 
@@ -2151,4 +2199,27 @@ const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
+}
+
+/// Whether `bytes` holds a NUL byte, and whether it is all ASCII, in one pass of eight bytes at a
+/// time. Most strings are a few bytes long, where `memchr`'s setup costs more than the scan.
+fn scan_nul_and_ascii(bytes: &[u8]) -> (bool, bool) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (mut zero_bits, mut high_bits) = (0u64, 0u64);
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(chunk);
+        let word = u64::from_le_bytes(word);
+        // The classic zero-byte test, which is nonzero exactly when some byte of the word is.
+        zero_bits |= word.wrapping_sub(ONES) & !word & HIGHS;
+        high_bits |= word;
+    }
+    let mut tail_nul = false;
+    for &byte in chunks.remainder() {
+        tail_nul |= byte == 0;
+        high_bits |= u64::from(byte);
+    }
+    (tail_nul || zero_bits != 0, high_bits & HIGHS == 0)
 }

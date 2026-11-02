@@ -156,7 +156,7 @@ ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
 On the 125 cases the suite held when it was last run under R 4.6.1, `compare` passed 118 of them,
-against 124 of 125 under 4.3.3 at the time (today 152 of 153 pass under 4.3.3). Four of the
+against 124 of 125 under 4.3.3 at the time (today every case but `stats__lbfgsb` passes under 4.3.3). Four of the
 remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
 and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
 seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case

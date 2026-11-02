@@ -34,3 +34,4 @@ roughly.toml
 /corpus/
 .corpus
 .bench
+tools/bench/why/*/.scratch.R
